@@ -369,15 +369,15 @@ fn park_with(i: u64, site_tag: &str, label: &str, extra: &str, regs: Vec<u64>) {
         "break",
         &format!("K{}", id),
         &format!(
-            "\"id\":\"K{}\",\"site\":\"{}\",\"at\":{},\"thread\":{},\"tid\":\"T{}\"{}{},\"more\":[\"stacks thread=T{}\",{}\"continue K{}\"]",
+            "\"id\":\"K{}\",\"site\":\"{}\",\"at\":{},\"thread\":{},\"tid\":\"{}\"{}{},\"more\":[\"stacks thread={}\",{}\"continue K{}\"]",
             id,
             site_tag,
             json_str(label),
             json_str(&thread),
-            p.os_id,
+            super::tid_label(p.os_id),
             extra,
             super::script_stack_field("script_stack", me),
-            p.os_id,
+            super::tid_label(p.os_id),
             if has_regs { format!("\"locals break=K{}\",", id) } else { String::new() },
             id
         ),
@@ -406,6 +406,13 @@ pub(super) fn find_all(u: &crate::jit::Unit, query: &str, max: usize) -> Vec<(u3
 }
 
 fn find_in(u: &crate::jit::Unit, query: &str, max: usize, inlined_too: bool) -> Vec<(u32, Option<u32>, String)> {
+    // `S35`: the fn of slot 35 (the handle answers print next to JIT frames)
+    if let Some(id) = query.strip_prefix('S').and_then(|n| n.parse::<u32>().ok()) {
+        if (id as usize) < u.fns.len() && targetable(&u.fns[id as usize], inlined_too) {
+            return vec![(id, None, u.fns[id as usize].name.to_string())];
+        }
+        return Vec::new();
+    }
     if let Some((file, line)) = query.rsplit_once(':').and_then(|(f, l)| l.parse::<u32>().ok().map(|l| (f, l))) {
         let files: Vec<u32> = u.prog.file_paths.iter().enumerate().filter(|(_, p)| p.ends_with(file)).map(|(i, _)| i as u32).collect();
         let mut out = Vec::new();
@@ -1247,7 +1254,7 @@ pub fn cmd(req: &Req, out: &mut Out) {
             }
             let parked = PARKED.lock().unwrap_or_else(|e| e.into_inner());
             for p in parked.iter() {
-                out.line(&format!("{{\"parked\":\"K{}\",\"site\":\"B{}\",\"tid\":\"T{}\"}}", p.id, p.site, p.os_id));
+                out.line(&format!("{{\"parked\":\"K{}\",\"site\":\"B{}\",\"tid\":\"{}\"}}", p.id, p.site, super::tid_label(p.os_id)));
             }
             drop(sites);
             let mut injected = Vec::new();

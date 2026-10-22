@@ -68,14 +68,17 @@ const FLT_ARGS: usize = 8;
 /// arm64 isel switches for measurements: `MAKEPAD_RUN_A64=none` or `-fuse,-fconst`.
 const A64_FUSE: u8 = 1;
 const A64_FCONST: u8 = 2;
+/// struct copies of >= 32 bytes through 16-byte vector pairs (off: 8-byte pieces; measurement switch)
+const A64_QCOPY: u8 = 4;
 
 fn isel_flags(options: &relax_session::Options) -> u8 {
-    let mut f = A64_FUSE | A64_FCONST;
+    let mut f = A64_FUSE | A64_FCONST | A64_QCOPY;
     for part in &options.a64 {
         match part.as_str() {
             "none" => f = 0,
             "-fuse" => f &= !A64_FUSE,
             "-fconst" => f &= !A64_FCONST,
+            "-qcopy" => f &= !A64_QCOPY,
             _ => {}
         }
     }
@@ -86,27 +89,99 @@ pub fn reg_config() -> RegConfig {
     RegConfig {
         int_caller: vec![9, 10, 11, 12, 13, 2, 3, 4, 5, 6, 7],
         int_callee: vec![19, 20, 21, 22, 23, 24, 25, 26, 27, 28],
-        flt_caller: vec![16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28],
+        flt_caller: vec![16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 0, 1, 2, 3, 4, 5, 6, 7],
         flt_callee: vec![8, 9, 10, 11, 12, 13, 14, 15],
         slot_index_free: false,
         clobbers: Some(arm64_clobbers),
         sym_class: 0,
         store_imm: |k| k == 0,
         fconst_remat: true,
+        float_windows: true,
     }
 }
 
-/// Registers an instruction overwrites while it runs (RegConfig::clobbers): only an asm! block
-/// (every register it names; regalloc also keeps its results out of them).
-fn arm64_clobbers(_options: &relax_session::Options, _f: &Func, i: &Inst) -> u64 {
+/// Registers an instruction overwrites while it runs (RegConfig::clobbers): an asm! block's
+/// (every register it names; regalloc also keeps its results out of them), and v0-v7 (bits
+/// 32..40) for every instruction whose emitter arm may name them: calls (float arguments and
+/// results, aggregate result registers) and the vector sequences with v4-v7 temporaries.
+/// v0-v7 are allocatable caller-saved registers everywhere else (reg_config).
+fn arm64_clobbers(_options: &relax_session::Options, f: &Func, i: &Inst) -> u64 {
     match i {
-        Inst::Call(Callee::Asm(b), _, _) => b.regs,
-        _ => 0,
+        Inst::Call(Callee::Asm(b), _, _) => b.regs | V0_7,
+        _ if keeps_v0_7(f, i) => 0,
+        _ => V0_7,
     }
 }
 
-/// x64 records RIR offsets for asm dumps; arm64 keeps the switch for one embedder API
-pub fn set_rir_map(_on: bool) {}
+/// pair_access's stand-in memory kind for VLoad / VStore pairs
+const V128_MEM: Mem = Mem::F64;
+
+/// v0-v7 as regalloc clobber bits (float register r = bit 32 + r)
+const V0_7: u64 = 0xff << 32;
+
+/// The instructions whose emitter arms (and the helpers they call) never name v0-v7: they reach
+/// vector registers only through use_f / def_f / fin_f / vtmp and the scratch registers v29-v31.
+/// Checked against `Gen::inst`, `vinst`, `vx_lanes` and `vx` arm by arm; anything not listed
+/// clobbers v0-v7.
+fn keeps_v0_7(f: &Func, i: &Inst) -> bool {
+    use VW::*;
+    match i {
+        Inst::Iconst(..) | Inst::IBinI(..) | Inst::ICmpI(..) | Inst::ICmp(..) | Inst::IBin(..) | Inst::IBit(..) | Inst::INeg(..) | Inst::INot(..) => true,
+        Inst::SlotAddr(..) | Inst::Addr(..) | Inst::FnAddr(..) | Inst::Mov(..) | Inst::Load(..) | Inst::Store(..) | Inst::LoadX(..) | Inst::StoreX(..) => true,
+        Inst::Fconst(..) | Inst::FBin(..) | Inst::FUnary(..) | Inst::FCmp(..) | Inst::FMulAdd(..) | Inst::Sel(..) | Inst::Conv(..) | Inst::Copy(..) => true,
+        Inst::VLoad(..) | Inst::VStore(..) | Inst::VLoadX(..) | Inst::VStoreX(..) | Inst::VConst(..) | Inst::VSplat(..) | Inst::VExtract(..) | Inst::VInsert(..) => true,
+        Inst::VSel(..) | Inst::VFma(..) | Inst::VAny(..) | Inst::VGather(..) => true,
+        Inst::VX(op, ..) => {
+            let _ = f;
+            match *op {
+                VX::FAdd(w, n) | VX::FSub(w, n) | VX::FMul(w, n) | VX::FDiv(w, n) => matches!(w, S | D) && n != NanBits::Intel,
+                VX::FMinNeon(w) | VX::FMaxNeon(w) | VX::FMinLt(w) | VX::FMaxGt(w) | VX::FCmp(_, w) => matches!(w, S | D),
+                VX::MinS(D) | VX::MaxS(D) | VX::MinU(D) | VX::MaxU(D) => true,
+                VX::ShlV(_) | VX::ShrSV(_) | VX::ShrUV(_) | VX::ICmp(..) | VX::UCmp(..) | VX::Neg(_) | VX::FCvtLo => true,
+                VX::FNeg(w) | VX::FAbs(w) | VX::FRound(w, _) | VX::FToI(w) | VX::IToF(w) => matches!(w, S | D),
+                VX::FSqrt(w, n) => matches!(w, S | D) && n != NanBits::Intel,
+                // vx's three-same table
+                VX::Add(_) | VX::Sub(_) | VX::MaxS(_) | VX::MinS(_) | VX::MaxU(_) | VX::MinU(_) | VX::CmpEq(_) | VX::CmpGtS(_) => true,
+                VX::AddSatU(_) | VX::AddSatS(_) | VX::SubSatU(_) | VX::SubSatS(_) | VX::AvgU(_) | VX::ZipLo(_) | VX::ZipHi(_) => true,
+                VX::MulLo(w) => w != D,
+                VX::And | VX::Or | VX::Xor | VX::AndNot | VX::Splat(_) | VX::FromLo64 | VX::Extract(..) => true,
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+static RIR_MAP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Stack storage alignment floor (frame::slot_layout_aligned): ldr / str x and ldp / stp scale
+/// their immediate by the access size, so an 8-byte field of a 4-aligned aggregate past the
+/// unscaled range needs `mov ip, #off; ldr [sp, ip]`, and q pairs on 16 need a 16-aligned base
+fn a64_slot_align(size: u32) -> u32 {
+    if size >= 16 {
+        16
+    } else if size >= 8 {
+        8
+    } else {
+        1
+    }
+}
+
+/// The emitted function's RIR, then `# counts` with each block's profile count (-1 = not counted)
+fn emitted_dump(f: &Func) -> String {
+    let mut s = f.dump();
+    s.push_str("# counts");
+    for b in &f.blocks {
+        s.push_str(&format!(" {}", b.count));
+    }
+    s.push('\n');
+    s
+}
+
+/// Record `Compiled::rir_map` (code offset -> RIR block/instruction) in later compiles (asm dumps)
+pub fn set_rir_map(on: bool) {
+    RIR_MAP.store(on, std::sync::atomic::Ordering::Relaxed);
+}
 
 pub struct Compiled {
     pub code: Vec<u8>,
@@ -120,7 +195,8 @@ pub struct Compiled {
     /// the relocated fields, emitted zeroed: the embedder links the code (`rir::link`) where it
     /// installs it
     pub relocs: Vec<RelocAt>,
-    /// x64 only (tools/run/tools/asmcmp); empty here
+    /// (code offset, block, instruction or u32::MAX = terminator) of every RIR instruction
+    /// emitted -- filled only while `set_rir_map(true)` (asm dumps)
     pub rir_map: Vec<(u32, u32, u32)>,
     pub rir_emitted: String,
 }
@@ -664,6 +740,7 @@ enum CondBr {
 struct Gen<'a> {
     /// isel_flags(options) & A64_FCONST: float constants by fmov #imm / literal loads
     fconst_isel: bool,
+    qcopy: bool,
     /// the block ends `t = x & K; t ==/!= 0; branch`: emitted as tst x, #K (the And skipped)
     test_fuse: Option<(VReg, i64)>,
     /// a compare whose flags the selects right after it read (csel / fcsel on the condition, no
@@ -671,6 +748,20 @@ struct Gen<'a> {
     /// the compare in its block: any other instruction, a fused compare-and-branch, or a block
     /// boundary ends it (the flags then belong to something else).
     sel_chain: Option<(VReg, u8)>,
+    /// a zero vector whose definition was skipped: the VInsert of lane 0 right after it reads
+    /// it (fmov s, which zeroes lanes 1-3)
+    zero_ins: Option<VReg>,
+    /// a skipped multiply's operands: the negation right after it is `fnmul`
+    fnmul_ins: Option<(VReg, VReg)>,
+    /// vregs defined once, as a zero vector (VConst 0 / FromLo64 of a constant 0)
+    zero_vec: Vec<bool>,
+    /// single-definition integer / float / vector zeros (Iconst 0, Fconst +0.0, VConst 0, a zero
+    /// vector from FromLo64 of an integer 0): stores of them store zr
+    zero_val: Vec<bool>,
+    /// vregs defined once, by an f32 load (a register holding one has its upper 96 bits zero)
+    f32_load: Vec<bool>,
+    /// single-def +0.0 constants read only by float compares: never built (fcmp #0.0)
+    zero_cmp: Vec<bool>,
     /// the last spill store emitted: (sp offset, register, word position right after it)
     last_spill: Option<(i64, u8, usize)>,
     /// spill windows (Alloc::windows): vreg -> (first use pos, last use pos, register); and the
@@ -735,6 +826,8 @@ struct Gen<'a> {
     pads: Vec<(usize, Vec<(VReg, i32)>, u32)>,
     /// (instruction position, return offset in bytes) of every call: the variable table's sites (dbgloc)
     var_calls: Vec<(u32, u32)>,
+    rir_map: Vec<(u32, u32, u32)>,
+    rir_map_on: bool,
     /// branch relaxation (a function past imm19's +-1 MB): conditional block branches become
     /// an inverted short branch over a `b` (+-128 MB), constants are built in registers
     /// instead of loaded from the literal pools after the code
@@ -933,6 +1026,12 @@ impl<'a> Gen<'a> {
         }
     }
     fn use_f(&mut self, v: VReg, scratch: u8) -> u8 {
+        if !matches!(self.al.loc[v.0 as usize], Loc::Flt(_)) {
+            // held in a register over this run of uses (float windows)
+            if let Some(r) = self.win_reg(v) {
+                return r;
+            }
+        }
         match self.al.loc[v.0 as usize] {
             Loc::Flt(x) => x,
             Loc::Stack(o) if self.cls(v) == Cls::V128 => {
@@ -1024,7 +1123,7 @@ impl<'a> Gen<'a> {
         // only slots something addresses take space (SROA and inlining leave many unreferenced:
         // the Splash VM's O3 opcode() had 1749 slots, 515 in use); slots whose lifetimes cannot
         // overlap share it (frame::slot_layout)
-        let (slot_fp, mut off) = crate::frame::slot_layout(self.f, self.saved + self.al.spill_bytes as i64, !crate::stats::opt_off(options, "-slotcolor"));
+        let (slot_fp, mut off) = crate::frame::slot_layout_aligned(self.f, self.saved + self.al.spill_bytes as i64, !crate::stats::opt_off(options, "-slotcolor"), if crate::stats::opt_off(options, "-a64slotalign") { |_| 1 } else { a64_slot_align });
         self.slot_pos = crate::frame::slot_addr_positions(self.f, &slot_fp);
         // C ABI body: buffers that rebuild aggregate params from their registers, and the
         // buffer an aggregate result is written to before Ret loads it into registers
@@ -1160,14 +1259,30 @@ impl<'a> Gen<'a> {
             }
             // `t = x & K; c = t ==/!= 0` feeding the branch (t used once, K a bitmask immediate): tst x, #K
             self.test_fuse = None;
+            let mut test_pair = false;
             if fused && n >= 2 {
                 if let (Inst::IBinI(IOp::And, it, t, x, k), Inst::ICmpI(Cond::Eq | Cond::Ne, _, _, t2, 0)) = (&b.insts[n - 2], &b.insts[n - 1]) {
                     if t == t2 && *x != *t && self.al.uses[t.0 as usize] == 1 && (it.bits == 64 || (0..1i64 << 32).contains(k)) && bitmask_imm(*k as u64).is_some() {
                         self.test_fuse = Some((*x, *k));
+                        test_pair = true;
+                    }
+                }
+            }
+            // `c = x & K` branched on directly (c used once): tst x, #K / tbnz (switch bit tests:
+            // `lsr; and #1; cbnz` was three instructions)
+            if let Term::Branch(c, _, _) = &b.term {
+                if !fused && n > 0 && self.al.uses[c.0 as usize] == 1 && isel_flags(options) & A64_FUSE != 0 {
+                    if let Inst::IBinI(IOp::And, it, t, x, k) = &b.insts[n - 1] {
+                        if t == c && *x != *t && (it.bits == 64 || (0..1i64 << 32).contains(k)) && bitmask_imm(*k as u64).is_some() {
+                            self.test_fuse = Some((*x, *k));
+                            fused = true;
+                        }
                     }
                 }
             }
             let mut skip_next = false;
+            // instructions before this were stored by one zero run (zero_run)
+            let mut skip_to = 0usize;
             let mut deferred: Option<usize> = None;
             // a block start can be a jump target: no spill store before it carries over
             self.last_spill = None;
@@ -1179,14 +1294,31 @@ impl<'a> Gen<'a> {
             self.cur_pos = self.al.block_start[bi];
             for (ii, inst) in b.insts.iter().enumerate() {
                 self.pc_map.push(((self.a.pos() * 4) as u32, b.pos[ii]));
+                if self.rir_map_on {
+                    self.rir_map.push(((self.a.pos() * 4) as u32, bi as u32, ii as u32));
+                }
                 self.cur_pos = self.al.inst_pos(bi, ii);
                 if let Some(ls) = self.win_start.get(&self.cur_pos).cloned() {
                     for (v, r) in ls {
-                        if let Loc::Stack(o) = self.al.loc[v as usize] {
-                            let off = self.spill_sp(o);
-                            self.a.ldst(LDRX, 8, r, SP, off);
-                        } else {
-                            self.remat_into(r, VReg(v));
+                        match (self.cls(VReg(v)), self.al.loc[v as usize]) {
+                            (Cls::I, Loc::Stack(o)) => {
+                                let off = self.spill_sp(o);
+                                self.a.ldst(LDRX, 8, r, SP, off);
+                            }
+                            (Cls::I, _) => self.remat_into(r, VReg(v)),
+                            (Cls::V128, Loc::Stack(o)) => {
+                                let off = self.spill_sp(o);
+                                self.vldst(true, r, SP, off);
+                            }
+                            (_, Loc::Stack(o)) => {
+                                let off = self.spill_sp(o);
+                                self.a.ldst(LDRD, 8, r, SP, off);
+                            }
+                            (_, _) => match self.al.remat[v as usize] {
+                                Remat::VConst(bits) => self.vconst_into(r, bits),
+                                Remat::FConst(bits, f64_) => self.fconst_into(r, bits, f64_),
+                                m => unreachable!("float window of {:?}", m),
+                            },
                         }
                     }
                 }
@@ -1198,11 +1330,14 @@ impl<'a> Gen<'a> {
                 if fused && ii == n - 1 {
                     break;
                 }
-                if self.test_fuse.is_some() && ii == n - 2 {
+                if test_pair && ii == n - 2 {
                     continue;
                 }
                 if skip_next {
                     skip_next = false;
+                    continue;
+                }
+                if ii < skip_to {
                     continue;
                 }
                 // the second instruction of a deferred pair: both are emitted here, at its position
@@ -1211,16 +1346,25 @@ impl<'a> Gen<'a> {
                 // readable at the next instruction (deferred reads)
                 if let Some(k) = deferred.take() {
                     let first = &b.insts[k];
-                    let done = self.shifted_operand(options, first, inst, true).is_some() || self.narrow_bswap(options, first, inst, true).is_some();
+                    let done = self.shifted_operand(options, first, inst, true).is_some() || self.narrow_bswap(options, first, inst, true).is_some() || self.mul_add(options, first, inst, true).is_some();
                     debug_assert!(done, "a deferred pair no longer matches");
                     continue;
+                }
+                // three or more zero stores off one base in a row: the widest zr stores over their bytes
+                let limit = if test_pair { n - 2 } else if fused { n - 1 } else { n };
+                if ii + 2 < limit && isel_flags(options) & A64_FUSE != 0 {
+                    let k = self.zero_run(bi, ii, limit);
+                    if k > 0 {
+                        skip_to = ii + k;
+                        continue;
+                    }
                 }
                 if ii + 1 < n && !(fused && ii + 1 == n - 1) {
                     // a shift by a constant feeding only the next add/sub/and/or/xor: the shifted
                     // register operand form (`eor d, a, b, lsl #13`); a 64-bit byte swap whose only
                     // use shifts the low half back down: the 32-bit forms (u32 / u16
                     // from_be_bytes: rev w; rev16 w). Emitted with the next instruction (above).
-                    if self.shifted_operand(options, inst, &b.insts[ii + 1], false).is_some() || self.narrow_bswap(options, inst, &b.insts[ii + 1], false).is_some() {
+                    if self.shifted_operand(options, inst, &b.insts[ii + 1], false).is_some() || self.narrow_bswap(options, inst, &b.insts[ii + 1], false).is_some() || self.mul_add(options, inst, &b.insts[ii + 1], false).is_some() {
                         deferred = Some(ii);
                         continue;
                     }
@@ -1229,6 +1373,24 @@ impl<'a> Gen<'a> {
                         skip_next = true;
                         continue;
                     }
+                }
+                // a float multiply only read by the negation right after it: fnmul (one
+                // instruction; -(a*b) bit for bit, NaNs included)
+                if ii + 1 < n && !(fused && ii + 1 == n - 1) {
+                    if let (Inst::FBin(FOp::Mul, w1, t, a, bb), Inst::FUnary(FUn::Neg, w2, _, t2)) = (inst, &b.insts[ii + 1]) {
+                        if w1 == w2 && t == t2 && t != a && t != bb && self.al.uses[t.0 as usize] == 1 {
+                            self.fnmul_ins = Some((*a, *bb));
+                            continue;
+                        }
+                    }
+                }
+                // a zero vector only read by the lane-0 insert right after it (SROA'd vector cells,
+                // `_mm_setr_ps` gathers): no movi; the insert is `fmov s` (zeroes lanes 1-3)
+                if ii + 1 < n && !(fused && ii + 1 == n - 1) && self.zero_then_insert(inst, &b.insts[ii + 1]) {
+                    if let Inst::VConst(z, _) | Inst::VX(_, z, _, _) = inst {
+                        self.zero_ins = Some(*z);
+                    }
+                    continue;
                 }
                 // a compare feeding the selects right after it: they read its flags (nothing between
                 // them sets flags); when they are all its uses, the bool is never materialised
@@ -1279,6 +1441,9 @@ impl<'a> Gen<'a> {
                 }
             }
             self.pc_map.push(((self.a.pos() * 4) as u32, b.term_pos));
+            if self.rir_map_on {
+                self.rir_map.push(((self.a.pos() * 4) as u32, bi as u32, u32::MAX));
+            }
             let fuse_inst = if fused { Some(b.insts[n - 1].clone()) } else { None };
             self.term(&b.term, bi, fuse_inst);
         }
@@ -2041,6 +2206,34 @@ impl<'a> Gen<'a> {
             let at = self.a.pos();
             self.a.e(0x9C00_0000 | xd as u32);
             self.vpool.push((at, bits));
+        }
+    }
+
+    /// `z = 0` (VConst 0, or FromLo64 of a constant 0) read only by the next instruction, an
+    /// insert of a 32-bit lane 0 into it
+    fn zero_then_insert(&self, a: &Inst, b: &Inst) -> bool {
+        let z = match *a {
+            Inst::VConst(z, 0) => z,
+            Inst::VX(VX::FromLo64, z, k, _) if self.al.loc[k.0 as usize] == Loc::None && self.al.remat[k.0 as usize] == Remat::Const(0) => z,
+            _ => return false,
+        };
+        if self.al.loc[z.0 as usize] == Loc::None {
+            return false;
+        }
+        match *b {
+            // d == z: the insert redefines the vreg, so the zero dies there
+            Inst::VInsert(d, v, 0, s) => v == z && s != z && (d == z || self.al.uses[z.0 as usize] == 1) && matches!(self.cls(s), Cls::I | Cls::F32),
+            _ => false,
+        }
+    }
+
+    /// A vector access's base register and offset: register-less slot addresses and base + k
+    /// values (Alloc::remat) folded in (sp + offset / the base's register + summed offset)
+    fn vbase(&mut self, base: VReg, off: i64) -> (u8, i64) {
+        let (b, o) = self.resolve_off(base, off);
+        match self.slot_base(b) {
+            Some(so) => (SP, so + o),
+            None => (self.use_i(b, S1), o),
         }
     }
 
@@ -2887,6 +3080,22 @@ impl<'a> Gen<'a> {
                     self.fin_f(d, xd);
                 }
             }
+            Inst::VInsert(d, v, 0, s) if self.zero_ins.take() == Some(v) || self.zero_vec[v.0 as usize] => {
+                // into a zero vector: fmov s (a scalar write zeroes the rest of the register)
+                let xd = self.def_f(d, FS2);
+                if self.cls(s) == Cls::I {
+                    let rs = self.use_i(s, S0);
+                    self.a.e(0x1E27_0000 | (rs as u32) << 5 | xd as u32); // fmov sd, wn
+                } else {
+                    let xs = self.use_f(s, FS1);
+                    // an f32 loaded straight into d's register is already [s, 0, 0, 0] (`ldr s`
+                    // zeroes the rest of the register)
+                    if !(xs == xd && self.f32_load[s.0 as usize]) {
+                        self.a.e(0x1E20_4000 | (xs as u32) << 5 | xd as u32); // fmov sd, sn
+                    }
+                }
+                self.fin_f(d, xd);
+            }
             Inst::VInsert(d, v, lane, s) => {
                 let t = if self.cls(s) == Cls::I { self.vtmp(d, &[]) } else { self.vtmp(d, &[s]) };
                 let xv = self.use_f(v, t);
@@ -2903,16 +3112,23 @@ impl<'a> Gen<'a> {
                 self.vmov(xd, t);
                 self.fin_f(d, xd);
             }
+            // a stack-slot or base + k address without a register folds into the access, as
+            // for scalar loads / stores ([sp, #k], not `add x15, sp, #k` first)
             Inst::VLoad(d, base, off) => {
-                let rb = self.use_i(base, S1);
+                let (rb, o) = self.vbase(base, off as i64);
                 let xd = self.def_f(d, FS0);
-                self.vldst(true, xd, rb, off as i64);
+                self.vldst(true, xd, rb, o);
                 self.fin_f(d, xd);
             }
             Inst::VStore(base, off, v) => {
-                let rb = self.use_i(base, S1);
+                let (rb, o) = self.vbase(base, off as i64);
+                if self.al.loc[v.0 as usize] == Loc::None && self.al.remat[v.0 as usize] == Remat::VConst(0) && o % 8 == 0 && (-512..=496).contains(&o) {
+                    // a zero vector: stp xzr, xzr (no movi)
+                    self.a.stp(false, ZR, ZR, rb, o as i32);
+                    return;
+                }
                 let xv = self.use_f(v, FS0);
-                self.vldst(false, xv, rb, off as i64);
+                self.vldst(false, xv, rb, o);
             }
             // [base + (idx << sh) + off]: ldr/str q [rb, ri{, lsl #4}] when nothing is added and the
             // shift is 0 or 4; else the address into s1 by one shifted add
@@ -3019,6 +3235,105 @@ impl<'a> Gen<'a> {
         Some(())
     }
 
+    /// `t = a * b; d = c + t` (or `t + c`) is `madd d, a, b, c`, `d = c - t` is `msub` (64-bit, t
+    /// used once; b may be an immediate without a cheaper shift form, built in ip0). None: no match.
+    /// `emit` false: only whether the pair matches.
+    fn mul_add(&mut self, options: &relax_session::Options, m: &Inst, next: &Inst, emit: bool) -> Option<()> {
+        let (t, a, b) = match *m {
+            Inst::IBin(IOp::Mul, it, t, a, b) if it.bits == 64 && a != t && b != t => (t, a, Ok(b)),
+            Inst::IBinI(IOp::Mul, it, t, a, k) if it.bits == 64 && a != t && !(k > 0 && ((k & (k - 1)) == 0 || mul_shift_add(k).is_some())) => (t, a, Err(k)),
+            _ => return None,
+        };
+        if self.al.uses[t.0 as usize] != 1 || isel_flags(options) & A64_FUSE == 0 {
+            return None;
+        }
+        // an indexed access whose index is the product (no shift, a register base): the address
+        // by madd into ip1, then [ip1 + off]
+        let reg_base = |g: &Self, v: VReg| v != t && g.slot_base(v).is_none() && g.resolve_off(v, 0).0 == v;
+        match *next {
+            Inst::LoadX(mm, d, base, x, 0, off) if x == t && reg_base(self, base) && (off as i64).unsigned_abs() < 1 << 24 => {
+                if !emit {
+                    return Some(());
+                }
+                let rc = self.use_i(base, S0);
+                let ra = self.use_i(a, S1);
+                let rb = self.mul_operand(b);
+                self.a.e(0x9B00_0000 | (rb as u32) << 16 | (rc as u32) << 10 | (ra as u32) << 5 | IP1 as u32);
+                let (op, size) = mem_op(mm, true);
+                let off = self.ip1_off(off as i64, size);
+                match mm {
+                    Mem::Int(..) => {
+                        let rd = self.def_i(d, S0);
+                        self.a.ldst(op, size, rd, IP1, off);
+                        self.fin_i(d, rd);
+                    }
+                    _ => {
+                        let xd = self.def_f(d, FS0);
+                        self.a.ldst(op, size, xd, IP1, off);
+                        self.fin_f(d, xd);
+                    }
+                }
+                return Some(());
+            }
+            Inst::StoreX(mm, base, x, 0, off, src) if x == t && reg_base(self, base) && src != t && (off as i64).unsigned_abs() < 1 << 24 => {
+                if !emit {
+                    return Some(());
+                }
+                let (op, size) = mem_op(mm, false);
+                let rs = match mm {
+                    Mem::Int(..) => self.use_stored(src, S0),
+                    _ => self.use_f(src, FS0),
+                };
+                let rc = self.use_i(base, S1);
+                let ra = self.use_i(a, IP1);
+                let rb = self.mul_operand(b);
+                self.a.e(0x9B00_0000 | (rb as u32) << 16 | (rc as u32) << 10 | (ra as u32) << 5 | IP1 as u32);
+                let off = self.ip1_off(off as i64, size);
+                self.a.ldst(op, size, rs, IP1, off);
+                return Some(());
+            }
+            _ => {}
+        }
+        let (sub, d, c) = match *next {
+            Inst::IBin(IOp::Add, it, d, x, y) if it.bits == 64 && y == t && x != t => (false, d, x),
+            Inst::IBin(IOp::Add, it, d, x, y) if it.bits == 64 && x == t && y != t => (false, d, y),
+            Inst::IBin(IOp::Sub, it, d, x, y) if it.bits == 64 && y == t && x != t => (true, d, x),
+            _ => return None,
+        };
+        if !emit {
+            return Some(());
+        }
+        let rc = self.use_i(c, S0);
+        let ra = self.use_i(a, S1);
+        let rb = self.mul_operand(b);
+        let rd = self.def_i(d, S0);
+        // madd / msub xd, xa, xb, xc
+        self.a.e(if sub { 0x9B00_8000 } else { 0x9B00_0000 } | (rb as u32) << 16 | (rc as u32) << 10 | (ra as u32) << 5 | rd as u32);
+        self.fin_i(d, rd);
+        Some(())
+    }
+
+    /// mul_add's second factor: its register (ip0 when spilled), or the constant built in ip0
+    fn mul_operand(&mut self, b: Result<VReg, i64>) -> u8 {
+        match b {
+            Ok(b) => self.use_i(b, IP0),
+            Err(k) => {
+                self.a.mov_imm(IP0, k);
+                IP0
+            }
+        }
+    }
+
+    /// An offset from ip1 that ldst encodes without ip1 as its offset register (else folded in)
+    fn ip1_off(&mut self, off: i64, size: u32) -> i64 {
+        if (off >= 0 && off % size as i64 == 0 && off / (size as i64) < 4096) || (-256..256).contains(&off) {
+            off
+        } else {
+            self.a.add_any(IP1, IP1, off);
+            0
+        }
+    }
+
     /// `t = bswap64(a); d = t >> 32` is `rev wd, wa` (the byte-reversed low word, zero-extended);
     /// `d = t >> 48` with a zero above 16 bits is `rev16 wd, wa`; `t = bitrev64(a); d = t >> 32`
     /// is `rbit wd, wa` (t used once). None: no match.
@@ -3049,7 +3364,7 @@ impl<'a> Gen<'a> {
     }
 
     /// `Load a, [p + o]; Load b, [p + o +- w]` (or two stores) of the same width w (8/4-byte ints,
-    /// f64/f32; 4-byte loads zero-extending) as one ldp / stp: both values in registers (no spill
+    /// f64/f32, 16-byte vectors; 4-byte loads zero-extending) as one ldp / stp: both values in registers (no spill
     /// windows), distinct, the loads' destinations not the base, the lower offset a multiple of w
     /// within the signed 7-bit scaled range. None: no match.
     fn pair_access(&mut self, options: &relax_session::Options, i1: &Inst, i2: &Inst, pos2: u32) -> Option<()> {
@@ -3059,13 +3374,25 @@ impl<'a> Gen<'a> {
         let (load, m1, v1, b1, o1, m2, v2, b2, o2) = match (i1, i2) {
             (Inst::Load(m1, d1, b1, o1), Inst::Load(m2, d2, b2, o2)) => (true, *m1, *d1, *b1, *o1, *m2, *d2, *b2, *o2),
             (Inst::Store(m1, b1, o1, s1), Inst::Store(m2, b2, o2, s2)) => (false, *m1, *s1, *b1, *o1, *m2, *s2, *b2, *o2),
+            // 16-byte vectors: ldp / stp q (Mem::F64 stands in for "float register"; the width is 16)
+            (Inst::VLoad(d1, b1, o1), Inst::VLoad(d2, b2, o2)) => (true, V128_MEM, *d1, *b1, *o1, V128_MEM, *d2, *b2, *o2),
+            (Inst::VStore(b1, o1, s1), Inst::VStore(b2, o2, s2)) => (false, V128_MEM, *s1, *b1, *o1, V128_MEM, *s2, *b2, *o2),
             _ => return None,
         };
-        if m1 != m2 || b1 != b2 || v1 == v2 {
+        let vec = matches!(i1, Inst::VLoad(..) | Inst::VStore(..));
+        // two zero stores of one width pair as `stp wzr / xzr` whatever their types
+        let zeros = !load && !vec && self.zero_val[v1.0 as usize] && self.zero_val[v2.0 as usize] && mem_op(m1, false).1 == mem_op(m2, false).1;
+        if !zeros && m1 != m2 || b1 != b2 || load && v1 == v2 {
             return None;
         }
         // (pair opcode, width, float?)
         let (op, w, fp) = match (m1, load) {
+            _ if zeros => match mem_op(m1, false).1 {
+                8 => (0xA900_0000u32, 8i64, false),
+                4 => (0x2900_0000, 4, false),
+                _ => return None,
+            },
+            _ if vec => (if load { 0xAD40_0000u32 } else { 0xAD00_0000 }, 16i64, true),
             (Mem::Int(8, _), true) => (0xA940_0000u32, 8i64, false),
             (Mem::Int(8, _), false) => (0xA900_0000, 8, false),
             (Mem::Int(4, false), true) => (0x2940_0000, 4, false),
@@ -3105,16 +3432,90 @@ impl<'a> Gen<'a> {
             },
         };
         let reg_of = |s: &Self, v: VReg| match (s.al.loc[v.0 as usize], fp) {
+            _ if zeros => Some(ZR),
+            // an integer zero store: zr (its register may not even hold it here)
+            (_, false) if !load && s.zero_val[v.0 as usize] => Some(ZR),
             (Loc::Reg(r), false) | (Loc::Flt(r), true) => Some(r),
             _ => None,
         };
         let (t1, t2) = (reg_of(self, lo_v)?, reg_of(self, hi_v)?);
-        if t1 == t2 {
+        if load && t1 == t2 {
             return None;
         }
         let imm = ((rb.1 / w) as u32) & 0x7f;
         self.a.e(op | imm << 15 | (t2 as u32) << 10 | (rb.0 as u32) << 5 | t1 as u32);
         Some(())
+    }
+
+    /// Instructions `ii..` that store zero (zero_values) off one base (after resolve_off), with no
+    /// region window starting among them: when there are at least three, their byte ranges are
+    /// stored with the widest zr stores (stp xzr, xzr per 16 bytes; a zeroed struct's 4-byte
+    /// fields were one `str wzr` each, its vectors a movi + str q) and the count is returned.
+    fn zero_run(&mut self, bi: usize, ii: usize, limit: usize) -> usize {
+        let b = &self.f.blocks[bi];
+        let zero = |s: &Self, v: VReg| s.zero_val[v.0 as usize] || s.al.loc[v.0 as usize] == Loc::None && matches!(s.al.remat[v.0 as usize], Remat::Const(0) | Remat::FConst(0, _) | Remat::VConst(0));
+        let mut root: Option<VReg> = None;
+        let mut spans: Vec<(i64, i64)> = Vec::new();
+        let mut k = ii;
+        while k < limit {
+            let (base, off, size) = match b.insts[k] {
+                Inst::Store(m, base, off, v) if zero(self, v) => (base, off as i64, mem_op(m, false).1 as i64),
+                Inst::VStore(base, off, v) if zero(self, v) => (base, off as i64, 16),
+                _ => break,
+            };
+            if k > ii && self.win_start.contains_key(&self.al.inst_pos(bi, k)) {
+                break;
+            }
+            let (r, o) = self.resolve_off(base, off);
+            if root.is_some_and(|x| x != r) {
+                break;
+            }
+            root = Some(r);
+            spans.push((o, o + size));
+            k += 1;
+        }
+        if k - ii < 3 {
+            return 0;
+        }
+        let root = root.unwrap();
+        let (rb, add) = match self.slot_base(root) {
+            Some(so) => (SP, so),
+            None => (self.use_i(root, S1), 0),
+        };
+        spans.sort();
+        let mut merged: Vec<(i64, i64)> = Vec::new();
+        for (lo, hi) in spans {
+            match merged.last_mut() {
+                Some(m) if lo <= m.1 => m.1 = m.1.max(hi),
+                _ => merged.push((lo, hi)),
+            }
+        }
+        for (lo, hi) in merged {
+            let (mut p, e) = (lo + add, hi + add);
+            while p < e {
+                let left = e - p;
+                if left >= 16 && p % 8 == 0 && (-512..=504).contains(&p) {
+                    self.a.stp(false, ZR, ZR, rb, p as i32);
+                    p += 16;
+                } else if left >= 8 && p % 8 == 0 {
+                    self.a.ldst(STRX, 8, ZR, rb, p);
+                    p += 8;
+                } else if left >= 8 && p % 4 == 0 && (-256..=252).contains(&p) {
+                    self.a.e(0x2900_0000 | (((p / 4) as u32) & 0x7f) << 15 | (ZR as u32) << 10 | (rb as u32) << 5 | ZR as u32);
+                    p += 8;
+                } else if left >= 4 && p % 4 == 0 {
+                    self.a.ldst(STRW, 4, ZR, rb, p);
+                    p += 4;
+                } else if left >= 2 && p % 2 == 0 {
+                    self.a.ldst(STRH, 2, ZR, rb, p);
+                    p += 2;
+                } else {
+                    self.a.ldst(STRB, 1, ZR, rb, p);
+                    p += 1;
+                }
+            }
+        }
+        k - ii
     }
 
     /// Sets the flags for a fused compare and returns the condition for "true".
@@ -3131,14 +3532,41 @@ impl<'a> Gen<'a> {
                 self.cmp_imm(ra, *v);
                 icc(*c, *signed)
             }
-            Inst::FCmp(c, f64_, _, a, b) => {
-                let xa = self.use_f(*a, FS0);
-                let xb = self.use_f(*b, FS1);
-                self.a.fcmp(*f64_, xa, xb);
-                fcc(*c)
-            }
+            Inst::FCmp(c, f64_, _, a, b) => fcc(self.fcmp_v(*c, *f64_, *a, *b)),
             _ => NE,
         }
+    }
+
+    /// fcmp a, b for `a c b`; against a register-less +0.0 (either side) the zero form (`fcmp s,
+    /// #0.0`, no `fmov d31, xzr`). Returns the condition on the flags (swapped with the operands:
+    /// a < b == b > a, also for unordered operands).
+    fn fcmp_v(&mut self, c: Cond, f64_: bool, a: VReg, b: VReg) -> Cond {
+        let zero = |g: &Self, v: VReg| g.zero_cmp[v.0 as usize] || (g.al.loc[v.0 as usize] == Loc::None && matches!(g.al.remat[v.0 as usize], Remat::FConst(0, _)));
+        let (x, c) = if zero(self, b) {
+            (a, c)
+        } else if zero(self, a) {
+            (b, match c {
+                Cond::Lt => Cond::Gt,
+                Cond::Le => Cond::Ge,
+                Cond::Gt => Cond::Lt,
+                Cond::Ge => Cond::Le,
+                c => c,
+            })
+        } else {
+            let xa = self.use_f(a, FS0);
+            let xb = self.use_f(b, FS1);
+            self.a.fcmp(f64_, xa, xb);
+            return c;
+        };
+        let xx = if self.zero_cmp[x.0 as usize] {
+            // both sides the unbuilt +0.0
+            self.fconst_into(FS0, 0, f64_);
+            FS0
+        } else {
+            self.use_f(x, FS0)
+        };
+        self.a.e(0x1E20_2008 | if f64_ { DBL } else { 0 } | (xx as u32) << 5);
+        c
     }
 
     fn cmp_imm(&mut self, ra: u8, v: i64) {
@@ -3280,7 +3708,12 @@ impl<'a> Gen<'a> {
                 let next = self.next_block[bi];
                 match fused {
                     // and with a bitmask immediate, compared with zero: tst + b.cond
-                    Some(Inst::ICmpI(cnd @ (Cond::Eq | Cond::Ne), _, _, _, 0)) if self.test_fuse.is_some() => {
+                    Some(ref fi @ (Inst::ICmpI(Cond::Eq | Cond::Ne, _, _, _, 0) | Inst::IBinI(IOp::And, ..))) if self.test_fuse.is_some() => {
+                        // (x & K) != 0 for a branch straight on the and
+                        let cnd = match fi {
+                            Inst::ICmpI(c, ..) => *c,
+                            _ => Cond::Ne,
+                        };
                         let (src, mask) = self.test_fuse.take().unwrap();
                         let rs = self.use_i(src, S0);
                         if self.tbz && (mask as u64).is_power_of_two() {
@@ -3413,6 +3846,8 @@ impl<'a> Gen<'a> {
                 self.a.mov_imm(r, *v);
                 self.fin_i(*d, r);
             }
+            // a +0.0 only compares read: they use the zero form (fcmp_v)
+            Inst::Fconst(d, ..) if self.zero_cmp[d.0 as usize] => {}
             Inst::Fconst(d, bits, f64_) => {
                 let x = self.def_f(*d, FS0);
                 self.fconst_into(x, *bits, *f64_);
@@ -3444,14 +3879,20 @@ impl<'a> Gen<'a> {
                     self.a.mov(rd, rs);
                     self.fin_i(*d, rd);
                 } else {
-                    let xs = self.use_f(*s, FS0);
+                    // a spilled source loads straight into d's register; a spilled d stores
+                    // straight from s's (no move through the scratch)
                     let xd = self.def_f(*d, FS0);
-                    if self.cls(*d) == Cls::V128 {
-                        self.vmov(xd, xs);
+                    let xs = self.use_f(*s, xd);
+                    if matches!(self.al.loc[d.0 as usize], Loc::Stack(_)) {
+                        self.fin_f(*d, xs);
                     } else {
-                        self.a.fmov(xd, xs);
+                        if self.cls(*d) == Cls::V128 {
+                            self.vmov(xd, xs);
+                        } else {
+                            self.a.fmov(xd, xs);
+                        }
+                        self.fin_f(*d, xd);
                     }
-                    self.fin_f(*d, xd);
                 }
             }
             Inst::IBin(op, it, d, a, b) => {
@@ -3549,6 +3990,15 @@ impl<'a> Gen<'a> {
                 self.a.fp3(opc, *f64_, xd, xa, xb);
                 self.fin_f(*d, xd);
             }
+            Inst::FUnary(FUn::Neg, f64_, d, _) if self.fnmul_ins.is_some() => {
+                let (a, b) = self.fnmul_ins.take().unwrap();
+                let xa = self.use_f(a, FS0);
+                let xb = self.use_f(b, FS1);
+                let xd = self.def_f(*d, FS0);
+                // fnmul sd/dd, a, b
+                self.a.e(0x1E20_8800 | if *f64_ { DBL } else { 0 } | (xb as u32) << 16 | (xa as u32) << 5 | xd as u32);
+                self.fin_f(*d, xd);
+            }
             Inst::FUnary(op, f64_, d, a) => {
                 let xa = self.use_f(*a, FS0);
                 let xd = self.def_f(*d, FS0);
@@ -3566,11 +4016,9 @@ impl<'a> Gen<'a> {
                 self.fin_f(*d, xd);
             }
             Inst::FCmp(c, f64_, d, a, b) => {
-                let xa = self.use_f(*a, FS0);
-                let xb = self.use_f(*b, FS1);
-                self.a.fcmp(*f64_, xa, xb);
+                let c = self.fcmp_v(*c, *f64_, *a, *b);
                 let rd = self.def_i(*d, S0);
-                self.a.cset(rd, fcc(*c));
+                self.a.cset(rd, fcc(c));
                 self.fin_i(*d, rd);
             }
             Inst::Conv(c, d, s) => self.conv(*c, *d, *s),
@@ -3636,6 +4084,12 @@ impl<'a> Gen<'a> {
                         let rs = self.use_stored(*src, S0);
                         self.a.ldst(op, size, rs, rb, *off as i64);
                     }
+                    // a float 0.0 without a register: the integer store of zr (`fmov d30, xzr;
+                    // str s30` was two instructions)
+                    _ if self.al.loc[src.0 as usize] == Loc::None && matches!(self.al.remat[src.0 as usize], Remat::FConst(0, _)) => {
+                        let op = if size == 8 { STRX } else { STRW };
+                        self.a.ldst(op, size, ZR, rb, *off as i64);
+                    }
                     _ => {
                         let xs = self.use_f(*src, FS0);
                         self.a.ldst(op, size, xs, rb, *off as i64);
@@ -3695,22 +4149,41 @@ impl<'a> Gen<'a> {
                 }
             }
             Inst::Copy(dst, src, size) => {
-                let rd = self.use_i(*dst, S0);
-                let rs = self.use_i(*src, S1);
                 let size = *size as i64;
+                let q = size >= 32 && self.qcopy;
+                // a slot or `base + k` end is addressed off sp / the base with its offset (no `add`
+                // first) when every piece's offset encodes: q pairs a multiple of 16 in -1024..=1008
+                // (scaled imm7), else the 8/4/1-byte pieces' unsigned scaled or unscaled range
+                let fits = |o: i64| if q { o % 16 == 0 && o >= -1024 && o + size - 16 <= 1008 } else { o >= 0 && o % 8 == 0 && o + size <= 4096 * 4 || o >= -256 && o + size <= 256 };
+                let (rd, od) = {
+                    let (b, o) = self.resolve_off(*dst, 0);
+                    match self.slot_base(b) {
+                        Some(so) if fits(so + o) => (SP, so + o),
+                        _ if o != 0 && fits(o) && self.slot_base(b).is_none() => (self.use_i(b, S0), o),
+                        _ => (self.use_i(*dst, S0), 0),
+                    }
+                };
+                let (rs, os) = {
+                    let (b, o) = self.resolve_off(*src, 0);
+                    match self.slot_base(b) {
+                        Some(so) if fits(so + o) => (SP, so + o),
+                        _ if o != 0 && fits(o) && self.slot_base(b).is_none() => (self.use_i(b, S1), o),
+                        _ => (self.use_i(*src, S1), 0),
+                    }
+                };
                 let mut o = 0i64;
-                if size >= 32 {
+                if q {
                     // 16-byte vector moves through the float scratch (an `ldp`/`stp` pair moves 32
                     // bytes in two instructions): a 160-byte struct move is 10 instructions, not 40
-                    let pair = |o: i64| o <= 1008;
-                    while o + 32 <= size && pair(o) {
-                        self.a.e(0xAD40_0000 | (((o / 16) as u32) & 0x7f) << 15 | (FS1 as u32) << 10 | (rs as u32) << 5 | FS0 as u32);
-                        self.a.e(0xAD00_0000 | (((o / 16) as u32) & 0x7f) << 15 | (FS1 as u32) << 10 | (rd as u32) << 5 | FS0 as u32);
+                    let pair = |x: i64| x % 16 == 0 && (-1024..=1008).contains(&x);
+                    while o + 32 <= size && pair(os + o) && pair(od + o) {
+                        self.a.e(0xAD40_0000 | ((((os + o) / 16) as u32) & 0x7f) << 15 | (FS1 as u32) << 10 | (rs as u32) << 5 | FS0 as u32);
+                        self.a.e(0xAD00_0000 | ((((od + o) / 16) as u32) & 0x7f) << 15 | (FS1 as u32) << 10 | (rd as u32) << 5 | FS0 as u32);
                         o += 32;
                     }
                     while o + 16 <= size {
-                        self.vldst(true, FS0, rs, o);
-                        self.vldst(false, FS0, rd, o);
+                        self.vldst(true, FS0, rs, os + o);
+                        self.vldst(false, FS0, rd, od + o);
                         o += 16;
                     }
                     // the tail falls through to the 8/4/1-byte pieces below, not one overlapping
@@ -3719,18 +4192,18 @@ impl<'a> Gen<'a> {
                     // overlapping tail made the next copy's load span two stores)
                 }
                 while o + 8 <= size {
-                    self.a.ldst(LDRX, 8, IP0, rs, o);
-                    self.a.ldst(STRX, 8, IP0, rd, o);
+                    self.a.ldst(LDRX, 8, IP0, rs, os + o);
+                    self.a.ldst(STRX, 8, IP0, rd, od + o);
                     o += 8;
                 }
                 while o + 4 <= size {
-                    self.a.ldst(LDRW, 4, IP0, rs, o);
-                    self.a.ldst(STRW, 4, IP0, rd, o);
+                    self.a.ldst(LDRW, 4, IP0, rs, os + o);
+                    self.a.ldst(STRW, 4, IP0, rd, od + o);
                     o += 4;
                 }
                 while o < size {
-                    self.a.ldst(LDRB, 1, IP0, rs, o);
-                    self.a.ldst(STRB, 1, IP0, rd, o);
+                    self.a.ldst(LDRB, 1, IP0, rs, os + o);
+                    self.a.ldst(STRB, 1, IP0, rd, od + o);
                     o += 1;
                 }
             }
@@ -4132,6 +4605,254 @@ impl<'a> Gen<'a> {
     }
 }
 
+/// FCmp of negations (or of a negation and +0.0): the compare of the negated values, mirrored.
+/// `FMulAdd(.., a, b, c)` whose a or c is a negation `-x` used only there: the negation folds into
+/// the multiply-add's flags (product / addend negated), x read instead. Exact: the fused forms negate
+/// the operand (FPNeg) before the one rounding, as the separate fneg did (NaN signs included).
+fn fold_fma_negs(f: &Func) -> Option<Func> {
+    let n = f.vregs.len();
+    let mut ndef = vec![0u32; n];
+    let mut uses = vec![0u32; n];
+    let mut neg: Vec<Option<(VReg, bool)>> = vec![None; n];
+    let mut fzero = vec![false; n];
+    let mut any = false;
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    for b in &f.blocks {
+        for i in &b.insts {
+            i.defs(|d| ndef[d.0 as usize] += 1);
+            regalloc::for_uses(i, |u| uses[u.0 as usize] += 1);
+            if let Inst::FUnary(FUn::Neg, w, d, x) = *i {
+                neg[d.0 as usize] = Some((x, w));
+            }
+            any |= matches!(i, Inst::FMulAdd(..) | Inst::FCmp(..));
+            if let Inst::Fconst(d, 0, _) = *i {
+                fzero[d.0 as usize] = true;
+            }
+        }
+        let mut t = Vec::new();
+        regalloc::term_uses(&b.term, &mut t);
+        for u in t {
+            uses[u.0 as usize] += 1;
+        }
+    }
+    if !any {
+        return None;
+    }
+    let of = |v: VReg, w: bool| match neg[v.0 as usize] {
+        Some((x, w2)) if w2 == w && ndef[v.0 as usize] == 1 && uses[v.0 as usize] == 1 && ndef[x.0 as usize] == 1 => Some(x),
+        _ => None,
+    };
+    let mut g = f.clone();
+    let mut dead = vec![false; n];
+    let zero = |v: VReg| fzero[v.0 as usize] && ndef[v.0 as usize] == 1;
+    for b in &mut g.blocks {
+        for i in &mut b.insts {
+            // -x c -y == x c' y and -x c 0 == x c' 0 (c' mirrored: -x < y == x > -y; unordered
+            // stays unordered; -0 == +0)
+            if let Inst::FCmp(c, w, _, a, bb) = i {
+                let (na, nb) = (of(*a, *w), of(*bb, *w));
+                let fold = match (na, nb) {
+                    (Some(x), Some(y)) => Some((x, y)),
+                    (Some(x), None) if zero(*bb) => Some((x, *bb)),
+                    (None, Some(y)) if zero(*a) => Some((*a, y)),
+                    _ => None,
+                };
+                if let Some((x, y)) = fold {
+                    if na.is_some() {
+                        dead[a.0 as usize] = true;
+                    }
+                    if nb.is_some() {
+                        dead[bb.0 as usize] = true;
+                    }
+                    *a = x;
+                    *bb = y;
+                    *c = match *c {
+                        Cond::Lt => Cond::Gt,
+                        Cond::Le => Cond::Ge,
+                        Cond::Gt => Cond::Lt,
+                        Cond::Ge => Cond::Le,
+                        c => c,
+                    };
+                }
+            }
+            if let Inst::FMulAdd(np, na, w, _, a, _, c) = i {
+                if let Some(x) = of(*c, *w) {
+                    dead[c.0 as usize] = true;
+                    *c = x;
+                    *na = !*na;
+                }
+                // a only: FMSUB / FNMADD negate the first factor (Rn), so a NaN b keeps its sign
+                // only when the negation was on a
+                if let Some(x) = of(*a, *w) {
+                    dead[a.0 as usize] = true;
+                    *a = x;
+                    *np = !*np;
+                }
+            }
+        }
+    }
+    if !dead.iter().any(|d| *d) {
+        return None;
+    }
+    for b in &mut g.blocks {
+        let keep: Vec<bool> = b.insts.iter().map(|i| !matches!(i, Inst::FUnary(FUn::Neg, _, d, _) if dead[d.0 as usize])).collect();
+        let mut k = 0;
+        b.insts.retain(|_| {
+            k += 1;
+            keep[k - 1]
+        });
+        let mut k = 0;
+        b.pos.retain(|_| {
+            k += 1;
+            keep[k - 1]
+        });
+    }
+    Some(g)
+}
+
+/// Every FCmp operand that is a single-def +0.0 (Fconst 0) defined elsewhere reads a fresh copy of
+/// the constant defined right before the compare instead; the emitter builds none of them
+/// (`fcmp s, #0.0`, Gen::zero_cmp).
+fn split_zero_compares(f: &Func) -> Option<Func> {
+    let n = f.vregs.len();
+    let mut ndef = vec![0u32; n];
+    let mut fz: Vec<Option<bool>> = vec![None; n];
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    let mut any = false;
+    for b in &f.blocks {
+        for i in &b.insts {
+            i.defs(|d| ndef[d.0 as usize] += 1);
+            if let Inst::Fconst(d, 0, w) = *i {
+                fz[d.0 as usize] = Some(w);
+            }
+            any |= matches!(i, Inst::FCmp(..));
+        }
+    }
+    let zero = |v: VReg| if ndef[v.0 as usize] == 1 { fz[v.0 as usize] } else { None };
+    if !any {
+        return None;
+    }
+    let mut g = f.clone();
+    let mut changed = false;
+    for bi in 0..g.blocks.len() {
+        let mut k = 0;
+        while k < g.blocks[bi].insts.len() {
+            if let Inst::FCmp(c, w, d, a, b) = g.blocks[bi].insts[k] {
+                let prev_def = |v: VReg, blk: &Block| k > 0 && matches!(blk.insts[k - 1], Inst::Fconst(t, 0, _) if t == v);
+                let mut ins = Vec::new();
+                let (mut a2, mut b2) = (a, b);
+                for (op, slot) in [(a, 0), (b, 1)] {
+                    if zero(op) == Some(w) && !prev_def(op, &g.blocks[bi]) && a != b {
+                        let t = g.vreg(if w { Cls::F64 } else { Cls::F32 });
+                        ins.push(Inst::Fconst(t, 0, w));
+                        if slot == 0 {
+                            a2 = t;
+                        } else {
+                            b2 = t;
+                        }
+                    }
+                }
+                if !ins.is_empty() {
+                    let m = ins.len();
+                    let pos = g.blocks[bi].pos[k];
+                    g.blocks[bi].insts[k] = Inst::FCmp(c, w, d, a2, b2);
+                    g.blocks[bi].insts.splice(k..k, ins);
+                    g.blocks[bi].pos.splice(k..k, std::iter::repeat(pos).take(m));
+                    k += m;
+                    changed = true;
+                }
+            }
+            k += 1;
+        }
+    }
+    changed.then_some(g)
+}
+
+/// Per vreg: defined exactly once, as an all-zero vector (VConst 0, or FromLo64 of a vreg defined
+/// once as the constant 0)
+/// (and, per vreg, defined once by an f32 load)
+fn zero_compare_consts(f: &Func) -> Vec<bool> {
+    let n = f.vregs.len();
+    let mut ndef = vec![0u32; n];
+    let mut z = vec![false; n];
+    let mut other = vec![false; n];
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    for b in &f.blocks {
+        for i in &b.insts {
+            i.defs(|d| ndef[d.0 as usize] += 1);
+            if let Inst::Fconst(d, 0, _) = *i {
+                z[d.0 as usize] = true;
+            }
+            if !matches!(i, Inst::FCmp(..)) {
+                regalloc::for_uses(i, |u| other[u.0 as usize] = true);
+            }
+        }
+        let mut t = Vec::new();
+        regalloc::term_uses(&b.term, &mut t);
+        for u in t {
+            other[u.0 as usize] = true;
+        }
+    }
+    (0..n).map(|v| z[v] && ndef[v] == 1 && !other[v]).collect()
+}
+
+fn zero_vectors(f: &Func) -> (Vec<bool>, Vec<bool>) {
+    let n = f.vregs.len();
+    let mut defs = vec![0u32; n];
+    let mut zint = vec![false; n];
+    let mut zvec = vec![false; n];
+    let mut fload = vec![false; n];
+    for b in &f.blocks {
+        for i in &b.insts {
+            i.defs(|d| defs[d.0 as usize] += 1);
+            match *i {
+                Inst::Iconst(d, 0) => zint[d.0 as usize] = true,
+                Inst::VConst(d, 0) => zvec[d.0 as usize] = true,
+                Inst::Load(Mem::F32, d, ..) | Inst::LoadX(Mem::F32, d, ..) => fload[d.0 as usize] = true,
+                _ => {}
+            }
+        }
+    }
+    for b in &f.blocks {
+        for i in &b.insts {
+            if let Inst::VX(VX::FromLo64, d, k, _) = *i {
+                if zint[k.0 as usize] && defs[k.0 as usize] == 1 {
+                    zvec[d.0 as usize] = true;
+                }
+            }
+        }
+    }
+    for p in &f.params {
+        defs[p.0 as usize] += 1;
+    }
+    ((0..n).map(|v| zvec[v] && defs[v] == 1).collect(), (0..n).map(|v| fload[v] && defs[v] == 1).collect())
+}
+
+/// Single-definition values that are zero in every bit (zero_vectors' vectors, Iconst 0, Fconst +0.0)
+fn zero_values(f: &Func, zero_vec: &[bool]) -> Vec<bool> {
+    let n = f.vregs.len();
+    let mut defs = vec![0u32; n];
+    let mut z = zero_vec.to_vec();
+    for p in &f.params {
+        defs[p.0 as usize] += 1;
+    }
+    for b in &f.blocks {
+        for i in &b.insts {
+            i.defs(|d| defs[d.0 as usize] += 1);
+            if let Inst::Iconst(d, 0) | Inst::Fconst(d, 0, _) = *i {
+                z[d.0 as usize] = true;
+            }
+        }
+    }
+    (0..n).map(|v| z[v] && defs[v] == 1).collect()
+}
+
 fn words_to_bytes(w: &[u32]) -> Vec<u8> {
     let mut b = Vec::with_capacity(w.len() * 4);
     for x in w {
@@ -4170,6 +4891,70 @@ pub fn compile(options: &relax_session::Options, f: &Func, env: &Env) -> Result<
 /// hash's `x >> ((x >> 28) + 4)`), the amount becomes `-c - y` -- the add a `sub` from the
 /// constant `-c`, built next to `c` -- and the shift `ArmUShl` / `ArmSShl` by it; `y - c` becomes
 /// `c - y` (no new constant). One instruction fewer per shift.
+/// A single-definition `VConst(d, k)` after another single-definition `VConst(c, k)` in the same
+/// block: d's uses read c (dominated by c's definition, as d's are), d's definition goes. One
+/// movi per block instead of one per use site: the unrolled `[T; N]` inits of box3d stored a
+/// fresh zero vector per element. A constant of a long range is still rebuilt at its uses when
+/// the allocator spills it (Remat::VConst).
+fn share_vconsts(f: &Func) -> Option<Func> {
+    let n = f.vregs.len();
+    let mut ndef = vec![0u32; n];
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    let mut any = 0usize;
+    for b in &f.blocks {
+        for i in &b.insts {
+            i.defs(|d| ndef[d.0 as usize] += 1);
+            any += matches!(i, Inst::VConst(..)) as usize;
+        }
+    }
+    if any < 2 {
+        return None;
+    }
+    let mut to: Vec<u32> = (0..n as u32).collect();
+    let mut drop: Vec<(usize, usize)> = Vec::new();
+    for (bi, b) in f.blocks.iter().enumerate() {
+        let mut seen: Vec<(u32, VReg)> = Vec::new();
+        for (ii, i) in b.insts.iter().enumerate() {
+            if let Inst::VConst(d, k) = *i {
+                if ndef[d.0 as usize] != 1 {
+                    continue;
+                }
+                match seen.iter().find(|e| e.0 == k) {
+                    Some(&(_, c)) => {
+                        to[d.0 as usize] = c.0;
+                        drop.push((bi, ii));
+                    }
+                    None => seen.push((k, d)),
+                }
+            }
+        }
+    }
+    if drop.is_empty() {
+        return None;
+    }
+    let mut g = f.clone();
+    for &(bi, ii) in drop.iter().rev() {
+        g.blocks[bi].insts.remove(ii);
+        g.blocks[bi].pos.remove(ii);
+    }
+    let m = |v: VReg| if (v.0 as usize) < n { VReg(to[v.0 as usize]) } else { v };
+    for b in g.blocks.iter_mut() {
+        for i in b.insts.iter_mut() {
+            *i = crate::passes::rename(i, &m);
+        }
+        b.term = match &b.term {
+            Term::Branch(c, x, y) => Term::Branch(m(*c), *x, *y),
+            Term::Ret(v) => Term::Ret(v.iter().map(|x| m(*x)).collect()),
+            Term::Switch(c, t) => Term::Switch(m(*c), t.clone()),
+            other => other.clone(),
+        };
+    }
+    g.dbg_map_vregs(&|v| Some(m(v)));
+    Some(g)
+}
+
 fn fold_shift_amounts(f: &Func) -> Option<Func> {
     let n = f.vregs.len();
     let mut ndef = vec![0u32; n];
@@ -4275,19 +5060,34 @@ fn fold_lane_splats(f: &Func) -> Option<Func> {
         ndef[p.0 as usize] += 1;
     }
     let mut any = false;
+    // 32-bit constants (f32 bits / integers) by vreg
+    let mut k32: Vec<Option<u32>> = vec![None; n];
     for b in &f.blocks {
         for i in &b.insts {
             i.defs(|d| ndef[d.0 as usize] += 1);
-            if let Inst::VSplat(d, s) = i {
-                if f.vregs[s.0 as usize] == Cls::F32 {
-                    splat[d.0 as usize] = Some(*s);
+            match *i {
+                Inst::VSplat(d, s) => {
+                    splat[d.0 as usize] = Some(s);
                     any = true;
                 }
+                Inst::Fconst(d, bits, false) => k32[d.0 as usize] = Some(bits as u32),
+                Inst::Iconst(d, k) => k32[d.0 as usize] = Some(k as u32),
+                _ => {}
             }
         }
     }
     if !any {
         return None;
+    }
+    // a splat of a single-def constant is a vector constant (movi / fmov .4s #imm / one literal
+    // load, rematerialised at its uses: `fmov d31, xzr; dup v.4s, v31.s[0]` was a 0.0 splat)
+    let kof = |s: VReg| if ndef[s.0 as usize] == 1 { k32[s.0 as usize] } else { None };
+    for v in 0..n {
+        if let Some(s) = splat[v] {
+            if f.vregs[s.0 as usize] != Cls::F32 || kof(s).is_some() {
+                splat[v] = None;
+            }
+        }
     }
     // both single-def: the scalar holds the splatted value wherever the splat is read
     let of = |v: VReg| if ndef[v.0 as usize] == 1 { splat[v.0 as usize].filter(|s| ndef[s.0 as usize] == 1) } else { None };
@@ -4296,6 +5096,10 @@ fn fold_lane_splats(f: &Func) -> Option<Func> {
     for b in &mut g.blocks {
         for i in &mut b.insts {
             match i {
+                Inst::VSplat(d, s) if kof(*s).is_some() => {
+                    *i = Inst::VConst(*d, kof(*s).unwrap());
+                    changed = true;
+                }
                 Inst::VFma(_, _, _, _, bb, _) => {
                     if let Some(s) = of(*bb) {
                         *bb = s;
@@ -4402,7 +5206,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         f
     };
     // chains of compares of one value against constants: jump tables, bit tests, binary search
-    let switched = crate::switch::lower_switches(options, f);
+    let switched = crate::switch::lower_switches(options, f, crate::switch::MIN_TABLE_CLUSTERS_ARM64);
     let (f, freq_sw) = match &switched {
         Some((g, origin)) => (g, freq.map(|fr| origin.iter().map(|b| fr.get(*b as usize).copied().unwrap_or(0.0)).collect::<Vec<f32>>())),
         None => (f, None),
@@ -4410,9 +5214,20 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     let freq = if switched.is_some() { freq_sw.as_deref() } else { freq };
     let _cost_ra = crate::probe::phase(9);
     let t_ra = crate::stats::pass_clock();
+    // negations read only by a fused multiply-add: its sign flags (fmsub / fnmadd / fnmsub)
+    let nf = fold_fma_negs(f);
+    let f = nf.as_ref().unwrap_or(f);
+    // compares with a shared +0.0: each its own adjacent constant (fcmp #0.0; the shared zero
+    // no longer holds a register over the function)
+    let zc = split_zero_compares(f);
+    let f = zc.as_ref().unwrap_or(f);
     // f32 splats read only by multiplies: the by-element forms (fmla / fmls / fmul v, v, v.s[0])
     let lanes = fold_lane_splats(f);
     let f = lanes.as_ref().unwrap_or(f);
+    // a vector constant made again in its block (an unrolled array init's zero per element):
+    // the first one's register
+    let vk = if crate::stats::opt_off(options, "-a64vconst") { None } else { share_vconsts(f) };
+    let f = vk.as_ref().unwrap_or(f);
     // right shifts by `y + c`: ushl / sshl by `-c - y` (no neg per shift)
     let shifts = fold_shift_amounts(f);
     let f = shifts.as_ref().unwrap_or(f);
@@ -4428,13 +5243,14 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     // branch compares at the end of their block (fused into cmp + b.cond)
     let brs = if env.opt_regs || f.full { regalloc::sink_branch_compares(options, f) } else { None };
     let f = brs.as_ref().unwrap_or(f);
-    // a function that calls nothing and returns no float may keep values in v0-v3 too (they
-    // carry float arguments and results, and calls' aggregate results, only around calls)
+    // v0-v7 are allocatable outside the instructions that name them (arm64_clobbers), except
+    // in an `extern "C"` body returning an aggregate in registers: its Ret loads the parts into
+    // v0-v3 before the result moves (c_ret_parts)
     let mut cfg = RegConfig { sym_class: env.sym_class, ..reg_config() };
-    let leaf = f.blocks.iter().all(|b| !b.insts.iter().any(|i| matches!(i, Inst::Call(..))));
-    if f.rets.iter().all(|c| *c == Cls::I) && leaf {
-        cfg.flt_caller.extend_from_slice(&[0, 1, 2, 3]);
+    if f.cabi.as_ref().is_some_and(|s| matches!(cabi::plan(s, s.conv.target()).ret, RetPlan::Parts(_))) {
+        cfg.flt_caller.retain(|x| *x >= 8);
     }
+    let leaf = f.blocks.iter().all(|b| !b.insts.iter().any(|i| matches!(i, Inst::Call(..))));
     // likewise x0 / x1 (integer results: the return's moves place them) and x8 (the large-copy and
     // atomic loops' scratch) in a function that calls nothing: small leaf fns kept values in
     // callee-saved registers and saved / restored them on every return path
@@ -4464,6 +5280,12 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         a: Asm { w: Vec::with_capacity(128) },
         test_fuse: None,
         sel_chain: None,
+        zero_ins: None,
+        fnmul_ins: None,
+        zero_vec: Vec::new(),
+        zero_val: Vec::new(),
+        f32_load: Vec::new(),
+        zero_cmp: Vec::new(),
         jt_fix: Vec::new(),
         last_spill: None,
         win: {
@@ -4496,6 +5318,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         next_block: Vec::new(),
         fixups: Vec::new(),
         fconst_isel: isel_flags(options) & A64_FCONST != 0,
+        qcopy: isel_flags(options) & A64_QCOPY != 0,
         fpool: Vec::new(),
         vpool: Vec::new(),
         apool: Vec::new(),
@@ -4515,10 +5338,15 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         last_call_ret: 0,
         pads: Vec::new(),
         var_calls: Vec::new(),
+        rir_map: Vec::new(),
+        rir_map_on: RIR_MAP.load(std::sync::atomic::Ordering::Relaxed),
         long,
         tbz: tbz && !long,
     };
     g.zero_above = crate::passes::zero_above(options, g.f, &g.low_only);
+    (g.zero_vec, g.f32_load) = zero_vectors(g.f);
+    g.zero_val = zero_values(g.f, &g.zero_vec);
+    g.zero_cmp = zero_compare_consts(g.f);
     if env.opt_regs || g.f.full {
         g.copy_reg = regalloc::copy_reuse(options, g.f, &g.al);
     }
@@ -4564,7 +5392,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     } else {
         crate::dbgloc::note_stats(&pc_map, &[], 0);
     }
-    return Ok(Compiled { code, pc_map, frame_size: frame, text_len, alloc_sig, relocs: g.relocs, rir_map: Vec::new(), rir_emitted: String::new() });
+    return Ok(Compiled { code, pc_map, frame_size: frame, text_len, alloc_sig, relocs: g.relocs, rir_emitted: if g.rir_map_on { emitted_dump(g.f) } else { String::new() }, rir_map: g.rir_map });
     }
 }
 

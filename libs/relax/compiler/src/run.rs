@@ -115,6 +115,13 @@ pub(crate) fn report(kind: &str, text: &str) {
     }
 }
 
+/// A start that ends before `main` (an unreachable store, a resolve error): its reason and exit
+/// code for the launcher following it.
+pub fn report_failed(error: &str, code: i32) {
+    report("error", error);
+    report("exit", &code.to_string());
+}
+
 pub(crate) fn reporting() -> bool {
     REPORT_FILE.lock().unwrap().is_some()
 }
@@ -766,6 +773,8 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         Err(e) => {
             if crate::run_state::observed() { crate::run_state::diagnostic(None, crate::diag::from_legacy(&e, "resolve")); }
             eprintln!("makepad-run: {e}");
+            // a launcher following the start (--report-to) learns why it ended
+            report_failed(&e, 1);
             return 1;
         }
     };
@@ -2171,7 +2180,8 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
     let (runtime, options, present_forward) = crate::zone_alloc::kept_with(|| (runtime.clone(), options.clone(), present_forward.clone()));
     let _k = crate::zone_alloc::kept();
     { let _k = crate::zone_alloc::kept();
-    std::thread::spawn(move || {
+    // named: inspect lists it as makepad run's, not the program's
+    let _ = std::thread::Builder::new().name("run-monitor".into()).spawn(move || {
         let runtime = &runtime;
         let options = &options;
         // A measurement harness requests an allocator snapshot at its own landmark

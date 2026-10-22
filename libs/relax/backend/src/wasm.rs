@@ -1078,7 +1078,7 @@ fn lower_func(o: &Options, options: &relax_session::Options, f0: &Func, fn_ix: &
         g
     });
     let f0: &Func = legal.as_ref().unwrap_or(f0);
-    let switched = crate::switch::lower_switches(options, f0);
+    let switched = crate::switch::lower_switches(options, f0, crate::switch::MIN_TABLE_CLUSTERS);
     let f: &Func = switched.as_ref().map(|s| &s.0).unwrap_or(f0);
     let ft = func_type(f)?;
     let ty = sh.ty(ft.clone());

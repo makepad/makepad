@@ -8,6 +8,10 @@ license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 
+# files outside this crate its build reads (makepad-source-slice ships them in a slice or source archive)
+[package.metadata.commercial]
+include = ["../../widgets/resources/RobotoFlex.ttf"]
+
 [dependencies]
 makepad-shared-bytes = { path = "../shared_bytes", version = "1.0.0" }
 rustybuzz = { version = "0.18.0", path = "../rustybuzz" }

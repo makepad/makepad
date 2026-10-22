@@ -1374,6 +1374,7 @@ impl WidgetRef {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             cx.enter_nesting_depth();
             let text_owner = if cx.text_runs.is_some() { cx.enter_text_owner(inner.widget.widget_uid().0) } else { 0 };
+            let draw_owner = if cx.draw_owners.is_some() { cx.enter_draw_owner(inner.widget.widget_uid().0) } else { 0 };
             if cx.sploded_active() {
                 let uid = inner.widget.widget_uid();
                 let depth = cx.nesting_depth;
@@ -1382,6 +1383,9 @@ impl WidgetRef {
             let step = inner.widget.draw_walk(cx, scope, walk).step();
             if cx.text_runs.is_some() {
                 cx.exit_text_owner(text_owner);
+            }
+            if cx.draw_owners.is_some() {
+                cx.exit_draw_owner(draw_owner);
             }
             cx.exit_nesting_depth();
             if let Some(nd) = step {
@@ -1401,6 +1405,7 @@ impl WidgetRef {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             cx.enter_nesting_depth();
             let text_owner = if cx.text_runs.is_some() { cx.enter_text_owner(inner.widget.widget_uid().0) } else { 0 };
+            let draw_owner = if cx.draw_owners.is_some() { cx.enter_draw_owner(inner.widget.widget_uid().0) } else { 0 };
             if cx.sploded_active() {
                 let uid = inner.widget.widget_uid();
                 let depth = cx.nesting_depth;
@@ -1409,6 +1414,9 @@ impl WidgetRef {
             inner.widget.draw_walk_all(cx, scope, walk);
             if cx.text_runs.is_some() {
                 cx.exit_text_owner(text_owner);
+            }
+            if cx.draw_owners.is_some() {
+                cx.exit_draw_owner(draw_owner);
             }
             cx.exit_nesting_depth();
         }
@@ -1436,6 +1444,7 @@ impl WidgetRef {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             cx.enter_nesting_depth();
             let text_owner = if cx.text_runs.is_some() { cx.enter_text_owner(inner.widget.widget_uid().0) } else { 0 };
+            let draw_owner = if cx.draw_owners.is_some() { cx.enter_draw_owner(inner.widget.widget_uid().0) } else { 0 };
             if cx.sploded_active() {
                 let uid = inner.widget.widget_uid();
                 let depth = cx.nesting_depth;
@@ -1444,6 +1453,9 @@ impl WidgetRef {
             let step = inner.widget.draw(cx, scope).step();
             if cx.text_runs.is_some() {
                 cx.exit_text_owner(text_owner);
+            }
+            if cx.draw_owners.is_some() {
+                cx.exit_draw_owner(draw_owner);
             }
             cx.exit_nesting_depth();
             if let Some(nd) = step {
@@ -1460,6 +1472,7 @@ impl WidgetRef {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             cx.enter_nesting_depth();
             let text_owner = if cx.text_runs.is_some() { cx.enter_text_owner(inner.widget.widget_uid().0) } else { 0 };
+            let draw_owner = if cx.draw_owners.is_some() { cx.enter_draw_owner(inner.widget.widget_uid().0) } else { 0 };
             if cx.sploded_active() {
                 let uid = inner.widget.widget_uid();
                 let depth = cx.nesting_depth;
@@ -1468,6 +1481,9 @@ impl WidgetRef {
             let step = inner.widget.draw(cx, &mut Scope::empty()).step();
             if cx.text_runs.is_some() {
                 cx.exit_text_owner(text_owner);
+            }
+            if cx.draw_owners.is_some() {
+                cx.exit_draw_owner(draw_owner);
             }
             cx.exit_nesting_depth();
             if let Some(nd) = step {

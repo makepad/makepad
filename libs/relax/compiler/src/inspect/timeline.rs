@@ -12,8 +12,8 @@
 //! Analysis per frame (a frame = the UI thread's root spans between two `present`s, or each root
 //! span when nothing presents): busy and waiting time per thread, the critical path (from the
 //! frame's end back through each wait to the thread that ended it), total work vs critical path
-//! vs wall, and the waits on the path ranked. `timeline save` writes Chrome trace-event JSON
-//! (Perfetto / chrome://tracing) with flow arrows for the edges.
+//! vs wall, and the waits on the path ranked. `timeline save` writes the capture as a `.mkpf`
+//! profile recording (makepad-prof-stream), the format Scope and `pf` queries read.
 
 use super::{json_str, now_ms, short, Out, Req};
 use std::cell::Cell;
@@ -34,11 +34,12 @@ static FRAME_WATCH: AtomicBool = AtomicBool::new(false);
 /// (default 50) or `hitch ms=<n>|off`
 static HITCH_NS: AtomicU64 = AtomicU64::new(0);
 
-fn flag_update() {
-    MAKEPAD_RUN_RECORDING.store(RINGS_ON.load(Relaxed) || FRAME_WATCH.load(Relaxed) || HITCH_NS.load(Relaxed) > 0, Release);
-    // the wait hook: the timeline's rings and the UI thread's frame log both want waits
+pub(super) fn flag_update() {
+    let rec = RINGS_ON.load(Relaxed) || super::pstream::on();
+    MAKEPAD_RUN_RECORDING.store(rec || FRAME_WATCH.load(Relaxed) || HITCH_NS.load(Relaxed) > 0, Release);
+    // the wait hook: the timeline's rings, the prof stream and the UI thread's frame log want waits
     let f: fn(bool, &'static str, &'static str, u64) = wait_trace;
-    crate::waits::TRACE.store(if RINGS_ON.load(Relaxed) || HITCH_NS.load(Relaxed) > 0 { f as usize } else { 0 }, Release);
+    crate::waits::TRACE.store(if rec || HITCH_NS.load(Relaxed) > 0 { f as usize } else { 0 }, Release);
 }
 
 /// Hitch detection on at inspect's start (MAKEPAD_RUN_HITCH_MS, default 50; 0: off).
@@ -119,13 +120,21 @@ fn ring() -> Option<&'static Ring> {
     Some(r)
 }
 
+/// The markers record: a timeline capture runs or a prof viewer is attached.
 #[inline]
 pub fn recording() -> bool {
-    RINGS_ON.load(Relaxed)
+    RINGS_ON.load(Relaxed) || super::pstream::on()
 }
 
-/// Appends a record to this thread's ring (callers check `recording()` first).
+/// Appends a record to this thread's ring and, while a viewer is attached, its prof stream ring
+/// (callers check `recording()` first).
 pub fn push(kind: Kind, label: &'static str, a: u64, b: u64) {
+    if super::pstream::on() {
+        super::pstream::push(kind as u8, label, a, b);
+    }
+    if !RINGS_ON.load(Relaxed) {
+        return;
+    }
     let Some(r) = ring() else { return };
     let e = EPOCH.load(Relaxed);
     if r.epoch.load(Relaxed) != e {
@@ -590,6 +599,12 @@ pub extern "C" fn relax_gpu_span(name: *const u8, len: usize, begin: u64, end: u
         return;
     }
     let name = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(name, len)) };
+    if super::pstream::on() {
+        super::pstream::gpu_span(name, begin, end);
+    }
+    if !RINGS_ON.load(Relaxed) {
+        return;
+    }
     // raw -> the timeline's clock (wall_ns): the offset between the two read now
     let off = raw_now_ns() as i128 - crate::clock::wall_ns() as i128;
     let map = |t: u64| (t as i128 - off).max(0) as u64;
@@ -824,7 +839,7 @@ fn critical(ths: &[Thread], ui: usize, t0: u64, t1: u64) -> Vec<(usize, u64, u64
                 }
                 match s.woke_by.and_then(|(h, at)| ths.iter().position(|x| x.handle == h).map(|i| (i, at))) {
                     Some((i, at)) if i != th && at > s.t0 => {
-                        path.push((th, at.max(s.t0), end, format!("{} (ended by T{})", s.what, ths[i].os_id)));
+                        path.push((th, at.max(s.t0), end, format!("{} (ended by {})", s.what, super::tid_label(ths[i].os_id))));
                         th = i;
                         t = at.max(t0);
                     }
@@ -856,7 +871,9 @@ fn frames_cmd(req: &Req, out: &mut Out) {
     let mut sorted = durs.clone();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let pct = |p: f64| sorted.get(((sorted.len() as f64 - 1.0) * p).round() as usize).copied().unwrap_or(0.0);
-    out.line(&format!("{{\"frame_ms\":{{\"n\":{},\"median\":{:.2},\"p95\":{:.2},\"max\":{:.2}}}}}", durs.len(), pct(0.5), pct(0.95), pct(1.0)));
+    // every frame's duration in order (a sparkline's data), 0.1 ms resolution
+    let series: Vec<String> = durs.iter().map(|d| format!("{:.1}", d)).collect();
+    out.line(&format!("{{\"frame_ms\":{{\"n\":{},\"median\":{:.2},\"p95\":{:.2},\"max\":{:.2}}},\"series_ms\":[{}]}}", durs.len(), pct(0.5), pct(0.95), pct(1.0), series.join(",")));
     let n = req.num("n", 30) as usize;
     let mut idx: Vec<usize> = (0..fr.len()).collect();
     idx.sort_by(|a, b| durs[*b].partial_cmp(&durs[*a]).unwrap().then(a.cmp(b)));
@@ -932,7 +949,7 @@ fn frame_cmd(req: &Req, out: &mut Out) {
             _ => steps.push((*th, b - a, what)),
         }
     }
-    let st: Vec<String> = steps.iter().take(16).map(|(th, d, w)| format!("{{\"thread\":\"T{}\",\"ms\":{:.2},\"what\":{}}}", ths[*th].os_id, *d as f64 / 1e6, json_str(&short(w, 120)))).collect();
+    let st: Vec<String> = steps.iter().take(16).map(|(th, d, w)| format!("{{\"thread\":\"{}\",\"ms\":{:.2},\"what\":{}}}", super::tid_label(ths[*th].os_id), *d as f64 / 1e6, json_str(&short(w, 120)))).collect();
     out.line(&format!("{{\"critical_path_busy_ms\":{:.2},\"steps\":[{}]}}", total as f64 / 1e6, st.join(",")));
     // the UI thread's waits in the frame, longest first, with who ended them
     let mut waits: Vec<(u64, String, Option<u64>)> = Vec::new();
@@ -944,7 +961,7 @@ fn frame_cmd(req: &Req, out: &mut Out) {
     let w: Vec<String> = waits
         .iter()
         .take(10)
-        .map(|(d, what, by)| format!("{{\"ms\":{:.2},\"what\":{}{}}}", *d as f64 / 1e6, json_str(&short(what, 100)), by.map(|b| format!(",\"ended_by\":\"T{}\"", b)).unwrap_or_default()))
+        .map(|(d, what, by)| format!("{{\"ms\":{:.2},\"what\":{}{}}}", *d as f64 / 1e6, json_str(&short(what, 100)), by.map(|b| format!(",\"ended_by\":\"{}\"", super::tid_label(b))).unwrap_or_default()))
         .collect();
     out.line(&format!("{{\"ui_waits\":[{}]}}", w.join(",")));
     // the GPU lane: passes overlapping the frame
@@ -963,55 +980,89 @@ fn frame_cmd(req: &Req, out: &mut Out) {
         let ps: Vec<String> = per.iter().take(8).map(|(n, d)| format!("[{},{:.2}]", json_str(n), *d as f64 / 1e6)).collect();
         out.line(&format!("{{\"gpu\":{{\"busy_ms\":{:.2},\"passes_ms\":[{}]}}}}", busy as f64 / 1e6, ps.join(",")));
     }
-    // per thread busy / wait in the frame
+    // per thread busy / wait in the frame, with its lane: one column per 1/60 of the frame,
+    // `█` busy most of it, `▄` busy some, `░` waiting, ` ` not recorded (idle or unmarked)
+    let cols = 60u64;
+    let os_threads = super::threads::list();
+    let tname = |id: u64| os_threads.iter().find(|t| t.os_id == id).map(|t| t.name.clone()).unwrap_or_default();
     let mut per: Vec<String> = Vec::new();
     for th in &ths {
         let (b, wt) = busy_in(th, t0, t1);
         if b > 0 {
-            per.push(format!("{{\"thread\":\"T{}\",\"busy_ms\":{:.2},\"wait_ms\":{:.2}}}", th.os_id, b as f64 / 1e6, wt as f64 / 1e6));
+            let step = ((t1 - t0) / cols).max(1);
+            let lane: String = (0..cols)
+                .map(|c| {
+                    let (a, z) = (t0 + c * step, (t0 + (c + 1) * step).min(t1));
+                    let (cb, cw) = busy_in(th, a, z);
+                    if cb * 2 >= z - a { '█' } else if cb > 0 { '▄' } else if cw * 2 >= z - a { '░' } else { ' ' }
+                })
+                .collect();
+            per.push(format!("{{\"thread\":\"{}\",\"name\":{},\"busy_ms\":{:.2},\"wait_ms\":{:.2},\"lane\":{}}}", super::tid_label(th.os_id), json_str(&tname(th.os_id)), b as f64 / 1e6, wt as f64 / 1e6, json_str(&lane)));
         }
     }
-    out.line(&format!("{{\"threads\":[{}]}}", per.join(",")));
+    out.line(&format!("{{\"threads\":[{}],\"frame_ms\":{:.2}}}", per.join(","), (t1 - t0) as f64 / 1e6));
 }
 
-/// Chrome trace-event JSON (Perfetto, chrome://tracing, speedscope): complete events per segment,
-/// flow events for the edges that ended waits.
+/// `timeline save`: the capture as a `.mkpf` profile recording (makepad-prof-stream; the format
+/// a live `prof` viewer receives): Scope opens it, `makepad inspect file=<x.mkpf> pf <query>`
+/// answers on it.
 fn save_cmd(out: &mut Out) {
-    let stop = stopped_or_now();
-    let t0 = STARTED_NS.load(Relaxed);
-    let ths = build(collect(), stop);
-    let mut ev: Vec<String> = Vec::new();
-    let pid = std::process::id();
+    use makepad_prof_stream as ps;
     let mut names = super::threads::list();
     super::name_handles(&mut names);
-    let mut flow = 0u64;
-    for th in &ths {
-        let nm = names.iter().find(|t| t.os_id == th.os_id).map(|t| t.name.clone()).unwrap_or_default();
-        ev.push(format!("{{\"ph\":\"M\",\"pid\":{},\"tid\":{},\"name\":\"thread_name\",\"args\":{{\"name\":{}}}}}", pid, th.os_id, json_str(&format!("{} T{}", nm, th.os_id))));
-        for s in &th.segs {
-            let ts = s.t0.saturating_sub(t0) as f64 / 1000.0;
-            let dur = (s.t1 - s.t0) as f64 / 1000.0;
-            ev.push(format!("{{\"ph\":\"X\",\"pid\":{},\"tid\":{},\"ts\":{:.3},\"dur\":{:.3},\"name\":{},\"cat\":\"{}\"}}", pid, th.os_id, ts, dur, json_str(&s.what), if s.wait { "wait" } else { "work" }));
-            if let Some((h, at)) = s.woke_by {
-                if let Some(src) = ths.iter().find(|x| x.handle == h) {
-                    flow += 1;
-                    ev.push(format!("{{\"ph\":\"s\",\"pid\":{},\"tid\":{},\"ts\":{:.3},\"id\":{},\"name\":\"wake\",\"cat\":\"edge\"}}", pid, src.os_id, at.saturating_sub(t0) as f64 / 1000.0, flow));
-                    ev.push(format!("{{\"ph\":\"f\",\"bp\":\"e\",\"pid\":{},\"tid\":{},\"ts\":{:.3},\"id\":{},\"name\":\"wake\",\"cat\":\"edge\"}}", pid, th.os_id, s.t1.saturating_sub(t0) as f64 / 1000.0, flow));
-                }
-            }
+    let off = ps::mono_ns() as i128 - crate::clock::wall_ns() as i128;
+    let map = |t: u64| (t as i128 + off).max(0) as u64;
+    let mut strings = ps::Interner::default();
+    let _ = strings.id("");
+    let mut body = Vec::new();
+    let mut n_recs = 0usize;
+    let mut lanes = Vec::new();
+    for (k, (os_id, handle, v)) in collect().into_iter().enumerate() {
+        let tid = k as u32 + 1;
+        let nm = names.iter().find(|t| t.os_id == os_id).map(|t| t.name.clone()).unwrap_or_default();
+        let sid = strings.id(&nm);
+        let mut recs = Vec::with_capacity(v.len());
+        for r in &v {
+            let name = if r.kind == Kind::WaitBegin as u8 {
+                let d = detail(r.b);
+                strings.id(&if d.is_empty() { label(r).to_string() } else { format!("{} {}", label(r), d) })
+            } else {
+                strings.id(label(r))
+            };
+            recs.push(ps::SpanRec { kind: r.kind, t: map(r.t), name, a: r.a });
         }
+        n_recs += recs.len();
+        lanes.push((ps::thread_payload(tid, os_id, handle, super::pstream::role_of(handle, &nm), sid), ps::spans_payload(tid, &recs)));
     }
-    // the GPU lane as its own track
     let gpu = gpu_spans(0, u64::MAX);
-    if !gpu.is_empty() {
-        ev.push(format!("{{\"ph\":\"M\",\"pid\":{},\"tid\":1,\"name\":\"thread_name\",\"args\":{{\"name\":\"GPU\"}}}}", pid));
-        for (b, e, n) in gpu {
-            ev.push(format!("{{\"ph\":\"X\",\"pid\":{},\"tid\":1,\"ts\":{:.3},\"dur\":{:.3},\"name\":{},\"cat\":\"gpu\"}}", pid, b.saturating_sub(t0) as f64 / 1000.0, (e - b) as f64 / 1000.0, json_str(n)));
-        }
+    let mut gpu_recs = Vec::new();
+    for (b, e, n) in &gpu {
+        let name = strings.id(n);
+        gpu_recs.push(ps::SpanRec { kind: ps::span::BEGIN, t: map(*b), name, a: 0 });
+        gpu_recs.push(ps::SpanRec { kind: ps::span::END, t: map(*e), name, a: 0 });
     }
-    let path = std::env::temp_dir().join(format!("makepad-run-inspect-{}-timeline-{}.json", pid, now_ms()));
-    match std::fs::write(&path, format!("{{\"traceEvents\":[{}]}}", ev.join(",\n"))) {
-        Ok(()) => out.line(&format!("{{\"saved\":{},\"events\":{},\"format\":\"Chrome trace events (open in ui.perfetto.dev or chrome://tracing)\"}}", json_str(&path.display().to_string()), ev.len())),
+    let gpu_sid = strings.id("GPU");
+    let mut file = ps::prelude().to_vec();
+    let app = super::APP.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let hello = ps::Hello { app, host: String::new(), pid: std::process::id() as u64, build: crate::jit::PROVENANCE.to_string(), device: String::new(), refresh_mhz: 0, flags: 1 };
+    ps::record(&mut file, ps::kind::HELLO, &hello.payload());
+    let unix_now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+    ps::record(&mut file, ps::kind::CLOCK, &ps::clock_payload(ps::mono_ns(), unix_now));
+    if let Some(s) = strings.take_new() {
+        ps::record(&mut file, ps::kind::STRINGS, &s);
+    }
+    for (t, sp) in &lanes {
+        ps::record(&mut file, ps::kind::THREAD, t);
+        ps::record(&mut body, ps::kind::SPANS, sp);
+    }
+    if !gpu_recs.is_empty() {
+        ps::record(&mut file, ps::kind::THREAD, &ps::thread_payload(0xFFFF, 0, 0, ps::role::GPU, gpu_sid));
+        ps::record(&mut body, ps::kind::SPANS, &ps::spans_payload(0xFFFF, &gpu_recs));
+    }
+    file.extend_from_slice(&body);
+    let path = std::env::temp_dir().join(format!("makepad-run-inspect-{}-timeline-{}.mkpf", std::process::id(), now_ms()));
+    match std::fs::write(&path, &file) {
+        Ok(()) => out.line(&format!("{{\"saved\":{},\"records\":{},\"lanes\":{},\"bytes\":{},\"more\":[\"makepad inspect file={} pf summary\"]}}", json_str(&path.display().to_string()), n_recs, lanes.len(), file.len(), path.display())),
         Err(e) => out.err(&format!("cannot write {}: {}", path.display(), e)),
     }
 }

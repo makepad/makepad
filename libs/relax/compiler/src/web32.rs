@@ -19,14 +19,21 @@ pub const UNIT_AT: u64 = 16 << 20;
 /// the unit reservation's parts (smaller than a native unit's: the window holds all of it)
 pub const UNIT_CODE: u64 = 384 << 20;
 pub const UNIT_DATA: u64 = 384 << 20;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const SLOTS_AT: u64 = 0x4500_0000;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const SLOTS_END: u64 = 0x5500_0000;
 const MISC_AT: u64 = 0x5500_0000;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const MISC_END: u64 = crate::zone_alloc::web::ARENA_OFFSET as u64;
+/// no window here (reserve_unit panics): alloc never runs
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+const MISC_END: u64 = MISC_AT;
 /// a thread's shadow stack
 const STACK: u64 = 16 << 20;
 
 static ON: AtomicBool = AtomicBool::new(false);
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 static SLOTS_NEXT: AtomicU64 = AtomicU64::new(SLOTS_AT);
 static MISC_NEXT: AtomicU64 = AtomicU64::new(0);
 static FREE: relax_session::sync::Mutex<Vec<(u64, u64)>> = relax_session::sync::Mutex::new(Vec::new());
@@ -64,6 +71,12 @@ pub fn offset(a: u64) -> u64 {
 
 /// Reserves the program unit at `UNIT_AT` and makes this process's W32 state (the window's misc
 /// region). Panics when the window is taken (one wasm32 program per process).
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn reserve_unit(_code: usize, _rest: usize) -> u64 {
+    panic!("makepad run: the wasm32 web target runs on macOS and Linux only")
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn reserve_unit(code: usize, rest: usize) -> u64 {
     if !crate::zone_alloc::web::active() {
         if let Err(e) = crate::web::activate() {
@@ -85,6 +98,7 @@ pub fn reserve_unit(code: usize, rest: usize) -> u64 {
 }
 
 /// Reserves a slot segment (thunks and stubs, then table words and tier records) in the window.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn reserve_slots(code: usize, rest: usize) -> u64 {
     let len = ((code + rest) as u64 + 0xffff) & !0xffff;
     let at = SLOTS_NEXT.fetch_add(len, Ordering::AcqRel);
@@ -98,6 +112,13 @@ pub fn reserve_slots(code: usize, rest: usize) -> u64 {
     r
 }
 
+/// No W32 unit exists off macOS / Linux (reserve_unit panics), so none asks for slots.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn reserve_slots(_code: usize, _rest: usize) -> u64 {
+    unreachable!("web32: slots without a unit")
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn map_rw(at: u64, len: usize) -> u64 {
     extern "C" {
         fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
@@ -319,7 +340,10 @@ pub fn symbol(name: &[u8]) -> Option<usize> {
         b"__relax_key_delete" => crate::domain_threads::key_delete as *const () as usize,
         b"__relax_key_get" => crate::domain_threads::key_get as *const () as usize,
         b"__relax_key_set" => crate::domain_threads::key_set as *const () as usize,
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         _ => return crate::zone_alloc::web::symbol32(name),
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        _ => return None,
     })
 }
 

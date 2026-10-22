@@ -5,6 +5,10 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
 
+# files outside this crate its build reads (makepad-source-slice ships them in a slice or source archive)
+[package.metadata.commercial]
+include = ["../build_sources.rs", "../../../widgets/derive_widget"]
+
 [dependencies]
 relax-base = { workspace = true }
 makepad-micro-proc-macro = { workspace = true, features = ["relax-tokens"] }

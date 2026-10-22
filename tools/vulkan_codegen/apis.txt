@@ -425,6 +425,7 @@ value VkPipelineStageFlags TRANSFER
 value VkPipelineStageFlags VERTEX_INPUT
 value VkPipelineStageFlags VERTEX_SHADER
 value VkPolygonMode FILL
+value VkPolygonMode LINE
 value VkPresentModeKHR FIFO
 value VkPrimitiveTopology TRIANGLE_LIST
 value VkQueryResultFlags TYPE_64

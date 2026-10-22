@@ -1340,3 +1340,11 @@ Windows.Win32.System.JobObjects.SetInformationJobObject
 Windows.Win32.System.JobObjects.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
 Windows.Win32.System.JobObjects.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
 Windows.Win32.System.JobObjects.JobObjectExtendedLimitInformation
+Windows.Win32.Storage.EnhancedStorage.PKEY_AppUserModel_ID
+Windows.Win32.Storage.EnhancedStorage.PKEY_AppUserModel_RelaunchCommand
+Windows.Win32.Storage.EnhancedStorage.PKEY_AppUserModel_RelaunchDisplayNameResource
+Windows.Win32.Storage.EnhancedStorage.PKEY_AppUserModel_RelaunchIconResource
+Windows.Win32.System.Variant.VT_LPWSTR
+Windows.Win32.UI.Shell.PropertiesSystem.IPropertyStore
+Windows.Win32.UI.Shell.PropertiesSystem.SHGetPropertyStoreForWindow
+Windows.Win32.UI.Shell.SetCurrentProcessExplicitAppUserModelID

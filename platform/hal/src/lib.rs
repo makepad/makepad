@@ -45,6 +45,8 @@ pub mod ledger;
 pub mod gpu_limits;
 pub mod gpu_pressure;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod framecap;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod inspect;
 pub mod media;
 pub mod profile;
@@ -597,6 +599,11 @@ impl Hal {
         lock(&self.state).backend_inits
     }
 
+    /// The backend this Hal runs (`backend_id`) and its shader dialect, once one is open.
+    pub fn backend_info(&self) -> Option<HalInfo> {
+        lock(&self.state).backend.as_ref().map(|(_, b)| b.info())
+    }
+
     /// Executes a batch. The slices in `buf` are read during this call only.
     pub fn submit(&self, buf: &CmdBuf) {
         let sid = buf.session;
@@ -1008,9 +1015,15 @@ pub struct ScreenInfo {
 /// window takes as its Wayland app_id and X11 WM_CLASS so the desktop groups it with its entry.
 /// None without one (the window is named after the executable).
 pub fn app_identity() -> Option<String> {
+    app_id().map(|id| format!("nl.makepad.{id}"))
+}
+
+/// The launcher's app id itself (MAKEPAD_APP_ID when it is a valid one): Windows names the
+/// process and its windows `Makepad.<id>`, the AppUserModelID of the app's Start menu entry.
+pub fn app_id() -> Option<String> {
     let id = std::env::var("MAKEPAD_APP_ID").ok()?;
     let ok = !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-    ok.then(|| format!("nl.makepad.{id}"))
+    ok.then_some(id)
 }
 
 /// The displays attached right now, as the window system last saw them (readable from any

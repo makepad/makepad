@@ -14935,6 +14935,12 @@ pub const MFVideoPrimaries_BT470_2_SysM: crate::Win32::Media::MediaFoundation::M
 pub const MFVideoPrimaries_BT709: crate::Win32::Media::MediaFoundation::MFVideoPrimaries = crate::Win32::Media::MediaFoundation::MFVideoPrimaries(2i64 as _);
 pub const MFVideoPrimaries_SMPTE170M: crate::Win32::Media::MediaFoundation::MFVideoPrimaries = crate::Win32::Media::MediaFoundation::MFVideoPrimaries(5i64 as _);
 pub const MFVideoPrimaries_SMPTE240M: crate::Win32::Media::MediaFoundation::MFVideoPrimaries = crate::Win32::Media::MediaFoundation::MFVideoPrimaries(6i64 as _);
+pub const MFVideoTransFunc_2020: crate::Win32::Media::MediaFoundation::MFVideoTransferFunction = crate::Win32::Media::MediaFoundation::MFVideoTransferFunction(13i64 as _);
+pub const MFVideoTransFunc_2084: crate::Win32::Media::MediaFoundation::MFVideoTransferFunction = crate::Win32::Media::MediaFoundation::MFVideoTransferFunction(15i64 as _);
+pub const MFVideoTransFunc_240M: crate::Win32::Media::MediaFoundation::MFVideoTransferFunction = crate::Win32::Media::MediaFoundation::MFVideoTransferFunction(6i64 as _);
+pub const MFVideoTransFunc_709: crate::Win32::Media::MediaFoundation::MFVideoTransferFunction = crate::Win32::Media::MediaFoundation::MFVideoTransferFunction(5i64 as _);
+pub const MFVideoTransFunc_HLG: crate::Win32::Media::MediaFoundation::MFVideoTransferFunction = crate::Win32::Media::MediaFoundation::MFVideoTransferFunction(16i64 as _);
+pub const MFVideoTransFunc_sRGB: crate::Win32::Media::MediaFoundation::MFVideoTransferFunction = crate::Win32::Media::MediaFoundation::MFVideoTransferFunction(7i64 as _);
 #[repr(transparent)]
 #[derive(Clone, Copy)]
 pub struct MFVideoTransferFunction(pub i32);
@@ -14947,12 +14953,6 @@ impl ::core::ops::BitOr for MFVideoTransferFunction { type Output = Self; fn bit
 impl ::core::ops::BitAnd for MFVideoTransferFunction { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
 impl ::core::ops::BitXor for MFVideoTransferFunction { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
 impl ::core::ops::Not for MFVideoTransferFunction { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
-pub const MFVideoTransFunc_2020: crate::Win32::Media::MediaFoundation::MFVideoTransferFunction = crate::Win32::Media::MediaFoundation::MFVideoTransferFunction(13i64 as _);
-pub const MFVideoTransFunc_2084: crate::Win32::Media::MediaFoundation::MFVideoTransferFunction = crate::Win32::Media::MediaFoundation::MFVideoTransferFunction(15i64 as _);
-pub const MFVideoTransFunc_240M: crate::Win32::Media::MediaFoundation::MFVideoTransferFunction = crate::Win32::Media::MediaFoundation::MFVideoTransferFunction(6i64 as _);
-pub const MFVideoTransFunc_709: crate::Win32::Media::MediaFoundation::MFVideoTransferFunction = crate::Win32::Media::MediaFoundation::MFVideoTransferFunction(5i64 as _);
-pub const MFVideoTransFunc_HLG: crate::Win32::Media::MediaFoundation::MFVideoTransferFunction = crate::Win32::Media::MediaFoundation::MFVideoTransferFunction(16i64 as _);
-pub const MFVideoTransFunc_sRGB: crate::Win32::Media::MediaFoundation::MFVideoTransferFunction = crate::Win32::Media::MediaFoundation::MFVideoTransferFunction(7i64 as _);
 #[repr(transparent)]
 #[derive(Clone, Copy)]
 pub struct MFVideoTransferMatrix(pub i32);
@@ -15329,6 +15329,12 @@ import_BCryptGenRandom::call(hAlgorithm.unwrap_or(unsafe { ::core::mem::zeroed()
 }
 }
 pub mod Storage {
+pub mod EnhancedStorage {
+pub const PKEY_AppUserModel_ID: crate::Win32::Foundation::PROPERTYKEY = crate::Win32::Foundation::PROPERTYKEY { fmtid: crate::core::GUID { data1: 2672568405, data2: 40825, data3: 19257, data4: [168,208,225,212,45,225,213,243,] }, pid: 5 };
+pub const PKEY_AppUserModel_RelaunchCommand: crate::Win32::Foundation::PROPERTYKEY = crate::Win32::Foundation::PROPERTYKEY { fmtid: crate::core::GUID { data1: 2672568405, data2: 40825, data3: 19257, data4: [168,208,225,212,45,225,213,243,] }, pid: 2 };
+pub const PKEY_AppUserModel_RelaunchDisplayNameResource: crate::Win32::Foundation::PROPERTYKEY = crate::Win32::Foundation::PROPERTYKEY { fmtid: crate::core::GUID { data1: 2672568405, data2: 40825, data3: 19257, data4: [168,208,225,212,45,225,213,243,] }, pid: 4 };
+pub const PKEY_AppUserModel_RelaunchIconResource: crate::Win32::Foundation::PROPERTYKEY = crate::Win32::Foundation::PROPERTYKEY { fmtid: crate::core::GUID { data1: 2672568405, data2: 40825, data3: 19257, data4: [168,208,225,212,45,225,213,243,] }, pid: 3 };
+}
 pub mod FileSystem {
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -19603,6 +19609,7 @@ pub pRecInfo: *mut ::core::ffi::c_void,
 impl VARIANT_0_0_0_0 { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
 impl ::core::default::Default for VARIANT_0_0_0_0 { fn default() -> Self {Self::default()} }
 pub const VT_I8: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(20u64 as _);
+pub const VT_LPWSTR: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(31u64 as _);
 pub const VT_UI4: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(19u64 as _);
 pub const VT_UI8: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(21u64 as _);
 }
@@ -21539,6 +21546,13 @@ impl ::core::ops::BitAnd for SIGDN { type Output = Self; fn bitand(self, rhs: Se
 impl ::core::ops::BitXor for SIGDN { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
 impl ::core::ops::Not for SIGDN { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
 pub const SIGDN_FILESYSPATH: crate::Win32::UI::Shell::SIGDN = crate::Win32::UI::Shell::SIGDN(-2147123200i64 as _);
+mod import_SetCurrentProcessExplicitAppUserModelID { #[link(name = "SHELL32", kind = "raw-dylib")] extern "system" { #[link_name = "SetCurrentProcessExplicitAppUserModelID"] pub fn call(AppID: crate::core::PCWSTR) -> crate::core::HRESULT; } }
+pub use import_SetCurrentProcessExplicitAppUserModelID::call as SetCurrentProcessExplicitAppUserModelID_raw;
+#[inline]
+pub unsafe fn SetCurrentProcessExplicitAppUserModelID(AppID: crate::core::PCWSTR) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_SetCurrentProcessExplicitAppUserModelID::call(AppID); hr__.ok()?;
+Ok(())
+}
 mod import_ShellExecuteW { #[link(name = "SHELL32", kind = "raw-dylib")] extern "system" { #[link_name = "ShellExecuteW"] pub fn call(hwnd: crate::Win32::Foundation::HWND,lpOperation: crate::core::PCWSTR,lpFile: crate::core::PCWSTR,lpParameters: crate::core::PCWSTR,lpDirectory: crate::core::PCWSTR,nShowCmd: crate::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD) -> crate::Win32::Foundation::HINSTANCE; } }
 pub use import_ShellExecuteW::call as ShellExecuteW_raw;
 #[inline]
@@ -21670,6 +21684,14 @@ pub unsafe fn Release(&self) -> u32 {
 impl Clone for IPropertyStore { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
 impl Drop for IPropertyStore { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
 impl ::core::cmp::PartialEq for IPropertyStore { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+mod import_SHGetPropertyStoreForWindow { #[link(name = "SHELL32", kind = "raw-dylib")] extern "system" { #[link_name = "SHGetPropertyStoreForWindow"] pub fn call(hwnd: crate::Win32::Foundation::HWND,riid: *const crate::core::GUID,ppv: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT; } }
+pub use import_SHGetPropertyStoreForWindow::call as SHGetPropertyStoreForWindow_raw;
+#[inline]
+pub unsafe fn SHGetPropertyStoreForWindow(hwnd: crate::Win32::Foundation::HWND,riid: *const crate::core::GUID) -> Result<*mut ::core::ffi::c_void, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = import_SHGetPropertyStoreForWindow::call(hwnd,riid,&mut result__); hr__.ok()?;
+Ok(result__)
+}
 }
 }
 pub mod WindowsAndMessaging {

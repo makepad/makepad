@@ -293,6 +293,11 @@ pub struct Cx {
     /// root (named widgets only), registered by the widgets layer; the remote
     /// bridge's `/snap` path addressing reads it.
     pub widget_paths_callback: Option<fn(&Cx) -> Vec<(WidgetSnapshot, String)>>,
+    /// The widget path and type of each given uid, registered by the widgets layer (frame capture
+    /// attribution: `draw_owners`).
+    pub widget_uid_paths_callback: Option<fn(&Cx, &[u64]) -> Vec<(u64, String, String)>>,
+    /// Per-instance widget attribution, only while a capture asks for it (`draw_owners`).
+    pub draw_owners: Option<Box<crate::draw_owners::DrawOwners>>,
     /// Subsystems' counts of asynchronous loads in flight, by kind (see
     /// `Cx::register_async_load_probe`).
     pub(crate) async_load_probes: Vec<(&'static str, crate::cx_api::AsyncLoadProbe)>,
@@ -1087,6 +1092,8 @@ impl Cx {
             widget_query_invalidation_event: None,
             app_clock: Default::default(),
             widget_paths_callback: None,
+            widget_uid_paths_callback: None,
+            draw_owners: None,
             async_load_probes: Vec::new(),
             widget_tree_ptr: std::ptr::null_mut(),
             widget_tree_dump_callback: None,

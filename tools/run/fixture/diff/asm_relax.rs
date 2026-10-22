@@ -13,8 +13,24 @@ fn rounds(f: fn()) {
 #[test]
 fn run() { rounds(work); }
 
+// x86_64: the asm below passes arguments in SysV registers (rdi, rsi) and leaves no Win64 shadow
+// space, so the functions it reaches are `extern "sysv64"` there (the C ABI on Linux and macOS,
+// not on Windows); aarch64 keeps the C ABI.
+#[cfg(target_arch = "x86_64")]
+type SegFn = extern "sysv64" fn(*mut u8);
+#[cfg(target_arch = "aarch64")]
+type SegFn = extern "C" fn(*mut u8);
+#[cfg(target_arch = "x86_64")]
+type U64Fn = extern "sysv64" fn(u64) -> u64;
+#[cfg(target_arch = "aarch64")]
+type U64Fn = extern "C" fn(u64) -> u64;
+
 // ---- stack.rs call_on_segment: run `f(data)` with sp at the top of `stack`
-extern "C" fn on_segment(data: *mut u8) {
+#[cfg(target_arch = "x86_64")]
+extern "sysv64" fn on_segment(data: *mut u8) { on_segment_body(data) }
+#[cfg(target_arch = "aarch64")]
+extern "C" fn on_segment(data: *mut u8) { on_segment_body(data) }
+fn on_segment_body(data: *mut u8) {
     let probe = 0u8;
     let v = unsafe { &mut *(data as *mut (usize, usize, u64)) };
     let sp = &probe as *const u8 as usize;
@@ -24,21 +40,27 @@ extern "C" fn on_segment(data: *mut u8) {
 fn deep(n: u64) -> u64 { if n == 0 { 0 } else { std::hint::black_box(n) + deep(n - 1) } }
 
 #[cfg(target_arch = "x86_64")]
-unsafe fn call_on_segment(sp: usize, f: extern "C" fn(*mut u8), data: *mut u8) {
-    asm!("mov r12, rsp", "mov rsp, {sp}", "call {f}", "mov rsp, r12", sp = in(reg) sp, f = in(reg) f, in("rdi") data, out("r12") _, clobber_abi("C"));
+unsafe fn call_on_segment(sp: usize, f: SegFn, data: *mut u8) {
+    asm!("mov r12, rsp", "mov rsp, {sp}", "call {f}", "mov rsp, r12", sp = in(reg) sp, f = in(reg) f, in("rdi") data, out("r12") _, clobber_abi("sysv64"));
 }
 #[cfg(target_arch = "aarch64")]
-unsafe fn call_on_segment(sp: usize, f: extern "C" fn(*mut u8), data: *mut u8) {
+unsafe fn call_on_segment(sp: usize, f: SegFn, data: *mut u8) {
     asm!("mov x20, sp", "mov sp, {sp}", "blr {f}", "mov sp, x20", sp = in(reg) sp, f = in(reg) f, in("x0") data, out("x20") _, clobber_abi("C"));
 }
 
 // ---- heap.rs: a naked veneer that jumps through a word another thread may change
 static TARGET: AtomicUsize = AtomicUsize::new(0);
+#[cfg(target_arch = "x86_64")]
+extern "sysv64" fn twice(x: u64) -> u64 { x * 2 }
+#[cfg(target_arch = "x86_64")]
+extern "sysv64" fn thrice(x: u64) -> u64 { x * 3 }
+#[cfg(target_arch = "aarch64")]
 extern "C" fn twice(x: u64) -> u64 { x * 2 }
+#[cfg(target_arch = "aarch64")]
 extern "C" fn thrice(x: u64) -> u64 { x * 3 }
 #[cfg(target_arch = "x86_64")]
 #[unsafe(naked)]
-extern "C" fn veneer(_x: u64) -> u64 {
+extern "sysv64" fn veneer(_x: u64) -> u64 {
     core::arch::naked_asm!("jmp qword ptr [rip + {t}]", t = sym TARGET)
 }
 #[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
@@ -52,10 +74,13 @@ extern "C" fn veneer(_x: u64) -> u64 {
     core::arch::naked_asm!("adrp x16, {t}", "ldr x16, [x16, :lo12:{t}]", "br x16", t = sym TARGET)
 }
 // a naked fn that adds the caller-visible frame pointer into a tracked call (heap.rs track_*)
+#[cfg(target_arch = "x86_64")]
+extern "sysv64" fn tracked(x: u64, fp_nonzero: u64) -> u64 { x + 100 * (fp_nonzero != 0) as u64 }
+#[cfg(target_arch = "aarch64")]
 extern "C" fn tracked(x: u64, fp_nonzero: u64) -> u64 { x + 100 * (fp_nonzero != 0) as u64 }
 #[cfg(target_arch = "x86_64")]
 #[unsafe(naked)]
-extern "C" fn track(_x: u64) -> u64 {
+extern "sysv64" fn track(_x: u64) -> u64 {
     core::arch::naked_asm!("mov rsi, rbp", "jmp {f}", f = sym tracked)
 }
 #[cfg(target_arch = "aarch64")]
@@ -65,6 +90,10 @@ extern "C" fn track(_x: u64) -> u64 {
 }
 
 // ---- interp.rs: a global_asm! pool of numbered entries that call back into Rust
+#[cfg(target_arch = "x86_64")]
+#[no_mangle]
+extern "sysv64" fn diff_asm_enter(k: u64, x: u64) -> u64 { k * 1000 + x }
+#[cfg(target_arch = "aarch64")]
 #[no_mangle]
 extern "C" fn diff_asm_enter(k: u64, x: u64) -> u64 { k * 1000 + x }
 #[cfg(target_arch = "x86_64")]
@@ -108,10 +137,10 @@ global_asm!(
     enter = sym diff_asm_enter,
 );
 extern "C" { fn diff_asm_pool(); }
-fn pool_entry(k: usize) -> extern "C" fn(u64) -> u64 {
+fn pool_entry(k: usize) -> U64Fn {
     // every entry starts on a 16-byte boundary (.p2align 4)
     let base = diff_asm_pool as usize;
-    unsafe { std::mem::transmute::<usize, extern "C" fn(u64) -> u64>(base + k * 16) }
+    unsafe { std::mem::transmute::<usize, U64Fn>(base + k * 16) }
 }
 
 // ---- arena.rs / tls.rs: the thread pointer

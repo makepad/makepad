@@ -172,7 +172,7 @@ fn switch_lowering_matches_the_compare_chain() {
         let signed = case % 3 != 0;
         let arms = rand_arms(&mut r, span, signed);
         let f = build(&arms);
-        if let Some((g, origin)) = switch::lower_switches(&options, &f) {
+        if let Some((g, origin)) = switch::lower_switches(&options, &f, switch::MIN_TABLE_CLUSTERS) {
             assert_eq!(origin.len(), g.blocks.len());
             g.verify().unwrap();
             switched += 1;

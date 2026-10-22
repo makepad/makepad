@@ -32,6 +32,7 @@ pub fn activate() -> Result<(), String> {
     Err("the web target runs on macOS and Linux only".to_string())
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const PAGE: usize = 64 << 10;
 
 extern "C" fn relax_web_memory_size(_mem: u32) -> usize {

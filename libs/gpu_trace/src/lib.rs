@@ -454,6 +454,39 @@ impl Recording {
     }
 }
 
+// ------------------------------------------------------------------ embedding
+
+/// What the profiler stream (makepad-prof-stream, profproto.md) carries of a recording: its
+/// GPU_HEADER, GPU_STRINGS and GPU_FRAMES records hold these chunks' payloads unchanged.
+pub mod chunk_tag {
+    pub const HEADER: u8 = super::TAG_HEADER;
+    pub const STRINGS: u8 = super::TAG_STRINGS;
+    pub const FRAMES: u8 = super::TAG_FRAMES;
+}
+
+impl Recording {
+    /// Applies one chunk's payload (tag from [`chunk_tag`]) to the recording: how a stream viewer
+    /// builds the GPU side as records arrive.
+    pub fn ingest(&mut self, tag: u8, payload: &[u8]) -> Result<(), String> {
+        let mut r = Rd { b: payload, i: 0 };
+        match tag {
+            TAG_HEADER => self.read_header(&mut r),
+            TAG_STRINGS => self.read_strings(&mut r),
+            TAG_FRAMES => self.read_frames(&mut r),
+            _ => Ok(()),
+        }
+    }
+
+    /// A chunk's payload without its tag and length (the stream's GPU record payload).
+    pub fn chunk_payload(chunk: &[u8]) -> &[u8] {
+        let mut r = Rd { b: chunk, i: 1 };
+        match r.u() {
+            Ok(len) => chunk.get(r.i..r.i + len as usize).unwrap_or(&[]),
+            Err(_) => &[],
+        }
+    }
+}
+
 // ------------------------------------------------------------------ partition
 
 /// Splits the union of GPU spans among them. `spans` are (start, end) ns in any order; a span owns

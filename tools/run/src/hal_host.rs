@@ -189,6 +189,8 @@ pub fn register() {
     relax_compiler::inspect::register_host_inspect("gpu", makepad_hal::inspect::dispatch);
     #[cfg(not(target_arch = "wasm32"))]
     relax_compiler::inspect::register_host_inspect("hal", makepad_hal::inspect::dispatch);
+    #[cfg(not(target_arch = "wasm32"))]
+    relax_compiler::inspect::register_host_inspect("cap", makepad_hal::inspect::dispatch);
     Hal::global().set_domain_host(Arc::new(Host::default()));
     domain::set_observer(observe);
 }

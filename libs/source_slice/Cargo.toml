@@ -16,3 +16,4 @@ path = "src/main.rs"
 
 [dependencies]
 makepad-toml-parser = { path = "../toml_parser" }
+makepad-zip-file = { path = "../zip_file" }

@@ -7,19 +7,28 @@ rem 1. Rust 1.98.0 for x86_64-pc-windows-gnu (rustc, cargo, rust-std, rust-mingw
 rem    no Visual Studio) from static.rust-lang.org, checked against the sizes and SHA-256 below.
 rem 2. The loader's source: the release service's licence-free loader release, a ZIP whose size
 rem    and SHA-256 the service names (checked before unpacking).
-rem 3. `cargo build --release --offline -p makepad-run --bin makepad` (the ZIP holds every crate),
-rem    then `makepad` with no arguments: the runner, from its launch record (apps\runner.launch,
-rem    the release service's latest `runner` release), which downloads the rest. With arguments,
-rem    the loader runs with them instead.
+rem 3. `cargo build --profile host --offline -p makepad-run --bin makepad` for this computer's
+rem    processor (the ZIP holds every crate; a new loader release replaces only the files that
+rem    changed, so only their crates compile again), then `makepad` with no arguments: the runner,
+rem    from its launch record (apps\runner.launch, the release service's latest `runner` release),
+rem    which downloads the rest. With arguments, the loader runs with them instead.
 rem
-rem Beside this file it creates rust\, cache\, apps\ and runner\, the same folders as makepad.sh.
+rem In its folder (this file's own when it holds nothing else, else %USERPROFILE%\makepad-runner) it
+rem creates rust\, cache\, apps\ and runner\, the same folders as makepad.sh.
 rem Run it again at any time: nothing is downloaded or compiled twice. It uses only Windows' own
 rem curl.exe, tar.exe, certutil.exe and PowerShell (to read the service's JSON answers).
 setlocal EnableExtensions EnableDelayedExpansion
 
+rem The folder: this file's own when it is an installation already or holds nothing else (a folder
+rem made for it); else %USERPROFILE%\makepad-runner (a download among other files), where it copies itself.
 set "ROOT=%~dp0"
 set "ROOT=%ROOT:~0,-1%"
+if not exist "%ROOT%\cache" (
+    for /f "delims=" %%F in ('dir /b /a "%ROOT%" 2^>nul') do if /i not "%%F"=="%~nx0" if /i not "%%F"=="desktop.ini" set "ROOT=%USERPROFILE%\makepad-runner"
+)
 if defined MAKEPAD_LOADER_ROOT set "ROOT=%MAKEPAD_LOADER_ROOT%"
+if not exist "%ROOT%" mkdir "%ROOT%" || (echo   Cannot create the folder %ROOT%. & exit /b 1)
+if /i not "%~dp0"=="%ROOT%\" copy /y "%~f0" "%ROOT%\makepad.bat" >nul
 set "RUST_VERSION=1.98.0"
 set "TRIPLE=x86_64-pc-windows-gnu"
 set "DIST=https://static.rust-lang.org/dist"
@@ -98,39 +107,63 @@ set "VERSION=" & set "ZIPNAME=" & set "ZIPBYTES=" & set "ZIPSHA="
 if exist "%LATEST%" for /f "tokens=1-4" %%A in ('powershell -NoProfile -Command "$j = Get-Content -Raw '%LATEST%' | ConvertFrom-Json; '{0} {1} {2} {3}' -f $j.release, $j.archive.name, $j.archive.bytes, $j.archive.sha256"') do (
     set "VERSION=%%A" & set "ZIPNAME=%%B" & set "ZIPBYTES=%%C" & set "ZIPSHA=%%D"
 )
-if not defined VERSION if exist "%CACHE%\loader\current" set /p VERSION=<"%CACHE%\loader\current"
-if not defined VERSION (echo   Could not reach the release service ^(%SERVICE%^) and no loader is here yet. & exit /b 1)
-set "SRC=%CACHE%\loader\%VERSION%"
-set "MAKEPAD=%SRC%\target\release\makepad.exe"
-if exist "%MAKEPAD%" if exist "%SRC%\.built" goto :have_loader
-if not exist "%SRC%\Cargo.toml" (
-    if not defined ZIPNAME (echo   The release service did not answer; the loader's source is not here yet. & exit /b 1)
+rem One source folder for every version (target\ inside it: makepad finds its std two levels up).
+set "SRC=%CACHE%\loader\src"
+if not defined VERSION if exist "%SRC%\.version" set /p VERSION=<"%SRC%\.version"
+if not defined VERSION (echo   Could not reach the release service ^(%SERVICE%^) and no loader is here yet. Check the connection, then run this again. & exit /b 1)
+set "MAKEPAD=%SRC%\target\host\makepad.exe"
+set "BUILT=%VERSION% %RUST_VERSION% %TRIPLE%"
+set "HAVE_BUILT="
+if exist "%SRC%\.built" set /p HAVE_BUILT=<"%SRC%\.built"
+if exist "%MAKEPAD%" if "%HAVE_BUILT%"=="%BUILT%" goto :have_loader
+set "HAVE_VERSION="
+if exist "%SRC%\.version" set /p HAVE_VERSION=<"%SRC%\.version"
+if not "%HAVE_VERSION%"=="%VERSION%" (
+    if not defined ZIPNAME (echo   The release service did not answer; the loader's source is not here yet. Check the connection, then run this again. & exit /b 1)
     echo   Makepad's loader: downloading its source
     curl.exe -fsS --proto =https --retry 3 "%SERVICE%/public/app/relax/%VERSION%/%ZIPNAME%" -o "%DOWNLOADS%\%ZIPNAME%" 2>>"%LOGS%\download.log" || (echo   The download stopped. & exit /b 1)
     for %%S in ("%DOWNLOADS%\%ZIPNAME%") do if not "%%~zS"=="%ZIPBYTES%" (del "%DOWNLOADS%\%ZIPNAME%" & echo   The loader's source has the wrong size. & exit /b 1)
     call :verify "%DOWNLOADS%\%ZIPNAME%" "%ZIPSHA%" || (del "%DOWNLOADS%\%ZIPNAME%" & echo   Checksum mismatch for %ZIPNAME%. & exit /b 1)
     if exist "%CACHE%\loader\.unpack" rmdir /s /q "%CACHE%\loader\.unpack"
     mkdir "%CACHE%\loader\.unpack" || exit /b 1
-    tar.exe -xf "%DOWNLOADS%\%ZIPNAME%" -C "%CACHE%\loader\.unpack" || (echo   Unpacking the loader's source failed. & exit /b 1)
-    move "%CACHE%\loader\.unpack\%VERSION%" "%SRC%" >nul || exit /b 1
+    tar.exe -xf "%DOWNLOADS%\%ZIPNAME%" -C "%CACHE%\loader\.unpack" || (echo   Unpacking the loader's source failed. Run this again. & exit /b 1)
+    if not exist "%SRC%\Cargo.toml" (
+        if exist "%SRC%" rmdir /s /q "%SRC%"
+        move "%CACHE%\loader\.unpack\%VERSION%" "%SRC%" >nul || exit /b 1
+    ) else (
+        rem an update: changed files replaced (with the time of now, so cargo sees them as changed),
+        rem files the new version no longer has removed, the rest (and target\) left as they are
+        echo   Makepad's loader: updating its source to %VERSION%
+        powershell -NoProfile -Command ^
+            "$new = '%CACHE%\loader\.unpack\%VERSION%'; $src = '%SRC%'; $now = Get-Date; $keep = @{};" ^
+            "foreach ($f in Get-ChildItem -LiteralPath $new -Recurse -File) { $rel = $f.FullName.Substring($new.Length + 1); $keep[$rel] = 1; $dst = Join-Path $src $rel;" ^
+            "  if (-not (Test-Path -LiteralPath $dst) -or (Get-FileHash -LiteralPath $f.FullName).Hash -ne (Get-FileHash -LiteralPath $dst).Hash) {" ^
+            "    New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null; Move-Item -Force -LiteralPath $f.FullName -Destination $dst; (Get-Item -LiteralPath $dst).LastWriteTime = $now } };" ^
+            "foreach ($f in Get-ChildItem -LiteralPath $src -Recurse -File) { $rel = $f.FullName.Substring($src.Length + 1);" ^
+            "  if (-not $rel.StartsWith('target\') -and $rel -ne '.version' -and $rel -ne '.built' -and -not $keep.ContainsKey($rel)) { Remove-Item -Force -LiteralPath $f.FullName } }" ^
+            || (echo   Could not update the loader's source in %SRC%. & exit /b 1)
+    )
+    >"%SRC%\.version" echo %VERSION%
     rmdir /s /q "%CACHE%\loader\.unpack"
     del "%DOWNLOADS%\%ZIPNAME%"
 )
 
 rem --- 3. Compile the loader: no Rust settings from elsewhere on this computer; output in cache\
-echo   Makepad's loader: compiling, once per version
+echo   Makepad's loader: compiling for this computer, once per version
 set "PATH=%RUST%\bin;%SystemRoot%\System32;%SystemRoot%;%SystemRoot%\System32\WindowsPowerShell\v1.0"
 set "CARGO_HOME=%CACHE%\cargo-home"
 set "CARGO_INCREMENTAL=0"
 for %%V in (RUSTUP_TOOLCHAIN RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_TARGET CARGO_BUILD_RUSTFLAGS CARGO_TARGET_DIR RUSTC_WRAPPER RUSTDOC) do set "%%V="
+rem [profile.host]: thin LTO, 16 codegen units; target-cpu=native for this computer's processor
+set "RUSTFLAGS=-Ctarget-cpu=native"
 set "RUSTC=%RUST%\bin\rustc.exe"
 pushd "%SRC%"
-cargo.exe build --release --offline -p makepad-run --bin makepad >"%LOGS%\build.log" 2>&1
+cargo.exe build --profile host --offline -p makepad-run --bin makepad >"%LOGS%\build.log" 2>&1
 set "BUILD=%errorlevel%"
 popd
-if not "%BUILD%"=="0" (echo   Makepad's loader did not compile. Log: %LOGS%\build.log & exit /b 1)
-type nul > "%SRC%\.built"
->"%CACHE%\loader\current" echo %VERSION%
+set "RUSTFLAGS="
+if not "%BUILD%"=="0" (echo   Makepad's loader did not compile. Run this again; if it stops the same way, the log says why: %LOGS%\build.log & exit /b 1)
+>"%SRC%\.built" echo %BUILT%
 :have_loader
 set "PATH=%RUST%\bin;%PATH%"
 set "MAKEPAD_LOADER_ROOT=%ROOT%"

@@ -25,6 +25,8 @@
 //! aggregate results also use an arena slot (lower.rs), copied out before leaving: a twin's
 //! sret stores must never receive a host destination.
 
+include!("rt_abi.rs");
+
 use crate::jit::{self, FnKey, Unit};
 use crate::program::DefKind;
 use relax_backend::rir::{Callee, Cls, Cond, Conv, Func, IOp, Inst, Sym, Term, VReg, U32, U64};
@@ -1160,7 +1162,24 @@ extern "C" fn sb_posix_memalign(out: u64, align: u64, size: u64) -> i32 {
     0
 }
 
+// Callee::Host entries (rt_policy, the Copy transform) are in Relax's convention; the same
+// operations as C functions (c_policy) are C: they differ on Windows (SysV vs Win64)
+rt_fn! {
+fn sb_rt_memcpy(d: u64, s: u64, n: u64) -> u64 {
+    memcpy_in(d, s, n)
+}
+}
+rt_fn! {
+fn sb_rt_memset(d: u64, c: u64, n: u64) -> u64 {
+    memset_in(d, c, n)
+}
+}
+
 extern "C" fn sb_memcpy(d: u64, s: u64, n: u64) -> u64 {
+    memcpy_in(d, s, n)
+}
+
+fn memcpy_in(d: u64, s: u64, n: u64) -> u64 {
     let (dm, sm) = (m(d), m(s));
     if n > 0 && fits(dm, n) && fits(sm, n) {
         unsafe { std::ptr::copy(sm as *const u8, dm as *mut u8, n as usize) };
@@ -1172,6 +1191,10 @@ extern "C" fn sb_memcpy(d: u64, s: u64, n: u64) -> u64 {
 }
 
 extern "C" fn sb_memset(d: u64, c: u64, n: u64) -> u64 {
+    memset_in(d, c, n)
+}
+
+fn memset_in(d: u64, c: u64, n: u64) -> u64 {
     let dm = m(d);
     if n > 0 && fits(dm, n) {
         unsafe { std::ptr::write_bytes(dm as *mut u8, c as u8, n as usize) };
@@ -1203,14 +1226,17 @@ extern "C" fn sb_strlen(p: u64) -> u64 {
     n
 }
 
-extern "C" fn sb_fmt_str(p: u64, len: u64, spec: u64) {
+rt_fn! {
+fn sb_fmt_str(p: u64, len: u64, spec: u64) {
     let pm = m(p);
     let len = if fits(pm, len) { len } else { 0 };
-    let f: extern "C" fn(u64, u64, u64) = unsafe { std::mem::transmute(jit::rt_entry("fmt_str") as usize) };
+    let f: rt_fn_ty!(fn(u64, u64, u64)) = unsafe { std::mem::transmute(jit::rt_entry("fmt_str") as usize) };
     f(pm, len, spec)
 }
+}
 
-extern "C" fn sb_str_eq(p1: u64, l1: u64, p2: u64, l2: u64) -> u64 {
+rt_fn! {
+fn sb_str_eq(p1: u64, l1: u64, p2: u64, l2: u64) -> u64 {
     let (a, b) = (m(p1), m(p2));
     if l1 != l2 || !fits(a, l1) || !fits(b, l2) {
         return 0;
@@ -1218,10 +1244,12 @@ extern "C" fn sb_str_eq(p1: u64, l1: u64, p2: u64, l2: u64) -> u64 {
     let (x, y) = unsafe { (std::slice::from_raw_parts(a as *const u8, l1 as usize), std::slice::from_raw_parts(b as *const u8, l2 as usize)) };
     (x == y) as u64
 }
+}
 
+rt_fn! {
 /// fmt_pop for a module: the text is copied into the window's scratch (larger text into its heap).
-extern "C" fn sb_fmt_pop() -> jit::StrRet {
-    let f: extern "C" fn() -> jit::StrRet = unsafe { std::mem::transmute(jit::rt_entry("fmt_pop") as usize) };
+fn sb_fmt_pop() -> jit::StrRet {
+    let f: rt_fn_ty!(fn() -> jit::StrRet) = unsafe { std::mem::transmute(jit::rt_entry("fmt_pop") as usize) };
     let r = f();
     let Some(a) = cur_arena() else { return r };
     let (p, n) = r.parts();
@@ -1232,15 +1260,18 @@ extern "C" fn sb_fmt_pop() -> jit::StrRet {
     unsafe { std::ptr::copy_nonoverlapping(p as *const u8, dst as *mut u8, n as usize) };
     jit::StrRet::new(dst, n)
 }
+}
 
+rt_fn! {
 /// catch_unwind inside a module: the target and data are masked; the shadow stack comes back.
-extern "C" fn sb_catch_panic(f: u64, data: u64) -> u64 {
+fn sb_catch_panic(f: u64, data: u64) -> u64 {
     let s = save();
     let fm = mask_thunk(f);
-    let g: extern "C" fn(u64, u64) -> u64 = unsafe { std::mem::transmute(jit::rt_entry("catch_panic") as usize) };
+    let g: rt_fn_ty!(fn(u64, u64) -> u64) = unsafe { std::mem::transmute(jit::rt_entry("catch_panic") as usize) };
     let r = g(fm, m(data));
     restore(s);
     r
+}
 }
 
 fn mask_thunk(f: u64) -> u64 {
@@ -1257,8 +1288,8 @@ fn rt_policy(name: &str) -> Option<Option<(&'static str, u64)>> {
         "fmt_str" => Some(("sb_fmt_str", sb_fmt_str as *const () as u64)),
         "fmt_pop" => Some(("sb_fmt_pop", sb_fmt_pop as *const () as u64)),
         "str_eq" => Some(("sb_str_eq", sb_str_eq as *const () as u64)),
-        "memcpy" | "memmove" => Some(("sb_memcpy", sb_memcpy as *const () as u64)),
-        "memset" => Some(("sb_memset", sb_memset as *const () as u64)),
+        "memcpy" | "memmove" => Some(("sb_rt_memcpy", sb_rt_memcpy as *const () as u64)),
+        "memset" => Some(("sb_rt_memset", sb_rt_memset as *const () as u64)),
         "catch_panic" => Some(("sb_catch_panic", sb_catch_panic as *const () as u64)),
         _ => return None,
     })
@@ -1476,7 +1507,7 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
                         let n = f.vreg(Cls::I);
                         let r = f.vreg(Cls::I);
                         emit(Inst::Iconst(n, len as i64), &mut insts, &mut pos);
-                        let s = u.syms.intern(SymKind::Rt("sb_memcpy"), sb_memcpy as *const () as u64);
+                        let s = u.syms.intern(SymKind::Rt("sb_rt_memcpy"), sb_rt_memcpy as *const () as u64);
                         emit(Inst::Call(Callee::Host(s), vec![dst, src, n], vec![r]), &mut insts, &mut pos);
                     } else {
                         let (d2, _) = mask(f, &mut insts, &mut pos, &mut cache, dst, 0);

@@ -36,7 +36,7 @@ start() {
         sleep 0.2
     done
 }
-ask() { TMPDIR="$dir/t" "$T/makepad" inspect $pid "$@" 2>&1; }
+ask() { TMPDIR="$dir/t" "$T/makepad" inspect $pid "$@" as=json 2>&1; }
 panic_locals() {
     touch "$dir/trigger"
     n=0

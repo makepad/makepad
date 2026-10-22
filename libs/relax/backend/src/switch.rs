@@ -199,13 +199,20 @@ enum Node {
     Table { lo: u64, targets: Vec<u32>, default: u32 },
 }
 
-const MIN_TABLE_CLUSTERS: usize = 4;
+/// fewest clusters for a jump table on x86-64 / wasm (LLVM's default); `lower_switches` takes the
+/// target's
+pub const MIN_TABLE_CLUSTERS: usize = 4;
+/// arm64: LLVM's AArch64 minimum (aarch64-min-jump-table-entries, 13): an indirect branch through
+/// a table costs more than a short compare tree there; rustc's arm64 code of box3d's
+/// `match simplex.count` (four cases) has no tables, Relax's had six per shape_distance call
+pub const MIN_TABLE_CLUSTERS_ARM64: usize = 13;
 /// jump table density: at most this many table entries per cluster
 const MAX_SPAN_PER_CLUSTER: u128 = 4;
 const MAX_TABLE: u128 = 4096;
 
 struct Planner {
     default: u32,
+    min_table: usize,
 }
 
 impl Planner {
@@ -238,7 +245,7 @@ impl Planner {
         }
         // a table pays when its entries are mostly distinct clusters: few clusters over a wide span
         // (identifier characters, say) are cheaper as range compares or bit tests
-        if n >= MIN_TABLE_CLUSTERS && span <= MAX_TABLE && span <= MAX_SPAN_PER_CLUSTER * n as u128 {
+        if n >= self.min_table && span <= MAX_TABLE && span <= MAX_SPAN_PER_CLUSTER * n as u128 {
             let mut targets = vec![self.default; span as usize];
             for c in cl {
                 for v in c.lo..=c.hi {
@@ -381,7 +388,7 @@ impl Emit<'_> {
 /// Switch lowering of every chain of `f` (see the module comment). None when nothing changed; else
 /// the new function and, per its block, the block of `f` whose execution frequency it shares (the
 /// blocks are renumbered, and block frequencies are by number).
-pub fn lower_switches(options: &relax_session::Options, f: &Func) -> Option<(Func, Vec<u32>)> {
+pub fn lower_switches(options: &relax_session::Options, f: &Func, min_table: usize) -> Option<(Func, Vec<u32>)> {
     if options.no_jump_tables || f.baseline {
         return None;
     }
@@ -523,7 +530,7 @@ pub fn lower_switches(options: &relax_session::Options, f: &Func) -> Option<(Fun
         if cl.len() < 3 {
             continue;
         }
-        let planner = Planner { default };
+        let planner = Planner { default, min_table };
         let node = planner.plan(&cl);
         let g = out.get_or_insert_with(|| f.clone());
         let pos = g.blocks[head].term_pos;

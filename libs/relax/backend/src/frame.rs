@@ -659,7 +659,14 @@ pub fn born_liveness(f: &Func, cand: &[usize], der: &[Vec<u32>], live: &mut [Vec
 /// (offset of its lowest byte below the base, its alignment respected), slots sharing storage
 /// (`slot_colors`) the same; unaddressed slots take no space. Returns the offsets and the new
 /// end of the area. `share` false (MAKEPAD_RUN_OPT=-slotcolor): every slot keeps its own storage.
-pub fn slot_layout(f: &Func, mut off: i64, share: bool) -> (Vec<i64>, i64) {
+pub fn slot_layout(f: &Func, off: i64, share: bool) -> (Vec<i64>, i64) {
+    slot_layout_aligned(f, off, share, |_| 1)
+}
+
+/// `slot_layout` with each storage aligned to at least `min_align(size)` (arm64: 8-byte and
+/// 16-byte aggregates on 8 / 16, so their 8-byte fields and q pairs take scaled immediate
+/// offsets instead of an offset register)
+pub fn slot_layout_aligned(f: &Func, mut off: i64, share: bool, min_align: fn(u32) -> u32) -> (Vec<i64>, i64) {
     let ns = f.slots.len();
     if ns == 0 {
         return (Vec::new(), off);
@@ -673,7 +680,7 @@ pub fn slot_layout(f: &Func, mut off: i64, share: bool) -> (Vec<i64>, i64) {
     let Some(to) = to else {
         for (s, slot) in f.slots.iter().enumerate() {
             if used[s] {
-                let al = slot.align.max(1) as i64;
+                let al = slot.align.max(min_align(slot.size)).max(1) as i64;
                 off += slot.size as i64;
                 off = (off + al - 1) / al * al;
                 at[s] = off;
@@ -695,7 +702,7 @@ pub fn slot_layout(f: &Func, mut off: i64, share: bool) -> (Vec<i64>, i64) {
         if !used[s] || to[s] as usize != s {
             continue;
         }
-        let al = align[s] as i64;
+        let al = align[s].max(min_align(size[s])) as i64;
         off += size[s] as i64;
         off = (off + al - 1) / al * al;
         at[s] = off;

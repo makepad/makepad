@@ -285,11 +285,12 @@ pub mod intrinsics_vx {
     // 73 sha256msg1, 74 sha256msg2; 80 Arm sha1su1, 81 sha256su0.
     // Ternary: 0 x86 sha256rnds2; 1/2/3 Arm sha1c/p/m (b is u32),
     // 4 Arm sha1su0, 5 sha256h, 6 sha256h2, 7 sha256su1 (b is a vector).
-    // 8 / 9 NEON f32 fused a + b * c / a - b * c (FMLA / FMLS .4s).
+    // 8 / 9 NEON f32 fused a + b * c / a - b * c (FMLA / FMLS .4s); 10 bitwise select
+    // (a & b) | (!a & c) (BSL; a, the mask, is passed as T).
     // vx_sha1rnds4: x86, immediate FUNC in 0..=3, checked at lowering.
     // vx_sha1h: Arm, scalar u32 -> u32 through lane 0 of a V128.
     // Unary: 0 abs, 1 shl, 2 unsigned shr, 3 signed shr, 4 shuffle i32,
-    // 5/6 byte shift right/left, 7 sqrt f32, 8 abs f32, 9 NEON sqrt f32. Narrow: 19/20/21 as above,
+    // 5/6 byte shift right/left, 7 sqrt f32, 8 abs f32, 9 NEON sqrt f32, 10 neg f32. Narrow: 19/20/21 as above,
     // 30 unsigned u16->u8. Narrow results are 8 bytes, all other vectors 16.
 
     extern "relax-intrinsic" {

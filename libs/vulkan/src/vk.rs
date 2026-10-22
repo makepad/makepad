@@ -8078,6 +8078,7 @@ impl PolygonMode {
     pub const fn from_raw(value: i32) -> Self { Self(value) }
     pub const fn as_raw(self) -> i32 { self.0 }
     pub const FILL: Self = Self(0 as i32);
+    pub const LINE: Self = Self(1 as i32);
 }
 impl core::fmt::Debug for PolygonMode { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
 match self.0 {

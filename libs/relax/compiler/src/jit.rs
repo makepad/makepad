@@ -2895,6 +2895,7 @@ impl Unit {
             rethrow: u.syms.intern(crate::syms::SymKind::Rt("rethrow"), u.rt.rethrow),
         };
         relax_codegen::opt::set_mem_fns(u.rs.memcpy, u.rs.memmove);
+        relax_codegen::loops::set_memset(u.rs.memset);
         if w32 {
             // the shadow stacks' thread-local words, and the code transform (relax_codegen::web32)
             let off = u.tls_alloc(16, 8);
@@ -3050,6 +3051,10 @@ impl Unit {
     pub(crate) fn index_code(&mut self, at: u64, len: u32, id: u32, unwind: Option<relax_backend::rir::UnwindInfo>) {
         let kind = code_as_now().unwrap_or_else(|| self.default_code_kind(id));
         self.code.write().unwrap_or_else(|e| e.into_inner()).add(at, len, id, unwind, kind);
+        if crate::inspect::pstream::on() {
+            let src = crate::inspect::codever::fn_lines(self, id).and_then(|(f, lo, _)| self.prog.file_paths.get(f as usize).map(|p| format!("{}:{}", p, lo))).unwrap_or_default();
+            crate::inspect::pstream::jit_install(&self.fns[id as usize].name, src, id, len, kind.tier, kind.origin);
+        }
     }
 
     /// The kind of new code for slot `id` when its install path did not say (`code_as`): what
@@ -10309,6 +10314,12 @@ fn tier1_optimize(options: &crate::options::Options, func: &mut relax_backend::r
     if cfg.sroa && relax_codegen::opt::dead_slot_stores(func) {
         relax_backend::passes::live_dce(func);
     }
+    // loops storing zeros over every element of an array (`[T::default(); N]`): one memset
+    if cfg.fold && relax_codegen::loops::zero_fill_loops(options, func) {
+        relax_codegen::loops::clear_unreachable(func);
+        relax_backend::passes::live_dce(func);
+        verify_pass(func, "zero_fill_loops");
+    }
     if cfg.licm && !relax_backend::stats::opt_off(options, "-promote") && relax_codegen::opt::promote_loop_memory(func) {
         verify_pass(func, "promote_loop_memory");
     }
@@ -15106,7 +15117,17 @@ pub struct JobGuard;
 
 /// Starts a compile job: waits while an allocator swap is in progress.
 pub fn compile_job() -> JobGuard {
-    job_gate(false)
+    let g = job_gate(false);
+    // the outermost job of the thread is a `compile` span of the timeline / prof stream
+    if JOB_DEPTH.with(|d| d.get()) == 1 && crate::inspect::timeline::recording() && !JOB_SPAN.with(|s| s.replace(true)) {
+        crate::inspect::timeline::push(crate::inspect::timeline::Kind::SpanBegin, "compile", 0, 0);
+    }
+    g
+}
+
+thread_local! {
+    /// this thread's outermost compile job opened a `compile` span (its guard's drop ends it)
+    static JOB_SPAN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn job_gate(reenter: bool) -> JobGuard {
@@ -15206,6 +15227,9 @@ impl Drop for JobGuard {
         });
         if outer {
             BG_ACTIVE.fetch_sub(1, Ordering::SeqCst);
+            if JOB_SPAN.with(|s| s.replace(false)) {
+                crate::inspect::timeline::push(crate::inspect::timeline::Kind::SpanEnd, "compile", 0, 0);
+            }
         }
     }
 }

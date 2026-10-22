@@ -67,7 +67,11 @@ fn config_from_args() -> AgentConfig {
             _ => {}
         }
     }
-    let root = root.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+    // run from git stores (makepad run), a relative folder is one of the virtual workspace
+    let root = match (root, std::env::var_os("MAKEPAD_RUN_WORKSPACE").filter(|w| !w.is_empty())) {
+        (Some(r), Some(ws)) if r.is_relative() => PathBuf::from(ws).join(r),
+        (root, _) => root.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into())),
+    };
     let session_dir = std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".makepad/code/sessions"));
     AgentConfig {
         root: root.canonicalize().unwrap_or(root),

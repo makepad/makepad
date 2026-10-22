@@ -508,6 +508,16 @@ impl Gpu for Metal {
         self.readback_texture(s, id, req, rect);
     }
 
+    fn capture_texture(&mut self, s: &mut Session, id: Id, done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>) {
+        self.capture_texture_storage(s, id, done);
+    }
+
+    fn capture_buffer(&mut self, sid: u32, id: Id) -> Option<Vec<u8>> {
+        let b = self.buf.get(&(sid, id.index)).filter(|b| b.gen == id.gen)?;
+        // SAFETY: a shared buffer of at least `size` bytes; writes happen on this thread only
+        Some(unsafe { std::slice::from_raw_parts(b.contents, b.size as usize) }.to_vec())
+    }
+
     fn texture_share(&mut self, s: &mut Session, id: Id) {
         let handle = self.tex.get(&(s.id, id.index)).filter(|t| t.gen == id.gen).map_or(0, |t| t.surface_id as u64);
         s.events.texture_shared(id, handle);

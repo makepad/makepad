@@ -8,6 +8,10 @@ publish = false
 # tests/ are `makepad test` programs (they use makepad's macros), not cargo tests
 autotests = false
 
+# files outside this crate its build reads (makepad-source-slice ships them in a slice or source archive)
+[package.metadata.commercial]
+include = ["../../libs/relax/build_stamp.rs"]
+
 [lib]
 name = "makepad_run"
 path = "src/lib.rs"

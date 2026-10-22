@@ -44,6 +44,7 @@ foldhash = { version = "0.2", path = "../libs/vulkan/foldhash" }
 # these targets.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 makepad-remote = { path = "../libs/remote", version = "0.1.0" }
+makepad-prof-stream = { path = "../libs/prof_stream", version = "1.0.0" }
 # The collect-web run mode writes its manifest in this format.
 makepad-web-manifest = { path = "../libs/web_manifest", version = "0.1.0" }
 # Every native target uses the HAL; web retains its browser backend.

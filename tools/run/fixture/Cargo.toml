@@ -49,3 +49,8 @@ path = "src/inspect_locals.rs"
 [[bin]]
 name = "relax-inspect-probe"
 path = "src/inspect_probe.rs"
+
+# the program behind makepad inspect's answer eval: known CPU, memory, panic and hang faults (inspect_eval.sh)
+[[bin]]
+name = "relax-inspect-eval"
+path = "src/inspect_eval.rs"

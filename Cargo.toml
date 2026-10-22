@@ -234,6 +234,7 @@ workspace.members = [
     "tools/run/android_host/fixture",
     "tools/run/web_trace",
     "libs/gpu_trace",
+    "libs/prof_stream",
     "libs/relax/compiler",
     "libs/relax/base",
     "libs/relax/backend",
@@ -422,7 +423,9 @@ relax-types = { path = "libs/relax/types", version = "0.1.0" }
 relax-provided-fixture = { path = "tools/run/fixture", version = "0.1.0" }
 makepad-live-id = { path = "libs/live_id", version = "1.0.0" }
 makepad-remote = { path = "libs/remote", version = "0.1.0" }
+makepad-strict-json = { path = "libs/strict_json", version = "0.1.0" }
 makepad-gpu-trace = { path = "libs/gpu_trace", version = "1.0.0" }
+makepad-prof-stream = { path = "libs/prof_stream", version = "1.0.0" }
 makepad-relax-api = { path = "libs/relax_api", version = "1.0.0" }
 makepad-relax-api-macro-impl = { path = "libs/relax_api/macro_impl", version = "1.0.0" }
 makepad-live-id-macros-impl = { path = "libs/live_id/id_macros_impl", version = "1.0.0" }

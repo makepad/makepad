@@ -826,6 +826,12 @@ impl Cx {
                     makepad_hal::profile::credit();
                 }
             }
+            HalEvent::Redraw { window: _, owners } => {
+                if owners {
+                    self.arm_draw_owners();
+                }
+                self.redraw_all();
+            }
             HalEvent::FramePartial { window: _, frame } => {
                 // its pipeline's PipelineReady repaints; an offscreen render asks `frames_partial`
                 let partial = &mut self.textures.1.partial;

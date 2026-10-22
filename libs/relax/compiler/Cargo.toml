@@ -9,6 +9,10 @@ publish = false
 # The native library tests are in src/; fixtures run through the compiler test runners.
 autotests = false
 
+# files outside this crate its build reads (makepad-source-slice ships them in a slice or source archive)
+[package.metadata.commercial]
+include = ["../build_stamp.rs", "std"]
+
 [lib]
 name = "relax_compiler"
 path = "src/lib.rs"
@@ -24,7 +28,9 @@ relax-types = { workspace = true }
 relax-front = { workspace = true }
 relax-session = { workspace = true }
 makepad-remote = { workspace = true }
+makepad-strict-json = { workspace = true }
 makepad-gpu-trace = { workspace = true }
+makepad-prof-stream = { workspace = true }
 # registry packages a program needs that are neither vendored nor in $CARGO_HOME (registry_net.rs)
 relax-light-http = { workspace = true }
 relax-native-macros = { workspace = true }

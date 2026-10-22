@@ -274,6 +274,24 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         }
     }
 
+    /// Make `uid` the widget the draws' instances are attributed to while a frame capture
+    /// records owners (`Cx::draw_owners`); returns the previous one for
+    /// [`Self::exit_draw_owner`]. Not called when nothing records.
+    #[inline]
+    pub fn enter_draw_owner(&mut self, uid: u64) -> u64 {
+        match self.draw_owners.as_mut() {
+            Some(o) => std::mem::replace(&mut o.current, uid),
+            None => 0,
+        }
+    }
+
+    #[inline]
+    pub fn exit_draw_owner(&mut self, previous: u64) {
+        if let Some(o) = self.draw_owners.as_mut() {
+            o.current = previous;
+        }
+    }
+
     pub fn is_drawing_overlay(&self) -> bool {
         self.overlay_draw_depth > 0
     }

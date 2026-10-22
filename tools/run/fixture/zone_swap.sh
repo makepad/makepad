@@ -38,9 +38,9 @@ for pkg in $PACKAGES; do
     pid=$!
     # the fixture's own lines: run.log is the app's (its writes would overwrite appended lines)
     : > "$d/fixture.log"
-    ask() { TMPDIR="$td" "$T/makepad" inspect $pid "$@" >> "$d/probes.log" 2>&1; }
+    ask() { TMPDIR="$td" "$T/makepad" inspect $pid "$@" as=json >> "$d/probes.log" 2>&1; }
     drive() { for r in 1 2 3; do TMPDIR="$td" "$T/makepad-remote" app $pid $DRIVE > /dev/null 2>&1; done; }
-    hits() { TMPDIR="$td" "$T/makepad" inspect $pid probes 2>/dev/null | grep -o '"hits":[0-9]*' | head -1 | cut -d: -f2; }
+    hits() { TMPDIR="$td" "$T/makepad" inspect $pid probes as=json 2>/dev/null | grep -o '"hits":[0-9]*' | head -1 | cut -d: -f2; }
     n=0
     until TMPDIR="$td" "$T/makepad" inspect $pid ping > /dev/null 2>&1 && grep -q "first frame at" "$d/run.log"; do
         n=$((n + 1)); [ $n -ge $((WAIT * 5)) ] && break
@@ -61,7 +61,7 @@ for pkg in $PACKAGES; do
     done
     if grep -q "zone: swap [0-9]" "$d/run.log"; then
         sleep 1
-        TMPDIR="$td" "$T/makepad" inspect $pid memory compiler=1 > "$d/memory.log" 2>&1
+        TMPDIR="$td" "$T/makepad" inspect $pid memory compiler=1 as=json > "$d/memory.log" 2>&1
         h0=$(hits)
         drive
         sleep "$AFTER"

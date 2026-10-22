@@ -178,7 +178,9 @@ pub struct BufferObj {
 pub struct PipelineObj {
     pub dialect: u32,
     pub desc: PipelineDesc,
-    pub code_len: usize,
+    /// The `PipelineCreate` blob as received (header, code, bindings, vertex layout): frame
+    /// capture replays exactly this code.
+    pub blob: std::sync::Arc<[u8]>,
 }
 
 /// An opaque host panel. Its pixels and the application's pixels have separate

@@ -43,6 +43,8 @@
 //! Everything goes through the `git` command line in the repository, which
 //! may be bare.
 use makepad_toml_parser::{parse_toml, Toml, TomlTable};
+mod archive;
+pub use archive::{workspace_archive, Archive};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
@@ -176,6 +178,9 @@ pub struct Crate {
     pub optional: BTreeMap<String, Vec<String>>,
     /// Directories of its path dependencies no feature is needed for.
     pub required: Vec<String>,
+    /// Directories of its dev-dependencies inside the repository (every target's): a slice
+    /// never ships them, but cargo reads their manifests when the crate is a workspace member.
+    pub dev: Vec<String>,
     /// Its `[features]` table.
     pub features: BTreeMap<String, Vec<String>>,
     /// `[package.metadata.commercial] include`, as written.
@@ -186,8 +191,89 @@ pub struct Crate {
     pub build: Option<String>,
 }
 
+/// The repository root's `[workspace]` (a virtual manifest at the root, as
+/// Makepad's): what `{ workspace = true }` dependencies and `[patch.crates-io]`
+/// resolve to, so a crate's dependencies on the workspace's own crates count
+/// as path dependencies inside the repository.
+#[derive(Clone, Debug, Default)]
+pub struct Workspace {
+    /// The root `Cargo.toml` as written.
+    pub manifest: String,
+    /// `workspace.members` and `workspace.exclude`, as written.
+    pub members: Vec<String>,
+    pub exclude: Vec<String>,
+    pub resolver: Option<String>,
+    /// `[workspace.dependencies]` keys with the directory they resolve to
+    /// inside the repository (a `path`, or a registry dependency the root
+    /// patches with a path); none for anything else.
+    pub deps: BTreeMap<String, Option<String>>,
+    /// `[patch.crates-io]`: package name -> directory.
+    pub patches: BTreeMap<String, String>,
+}
+
+impl Workspace {
+    fn parse(text: &str) -> Result<Option<Workspace>, String> {
+        let doc = parse_toml(text).map_err(|e| e.to_string())?;
+        let Some(table) = doc.root.get("workspace").and_then(Toml::as_table) else {
+            return Ok(None);
+        };
+        let strings = |key: &str| -> Result<Vec<String>, String> {
+            match table.get(key) {
+                None => Ok(Vec::new()),
+                Some(v) => v
+                    .as_array()
+                    .ok_or_else(|| format!("workspace.{key} must be an array"))?
+                    .iter()
+                    .map(|v| v.as_str().map(str::to_owned).ok_or_else(|| format!("workspace.{key} must be an array of strings")))
+                    .collect(),
+            }
+        };
+        let mut patches = BTreeMap::new();
+        if let Some(patch) = doc.get_path(&["patch", "crates-io"]).and_then(Toml::as_table) {
+            for (name, spec) in patch.iter() {
+                if let Some(dir) = spec.as_table().and_then(|t| t.get("path")).and_then(Toml::as_str).and_then(|p| resolve("", p)) {
+                    patches.insert(name.clone(), dir);
+                }
+            }
+        }
+        let mut deps = BTreeMap::new();
+        if let Some(table) = table.get("dependencies").and_then(Toml::as_table) {
+            for (key, spec) in table.iter() {
+                let t = spec.as_table();
+                let dir = match t.and_then(|t| t.get("path")).and_then(Toml::as_str) {
+                    Some(path) => resolve("", path),
+                    None if t.is_some_and(|t| t.get("git").is_some()) => None,
+                    None => patches.get(t.and_then(|t| t.get("package")).and_then(Toml::as_str).unwrap_or(key)).cloned(),
+                };
+                deps.insert(key.clone(), dir);
+            }
+        }
+        Ok(Some(Workspace {
+            manifest: text.to_owned(),
+            members: strings("members")?,
+            exclude: strings("exclude")?,
+            resolver: table.get("resolver").and_then(Toml::as_str).map(str::to_owned),
+            deps,
+            patches,
+        }))
+    }
+
+    /// The directory a dependency without a `path` resolves to: a
+    /// `{ workspace = true }` one through `[workspace.dependencies]`, a
+    /// registry one through `[patch.crates-io]`.
+    fn resolve_dep(&self, key: &str, spec: Option<&TomlTable>) -> Option<String> {
+        if spec.and_then(|t| t.get("workspace")).and_then(Toml::as_bool) == Some(true) {
+            return self.deps.get(key).cloned().flatten();
+        }
+        if spec.is_some_and(|t| t.get("git").is_some()) {
+            return None;
+        }
+        self.patches.get(spec.and_then(|t| t.get("package")).and_then(Toml::as_str).unwrap_or(key)).cloned()
+    }
+}
+
 impl Crate {
-    fn parse(dir: &str, text: &str) -> Result<Option<Crate>, String> {
+    fn parse(dir: &str, text: &str, workspace: Option<&Workspace>) -> Result<Option<Crate>, String> {
         let doc = parse_toml(text).map_err(|e| e.to_string())?;
         let Some(name) = doc.get_path(&["package", "name"]).and_then(Toml::as_str) else {
             return Ok(None);
@@ -210,11 +296,32 @@ impl Crate {
                 }
             }
         }
+        let resolve_dep = |key: &str, spec: Option<&TomlTable>| match spec.and_then(|t| t.get("path")).and_then(Toml::as_str) {
+            Some(path) => resolve(dir, path),
+            None => workspace.and_then(|w| w.resolve_dep(key, spec)),
+        };
+        let mut dev = BTreeSet::new();
+        let mut dev_tables: Vec<&TomlTable> = Vec::new();
+        if let Some(table) = doc.root.get("dev-dependencies").and_then(Toml::as_table) {
+            dev_tables.push(table);
+        }
+        if let Some(targets) = doc.root.get("target").and_then(Toml::as_table) {
+            for target in targets.values().filter_map(Toml::as_table) {
+                if let Some(table) = target.get("dev-dependencies").and_then(Toml::as_table) {
+                    dev_tables.push(table);
+                }
+            }
+        }
+        for table in dev_tables {
+            for (key, spec) in table.iter() {
+                dev.extend(resolve_dep(key, spec.as_table()));
+            }
+        }
         for table in tables {
             for (key, spec) in table.iter() {
                 let spec = spec.as_table();
                 let is_optional = spec.and_then(|t| t.get("optional")).and_then(Toml::as_bool).unwrap_or(false);
-                let resolved = spec.and_then(|t| t.get("path")).and_then(Toml::as_str).and_then(|path| resolve(dir, path));
+                let resolved = resolve_dep(key, spec);
                 if is_optional {
                     let dirs = optional.entry(key.clone()).or_default();
                     dirs.extend(resolved.clone());
@@ -281,6 +388,7 @@ impl Crate {
             deps: deps.into_iter().collect(),
             optional,
             required: required.into_iter().collect(),
+            dev: dev.into_iter().collect(),
             features,
             include,
             targets,
@@ -360,10 +468,12 @@ pub struct Source {
     pub crates: BTreeMap<String, Crate>,
     /// Manifests that could not be read as packages, by directory.
     pub broken: BTreeMap<String, String>,
+    /// The root manifest's `[workspace]`, when the root has one.
+    pub workspace: Option<Workspace>,
 }
 
 /// Read many blobs at once through `git cat-file --batch`.
-fn read_blobs(repo: &Path, oids: &[&str]) -> Result<Vec<Vec<u8>>, String> {
+pub(crate) fn read_blobs(repo: &Path, oids: &[&str]) -> Result<Vec<Vec<u8>>, String> {
     if oids.is_empty() {
         return Ok(Vec::new());
     }
@@ -419,11 +529,15 @@ impl Source {
             .filter(|e| e.kind == "blob" && (e.path == "Cargo.toml" || e.path.ends_with("/Cargo.toml")))
             .collect();
         let blobs = read_blobs(repo, &manifests.iter().map(|e| e.oid.as_str()).collect::<Vec<_>>())?;
+        let workspace = match manifests.iter().zip(&blobs).find(|(e, _)| e.path == "Cargo.toml") {
+            Some((_, blob)) => Workspace::parse(&String::from_utf8_lossy(blob)).map_err(|e| format!("Cargo.toml: {e}"))?,
+            None => None,
+        };
         let mut crates = BTreeMap::new();
         let mut broken = BTreeMap::new();
         for (entry, blob) in manifests.iter().zip(blobs) {
             let dir = parent(&entry.path).unwrap_or("").to_owned();
-            let parsed = String::from_utf8(blob).map_err(|e| e.to_string()).and_then(|text| Crate::parse(&dir, &text));
+            let parsed = String::from_utf8(blob).map_err(|e| e.to_string()).and_then(|text| Crate::parse(&dir, &text, workspace.as_ref()));
             match parsed {
                 Ok(Some(krate)) => {
                     crates.insert(dir, krate);
@@ -434,7 +548,7 @@ impl Source {
                 }
             }
         }
-        Ok(Source { commit, entries, by_path, children, crates, broken })
+        Ok(Source { commit, entries, by_path, children, crates, broken, workspace })
     }
 
     /// Whether the source tree has a file or directory at `path`.

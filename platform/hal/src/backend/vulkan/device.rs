@@ -231,7 +231,9 @@ impl Device {
         let features = vk::PhysicalDeviceFeatures::default()
             .independent_blend(supported_features.independent_blend == vk::TRUE)
             .texture_compression_bc(supported_features.texture_compression_bc == vk::TRUE)
-            .texture_compression_astc_ldr(supported_features.texture_compression_astc_ldr == vk::TRUE);
+            .texture_compression_astc_ldr(supported_features.texture_compression_astc_ldr == vk::TRUE)
+            // line fill: frame capture's wireframe view (`Draw::WIREFRAME`)
+            .fill_mode_non_solid(supported_features.fill_mode_non_solid == vk::TRUE);
         let priorities = [1.0];
         let queues = [vk::DeviceQueueCreateInfo::default().queue_family_index(family as u32).queue_priorities(&priorities)];
         let mut create = vk::DeviceCreateInfo::default()

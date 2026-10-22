@@ -902,7 +902,7 @@ pub fn reg_config(options: &relax_session::Options) -> RegConfig {
         int_caller.push(RCX);
         int_caller.push(RDX);
     }
-    RegConfig { int_caller, int_callee: CALLEE_SAVED.to_vec(), flt_caller: flt, flt_callee: Vec::new(), slot_index_free: true, clobbers: Some(x64_clobbers), sym_class: 0, store_imm: |k| k == k as i32 as i64, fconst_remat: false }
+    RegConfig { int_caller, int_callee: CALLEE_SAVED.to_vec(), flt_caller: flt, flt_callee: Vec::new(), slot_index_free: true, clobbers: Some(x64_clobbers), sym_class: 0, store_imm: |k| k == k as i32 as i64, fconst_remat: false, float_windows: false }
 }
 
 // ------------------------------------------------------------ code generation
@@ -6003,7 +6003,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         f
     };
     // chains of compares of one value against constants: jump tables, bit tests, binary search
-    let switched = crate::switch::lower_switches(options, f);
+    let switched = crate::switch::lower_switches(options, f, crate::switch::MIN_TABLE_CLUSTERS);
     let (f, freq_sw) = match &switched {
         Some((g, origin)) => (g, freq.map(|fr| origin.iter().map(|b| fr.get(*b as usize).copied().unwrap_or(0.0)).collect::<Vec<f32>>())),
         None => (f, None),

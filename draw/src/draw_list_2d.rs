@@ -511,7 +511,11 @@ impl<'a> CxDraw<'a> {
 
         if append && !sh.mapping.flags.draw_call_always {
             if let Some(index) = draw_list.find_appendable_drawcall(sh, draw_vars, depth_target, pick_target) {
-                return Some(&mut draw_list.draw_items[index]);
+                if let Some(owners) = self.cx.draw_owners.as_mut() {
+                    let offset = self.cx.draw_lists[current_draw_list_id].draw_items[index].instances.as_ref().map_or(0, |i| i.len());
+                    owners.note(current_draw_list_id.index(), index, offset);
+                }
+                return Some(&mut self.cx.draw_lists[current_draw_list_id].draw_items[index]);
             }
         }
 
@@ -525,7 +529,11 @@ impl<'a> CxDraw<'a> {
         if let Some(call) = item.kind.draw_call_mut() {
             call.pick_id = pick_target.unwrap_or(0);
         }
-        Some(item)
+        let item_id = item.draw_item_id;
+        if let Some(owners) = self.cx.draw_owners.as_mut() {
+            owners.note(current_draw_list_id.index(), item_id, 0);
+        }
+        Some(&mut self.cx.draw_lists[current_draw_list_id].draw_items[item_id])
     }
 
     pub fn begin_many_instances(&mut self, draw_vars: &DrawVars) -> Option<ManyInstances> {

@@ -570,7 +570,7 @@ pub fn cmd_versions(req: &Req, out: &mut Out) {
     let caps = super::capture_all(&|_| true).unwrap_or_default();
     let stacks: Vec<(String, Vec<u64>)> = caps
         .iter()
-        .map(|c| (format!("{} (T{})", if c.t.name.is_empty() { "-" } else { &c.t.name }, c.t.os_id), c.frames.iter().enumerate().map(|(i, &pc)| if i == 0 { pc } else { pc.wrapping_sub(1) }).collect()))
+        .map(|c| (format!("{} ({})", if c.t.name.is_empty() { "-" } else { &c.t.name }, super::tid_label(c.t.os_id)), c.frames.iter().enumerate().map(|(i, &pc)| if i == 0 { pc } else { pc.wrapping_sub(1) }).collect()))
         .collect();
     let r = crate::owner::call_within(crate::owner::Class::Job, 10_000, move || -> Result<Vec<String>, String> {
         let u = unsafe { &mut *up };

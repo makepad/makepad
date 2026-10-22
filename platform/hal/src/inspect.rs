@@ -80,6 +80,9 @@ fn fresh(req: &Req) -> Report {
 
 /// True when this is a GPU or HAL command. The endpoint thread reads the native ledger directly.
 pub fn dispatch(req: &Req, out: &mut Out) -> bool {
+    if crate::framecap::dispatch(req, out) {
+        return true;
+    }
     if req.cmd == "hal" {
         match req.pos.first().map(String::as_str) {
             Some("pump") => pump(out),

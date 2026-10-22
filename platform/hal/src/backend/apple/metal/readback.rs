@@ -126,6 +126,71 @@ impl Metal {
         };
     }
 
+    /// Frame capture: every level and layer of a texture's storage, copied on the batch's command
+    /// buffer after the uploads and frames before it (see `Gpu::capture_texture`). Depth formats
+    /// are not blitted to buffers here: `None`.
+    pub(super) fn capture_texture_storage(&mut self, s: &mut Session, id: Id, done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>) {
+        let sid = s.id;
+        let Ok(entry) = s.textures.get(sid, id) else { return done(None) };
+        let t = entry.val.clone();
+        let tex = match t.lent {
+            Some(l) => self.tex.get(&(l.child, l.tex.index)).filter(|x| x.gen == l.tex.gen),
+            None => self.tex.get(&(sid, id.index)).filter(|x| x.gen == id.gen),
+        };
+        let Some(tex) = tex.map(|x| x.obj.clone()) else { return done(None) };
+        if format::is_depth(t.format) {
+            return done(None);
+        }
+        // (level, layer, w, h, stride, row, rows, offset) of every region, in the output's order
+        let mut regions = Vec::new();
+        let mut length = 0u64;
+        for level in 0..t.mips.max(1) {
+            let (w, h) = ((t.w >> level).max(1), (t.h >> level).max(1));
+            let (row, rows) = row_layout(t.format, w, h);
+            let stride = (row + 255) & !255;
+            for layer in 0..t.depth.max(1) {
+                regions.push((level, layer, w, h, stride, row, rows, length));
+                length += stride * rows;
+            }
+        }
+        let staging = NonNull::new(unsafe { msg_send![self.dev.device, newBufferWithLength: length.max(16) options: MTLResourceOptions::StorageModeShared] }).map(RcObjcId::from_owned);
+        let Some(staging) = staging else { return done(None) };
+        let (cb, _) = self.ensure_batch();
+        self.flush_uploads();
+        unsafe {
+            let blit: ObjcId = msg_send![cb, blitCommandEncoder];
+            for &(level, layer, w, h, stride, _, rows, offset) in &regions {
+                let origin = MTLOrigin { x: 0, y: 0, z: 0 };
+                let size = MTLSize { width: w as u64, height: h as u64, depth: 1 };
+                let _: () = msg_send![blit, copyFromTexture: tex.as_id() sourceSlice: layer as u64 sourceLevel: level as u64 sourceOrigin: origin sourceSize: size toBuffer: staging.as_id() destinationOffset: offset destinationBytesPerRow: stride destinationBytesPerImage: stride * rows];
+            }
+            let _: () = msg_send![blit, endEncoding];
+        }
+        let capture = Mutex::new(Some((tex, staging, done)));
+        let () = unsafe {
+            msg_send![cb, addCompletedHandler: &objc_block!(move |cb: ObjcId| {
+                if let Some((_tex, staging, done)) = capture.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    let status: u64 = unsafe { msg_send![cb, status] };
+                    if status != 4 {
+                        return done(None);
+                    }
+                    let mut out = Vec::new();
+                    for &(_, _, _, _, stride, row, rows, offset) in &regions {
+                        let src: *const u8 = unsafe { msg_send![staging.as_id(), contents] };
+                        if src.is_null() {
+                            return done(None);
+                        }
+                        for r in 0..rows {
+                            // SAFETY: the region holds `rows` rows of `stride` bytes at `offset`
+                            out.extend_from_slice(unsafe { std::slice::from_raw_parts(src.add((offset + r * stride) as usize), row as usize) });
+                        }
+                    }
+                    done(Some(out))
+                }
+            })]
+        };
+    }
+
     /// `rect` clamped to a `w` x `h` texture; `None` when nothing is left.
     fn clamp(rect: [u32; 4], w: u32, h: u32) -> Option<[u32; 4]> {
         let [x, y, rw, rh] = rect;

@@ -46,6 +46,8 @@ pub(super) enum Ticket {
     Shared { token: Token, id: Id, handle: u64 },
     Copy { token: Token, req: u32, rect: [u32; 4] },
     Host { reply: std::sync::mpsc::SyncSender<Option<crate::backend::Pixels>>, image: Arc<Image>, staging: Arc<Buffer> },
+    /// Frame capture: a texture's storage, every level and layer (`Gpu::capture_texture`).
+    FrameCap { staging: Arc<Buffer>, len: usize, done: Box<dyn FnOnce(Option<Vec<u8>>) + Send> },
 }
 
 /// How a batch ended: its work ran, it was never submitted (its recording or presentation
@@ -225,7 +227,7 @@ impl Batch {
                 #[cfg(target_os = "linux")]
                 Ticket::Capture { token, .. } => token.sid,
                 Ticket::Frame { token, .. } | Ticket::Read { token, .. } | Ticket::Shared { token, .. } | Ticket::Copy { token, .. } => token.sid,
-                Ticket::Host { .. } => continue,
+                Ticket::Host { .. } | Ticket::FrameCap { .. } => continue,
             };
             if !sids.contains(&sid) { sids.push(sid); }
         }
@@ -571,6 +573,7 @@ impl Batch {
                     req, rect, status: if failed { readback::FAILED } else { readback::OK }, pixels: Vec::new(),
                 }),
                 Ticket::Shared { token, id, handle } => push(token, Event::Shared { id, handle: if failed { 0 } else { handle } }),
+                Ticket::FrameCap { staging, len, done } => done(if failed { None } else { staging.read(len).ok() }),
                 Ticket::Host { reply, image, staging } => {
                     let pixels = if failed { None } else { staging.read(image.desc.w as usize * image.desc.h as usize * 4).ok().map(|mut rgba| {
                         if image.desc.format == format::BGRA8 { for p in rgba.chunks_exact_mut(4) { p.swap(0, 2); } }

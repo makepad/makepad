@@ -154,7 +154,7 @@ struct VariantKey { colors: [u32; 4], depth: u32, flags: u32 }
 
 impl VariantKey {
     fn new(pass: PassKey, flags: u32) -> Self {
-        let mut flags = flags & (Draw::BLEND | Draw::CULL | Draw::DEPTH_WRITE);
+        let mut flags = flags & (Draw::BLEND | Draw::CULL | Draw::DEPTH_WRITE | Draw::WIREFRAME);
         if pass.depth == ABSENT { flags &= !Draw::DEPTH_WRITE; } // no depth attachment: the bit changes nothing
         Self { colors: pass.colors, depth: pass.depth, flags }
     }
@@ -268,7 +268,8 @@ fn create_variant(program: Arc<Program>, pass: &RenderPass, flags: u32) -> Resul
     let vertex = vk::PipelineVertexInputStateCreateInfo::default().vertex_binding_descriptions(if words == 0 { &[] } else { &bindings }).vertex_attribute_descriptions(&attrs);
     let assembly = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_LIST);
     let viewport = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
-    let raster = vk::PipelineRasterizationStateCreateInfo::default().polygon_mode(vk::PolygonMode::FILL)
+    let lines = flags & Draw::WIREFRAME != 0 && program.dev.features.fill_mode_non_solid == vk::TRUE;
+    let raster = vk::PipelineRasterizationStateCreateInfo::default().polygon_mode(if lines { vk::PolygonMode::LINE } else { vk::PolygonMode::FILL })
         .cull_mode(if flags & Draw::CULL != 0 { vk::CullModeFlags::BACK } else { vk::CullModeFlags::NONE })
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE).line_width(1.0);
     let samples = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);

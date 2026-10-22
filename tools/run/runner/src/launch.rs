@@ -192,6 +192,14 @@ fn apply(l: &Launch) -> Result<Vec<Vec<u8>>, String> {
     if !l.title.is_empty() {
         std::env::set_var("MAKEPAD_APP_TITLE", &l.title);
     }
+    // the .ico the runner made for the app's Start menu entry: its windows' relaunch icon
+    #[cfg(windows)]
+    {
+        let ico = dir(&crate::fetch::home()).join(format!("{}.ico", l.id));
+        if ico.is_file() {
+            std::env::set_var("MAKEPAD_APP_ICON", ico);
+        }
+    }
     for (k, v) in &l.env {
         std::env::set_var(k, v);
     }

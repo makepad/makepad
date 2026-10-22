@@ -956,6 +956,9 @@ impl Cx {
             }
         }
         self.fb_sweep(fb);
+        if !built.is_empty() {
+            self.draw_owners_frame_done();
+        }
         built
     }
 
@@ -1170,6 +1173,9 @@ impl Cx {
         pass.owner = self.draw_lists[list_id].owner.map_or(0, |o| fb.intern(o));
 
         fb.w.frame_begin(serial, FrameMeta { build_start_ns: build_start, input_ns, ..Default::default() });
+        if let Some(o) = self.draw_owners.as_mut().filter(|_| !picking) {
+            o.begin_packet(serial);
+        }
         fb.w.pass(pass);
         let sploded = self.passes[pass_id].sploded.is_some();
         let step = self.passes[pass_id].zbias_step;
@@ -1184,6 +1190,9 @@ impl Cx {
         fb.w.frame_set_build_end(end);
         fb.stats.build_ns += end.saturating_sub(build_start);
         fb.w.frame_end(target, kind | if picking { makepad_hal::target::PICK } else { 0 });
+        if let Some(o) = self.draw_owners.as_mut() {
+            o.end_packet();
+        }
         if !picking {
             self.readback_pass_submitted(pass_id, serial);
             self.hal_texture_readbacks(fb, Some(pass_id));
@@ -1520,6 +1529,9 @@ impl Cx {
         }
         if pipe.failed {
             return;
+        }
+        if let Some(o) = self.draw_owners.as_mut() {
+            o.draw(list_id.index(), item_id, slots, instances);
         }
         fb.w.draw(draw);
         fb.stats.draws += 1;

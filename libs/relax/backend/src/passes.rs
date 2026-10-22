@@ -683,6 +683,27 @@ pub fn vx_peep(f: &mut Func, ndef: &[u32]) {
             }
         }
     }
+    // vectors whose every use reads only their low 64 bits (lane extracts there), and the lane-wise
+    // results only such extracts read: the operands of those may be any vector with the same low
+    // half (NEON 8-byte group compares widened to 16-byte vectors: `FromLo64(Extract(D, 0, v))`)
+    let mut uses = vec![0u32; nv];
+    let mut low_uses = vec![0u32; nv];
+    for b in &f.blocks {
+        for i in &b.insts {
+            crate::regalloc::for_uses(i, |u| uses[u.0 as usize] += 1);
+            if let Inst::VX(VX::Extract(w, lane), _, a, _) = *i {
+                if (lane as u32 + 1) * w.bits() <= 64 {
+                    low_uses[a.0 as usize] += 1;
+                }
+            }
+        }
+        let mut t = Vec::new();
+        crate::regalloc::term_uses(&b.term, &mut t);
+        for u in t {
+            uses[u.0 as usize] += 1;
+        }
+    }
+    let low_only = |v: VReg| uses[v.0 as usize] > 0 && uses[v.0 as usize] == low_uses[v.0 as usize];
     // the vector whose low 64 bits `x` holds
     let low = |x: VReg| -> VReg {
         if let Some((VX::FromLo64, t)) = def[x.0 as usize] {
@@ -767,10 +788,20 @@ pub fn vx_peep(f: &mut Func, ndef: &[u32]) {
                     VX::Extract(w, lane) if (lane as u32 + 1) * w.bits() <= 64 => {
                         *a = low(*a);
                         *bb = *a;
+                        // lane 0 of [x, 0] is x
+                        if let (VX::Extract(VW::D, 0), Some((VX::FromLo64, x))) = (*op, def[a.0 as usize]) {
+                            let d = *d;
+                            *i = Inst::Mov(d, x);
+                            continue;
+                        }
+                    }
+                    // lane-wise ops whose result is only read in its low half: so are their operands
+                    VX::CmpEq(_) | VX::CmpGtS(_) | VX::And | VX::Or | VX::Xor | VX::AndNot | VX::Add(_) | VX::Sub(_) if low_only(*d) => {
+                        *a = low(*a);
+                        *bb = low(*bb);
                     }
                     _ => {}
                 }
-                let _ = d;
             }
         }
     }
@@ -3786,7 +3817,10 @@ pub fn if_convert(f: &mut Func, spec_on: bool) -> bool {
     }
     // compares and selects only: the arms of a value choice (an Ordering), not general arithmetic
     // (speculating sums cost iterator loops more instructions than their branches: iter_chain +27%)
-    let speculatable = |i: &Inst| matches!(i, Inst::ICmp(..) | Inst::ICmpI(..) | Inst::Sel(..));
+    // A float negation too: `if x < 0.0 { -x } else { x }` (box3d's scalar abs_v: -0.0 and NaN keep
+    // their sign, so no fabs) is fcmp + fneg + fcsel, not a branch around one fneg per lane
+    // (rustc's arm64 test_bounds_triangle_overlap has no such branches)
+    let speculatable = |i: &Inst| matches!(i, Inst::ICmp(..) | Inst::ICmpI(..) | Inst::Sel(..) | Inst::FUnary(FUn::Neg, ..));
     // an arm: (speculated temporaries, copies (dest, source or constant), join) when block x is
     // cheap temporaries (single-def, read only in x) then copies / constants into its results and a
     // jump, entered only from the branch
@@ -6173,7 +6207,6 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
     // write of it reads padding or an unwritten variant field: any value will do)
     let mut slot_regs: Vec<Vec<u32>> = vec![Vec::new(); ns];
     let mut init: Vec<Inst> = Vec::new();
-    let mut vzero = None;
     for sl in 0..ns {
         if !ok[sl] {
             continue;
@@ -6189,17 +6222,10 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
                 continue;
             }
             if m == SROA_V128 {
-                let z = match vzero {
-                    Some(z) => z,
-                    None => {
-                        let z = f.vreg(Cls::I);
-                        init.push(Inst::Iconst(z, 0));
-                        vzero = Some(z);
-                        z
-                    }
-                };
+                // a constant (rematerialised at its uses: movi / pxor), not a register held
+                // from the entry on
                 let r = f.vreg(Cls::V128);
-                init.push(Inst::VX(VX::FromLo64, r, z, z));
+                init.push(Inst::VConst(r, 0));
                 regs.push(r.0);
                 continue;
             }

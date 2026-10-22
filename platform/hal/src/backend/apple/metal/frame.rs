@@ -78,6 +78,8 @@ struct Encoder {
     pso: ObjcId,
     depth_state: ObjcId,
     cull: u64,
+    /// MTLTriangleFillMode: 0 fill, 1 lines (`Draw::WIREFRAME`)
+    fill: u64,
     scissor: Option<[u32; 4]>,
     /// buffer and offset bound at each vertex / fragment buffer slot
     buffers: [(ObjcId, u64); 32],
@@ -895,7 +897,7 @@ impl Metal {
                 }
             }
         }
-        let mut enc = Encoder { id: encoder_id, pso: nil, depth_state: nil, cull: 0, scissor: None, buffers: [(nil, u64::MAX); 32], textures: [nil; 31], size: [vw as u64, vh as u64] };
+        let mut enc = Encoder { id: encoder_id, pso: nil, depth_state: nil, cull: 0, fill: 0, scissor: None, buffers: [(nil, u64::MAX); 32], textures: [nil; 31], size: [vw as u64, vh as u64] };
         let mut shaders: Vec<String> = Vec::new();
         for (_, id, _) in &colors {
             if !id.is_none() {
@@ -994,6 +996,13 @@ impl Metal {
                     unsafe {
                         let _: () = msg_send![enc.id, setDepthStencilState: state];
                     }
+                }
+            }
+            let fill = if d.flags & Draw::WIREFRAME != 0 { 1u64 } else { 0u64 };
+            if enc.fill != fill {
+                enc.fill = fill;
+                unsafe {
+                    let _: () = msg_send![enc.id, setTriangleFillMode: fill];
                 }
             }
             let cull = if d.flags & Draw::CULL != 0 { 2u64 } else { 0u64 }; // MTLCullModeBack / None

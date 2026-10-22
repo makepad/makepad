@@ -729,6 +729,13 @@ impl Gpu for Vulkan {
         self.pick_pending.remove(&(sid, id));
         if self.pressure.is_starved(sid, id) { self.pressure.forget(sid, id); }
     }
+    fn capture_texture(&mut self, s: &mut Session, id: Id, done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>) {
+        self.capture_storage(s, id, done);
+    }
+    fn capture_buffer(&mut self, sid: u32, id: Id) -> Option<Vec<u8>> {
+        let r = self.buf.get(&(sid, id.index)).filter(|r| r.gen == id.gen)?;
+        r.buffer.read(r.buffer.size as usize).ok()
+    }
     fn texture_readback(&mut self, s: &mut Session, id: Id, req: u32, rect: [u32; 4]) {
         if self.pick_pending.contains(&(s.id, id)) { s.events.readback(req, crate::types::readback::INCOMPLETE, rect, &[]); return; }
         let image = self.resolve(s, id); self.read(s, image, req, rect, None);

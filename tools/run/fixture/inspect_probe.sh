@@ -16,7 +16,7 @@ MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MAKEPAD_HOME="$dir/home" TM
     PROBE_TRIGGER="$dir/trigger" PROBE_SECS=300 \
     "$T/makepad" run relax-provided-fixture --bin relax-inspect-probe > "$dir/run.log" 2>&1 &
 pid=$!
-ask() { TMPDIR="$dir/t" "$T/makepad" inspect $pid "$@" 2>&1; }
+ask() { TMPDIR="$dir/t" "$T/makepad" inspect $pid "$@" as=json 2>&1; }
 n=0
 until ask ping > /dev/null 2>&1; do
     n=$((n + 1)); [ $n -ge 600 ] && break

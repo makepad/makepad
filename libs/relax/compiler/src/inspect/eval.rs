@@ -514,7 +514,7 @@ pub fn cmd_locals(req: &Req, out: &mut Out) {
             return out.err("that thread is running: `pause` first (its stack moves while it runs)");
         }
         match super::threads::regs_now(t) {
-            Some((pc, fp, ints)) => (format!("\"thread\":\"T{}\"", t.os_id), Src::Thread(pc, fp, ints), None),
+            Some((pc, fp, ints)) => (format!("\"thread\":\"{}\"", super::tid_label(t.os_id)), Src::Thread(pc, fp, ints), None),
             None => return out.err("this thread's registers are not readable here (pause it first: `pause`)"),
         }
     } else {

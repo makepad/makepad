@@ -6,6 +6,10 @@ description = "The runner of `makepad run` without provided crates: compiler, se
 license = "MIT OR Apache-2.0"
 publish = false
 
+# files outside this crate its build reads (makepad-source-slice ships them in a slice or source archive)
+[package.metadata.commercial]
+include = ["../../../libs/relax/build_stamp.rs"]
+
 [lib]
 name = "relax_runner"
 path = "src/lib.rs"

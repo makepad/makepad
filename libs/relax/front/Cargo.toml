@@ -6,6 +6,10 @@ description = "Relax front layer (see src/lib.rs)"
 license = "MIT OR Apache-2.0"
 publish = false
 
+# files outside this crate its build reads (makepad-source-slice ships them in a slice or source archive)
+[package.metadata.commercial]
+include = ["../../../platform/build_gen.rs"]
+
 [dependencies]
 relax-backend = { workspace = true }
 relax-base = { workspace = true }

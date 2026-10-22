@@ -178,6 +178,10 @@ hal_events! {
     /// The packet left draws out: a pipeline they use was still being built for its target's
     /// layout (they come with a later packet, after `PipelineReady`). Posted before its `FrameDone`.
     FramePartial = 68, frame_partial { window: obj, frame: u64 };
+    /// The HAL wants a complete frame of every window (`window` NONE) or of one: an inspector
+    /// is about to record it (frame capture). The app redraws everything, cached or not; with
+    /// `owners` it also records which widget draws each instance range (the `draw_owners` query).
+    Redraw = 70, redraw { window: obj, owners: bool };
     PipelineFailed = 53, pipeline_failed { pipeline: id, log: rng };
     BufferEvicted = 54, buffer_evicted { buffer: id };
     TextureShared = 55, texture_shared { texture: id, handle: u64 };

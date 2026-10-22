@@ -44,7 +44,7 @@ EXPECT = {
 }
 
 def inspect(relax, pid, *cmd):
-    r = subprocess.run([relax, "inspect", str(pid), *cmd], capture_output=True, text=True, timeout=60)
+    r = subprocess.run([relax, "inspect", str(pid), *cmd, "as=json"], capture_output=True, text=True, timeout=60)
     return r.stdout + r.stderr
 
 def run_plain(a, mode):

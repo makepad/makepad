@@ -19,6 +19,7 @@
 mod clipboard;
 mod dialog;
 mod drag;
+mod identity;
 mod ime;
 mod keys;
 mod process;

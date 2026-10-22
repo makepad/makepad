@@ -131,6 +131,19 @@ pub trait Gpu {
         false
     }
     fn pick(&mut self, s: &mut Session, window: Id, req: u32, pos: [f32; 2]);
+    /// Frame capture ([`crate::framecap`]): a copy of the texture's storage as everything submitted
+    /// so far leaves it, before the frame that follows. Every mip level of every layer, tightly
+    /// packed rows (whole 4x4 blocks for block formats), level-major then layer. `done` runs once
+    /// the GPU has it (on any thread); `None`: no storage yet, or this backend cannot read it.
+    /// Never waits for the GPU.
+    fn capture_texture(&mut self, _s: &mut Session, _id: Id, done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>) {
+        done(None)
+    }
+    /// Frame capture: the buffer's bytes as the next frame reads them (`None`: no storage, or this
+    /// backend cannot read it).
+    fn capture_buffer(&mut self, _sid: u32, _id: Id) -> Option<Vec<u8>> {
+        None
+    }
     fn window_copy(&mut self, s: &mut Session, _window: Id, _texture: Id, req: u32) {
         s.events.readback(req, readback::NO_RASTER, [0; 4], &[]);
     }
@@ -618,6 +631,10 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                     s.ledger.touch(Kind::Texture, tex.index, tex.gen, frame, now);
                 }
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            if crate::framecap::armed() {
+                crate::framecap::on_frame(gpu, s, sid, target, kind, packet, view, now);
+            }
             let Some(submitted) = gpu.frame(s, sid, target, kind, packet, view, now) else { return };
             let host = submitted.window.then(||
                 s.windows.get(sid, target).ok().and_then(|w| w.val.alias_of)).flatten();
@@ -1101,7 +1118,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
         },
         HalCmd::PipelineCreate { id, dialect, attr, desc } => match PipelineBlob::parse(desc) {
             Some(b) => {
-                let obj = PipelineObj { dialect, desc: b.desc, code_len: b.code.len() };
+                let obj = PipelineObj { dialect, desc: b.desc, blob: desc.into() };
                 match s.pipelines.insert(sid, id, sid, obj) {
                     Ok(old) => {
                         if old.is_some() {

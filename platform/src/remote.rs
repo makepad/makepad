@@ -542,6 +542,9 @@ mod imp {
             endpoint.register_cmd(dispatch);
             endpoint.set_end_fields(end_fields);
             endpoint.register("frames", 1, frames_service());
+            // the profiler stream (Scope's Live, `makepad inspect <app> pf`)
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            endpoint.register("prof", 1, crate::prof_native::service(app.clone()));
             // held until ACTIVE is set, so a service registered meanwhile is not lost
             let mut pending = PENDING_SERVICES.lock().unwrap();
             if serves_own_app() {
@@ -578,6 +581,7 @@ mod imp {
     pub(crate) fn gpu_commands() -> Vec<crate::remote_schema::Command> {
         makepad_hal::inspect::COMMANDS
             .iter()
+            .chain(makepad_hal::framecap::COMMANDS.iter())
             .map(|(words, args, answers)| crate::remote_schema::Command {
                 words,
                 args,

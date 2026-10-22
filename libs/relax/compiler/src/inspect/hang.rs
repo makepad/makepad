@@ -116,38 +116,49 @@ pub fn why_hung(req: &Req, out: &mut Out) {
     let describe = |i: usize| -> String {
         let c = &caps[i];
         let w = wait_of(c.t.handle).map(|w| super::wait_text(w, &list));
-        let top = syms[i].iter().find(|f| f.module.starts_with("jit")).or(syms[i].first()).map(|f| f.name.clone()).unwrap_or_default();
+        // where: the program's innermost frame and the std call it is in (`Mutex::lock in post_ledger at ..`)
+        let fr = &syms[i];
+        let prog = fr.iter().position(super::is_program_frame);
+        let top = match prog {
+            Some(p) => {
+                let callee = fr[..p].iter().rev().find(|f| f.module.starts_with("jit") && !f.name.starts_with("(inlined") && !f.name.starts_with("std::sys::") && !f.name.starts_with("std::sync::raw"));
+                let at = if fr[p].at.is_empty() { String::new() } else { format!(" at {}", fr[p].at) };
+                match callee {
+                    Some(c) => format!("{} called from {}{}", c.name, fr[p].name, at),
+                    None => format!("{}{}", fr[p].name, at),
+                }
+            }
+            None => fr.iter().find(|f| f.module.starts_with("jit")).or(fr.first()).map(|f| f.name.clone()).unwrap_or_default(),
+        };
         match w {
-            Some(w) => format!("{} waits: {}", thread_label(c.t.handle, &list).replace("?", &c.t.name), w),
+            Some(w) => format!("{} waits: {} in {}", thread_label(c.t.handle, &list).replace("?", &c.t.name), w, super::short(&top, 240)),
             None => format!("{} ({}, {}% CPU) in {}", if c.t.name.is_empty() { "thread" } else { &c.t.name }, c.t.state, cpu(c), super::short(&top, 100)),
         }
     };
-    let verdict;
-    let detail;
-    // a panic parked waiting for a decision stops its thread for good: that is the answer, whatever
-    // the other threads are doing meanwhile (main idles waiting for the frame the parked thread
-    // never finishes)
+    // every finding, the most decisive first: a wait cycle stops its threads for good, a parked
+    // panic stops its thread until decided, then what main does; threads waiting long are listed
+    // too (a park or condvar wait with no holder is waiting for a notify, not deadlocked)
+    let mut findings: Vec<(&'static str, String)> = Vec::new();
+    if !cycle.is_empty() {
+        let steps: Vec<String> = cycle.iter().map(|h| match idx_of(*h) {
+            Some(i) => describe(i),
+            None => thread_label(*h, &list),
+        }).collect();
+        findings.push(("deadlock", format!("wait cycle: {} -> back to the first", steps.join(" -> "))));
+    }
     let parked = super::events::parked_now();
-    if let Some((id, os_id, thread, message, location)) = parked.first() {
-        verdict = "parked panic";
+    for (id, os_id, thread, message, location) in &parked {
         let name = caps.iter().find(|c| c.t.os_id == *os_id).map(|c| c.t.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| thread.clone());
-        let more = if parked.len() > 1 { format!(" (+{} more parked)", parked.len() - 1) } else { String::new() };
-        detail = format!("P{} parked on thread {} (T{}): {} at {}{} -- see `panics`, decide with `resume P{} panic`", id, name, os_id, super::short(message, 300), location, more, id);
-    } else if !cycle.is_empty() {
-        let names: Vec<String> = cycle.iter().map(|h| thread_label(*h, &list)).collect();
-        verdict = "deadlock";
-        detail = format!("wait cycle: {} -> {}", names.join(" -> "), names[0]);
-    } else if let Some(m) = main_i {
+        findings.push(("parked panic", format!("P{} parked on thread {} ({}): {} at {} -- see `panics`, decide with `resume P{} panic`", id, name, super::tid_label(*os_id), super::short(message, 300), location, id)));
+    }
+    if let Some(m) = main_i {
         let busy = cpu(&caps[m]);
         if chain.len() > 1 {
-            verdict = "blocked";
             let steps: Vec<String> = chain.iter().map(|&i| describe(i)).collect();
-            detail = steps.join(" -> ");
+            findings.push(("blocked", format!("main is blocked: {}", steps.join(" -> "))));
         } else if wait_of(caps[m].t.handle).is_some() {
-            verdict = "blocked";
-            detail = describe(m);
+            findings.push(("blocked", format!("main is blocked: {}", describe(m))));
         } else if busy >= 50 {
-            verdict = "busy";
             // the innermost JIT frame most often seen while main ran
             let mut count: Vec<(String, usize)> = Vec::new();
             let mut p2 = Vec::new();
@@ -163,18 +174,28 @@ pub fn why_hung(req: &Req, out: &mut Out) {
             }
             count.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
             let hot: Vec<String> = count.iter().take(3).map(|(k, n)| format!("{} ({} of {} samples)", super::short(k, 160), n, tops.len())).collect();
-            detail = format!("main runs ({}% CPU over {} ms): {}", busy, probe, hot.join("; "));
+            findings.push(("busy", format!("main runs ({}% CPU over {} ms): {}", busy, probe, hot.join("; "))));
         } else {
             let top = syms[m].first().map(|f| f.name.clone()).unwrap_or_default();
-            verdict = "idle";
-            detail = format!("main is not in a JIT-visible wait and uses {}% CPU: waiting for events or sleeping in {}", busy, super::short(&top, 100));
+            findings.push(("idle", format!("main is not stuck: {}% CPU, waiting for events or sleeping in {}", busy, super::short(&top, 100))));
         }
     } else {
-        verdict = "unknown";
-        detail = "the main thread was not found".into();
+        findings.push(("unknown", "the main thread was not found".into()));
     }
+    let in_cycle = |h: u64| cycle.contains(&h);
+    for w in waits.iter().filter(|w| w.kind != Kind::None && !in_cycle(w.thread) && crate::clock::wall_ns().saturating_sub(w.since_ns) >= 5_000_000_000) {
+        let Some(i) = idx_of(w.thread) else { continue };
+        if Some(i) == main_i {
+            continue;
+        }
+        let no_holder = w.kind == Kind::Futex && super::holder_of_tag(w.holder, &caps).is_none();
+        let note = if no_holder && w.label != "mutex" { " (no holder: it waits for a notify -- a channel, condvar or park -- not for a lock)" } else { "" };
+        findings.push(("long wait", format!("{}{}", describe(i), note)));
+    }
+    let (verdict, detail) = findings.first().cloned().unwrap_or(("unknown", String::new()));
+    let found: Vec<String> = findings.iter().map(|(k, d)| format!("{{\"kind\":\"{}\",\"why\":{}}}", k, json_str(d))).collect();
     let owner = format!("{{\"serving\":{},\"queued\":{}}}", json_str(&crate::owner::serving_note()), crate::owner::queued_note());
-    out.line(&format!("{{\"verdict\":\"{}\",\"why\":{},\"owner\":{}}}", verdict, json_str(&detail), owner));
+    out.line(&format!("{{\"verdict\":\"{}\",\"why\":{},\"findings\":[{}],\"owner\":{}}}", verdict, json_str(&detail), found.join(","), owner));
     // stacks of the threads involved, one line for the others
     let mut involved: Vec<usize> = chain.clone();
     for h in &cycle {
@@ -193,7 +214,7 @@ pub fn why_hung(req: &Req, out: &mut Out) {
         let c = &caps[i];
         let fr: Vec<String> = syms[i].iter().take(depth).map(frame_json).collect();
         let w = wait_of(c.t.handle).map(|w| format!(",\"waits\":{}", json_str(&super::wait_text(w, &list)))).unwrap_or_default();
-        out.line(&format!("{{\"thread\":{},\"id\":\"T{}\",\"state\":\"{}\",\"cpu_pct\":{}{},\"frames\":[{}]}}", json_str(&c.t.name), c.t.os_id, c.t.state, cpu(c), w, fr.join(",")));
+        out.line(&format!("{{\"thread\":{},\"id\":\"{}\",\"state\":\"{}\",\"cpu_pct\":{}{},\"frames\":[{}]}}", json_str(&c.t.name), super::tid_label(c.t.os_id), c.t.state, cpu(c), w, fr.join(",")));
     }
     let mut others: Vec<String> = Vec::new();
     for (i, c) in caps.iter().enumerate() {
@@ -201,7 +222,7 @@ pub fn why_hung(req: &Req, out: &mut Out) {
             continue;
         }
         let top = syms[i].iter().find(|f| f.module.starts_with("jit")).or(syms[i].first()).map(|f| super::short(&f.name, 60)).unwrap_or_default();
-        others.push(format!("{} T{} {} {}%: {}", c.t.name, c.t.os_id, c.t.state, cpu(c), top));
+        others.push(format!("{} {} {} {}%: {}", c.t.name, super::tid_label(c.t.os_id), c.t.state, cpu(c), top));
     }
     others.sort();
     let shown: Vec<String> = others.iter().take(40).map(|s| json_str(s)).collect();

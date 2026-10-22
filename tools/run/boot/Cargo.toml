@@ -5,6 +5,10 @@ edition = "2021"
 publish = false
 license = "MIT OR Apache-2.0"
 
+# files outside this crate its build reads (makepad-source-slice ships them in a slice or source archive)
+[package.metadata.commercial]
+include = ["../../../widgets/resources/IBMPlexSans-Text.ttf"]
+
 [dependencies]
 # The exact same provided crate instances/features as the Relax host.
 makepad-hal = { path = "../../../platform/hal", features = ["host-shims"] }

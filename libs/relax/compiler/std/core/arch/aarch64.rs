@@ -1510,94 +1510,49 @@ pub unsafe fn vbicq_u32(a: uint32x4_t, b: uint32x4_t) -> uint32x4_t {
     vx::vx_binary(a, b, 9, 32)
 }
 
+#[inline(always)]
 pub unsafe fn vbslq_f32(a: uint32x4_t, b: float32x4_t, c: float32x4_t) -> float32x4_t {
-    let mut r = [0.0; 4];
-    let mut i = 0;
-    while i < 4 {
-        r[i] = f32::from_bits((a.0[i] & b.0[i].to_bits()) | (!a.0[i] & c.0[i].to_bits()));
-        i += 1;
-    }
-    float32x4_t(r)
+    vx::vx_ternary(crate::ptr::read_unaligned(&a as *const uint32x4_t as *const float32x4_t), b, c, 10)
 }
 
+#[inline(always)]
 pub unsafe fn vbslq_s16(a: uint16x8_t, b: int16x8_t, c: int16x8_t) -> int16x8_t {
-    let mut r = [0; 8];
-    let mut i = 0;
-    while i < 8 {
-        r[i] = ((a.0[i] & b.0[i] as u16) | (!a.0[i] & c.0[i] as u16)) as i16;
-        i += 1;
-    }
-    int16x8_t(r)
+    vx::vx_ternary(crate::ptr::read_unaligned(&a as *const uint16x8_t as *const int16x8_t), b, c, 10)
 }
 
+#[inline(always)]
 pub unsafe fn vbslq_s32(a: uint32x4_t, b: int32x4_t, c: int32x4_t) -> int32x4_t {
-    let mut r = [0; 4];
-    let mut i = 0;
-    while i < 4 {
-        r[i] = ((a.0[i] & b.0[i] as u32) | (!a.0[i] & c.0[i] as u32)) as i32;
-        i += 1;
-    }
-    int32x4_t(r)
+    vx::vx_ternary(crate::ptr::read_unaligned(&a as *const uint32x4_t as *const int32x4_t), b, c, 10)
 }
 
+#[inline(always)]
 pub unsafe fn vbslq_s64(a: uint64x2_t, b: int64x2_t, c: int64x2_t) -> int64x2_t {
-    let mut r = [0; 2];
-    let mut i = 0;
-    while i < 2 {
-        r[i] = ((a.0[i] & b.0[i] as u64) | (!a.0[i] & c.0[i] as u64)) as i64;
-        i += 1;
-    }
-    int64x2_t(r)
+    vx::vx_ternary(crate::ptr::read_unaligned(&a as *const uint64x2_t as *const int64x2_t), b, c, 10)
 }
 
+#[inline(always)]
 pub unsafe fn vbslq_s8(a: uint8x16_t, b: int8x16_t, c: int8x16_t) -> int8x16_t {
-    let mut r = [0; 16];
-    let mut i = 0;
-    while i < 16 {
-        r[i] = ((a.0[i] & b.0[i] as u8) | (!a.0[i] & c.0[i] as u8)) as i8;
-        i += 1;
-    }
-    int8x16_t(r)
+    vx::vx_ternary(crate::ptr::read_unaligned(&a as *const uint8x16_t as *const int8x16_t), b, c, 10)
 }
 
+#[inline(always)]
 pub unsafe fn vbslq_u16(a: uint16x8_t, b: uint16x8_t, c: uint16x8_t) -> uint16x8_t {
-    let mut r = [0; 8];
-    let mut i = 0;
-    while i < 8 {
-        r[i] = ((a.0[i] & b.0[i] as u16) | (!a.0[i] & c.0[i] as u16)) as u16;
-        i += 1;
-    }
-    uint16x8_t(r)
+    vx::vx_ternary(a, b, c, 10)
 }
 
+#[inline(always)]
 pub unsafe fn vbslq_u32(a: uint32x4_t, b: uint32x4_t, c: uint32x4_t) -> uint32x4_t {
-    let mut r = [0; 4];
-    let mut i = 0;
-    while i < 4 {
-        r[i] = ((a.0[i] & b.0[i] as u32) | (!a.0[i] & c.0[i] as u32)) as u32;
-        i += 1;
-    }
-    uint32x4_t(r)
+    vx::vx_ternary(a, b, c, 10)
 }
 
+#[inline(always)]
 pub unsafe fn vbslq_u64(a: uint64x2_t, b: uint64x2_t, c: uint64x2_t) -> uint64x2_t {
-    let mut r = [0; 2];
-    let mut i = 0;
-    while i < 2 {
-        r[i] = ((a.0[i] & b.0[i] as u64) | (!a.0[i] & c.0[i] as u64)) as u64;
-        i += 1;
-    }
-    uint64x2_t(r)
+    vx::vx_ternary(a, b, c, 10)
 }
 
+#[inline(always)]
 pub unsafe fn vbslq_u8(a: uint8x16_t, b: uint8x16_t, c: uint8x16_t) -> uint8x16_t {
-    let mut r = [0; 16];
-    let mut i = 0;
-    while i < 16 {
-        r[i] = ((a.0[i] & b.0[i] as u8) | (!a.0[i] & c.0[i] as u8)) as u8;
-        i += 1;
-    }
-    uint8x16_t(r)
+    vx::vx_ternary(a, b, c, 10)
 }
 
 #[inline(always)]
@@ -2549,14 +2504,9 @@ pub unsafe fn vmvnq_u32(a: uint32x4_t) -> uint32x4_t {
     uint32x4_t(r)
 }
 
+#[inline(always)]
 pub unsafe fn vnegq_f32(a: float32x4_t) -> float32x4_t {
-    let mut r = [0.0; 4];
-    let mut i = 0;
-    while i < 4 {
-        r[i] = f32::from_bits(a.0[i].to_bits() ^ 0x80000000);
-        i += 1;
-    }
-    float32x4_t(r)
+    vx::vx_unary(a, 10, 32, 0)
 }
 
 pub unsafe fn vnegq_s32(a: int32x4_t) -> int32x4_t {

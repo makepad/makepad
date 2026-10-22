@@ -38,8 +38,9 @@ fn mb(v: u64) -> String {
     format!("{:.1}", v as f64 / MB)
 }
 
+/// A signed MB delta as a JSON number (no `+`: JSON has none).
 fn smb(v: i64) -> String {
-    format!("{:+.1}", v as f64 / MB)
+    format!("{:.1}", v as f64 / MB)
 }
 
 // ------------------------------------------------------------------ the timeline ring
@@ -492,7 +493,7 @@ pub fn cmd_memory(req: &Req, out: &mut Out) {
         let mut growth: Vec<(i64, &String)> = snap.nodes.iter().map(|(k, v)| (*v as i64 - p.iter().find(|x| &x.0 == k).map_or(0, |x| x.1 as i64), k)).filter(|x| x.0 >= 16 << 20 && x.1.contains('/')).collect();
         growth.sort_by(|a, b| b.0.cmp(&a.0));
         for (d, k) in growth.iter().take(3) {
-            f.push((*d as u64, format!("{} grew {} MB since the last `memory`", k, smb(*d))));
+            f.push((*d as u64, format!("{} grew +{} MB since the last `memory`", k, smb(*d))));
         }
     }
     let tracked = snap.get("malloc/in use/program (tracked stacks, est.)");

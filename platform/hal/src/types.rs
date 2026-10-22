@@ -902,6 +902,9 @@ impl Draw {
     pub const BLEND: u32 = 4;
     /// the index buffer holds u32 indices (otherwise u16)
     pub const INDEX_U32: u32 = 8;
+    /// triangles drawn as their edges (frame capture's wireframe view; backends without a line
+    /// fill mode draw them filled)
+    pub const WIREFRAME: u32 = 16;
 }
 
 unsafe impl Plain for Draw {}

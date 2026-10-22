@@ -5,7 +5,7 @@
 //! click or a caption drag, as on X11).
 
 use super::super::super::exec::OsCmd;
-use super::{clipboard, dialog, drag, ime, keys, lock, log_enabled, menu, rawinput, Key, Native, Op, Shared, WM_HAL_OPS};
+use super::{clipboard, dialog, drag, identity, ime, keys, lock, log_enabled, menu, rawinput, Key, Native, Op, Shared, WM_HAL_OPS};
 use crate::types::*;
 use crate::Id;
 use makepad_windows_sys::core::PCWSTR;
@@ -222,6 +222,7 @@ pub(super) fn start(s: &'static Shared) -> Result<(), String> {
         }
         s.dispatch.store(dispatch.0 as usize, Ordering::Release);
         s.dpi.store(dpi.to_bits(), Ordering::Release);
+        identity::process_started();
         // the main thread is OLE's STA: drop targets and outgoing drags
         match OleInitialize(std::ptr::null()) {
             Ok(()) => OLE.set(true),
@@ -430,6 +431,7 @@ fn create(s: &'static Shared, sid: u32, id: Id, kind: u32, parent: Id, geom: [f3
     win.dpi.set(dpi_of(hwnd));
     ime::window_created(&win);
     if !win.popup() {
+        identity::window_created(hwnd);
         apply_dark(hwnd);
         if OLE.get() {
             drag::register(&win);
@@ -1060,6 +1062,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             return LRESULT(0);
         }
         WM_DESTROY => {
+            if !w.popup() {
+                identity::window_destroyed(hwnd);
+            }
             rawinput::destroyed(hwnd);
             drag::revoke(&w);
             let s = Shared::global();

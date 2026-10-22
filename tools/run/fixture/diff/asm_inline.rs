@@ -15,6 +15,8 @@ extern "C" fn callee(x: u64) -> u64 { x.wrapping_mul(3).wrapping_add(1) }
 #[cfg(target_arch = "x86_64")]
 mod a {
     use super::*;
+    // the call passes x in rdi on every OS (Windows' C ABI takes it in rcx): a SysV callee
+    extern "sysv64" fn callee_sysv(x: u64) -> u64 { callee(x) }
     #[inline(never)]
     pub fn add(a: u64, b: u64) -> u64 { let r: u64; unsafe { asm!("lea {r}, [{a} + {b}*2 + 7]", a = in(reg) a, b = in(reg) b, r = lateout(reg) r, options(pure, nomem, nostack)) }; r }
     #[inline(never)]
@@ -34,7 +36,7 @@ mod a {
     #[inline(never)]
     pub fn call(x: u64) -> u64 {
         let r: u64;
-        unsafe { asm!("call {f}", f = sym callee, inout("rdi") x => _, out("rax") r, clobber_abi("C")) };
+        unsafe { asm!("call {f}", f = sym callee_sysv, inout("rdi") x => _, out("rax") r, clobber_abi("sysv64")) };
         r
     }
     #[inline(never)]

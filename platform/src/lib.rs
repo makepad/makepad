@@ -57,6 +57,7 @@ pub mod video_encode;
 pub mod video_file;
 
 mod draw_list;
+pub mod draw_owners;
 pub mod retained_instances;
 pub mod recording_buffer;
 pub mod shared_instances;
@@ -135,6 +136,9 @@ pub mod font_policy;
 mod app_main;
 pub mod remote;
 pub mod remote_schema;
+// the profiler stream of a native build (a `makepad run` app serves it from relax inspect)
+#[cfg(all(not(relax), any(target_os = "macos", target_os = "linux")))]
+pub mod prof_native;
 pub mod devtools;
 pub mod pixel_probe;
 pub mod screen_capture;

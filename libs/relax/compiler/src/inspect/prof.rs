@@ -301,7 +301,7 @@ fn pick(sel: &str) -> Box<dyn Fn(&super::threads::Thread) -> bool> {
         "owner" => t.handle != 0 && t.handle == owner,
         "compiler" => t.name.starts_with("run-") || t.handle == owner,
         "program" => !t.name.starts_with("run-") && !t.name.starts_with("gandalf") && t.handle != owner,
-        s => s.split(',').any(|s| s.trim_start_matches('T').parse::<u64>().map_or(false, |id| id == t.os_id) || t.name.starts_with(s)),
+        s => s.split(',').any(|s| super::tid_of(s).is_some_and(|id| id == t.os_id) || t.name.starts_with(s)),
     })
 }
 
@@ -345,12 +345,34 @@ fn report(run: &Run, n: usize, save: bool, out: &mut Out) {
     }
     per.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     let tname = |id: u64| run.threads.iter().find(|t| t.os_id == id).map(|t| t.name.clone()).unwrap_or_default();
-    let threads: Vec<String> = per
+    // CPU time per thread from the OS counters over the window (samples are weighted by CPU
+    // time, but their count is not the CPU time: the sampler backs off on idle threads)
+    let now = super::threads::list();
+    let cpu_ms = |id: u64| -> f64 {
+        let b = run.threads.iter().find(|t| t.os_id == id).map_or(0, |t| t.cpu_ns);
+        now.iter().find(|t| t.os_id == id).map_or(0, |t| t.cpu_ns).saturating_sub(b) as f64 / 1e6
+    };
+    out.line(&format!("{{\"window_s\":{:.2},\"hz\":{},\"samples\":{}}}", run.secs, run.hz, run.samples.len()));
+    let mut by_cpu: Vec<(u64, f64, usize)> = run.threads.iter().map(|t| (t.os_id, cpu_ms(t.os_id), per.iter().find(|x| x.0 == t.os_id).map_or(0, |x| x.1))).filter(|x| x.1 >= 1.0 || x.2 > 0).collect();
+    by_cpu.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(b.2.cmp(&a.2)));
+    let threads: Vec<String> = by_cpu
         .iter()
         .take(12)
-        .map(|(id, c)| format!("{{\"thread\":{},\"id\":\"T{}\",\"cpu_ms\":{:.0},\"pct_of_samples\":{:.1}}}", json_str(&tname(*id)), id, *c as f64 * ms_per, *c as f64 * 100.0 / total as f64))
+        .map(|(id, ms, c)| format!("{{\"thread\":{},\"id\":\"{}\",\"cpu_ms\":{:.0},\"pct_of_samples\":{:.1}}}", json_str(&tname(*id)), super::tid_label(*id), ms, *c as f64 * 100.0 / total as f64))
         .collect();
-    out.line(&format!("{{\"threads\":[{}]}}", threads.join(",")));
+    let rest: f64 = by_cpu.iter().skip(12).map(|x| x.1).sum();
+    // the busiest thread off its CPU: where it waits (the samples only see it running)
+    if let Some(&(id, ms, _)) = by_cpu.first() {
+        let wall = run.secs * 1000.0;
+        if ms < wall * 0.8 && ms > 0.0 {
+            let (seen, n) = off_cpu_stacks(id);
+            if let Some((k, c)) = seen.first() {
+                out.line(&format!("{{\"off_cpu\":{{\"tid\":\"{}\",\"pct\":{:.0},\"stack\":{},\"seen\":{},\"of\":{}}}}}", super::tid_label(id), (wall - ms) * 100.0 / wall.max(1.0), json_str(&short(k, 240)), c, n));
+            }
+        }
+    }
+    out.line(&format!("{{\"threads\":[{}],\"other_threads\":{},\"other_cpu_ms\":{:.0}}}", threads.join(","), by_cpu.len().saturating_sub(12), rest));
+    let _ = ms_per;
     // activity split
     let mut act: Vec<(&str, usize)> = Vec::new();
     for s in &syms {
@@ -368,9 +390,13 @@ fn report(run: &Run, n: usize, save: bool, out: &mut Out) {
     let mut selfc: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut totc: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut at: std::collections::HashMap<String, std::collections::HashMap<String, usize>> = std::collections::HashMap::new();
-    for s in &syms {
+    let mut rep: std::collections::HashMap<String, &super::Frame> = std::collections::HashMap::new();
+    let mut by_thread: std::collections::HashMap<String, std::collections::HashMap<u64, usize>> = std::collections::HashMap::new();
+    for (s, s_os) in syms.iter().zip(run.samples.iter().map(|x| x.os_id)) {
         if let Some(f) = s.first() {
+            rep.entry(key(f)).or_insert(f);
             *selfc.entry(key(f)).or_default() += 1;
+            *by_thread.entry(key(f)).or_default().entry(s_os).or_default() += 1;
             if !f.at.is_empty() {
                 *at.entry(key(f)).or_default().entry(f.at.clone()).or_default() += 1;
             }
@@ -388,8 +414,26 @@ fn report(run: &Run, n: usize, save: bool, out: &mut Out) {
     top.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
     for (k, c) in top.iter().take(n) {
         let line = at.get(*k).and_then(|m| m.iter().max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))).map(|(l, lc)| format!(",\"hottest_line\":{},\"line_pct\":{:.0}", json_str(l), *lc as f64 * 100.0 / **c as f64)).unwrap_or_default();
-        out.line(&format!("{{\"self_pct\":{:.1},\"total_pct\":{:.1},\"fn\":{}{}}}", **c as f64 * 100.0 / total as f64, *totc.get(*k).unwrap_or(c) as f64 * 100.0 / total as f64, json_str(&short(k, 160)), line));
+        // the frame's own fields: the fn, its code (tier), its slot and, for an inlined copy, the
+        // fn whose code it is in
+        let f = rep.get(*k).copied();
+        let mut fields = String::new();
+        if let Some(f) = f {
+            fields.push_str(&format!(",\"in\":{}", json_str(f.module.split(" inlined").next().unwrap_or(""))));
+            if let Some(sl) = f.slot {
+                fields.push_str(&format!(",\"slot\":{}", sl));
+            }
+            if let Some((into, _)) = f.levels.last() {
+                fields.push_str(&format!(",\"inlined_into\":{}", json_str(&short(into, 160))));
+            }
+        }
+        if let Some((t, _)) = by_thread.get(*k).and_then(|m| m.iter().max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))) {
+            fields.push_str(&format!(",\"thread\":{},\"tid\":\"{}\"", json_str(&tname(*t)), super::tid_label(*t)));
+        }
+        let name = f.map_or_else(|| short(k, 160), |f| short(&f.name, 160));
+        out.line(&format!("{{\"self_pct\":{:.1},\"total_pct\":{:.1},\"fn\":{}{}{}}}", **c as f64 * 100.0 / total as f64, *totc.get(*k).unwrap_or(c) as f64 * 100.0 / total as f64, json_str(&name), fields, line));
     }
+    out.line(&format!("{{\"fns_not_shown\":{},\"not_shown_self_pct\":{:.1}}}", top.len().saturating_sub(n), top.iter().skip(n).map(|x| *x.1).sum::<usize>() as f64 * 100.0 / total as f64));
     let mut tops: Vec<(&String, &usize)> = totc.iter().filter(|x| *x.1 * 100 >= total * 10).collect();
     tops.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
     let t: Vec<String> = tops.iter().take(n).map(|(k, c)| format!("[{:.1},{}]", **c as f64 * 100.0 / total as f64, json_str(&short(k, 120)))).collect();
@@ -410,6 +454,36 @@ fn report(run: &Run, n: usize, save: bool, out: &mut Out) {
         }
     }
     let _ = frame_json;
+}
+
+/// Where thread `os_id` is when it is not on a CPU: its stack a few times (15 ms apart), the
+/// distinct tops ("__semwait_signal in std::sys::time::sleep from main (file:line)") most seen first.
+fn off_cpu_stacks(os_id: u64) -> (Vec<(String, usize)>, usize) {
+    let is_it = |t: &super::threads::Thread| t.os_id == os_id;
+    let mut seen: Vec<(String, usize)> = Vec::new();
+    let mut caps_n = 0;
+    for _ in 0..5 {
+        if let Ok(c) = super::capture_all(&is_it) {
+            if let Some(c) = c.first() {
+                let mut p2 = Vec::new();
+                let f: Vec<Vec<u64>> = vec![c.frames.iter().copied().take(24).collect()];
+                let sy = super::symbolise_within(&f, &mut p2, 300);
+                let fr = &sy[0];
+                let top = fr.first().map(|f| f.name.clone()).unwrap_or_default();
+                let prog = fr.iter().find(|f| super::is_program_frame(f)).map(|f| format!(" from {}{}", f.name, if f.at.is_empty() { String::new() } else { format!(" ({})", f.at) })).unwrap_or_default();
+                let jit = fr.iter().find(|f| f.module.starts_with("jit")).map(|f| format!(" in {}", f.name)).unwrap_or_default();
+                let k = format!("{}{}{}", top, jit, prog);
+                caps_n += 1;
+                match seen.iter_mut().find(|x| x.0 == k) {
+                    Some(x) => x.1 += 1,
+                    None => seen.push((k, 1)),
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+    seen.sort_by(|a, b| b.1.cmp(&a.1));
+    (seen, caps_n)
 }
 
 /// `why-slow [s=3]`: ranked causes of where the main thread's time goes: its CPU split (program,
@@ -438,7 +512,9 @@ pub fn cmd_why_slow(req: &Req, out: &mut Out) {
     let mut findings: Vec<(f64, String)> = Vec::new();
     // main thread activity
     let main_samples: Vec<&Vec<super::Frame>> = run.samples.iter().zip(&syms).filter(|(s, _)| s.os_id == main_id).map(|x| x.1).collect();
-    let ms_per = 1000.0 / 250.0;
+    // samples are weighted by CPU time, not one per period: shares of main's samples times its
+    // measured CPU time
+    let ms_per = main_cpu_ms / main_samples.len().max(1) as f64;
     let mut act: Vec<(&str, usize)> = Vec::new();
     for s in &main_samples {
         let a = activity(s);
@@ -451,14 +527,29 @@ pub fn cmd_why_slow(req: &Req, out: &mut Out) {
     findings.push((main_cpu_ms, format!("main thread busy {:.0}% of the time ({:.0} ms CPU in {:.0} ms)", busy_pct, main_cpu_ms, wall_ms)));
     for (a, c) in &act {
         let ms = *c as f64 * ms_per;
-        findings.push((ms, format!("main: {:.0} ms in {}", ms, a)));
+        findings.push((ms * 0.99 - 0.01, format!("main: {:.0} ms in {}", ms, a)));
     }
     // hot program fns on main
     let mut hot: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for s in &main_samples {
         if let Some(f) = s.iter().find(|f| f.module.starts_with("jit")) {
-            *hot.entry(if f.at.is_empty() { f.name.clone() } else { format!("{} ({})", f.name, f.at) }).or_default() += 1;
+            let name = match f.levels.last() {
+                Some((into, _)) if into != &f.name => format!("{} (inlined into {})", f.name, into),
+                _ => f.name.clone(),
+            };
+            *hot.entry(if f.at.is_empty() { name } else { format!("{} ({})", name, f.at) }).or_default() += 1;
         }
+    }
+    // the program fn whose code the samples are in (its inlined copies counted with it)
+    let mut phys: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for s in &main_samples {
+        // the innermost frame whose physical fn (the code it is in) is the program's
+        if let Some(n) = s.iter().filter(|f| f.module.starts_with("jit")).map(|f| f.levels.last().map_or(f.name.clone(), |l| l.0.clone())).find(|n| !super::is_std_fn(n) && !n.starts_with("jit 0x") && !n.starts_with("slot#")) {
+            *phys.entry(n).or_default() += 1;
+        }
+    }
+    if let Some((n, c)) = phys.iter().max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0))) {
+        findings.push((main_cpu_ms - 0.002, format!("main's hottest program fn (with the code inlined into it): {} {:.0} ms = {:.0}% of main's CPU", n, *c as f64 * ms_per, *c as f64 * 100.0 / main_samples.len().max(1) as f64)));
     }
     let mut hv: Vec<(String, usize)> = hot.into_iter().collect();
     hv.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
@@ -484,7 +575,15 @@ pub fn cmd_why_slow(req: &Req, out: &mut Out) {
         }
         let ms = t.cpu_ns.saturating_sub(cpu_of(&cpu0, t.os_id)) as f64 / 1e6;
         if ms > wall_ms * 0.3 {
-            findings.push((ms * 0.3, format!("thread {} (T{}) used {:.0} ms CPU", t.name, t.os_id, ms)));
+            findings.push((ms * 0.3, format!("thread {} ({}) used {:.0} ms CPU", t.name, super::tid_label(t.os_id), ms)));
+        }
+    }
+    // where main is when it is not on a CPU: a few stack captures (the samples only see it running)
+    let off = (wall_ms - main_cpu_ms).max(0.0);
+    if off > wall_ms * 0.2 {
+        let (seen, caps_n) = off_cpu_stacks(main_id);
+        if let Some((k, c)) = seen.first() {
+            findings.push((main_cpu_ms - 0.001, format!("main off CPU {:.0}% of the time ({:.0} ms); its stack then ({} of {} captures): {}", off * 100.0 / wall_ms.max(1.0), off, c, caps_n, short(k, 240))));
         }
     }
     findings.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));

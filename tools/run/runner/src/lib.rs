@@ -368,6 +368,7 @@ fn run_spec(opts: Vec<String>, spec: &fetch::Spec, cached: bool, rest: Vec<Strin
         Ok(s) => s,
         Err(e) => {
             eprintln!("makepad: {e}");
+            relax_compiler::run::report_failed(&e, 1);
             return 1;
         }
     };
@@ -375,12 +376,16 @@ fn run_spec(opts: Vec<String>, spec: &fetch::Spec, cached: bool, rest: Vec<Strin
         Ok(w) => w,
         Err(e) => {
             eprintln!("makepad: {e}");
+            relax_compiler::run::report_failed(&e, 1);
             return 1;
         }
     };
     // and the spec itself (the runner names its own repositories for apps that share them)
     std::env::set_var("MAKEPAD_RUN_SPEC", spec.args().join("\u{1f}"));
-    run_mounted(&workspace, opts, rest)
+    let code = run_mounted(&workspace, opts, rest);
+    // compiler-arena blocks (the boot thread compiles): see boot_package
+    std::mem::forget((home, snap, workspace));
+    code
 }
 
 /// `run [options] [--root <folder>] --src <store>[@<offset>+<len>] <package> ...`: the app from a packed source
@@ -481,7 +486,10 @@ pub fn run_mounted(workspace: &str, opts: Vec<String>, rest: Vec<String>) -> i32
     // so its relax dir is $MAKEPAD_RUN_HOME/target/<hash of the virtual workspace> (relax dirs.rs), one
     // per spec shape (the same across updates)
     apply_run_env(&workspace, &rest[0]);
-    boot_package(opts, rest)
+    let code = boot_package(opts, rest);
+    // compiler-arena blocks (the boot thread compiles): see boot_package
+    std::mem::forget((workspace, own));
+    code
 }
 
 /// Runs `rest` (the package and its flags) with `opts` in the current directory, a checkout:
@@ -508,6 +516,12 @@ fn boot_package(opts: Vec<String>, rest: Vec<String>) -> i32 {
     let mut invocation = vec!["loader".to_string(), "run".to_string()];
     invocation.extend_from_slice(&a);
     let sess = relax_compiler::session_from_env(&invocation);
-    relax_compiler::run::cmd_run(&sess, &a)
+    let code = relax_compiler::run::cmd_run(&sess, &a);
+    // made in the compiler arena (the boot thread's allocations go there), which the zone swap
+    // after the first present destroyed: freeing them on the way out wrote into unmapped chunks
+    // (SIGSEGV at every exit of `makepad` started without arguments, `makepad app <id>` or
+    // `makepad run <git url>`). The callers on this path forget theirs the same way.
+    std::mem::forget((sess, a, invocation));
+    code
 }
 

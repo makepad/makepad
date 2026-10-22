@@ -14,9 +14,20 @@ mod boot_probe;
 pub use relax_boot::Environment as BootEnvironment;
 
 /// The `makepad` binary's additions to the runner.
+/// Before anything else runs: the kernel store, and the host providers `makepad inspect
+/// file=<x.mkcap>` needs in this process too (frame captures replay here).
+fn init() {
+    install_kernel_store();
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        relax_compiler::inspect::register_host_inspect("cap", makepad_hal::inspect::dispatch);
+        relax_compiler::inspect::register_host_commands(makepad_hal::framecap::COMMANDS);
+    }
+}
+
 pub static HOST: relax_runner::Host = relax_runner::Host {
     provenance: env!("MAKEPAD_RUN_PROVENANCE"),
-    init: install_kernel_store,
+    init: init,
     provide: provided,
     // interactive visual iteration: a bounded compile-ahead of what the UI is about to need
     ahead: relax_compiler::options::AheadLevel::Balanced,
