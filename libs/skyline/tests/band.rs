@@ -1023,33 +1023,56 @@ fn size_keeps_the_zones() {
 }
 
 /// Bigger means fewer: at k = 2 the discrete elements are 0.5x k = 1's (+-20 %), at k = 0.5 2x (+-20 %, or held at their
-/// caps): the front treeline's single trees, and the props, every prop at 1 (instances per generator, the distant lights by
-/// their lamps; the bridge, the fair, the churches, the masts and the coast are a few each and are printed only, and the
-/// industry's rows hold at most twelve lots). The city's buildings: `bigger_means_fewer_buildings`.
+/// caps): the front treeline's single trees, and the props, every prop at 1, kind by kind (instances per generator, the
+/// distant lights by their lamps). Each kind with 20 or more at Size 1 is asserted, but for these exemptions (measured
+/// at seed 7, every prop at 1):
+/// - industry at k < 1 (x1.19): its rows hold at most twelve lots (the page's `j` -6..=5), a cap;
+/// - the fair at k < 1 (x1.37): one wheel, one drop tower and one carousel at any Size, and the coaster's track at most
+///   250 size units, so only its booths, pier and coaster chunks multiply;
+/// - the kinds of under 20 at Size 1 (churches 6, masts 4, farms 8, coast 4), printed only: churches and masts are
+///   rounded counts (1-2, 1-4), farms (x0.75 at k = 2, x1.62 at 0.5) and ships (x0.75, x1.50) are a few probabilistic
+///   cells.
+/// Also each kind's size: the mean angular top (top x Size / distance) of the pylons' towers and the street lamps' poles
+/// (on their fixed lines and roads) at k = 2 is 2x k = 1's (+-10 %); the turbines' is printed (x1.81: their farms' sites
+/// are chosen by how much of them shows over the ridges, so at another Size they can stand at other distances).
 #[test]
 fn bigger_means_fewer() {
     use makepad_skyline::props::{self, kit::{Ctx, PropSet, Pt}};
     let mut all = Params::default();
     for (i, d) in makepad_skyline::params::PARAMS.iter().enumerate() { if d.group == "Props" && i != P::PrRefl as usize && i != P::PrRipple as usize { all.v[i] = 1.0; } }
-    let few = ["bridge", "fair", "churches", "masts", "coast"];
+    let set_of = |p: &Params, name: &str| {
+        let (z, mut set) = (Zones::new(p), PropSet::default());
+        (props::GENERATORS.iter().find(|g| g.0 == name).unwrap().1)(&mut Ctx::new(&z, p, &mut set));
+        set
+    };
     let counts = |p: &Params| -> Vec<(&'static str, usize)> {
-        let z = Zones::new(p);
-        props::GENERATORS.iter().map(|(name, g)| {
-            let mut set = PropSet::default();
-            g(&mut Ctx::new(&z, p, &mut set));
+        props::GENERATORS.iter().map(|(name, _)| {
+            let set = set_of(p, name);
             (*name, if *name == "far" { set.parts.iter().filter(|q| q.t == Pt::Light).count() } else { set.inst.len() })
         }).collect()
     };
-    let scaled = |c: &[(&str, usize)]| c.iter().filter(|q| !few.contains(&q.0)).map(|q| q.1).sum::<usize>() as f64;
+    let exempt = |name: &str, k: f64| k < 1.0 && (name == "industry" || name == "fair");
     let trees = |p: &Params| front_trees(p, std::f64::consts::TAU / 16384.0).0;
     let (c1, t1) = (counts(&all), trees(&all));
     println!("Size 1: props {c1:?}, front trees {t1}");
     for (k, want) in [(2.0, 0.5), (0.5, 2.0)] {
         let (ck, tk) = (counts(&sized(&all, k)), trees(&sized(&all, k)));
         let per: Vec<String> = ck.iter().zip(&c1).map(|(a, b)| format!("{} {} -> {} (x{:.2})", a.0, b.1, a.1, a.1 as f64 / b.1.max(1) as f64)).collect();
-        let (rp, rt) = (scaled(&ck) / scaled(&c1), tk as f64 / t1 as f64);
-        println!("Size {k}: {}; the props that scale x{rp:.3}, front trees {t1} -> {tk} (x{rt:.3})", per.join(", "));
-        for (r, what) in [(rp, "props"), (rt, "trees")] { assert!((r / want - 1.0).abs() <= 0.2, "Size {k}: the {what} x{r}, not x{want}"); }
+        let rt = tk as f64 / t1 as f64;
+        println!("Size {k}: {}; front trees {t1} -> {tk} (x{rt:.3})", per.join(", "));
+        assert!((rt / want - 1.0).abs() <= 0.2, "Size {k}: the trees x{rt}, not x{want}");
+        for (a, b) in ck.iter().zip(&c1).filter(|(_, b)| b.1 >= 20) {
+            let r = a.1 as f64 / b.1 as f64;
+            if exempt(a.0, k) { println!("  {} x{r:.2} at Size {k}: exempt (capped)", a.0); continue; }
+            assert!((r / want - 1.0).abs() <= 0.2, "Size {k}: {} x{r}, not x{want}", a.0);
+        }
+    }
+    // a kind's size: the towers' mean angular top
+    for name in ["pylons", "lamps", "turbines"] {
+        let top = |p: &Params| { let s = set_of(p, name); let i: Vec<_> = s.inst.iter().filter(|i| !i.line).collect(); i.iter().map(|i| i.top * p[P::Size] / i.d).sum::<f64>() / i.len() as f64 };
+        let r = top(&sized(&all, 2.0)) / top(&all);
+        println!("{name}: mean angular top x{r:.3} at Size 2");
+        assert!(name == "turbines" || (r / 2.0 - 1.0).abs() <= 0.1, "{name}: the angular top x{r}");
     }
 }
 
