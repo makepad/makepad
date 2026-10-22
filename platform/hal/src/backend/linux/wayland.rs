@@ -314,7 +314,7 @@ impl State {
                 .ok()
                 .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
                 .unwrap_or_else(|| "makepad".into());
-            toplevel.set_app_id(name.clone());
+            toplevel.set_app_id(crate::app_identity().unwrap_or_else(|| name.clone()));
             toplevel.set_title(name);
             if let Some(parent) = parent_key
                 .and_then(|p| self.windows.get(&p))

@@ -431,6 +431,17 @@ impl Syms {
 
 static UNIT_PTR: AtomicPtr<Unit> = AtomicPtr::new(std::ptr::null_mut());
 
+/// SPEC-V: the address an indirect call from unverified code goes to: the unverified-mode twin's entry
+/// when `addr` is the entry of a fn instance or closure, else `addr` itself.
+pub extern "C" fn relax_alias_entry(addr: u64) -> u64 {
+    let up = UNIT_PTR.load(Ordering::Acquire);
+    if up.is_null() { return addr; }
+    let u = unsafe { &*up };
+    let Some(id) = u.thunk_slot(addr) else { return addr };
+    let twin = u.plain_twin(id);
+    if twin == id { addr } else { u.slots.callable(twin) }
+}
+
 pub fn set_unit(u: *mut Unit) {
     UNIT_PTR.store(u, Ordering::SeqCst);
 }

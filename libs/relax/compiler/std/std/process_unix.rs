@@ -439,11 +439,12 @@ impl Command {
 
     /// Under `makepad run` the program's executable is Relax itself: spawning it runs this
     /// program again (Relax's command line up to `--`, then the new arguments). A spawn of the
-    /// loader whose first argument is `run` is a launcher starting another program through it
-    /// (`$MAKEPAD_RUN_LOADER run [flags] <package> ...`): that one runs as written.
+    /// loader whose first argument is `run` or `app` is a launcher starting another program
+    /// through it (`$MAKEPAD_RUN_LOADER run [flags] <package> ...`, `... app <id>`: a launch
+    /// record): that one runs as written.
     fn self_exec_args(&self) -> Option<Vec<OsString>> {
         let pre = crate::env::var("MAKEPAD_RUN_SELF_EXEC").ok()?;
-        if self.args.get(1).is_some_and(|a| a.as_encoded_bytes() == b"run") {
+        if self.args.get(1).is_some_and(|a| matches!(a.as_encoded_bytes(), b"run" | b"app")) {
             return None;
         }
         // inside a build script (MAKEPAD_RUN_AS_RUSTC): its spawns of this executable are RUSTC

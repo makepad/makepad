@@ -11,11 +11,12 @@
 #    arguments, the packs of the runner's git repositories (the service's latest `runner`
 #    release), which makepad run takes instead of downloading them itself.
 # 3. The loader is compiled (`cargo build --release --offline`: the ZIP holds every crate) the
-#    moment Rust and the source are in place, and started: `makepad run` the runner, which
+#    moment Rust and the source are in place, and started with no arguments: it runs the runner, which
 #    downloads the rest. With arguments, the loader runs with them instead.
 #
-# Beside this file it creates only two folders: rust/ (the toolchain) and cache/
-# (everything else: downloads, the loader, its caches and logs). Piped into sh, the folder is
+# Beside this file it creates rust/ (the toolchain), cache/ (downloads, the loader, its caches and
+# logs), apps/ (what `makepad` and `makepad app <id>` run: the runner's and each app's launch
+# record) and runner/ (the runner's own state: licence, catalog, launch logs). Piped into sh, the folder is
 # ~/makepad-builder; $MAKEPAD_LOADER_ROOT overrides either. Run it again at any time: nothing is
 # downloaded or compiled twice. The system needs a C linker (Apple's command line tools; on
 # Linux cc) and, on Linux, OpenSSL 3's development files; it names the packages when missing.
@@ -499,12 +500,12 @@ fi
 
 # --- 4. Start it --------------------------------------------------------------------------------
 # makepad run runs cargo/rustc for build scripts and unit graphs (until it does that itself), so the
-# toolchain stays on PATH for it and every app it starts. makepad run knows only git URLs: with no
-# arguments this script names the runner's: the release service's latest licence-free `runner`
-# release, whose repositories the service serves read-only over git
+# toolchain stays on PATH for it and every app it starts. With no arguments `makepad` runs the
+# runner: its launch record names the runner's repositories, the release service's latest
+# licence-free `runner` release, which the service serves read-only over git
 # ($service/public/git/runner/<repository>.git, one branch per release). The repository at
 # `makepad` is the workspace, the others mount at their folders inside it. makepad run keeps its
-# snapshots in $MAKEPAD_RUN_HOME/cache and, with --cached, starts the last one at once while it
+# stores in $MAKEPAD_RUN_HOME/cache and, with --cached, starts the last one at once while it
 # fetches the new release for the next start. Offline, the release recorded last.
 export MAKEPAD_LOADER_ROOT="$root" MAKEPAD_LOADER_SERVICE="$service"
 if [ $# -gt 0 ]; then
@@ -530,7 +531,13 @@ else
     repos=$(sed -n '2,$p' "$cache/runner/release")
 fi
 git_base=$service/public/git/runner
-set -- run --quiet --cached
+# The runner's launch record ($MAKEPAD_RUN_HOME/apps/runner.launch, one `key<TAB>value` line each):
+# what `makepad` with no arguments runs, from here and from anywhere else (makepad launch.rs).
+launch_dir=$root/apps
+mkdir -p "$launch_dir" || fail "Cannot create $launch_dir"
+record=$launch_dir/runner.launch
+printf 'title\tMakepad\narg\trun\narg\t--quiet\narg\t--cached\n' > "$record.part" || fail "Cannot write $record"
+rm -f "$record.mounts"
 root_repo=
 for entry in $(printf '%s\n' "$repos" | tr ' ' ':'); do
     name=${entry%%:*}
@@ -543,18 +550,22 @@ for entry in $(printf '%s\n' "$repos" | tr ' ' ':'); do
     [ ${#commit} -ne 40 ] || pin=@$commit
     case "$path" in
         makepad) root_repo="$git_base/$name.git#$runner_release$pin" ;;
-        makepad/*) set -- "$@" --mount "${path#makepad/}=$git_base/$name.git#$runner_release$pin" ;;
-        *) fail "The runner release has a repository outside its workspace: $path" ;;
+        makepad/*) printf 'arg\t--mount\narg\t%s\n' "${path#makepad/}=$git_base/$name.git#$runner_release$pin" >> "$record.mounts" ;;
+        *) rm -f "$record.mounts"; fail "The runner release has a repository outside its workspace: $path" ;;
     esac
 done
 [ -n "$root_repo" ] || fail "The runner release has no repository at makepad."
+printf 'arg\t%s\n' "$root_repo" >> "$record.part"
+[ ! -f "$record.mounts" ] || { cat "$record.mounts" >> "$record.part"; rm -f "$record.mounts"; }
+printf 'arg\tmakepad-runner\n' >> "$record.part"
+mv -f "$record.part" "$record" || fail "Cannot write $record"
 stamp start-loader
 # The loader runs as a job; the runner reports its first frame (MAKEPAD_RUN_REPORT_TO), and the row
 # turns to running then. Its own output goes to the log.
 report=$logs/runner.report
 : > "$report"
 export MAKEPAD_RUN_REPORT_TO="$report"
-job run "$makepad" "$@" "$root_repo" makepad-runner >"$logs/makepad.log" 2>&1
+job run "$makepad" >"$logs/makepad.log" 2>&1
 while [ ! -f "$jobs/run.done" ]; do
     if [ -z "$shown" ] && grep -q '^present' "$report" 2>/dev/null; then
         shown=1

@@ -355,6 +355,10 @@ pub fn cached(home: &Path, spec: &Spec) -> Result<Snapshot, String> {
 /// Mounts the snapshot under `<home>/vfs/<label>` (a folder that is never created) and returns
 /// that virtual workspace.
 pub fn mount(home: &Path, snap: &Snapshot) -> Result<String, String> {
+    // the mounted stores (index, file tables) are process state, read by the program for as long
+    // as it runs: kept heap, never the compiler zone (its destroy at the zone swap freed them under
+    // a program reading a file of its workspace after its first present)
+    let _k = relax_compiler::zone_alloc::kept();
     let root = home.join("vfs").join(&snap.label).display().to_string();
     for (dir, path, commit) in &snap.parts {
         let s = relax_compiler::gitstore::Store::open(path).map_err(|e| format!("{}: {e}", path.display()))?.ok_or_else(|| format!("{}: no store", path.display()))?;

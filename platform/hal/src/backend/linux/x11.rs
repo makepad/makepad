@@ -281,7 +281,7 @@ impl App {
                 protocols.as_mut_ptr(),
                 protocols.len() as c_int,
             );
-            let name = std::env::var("RESOURCE_NAME").ok().unwrap_or_else(|| {
+            let name = std::env::var("RESOURCE_NAME").ok().or_else(crate::app_identity).unwrap_or_else(|| {
                 std::env::current_exe()
                     .ok()
                     .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))

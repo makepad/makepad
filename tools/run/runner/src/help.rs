@@ -6,7 +6,7 @@ use std::io::IsTerminal;
 
 /// The word a command line starts with, for every command `makepad` knows (help pages or not).
 pub const COMMANDS: &[&str] = &[
-    "run", "fetch", "pack-src", "inspect", "check", "selftest", "test", "live", "fix", "clean", "serve", "schema", "hover", "definition",
+    "run", "app", "fetch", "pack-src", "inspect", "check", "selftest", "test", "live", "fix", "clean", "serve", "schema", "hover", "definition",
     "parse", "resolve", "file", "std-surface", "lex", "hub", "remote-relay", "remote", "help",
 ];
 
@@ -120,6 +120,7 @@ fn main_page(st: &Style) -> String {
     p.row("run <package>", "Run an app from this workspace");
     p.row("run <git-url> <package>", "Run an app straight from a git repository");
     p.row("run --src <store> <package>", "Run an app from a packed source archive (no checkout)");
+    p.row("app <id>", "Run an app the runner set up (its launch record; macOS: from its own .app)");
     p.row("fetch <git-url>", "Fetch a repository into the local store");
     p.row("pack-src <out> <package>...", "Pack the sources a run of these packages reads into one store");
     p.row("inspect <app> <question>", "Ask a running app about itself (hangs, stacks, events)");

@@ -20,7 +20,25 @@ pub static HOST: relax_runner::Host = relax_runner::Host {
     provide: provided,
     // interactive visual iteration: a bounded compile-ahead of what the UI is about to need
     ahead: relax_compiler::options::AheadLevel::Balanced,
+    default_launch: Some(checkout_runner),
 };
+
+/// `makepad` with no arguments and no `runner` launch record (an installation's entry script
+/// writes one): the runner app of the checkout this binary was built from, when it has one
+/// (apps/commercial/runner), run from that checkout like `makepad run makepad-runner` there.
+fn checkout_runner() -> Option<relax_runner::launch::Launch> {
+    let checkout = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().ok()?;
+    if !checkout.join("apps/commercial/runner/Cargo.toml").is_file() {
+        return None;
+    }
+    Some(relax_runner::launch::Launch {
+        id: "runner".to_string(),
+        title: "Makepad".to_string(),
+        cwd: Some(checkout),
+        env: Vec::new(),
+        args: vec!["run".to_string(), "--quiet".to_string(), "makepad-runner".to_string()],
+    })
+}
 
 /// The Android shell forwards its HAL safe area (logical dp), appearance and
 /// accessibility snapshot here, also before session 0 opens. Desktop uses zero

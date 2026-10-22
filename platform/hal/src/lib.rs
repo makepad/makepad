@@ -1007,6 +1007,16 @@ pub struct ScreenInfo {
 /// (a larger number: call again with room for all). None where there is no window system, or
 /// before it is up. An op: the list lives in the shell's state.
 #[relax_api]
+/// The identity a launcher gave this process (MAKEPAD_APP_ID, set by `makepad app <id>` for the
+/// OS entry of an app: its .desktop file names the same id): `nl.makepad.<id>`, which a Linux
+/// window takes as its Wayland app_id and X11 WM_CLASS so the desktop groups it with its entry.
+/// None without one (the window is named after the executable).
+pub fn app_identity() -> Option<String> {
+    let id = std::env::var("MAKEPAD_APP_ID").ok()?;
+    let ok = !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    ok.then(|| format!("nl.makepad.{id}"))
+}
+
 pub fn hal_screens(out: &mut [ScreenInfo]) -> u32 {
     let all = main_loop::screens();
     for (o, s) in out.iter_mut().zip(&all) {
