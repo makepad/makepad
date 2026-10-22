@@ -150,7 +150,7 @@ impl SceneCtx<'_> {
         vars.set_uniform(cx, live_id!(sea_edge), &[crate::sea_edge_rad(self.p) as f32]);
         vars.set_uniform(cx, live_id!(lake_n), &[self.z.lakes.len() as f32]);
         vars.set_uniform(cx, live_id!(lake_eye), &[(crate::props::kit::EYE * self.p[P::Size]) as f32]);
-        vars.set_uniform(cx, live_id!(wet), &[l.wet]);
+        vars.set_uniform(cx, live_id!(wet), &[l.own_wet()]);
         bind_texture(cx, vars, live_id!(lake_tex), self.lakes);
         bind_texture(cx, vars, live_id!(ring_tex), self.ring);
         bind_texture(cx, vars, live_id!(cols), self.cols);
@@ -258,7 +258,9 @@ impl Skyline {
         let (pr, ci, po) = (&mut self.props, &mut self.city, &mut self.post);
         for v in [&mut self.draw_glow.draw_vars, &mut self.draw_range.draw_vars, &mut self.draw_ground.draw_vars, &mut self.trees.draw_trees.draw_vars,
             &mut ci.draw_city.draw_vars, &mut ci.draw_blit.draw_vars, &mut pr.draw_part.draw_vars, &mut pr.draw_blit.draw_vars,
-            &mut po.draw_final.draw_vars, &mut po.draw_blur.draw_vars, &mut po.draw_water.draw_vars, &mut po.draw_water_day.draw_vars] { v.texture_slots = Default::default(); }
+            &mut po.draw_final.draw_vars, &mut po.draw_final_cut.draw_vars, &mut po.draw_blur.draw_vars, &mut po.draw_water.draw_vars, &mut po.draw_water_day.draw_vars] {
+            v.texture_slots = Default::default();
+        }
     }
 
     /// The zones, the columns for this view and the sky's rings, rebuilt when what they depend on changed.
@@ -337,7 +339,7 @@ impl Skyline {
         let parts = ScenePainter { glow: &mut self.draw_glow, range: &mut self.draw_range, ground: &mut self.draw_ground };
         let mut parts = (parts, &mut self.props, &mut self.city);
         scene.record(cx, view.w, view.h, |cx| draw_scene(cx, &sc, &mut parts));
-        let sea = (0..view.w).any(|x| sc.col(x, 6)[0] < 0.35) || !z.lakes.is_empty() || light.wet > 0.0;
+        let sea = (0..view.w).any(|x| sc.col(x, 6)[0] < 0.35) || !z.lakes.is_empty() || light.own_wet() > 0.0;
         self.mirror = (self.post.wants_mirror(p, light) && sea).then(|| {
             let mut mirror = self.mirror.take().unwrap_or_else(|| SceneTarget::new(cx, "skyline_mirror", true));
             (sc.mirror, sc.view, sc.up_dy) = (true, &mv, (view.horizon - mv.horizon) * view.h as f64);
@@ -386,8 +388,9 @@ fn draw_scene(cx: &mut Cx2d, sc: &SceneCtx, (sp, props, city): &mut (ScenePainte
     props.draw(cx, sc, Bucket::FrontOfCity);
     // the reflection run ends here for the sea and the lakes. A wet ground (`SkyLight::wet`) lies in front of the near rise,
     // so under a wet light it goes on with the front treeline and the rise as they stand above it (to the ranges' two
-    // pixels under the horizon), which the sea and the lakes then mirror too
-    let wet = sc.mirror && sc.light.wet > 0.0;
+    // pixels under the horizon), which the sea and the lakes then mirror too (not over a host's ground, whose own floor
+    // holds its water: `SkyLight::own_wet`)
+    let wet = sc.mirror && sc.light.own_wet() > 0.0;
     if sc.mirror && !wet { return; }
     if let Some(r) = sc.band(band_top(sc, 5), -2.0 * px0) { sp.range.k = 5.0; sp.range.draw_abs(cx, r); }
     // the ground band: from the top of the near rise (raw elevation) down; the sea is all below the horizon

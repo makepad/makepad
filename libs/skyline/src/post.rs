@@ -1,5 +1,6 @@
 //! After the scene: scene + mirror -> water (the light plus what the sea mirrors) -> blur H -> final (blur V, plus the
-//! colour, then the display tone shoulder; an export keeps the raw HDR). A stage that would do nothing is left out;
+//! colour, then the display tone shoulder; an export keeps the raw HDR; over a host's wet ground it leaves the land below
+//! the horizon out, `DrawSkyFinalCut`). A stage that would do nothing is left out;
 //! the final samples the light target the chain ends in. The blur takes the reflections with the lights, as the page's.
 use crate::light::SkyLight;
 use crate::params::{Params, P};
@@ -38,13 +39,37 @@ script_mod! {
         tone: uniform(1.0)
         // the view inside the scene's targets (their margin cropped off): offset, size (uv)
         crop: uniform(vec4(0.0, 0.0, 1.0, 1.0))
+        // the share of the texel at scene uv the strip keeps: all of it (DrawSkyFinalCut's leaves a host's wet land out)
+        keep: fn(uv: vec2) -> float { return 1.0 }
         pixel: fn(){
             let uv = self.crop.xy + self.pos * self.crop.zw; let c = self.scene_color.sample_nearest(uv); var e = self.scene_light.sample_nearest(uv)
             if self.sigma > 0.0 { e = self.gauss(uv, vec2(0.0, 1.0)) }
             var o = c.xyz + e.xyz; let one = vec3(1.0, 1.0, 1.0)
             if self.tone > 0.5 { o = min(o, one) + (one - exp(min(one - o, vec3(0.0, 0.0, 0.0)))) * 0.4 }
-            return vec4(o, c.w)
+            let k = self.keep(uv)
+            return vec4(o * k, c.w * k)
         }
+    }
+
+    // The final over a host's ground under standing water (`SkyLight::leaves_land`): below the horizon the strip keeps only
+    // its open water, as DrawSkyWater reads it (the sea from its distance out, faded from the host's coast by day, and the
+    // lakes), and leaves the rest out (clear): its land and its shore, which are the host's ground (DrawSkyGround). The
+    // host's own floor shows through there, its puddles and what they mirror (the skyline at the mirrored elevation, through
+    // its weather), so the band and the host's floor below it are one floor (plan hdri-6 §5). Kept apart, so every other
+    // final is the shader it was.
+    mod.draw.DrawSkyFinalCut = mod.std.set_type_default() do #(DrawSkyFinalCut::script_shader(vm)){
+        ..mod.draw.DrawSkyFinal,
+        ..mod.draw.SkyScene,
+        keep: fn(uv: vec2) -> float {
+            // the scene's pixel under uv, read as the scene's shaders read their own (`frag`, `view_raw`)
+            let pp = floor(uv * self.view_size) + 0.5; let g = self.col_row(pp.x, 6.0); let a = self.ang_raw(pp.y); let al = 0.0 - a * g.z
+            if al <= 0.0 { return 1.0 }
+            let vr = vec3(fract(self.view_span.x + (pp.x - self.view_pad) / self.view_in().x * self.view_span.y), a, self.px0())
+            let ws = self.water_at(g, self.pix_view(vr).x, al, vr.z * g.z)
+            return max(ws.x * (1.0 - self.coast_at(vr.x) * self.day()), ws.y)
+        }
+        // one target, but SkyScene declares a second output: written too, so no backend leaves it undefined
+        fragment: fn(){ let c = self.pixel(); self.fb0 = c; self.fb1 = c }
     }
 
     // The horizontal step of the blur.
@@ -140,11 +165,13 @@ script_mod! {
 
     mod.draw.SkyPostBase = #(Post::script_component(vm))
     mod.draw.SkyPost = mod.std.set_type_default() do mod.draw.SkyPostBase{
-        draw_final: mod.draw.DrawSkyFinal{} draw_blur: mod.draw.DrawSkyBlur{} draw_water: mod.draw.DrawSkyWater{} draw_water_day: mod.draw.DrawSkyWaterDay{}
+        draw_final: mod.draw.DrawSkyFinal{} draw_final_cut: mod.draw.DrawSkyFinalCut{} draw_blur: mod.draw.DrawSkyBlur{} draw_water: mod.draw.DrawSkyWater{}
+        draw_water_day: mod.draw.DrawSkyWaterDay{}
     }
 }
 
 #[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyFinal { #[deref] pub draw_super: DrawQuad }
+#[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyFinalCut { #[deref] pub draw_super: DrawQuad }
 #[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyBlur { #[deref] pub draw_super: DrawQuad }
 #[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyWater { #[deref] pub draw_super: DrawQuad }
 #[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyWaterDay { #[deref] pub draw_super: DrawQuad }
@@ -177,16 +204,19 @@ pub fn blur_sigma(p: &Params, v: &ViewSpec) -> f64 {
 
 #[derive(Script, ScriptHook)]
 pub struct Post {
-    #[live] pub draw_final: DrawSkyFinal, #[live] pub draw_blur: DrawSkyBlur, #[live] pub draw_water: DrawSkyWater, #[live] pub draw_water_day: DrawSkyWaterDay,
-    /// The water and blur targets; what the last picture ran: the water, the blur's sigma (px, 0 none); the scene's margin (px).
-    #[rust] pub water: Option<SceneTarget>, #[rust] pub blur: Option<SceneTarget>, #[rust] ran: (bool, f64), #[rust] margin: usize,
+    #[live] pub draw_final: DrawSkyFinal, #[live] pub draw_final_cut: DrawSkyFinalCut, #[live] pub draw_blur: DrawSkyBlur, #[live] pub draw_water: DrawSkyWater,
+    #[live] pub draw_water_day: DrawSkyWaterDay,
+    /// The water and blur targets; what the last picture ran: the water, the blur's sigma (px, 0 none); the scene's margin (px);
+    /// whether its final leaves a host's wet land out (`SkyLight::leaves_land`).
+    #[rust] pub water: Option<SceneTarget>, #[rust] pub blur: Option<SceneTarget>, #[rust] ran: (bool, f64), #[rust] margin: usize, #[rust] cut: bool,
 }
 
 impl Post {
     /// Whether the scene list also runs mirrored (the reflections): the page's rule, some strength and some sea, or lakes;
-    /// or a wet ground (`SkyLight::wet`), which mirrors at full strength (render.rs also asks for water in the view).
+    /// or a wet ground the strip draws itself (`SkyLight::own_wet`), which mirrors at full strength (render.rs also asks for
+    /// water in the view).
     pub fn wants_mirror(&self, p: &Params, light: &SkyLight) -> bool {
-        (p[P::PrRefl] > 0.0 && (p[P::Land] < 0.999 || p[P::PrLake] > 0.0)) || light.wet > 0.0
+        (p[P::PrRefl] > 0.0 && (p[P::Land] < 0.999 || p[P::PrLake] > 0.0)) || light.own_wet() > 0.0
     }
 
     /// The view to draw the scene at for `v` under `light`: widened by the blur's margin, so lights at its edges blur with
@@ -226,6 +256,10 @@ impl Post {
             t.record(cx, v.w, v.h, |cx| d.draw_abs(cx, full));
             cx.attach_child_pass(head, t.pass.draw_pass_id(), None);
         }
+        // over a host's wet ground the final leaves the land below the horizon out, reading the scene's columns as the
+        // scene's shaders do (`DrawSkyFinalCut`)
+        self.cut = sc.light.leaves_land();
+        if self.cut { sc.set_uniforms(cx, &mut self.draw_final_cut.draw_vars); }
         self.ran = (out.mirror.is_some(), sigma);
     }
 
@@ -236,12 +270,13 @@ impl Post {
         let t = if sigma > 0.0 { self.blur.as_ref() } else if water { self.water.as_ref() } else { None };
         let (pass, light) = t.map_or((&out.scene.pass, &out.scene.light), |t| (&t.pass, &t.light));
         cx.make_child_pass(pass);
-        let vars = &mut self.draw_final.draw_vars;
+        let d: &mut DrawQuad = if self.cut { &mut self.draw_final_cut } else { &mut self.draw_final };
+        let vars = &mut d.draw_vars;
         for (name, tex) in [(live_id!(scene_color), &out.scene.color), (live_id!(scene_light), light)] { bind_texture(cx, vars, name, tex); }
         vars.set_uniform(cx, live_id!(tone), &[if tone { 1.0 } else { 0.0 }]);
         vars.set_uniform(cx, live_id!(sigma), &[sigma as f32]);
         let (m, w, h) = (self.margin as f32, out.view.w as f32, out.view.h as f32);
         vars.set_uniform(cx, live_id!(crop), &[m / w, m / h, 1.0 - 2.0 * m / w, 1.0 - 2.0 * m / h]);
-        self.draw_final.draw_abs(cx, rect);
+        d.draw_abs(cx, rect);
     }
 }

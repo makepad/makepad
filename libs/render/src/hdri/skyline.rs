@@ -398,9 +398,12 @@ pub struct SkylineLight {
     pub sea_low: [[f32; 3]; RING],
     pub sea_high: [[f32; 3]; RING],
     /// The puddles' mean share of the map's ground (`Weather::puddle_share`; 0 without a wet ground, 1 at Wet ground 1.00).
+    /// Above 0 the strip leaves its land below the horizon to the map's own floor, which holds the water there, its puddles
+    /// and what they mirror (makepad_skyline's `SkyLight::leaves_land`, over the map's ground).
     pub wet: f32,
-    /// The map's ground ring as `ground_ring`, read with no puddles (`Weather::ground_damp`): what the strip's land takes when
-    /// it draws the water itself (`SkyLight::wet`). `ground_ring` exactly when the ground is dry.
+    /// The map's ground ring as `ground_ring`, read with no puddles (`Weather::ground_damp`): what the strip's own ground
+    /// still shows under a wet ground (its near rise above the horizon, its lakes' bottoms), the land below the horizon being
+    /// the map's. `ground_ring` exactly when the ground is dry.
     pub ground_damp: [[f32; 3]; RING],
 }
 
@@ -1126,6 +1129,37 @@ mod tests {
         assert!(close3(mirrored, light * fresnel, 1e-3), "the puddle shows {mirrored:?}, the light by Fresnel {:?}", light * fresnel);
         let aside = dir_at_u(u + 10.0 / 360.0, -el);
         assert_eq!(city.radiance(aside), plain.radiance(aside), "10 degrees round the turn the puddle shows none of it");
+    }
+
+    /// Under rain a puddle mirrors the city as the rain shows it (plan hdri-6 §5: weather is still drawn over everything).
+    /// The rain kind at Wet ground 1.00, the night, no light layers, the band of `a_puddle_mirrors_a_city_light_above_it`:
+    /// above the horizon the map shows the light through the veil along its direction; the puddle 12 degrees down shows that,
+    /// by the water's Fresnel term, through the veil along its own direction once more. So where the rain hides the city
+    /// the puddles hide it too; over a host's wet ground they are the only water below the band's sea and lakes (the strip
+    /// leaves its land to them, makepad_skyline's `SkyLight::leaves_land`).
+    #[test]
+    fn under_rain_a_puddle_mirrors_the_city_as_the_rain_shows_it() {
+        let mut p = HdriParams { lights: vec![], ..HdriParams::default() };
+        sun_at(&mut p, -20.0, 0.0);
+        p.sky.weather = Some(WeatherParams { kind: "rain".to_string(), wet_ground: 1.0, ..WeatherParams::default() });
+        let (w, h, top, bottom) = (360usize, 24usize, 20.0f32, -4.0f32);
+        let row = ((top - 12.0) / (top - bottom) * h as f32 - 0.5).round() as usize;
+        let el = top - (row as f32 + 0.5) * (top - bottom) / h as f32;
+        let mut texels = vec![[0.0f32; 4]; w * h];
+        texels[row * w + 90] = [40.0, 30.0, 20.0, 0.0];
+        let (q, images) = with_band(&p, SkylineBand { w, h, texels, top_deg: top, bottom_deg: bottom });
+        let (plain, city) = (Env::new(&p), Env::new_with(&q, &images));
+        let u = 90.5 / w as f32;
+        let (up, down) = (dir_at_u(u, el), dir_at_u(u, -el));
+        // what passes the map's veil along a direction (it is affine and grey)
+        let through = |d: Vec3f| veil_of(&city, d, Vec3f::all(1.0)) - veil_of(&city, d, Vec3f::default());
+        let (light, t_up, t_down) = (city.radiance(up) - plain.radiance(up), through(up), through(down));
+        println!("through the rain: {:.3} up, {:.3} down", t_up.x, t_down.x);
+        assert!(light.x > 0.0 && t_up.x < 0.9, "the premise: the rain veils the light above the horizon: {light:?} through {t_up:?}");
+        let fresnel = 0.02 + 0.98 * (1.0 - el.to_radians().sin()).powi(5);
+        let mirrored = city.radiance(down) - plain.radiance(down);
+        let want = vec3f(light.x * t_down.x, light.y * t_down.y, light.z * t_down.z) * fresnel;
+        assert!(close3(mirrored, want, 1e-3), "the puddle shows {mirrored:?}, the light as the rain shows it by Fresnel {want:?}");
     }
 
     /// A caster's bloom asks the base for its fine detail (`Env::base_peak`). A city light a puddle mirrors is as fine as

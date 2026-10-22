@@ -1503,3 +1503,50 @@ fn a_wet_ground_mirrors_only_what_stands_above_it() {
         if day { assert!(n > 500 && got >= WET_DAY_SHARE as f64 * want, "{name}: the wet ground mirrors {got} of {want} ({n} texels)"); }
     }
 }
+
+/// Plan hdri-6 §5, "so the band and the map's floor below it agree": over a host's ground (`host_ground`) under standing
+/// water (`wet` > 0) the strip leaves its land and its shore below the horizon to the host (`SkyLight::leaves_land`), whose
+/// own floor holds the water there, its puddles and what they mirror (the skyline at the mirrored elevation, through the
+/// host's weather): the band is clear there, all four channels 0, so the host's floor shows through it as it does below it.
+/// Everything else is the host's dry band, bit for bit: the sky, the city, the near rise above the horizon, the sea from its
+/// distance out and the lakes (which keep their own Water reflections), by day and at night (`SkyLight::plan`, the decode).
+/// The app's scene: a shore in front of the sea (Sea distance 0.3) and lakes (kept to their edge's share).
+#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn over_a_hosts_wet_ground_the_band_leaves_its_land_to_the_host() {
+    let mut p = Params::default();
+    for (k, v) in [(P::SeaD, 0.3), (P::PrLake, 1.0)] { p.set(k as usize, v); }
+    let (z, edge, w) = (Zones::new(&p), makepad_skyline::sea_edge_rad(&p), 2048usize);
+    let (px, eye) = (std::f64::consts::TAU / w as f64, makepad_skyline::props::kit::EYE * p[P::Size]);
+    assert!(!z.lakes.is_empty(), "the premise: lakes at seed 7");
+    // the coast the day's sea fades into over a host's ground (`coast_at`: the ring's two nearest entries)
+    let coast = makepad_skyline::coast_ring(|u| z.land(u));
+    let off_coast = |u: f64| { let i = (u * RING as f64 - 0.5).floor() as i64; [i, i + 1].iter().all(|&i| coast[i.rem_euclid(RING as i64) as usize] == 0.0) };
+    let ground = [0.30f32, 0.20, 0.10];
+    let noon_host = SkyLight { host_ground: true, ground: [ground; RING], ..noon([1.2, 1.3, 1.5]) };
+    for (name, light) in [("noon", noon_host), ("night", generator_light(-20.0))] {
+        let (dry, wet) = (render_planned(&p, w, &light), render_planned(&p, w, &SkyLight { wet: 0.5, ..light.clone() }));
+        // texels left clear, and kept as the dry band: above the horizon, the sea, the lakes; the first miss of each
+        let (mut clear, mut above, mut sea, mut lake) = ((0usize, None), (0usize, None), (0usize, None), (0usize, None));
+        let tally = |n: &mut (usize, Option<String>), ok: bool, what: String| if ok { n.0 += 1 } else if n.1.is_none() { n.1 = Some(what) };
+        for y in 0..dry.h {
+            let al = -row_el(&p, &dry, y);
+            for x in 0..w {
+                let (i, u) = (y * w + x, (x as f64 + 0.5) / w as f64);
+                let (d, t, land) = (dry.texels[i], wet.texels[i], z.land(u));
+                let what = format!("x {x}, {:.2} deg: wet {t:?}, dry {d:?}", -al.to_degrees());
+                if al < -1.5 * px { tally(&mut above, t == d, what); continue; }
+                if al <= 1.5 * px { continue; }
+                let in_lake = makepad_skyline::lakes::cover(&z.lakes, u, al, px, eye);
+                if (land > 0.95 && in_lake == 0.0) || (land < 0.05 && al > edge + 1.5 * px) { tally(&mut clear, t == [0.0; 4], what); }
+                else if land < 0.05 && al < edge - 1.5 * px && off_coast(u) { tally(&mut sea, t == d, what); }
+                // (a lake keeps its own share of the texel: the shader's cover is the CPU's to 0.1 %, `the_shaders_lakes_are_the_cpus`)
+                else if land > 0.95 && in_lake >= 0.999 { tally(&mut lake, (0..4).all(|c| (t[c] - d[c]).abs() <= 1e-3 * d[c].abs().max(1.0)), what); }
+            }
+        }
+        println!("{name}: {} texels of land and shore left clear, {} above the horizon, {} of sea, {} of lakes kept", clear.0, above.0, sea.0, lake.0);
+        for (what, n, least) in [("land and shore left clear", clear, 2000), ("above the horizon as dry", above, 20000), ("sea as dry", sea, 200), ("lakes as dry", lake, 10)] {
+            assert!(n.1.is_none(), "{name}: {what} fails at {}", n.1.unwrap());
+            assert!(n.0 >= least, "{name}, the premise: {} texels of {what}", n.0);
+        }
+    }
+}

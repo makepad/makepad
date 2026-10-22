@@ -516,9 +516,12 @@ impl Env {
     /// - `wet` and `ground_damp`: the puddles' mean share of the map's ground
     ///   (`Weather::puddle_share`, 0 on a dry ground or without a sky) and the
     ///   ground ring read with no puddles (`Weather::ground_damp`; the ground
-    ///   ring itself when `wet` is 0): the strip lays its own water over its
-    ///   land (`SkyLight::wet`, plan hdri-6 §5), so the puddles are not
-    ///   mirrored twice.
+    ///   ring itself when `wet` is 0): under a wet ground the strip leaves its
+    ///   land below the horizon to this map's own floor, its puddles and what
+    ///   they mirror (`SkyLight::wet` over a host's ground, plan hdri-6 §5),
+    ///   so the band and the floor below it are one floor and nothing is
+    ///   mirrored twice; the damp ring is what the strip's own ground still
+    ///   shows (its near rise, its lakes' bottoms).
     /// - `sun_rgb`: the sun's irradiance through the cover the key is dimmed
     ///   by (`cover_toward`), times the key's own fade over the horizon, / pi:
     ///   so under a closed deck the strip is as unlit by the sun as the key.
@@ -553,7 +556,7 @@ impl Env {
             }
             None => (ring_low, ring_high),
         };
-        // The strip's wet ground (plan hdri-6 §5): the puddles' share and the ground between them; the strip draws the water.
+        // The strip's wet ground (plan hdri-6 §5): the puddles' share and the ground between them; the map's floor holds the water.
         let wet = match &self.weather { Some(weather) if self.atmo.is_some() => weather.puddle_share(), _ => 0.0 };
         let ground_damp = if wet > 0.0 { ring_seen(-skyline::GROUND_RING_DEG, Sampling { damp_ground: true, ..at }) } else { ground_ring };
         let Some(atmo) = &self.atmo else {

@@ -88,14 +88,14 @@ fn line_range(i: &Instance) -> ([f64; 2], f64, f64, f64, f64) {
 }
 
 /// Whether the reflection run sees instance `i` from the mirrored eye (the eye as far under the water as it is over it):
-/// the props layer (slot 2) as the sea and the lakes mirror it, standing on the water. Under a wet light
-/// (`SkyLight::wet`) a prop on land is seen from the eye itself: the wet ground lies in front of the near rise, behind
-/// which the props on land stand, and mirrors them at the mirrored angle with the rise and the treeline (`draw_scene`).
+/// the props layer (slot 2) as the sea and the lakes mirror it, standing on the water. Under a wet ground the strip draws
+/// itself (`SkyLight::own_wet`), a prop on land is seen from the eye itself: the wet ground lies in front of the near rise,
+/// behind which the props on land stand, and mirrors them at the mirrored angle with the rise and the treeline (`draw_scene`).
 fn mirrored_eye(sc: &SceneCtx, i: &Instance) -> bool {
     if !sc.mirror || i.slot != 2 { return false; }
     // the land share where the prop stands (a plane's bearing, a line's middle); from 0.35 up no sea (`water_at`)
     let u = if i.line { let m = 0.5 * i.len; fract((i.o[1] + m * i.ang.sin()).atan2(i.o[0] + m * i.ang.cos()) / TAU) } else { i.uc };
-    !(sc.light.wet > 0.0) || sc.z.land(u) < 0.35
+    !(sc.light.own_wet() > 0.0) || sc.z.land(u) < 0.35
 }
 
 /// The pass rects of instance i's draw in window `win`: its azimuth extent (the page's bucket extent) and its height band

@@ -17,7 +17,8 @@ fn post_shaders_compile_for_every_backend() {
         shaders::script_mod(vm);
         post::script_mod(vm);
         let broken = vm.eval(script! { use mod.draw.*; DrawQuad{ pixel: fn(){ return self.no_such_field } } });
-        let shaders = [("final", vm.eval(script! { mod.draw.DrawSkyFinal })), ("blur", vm.eval(script! { mod.draw.DrawSkyBlur })), ("water", vm.eval(script! { mod.draw.DrawSkyWater })), ("broken", broken)];
+        let shaders = [("final", vm.eval(script! { mod.draw.DrawSkyFinal })), ("final_cut", vm.eval(script! { mod.draw.DrawSkyFinalCut })), ("blur", vm.eval(script! { mod.draw.DrawSkyBlur })),
+            ("water", vm.eval(script! { mod.draw.DrawSkyWater })), ("broken", broken)];
         for (name, shader) in shaders {
             let shader = shader.as_object().unwrap_or_else(|| panic!("{name}: no shader object"));
             for (backend, gles) in [(ShaderBackend::Metal, false), (ShaderBackend::Hlsl, false), (ShaderBackend::Glsl, true)] {
