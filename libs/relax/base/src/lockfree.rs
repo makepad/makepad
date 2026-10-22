@@ -106,6 +106,16 @@ impl Sleepers {
         self.idle.fetch_and(!bit, Ordering::SeqCst);
     }
 
+    /// `sleep` that also returns after `timeout` (a worker that polls besides its wakeups).
+    pub fn sleep_timeout(&self, k: usize, timeout: std::time::Duration, ready: impl Fn() -> bool) {
+        let bit = 1u64 << k;
+        self.idle.fetch_or(bit, Ordering::SeqCst);
+        if !ready() {
+            std::thread::park_timeout(timeout);
+        }
+        self.idle.fetch_and(!bit, Ordering::SeqCst);
+    }
+
     /// Wakes one sleeping worker, if any. One SeqCst load when none sleeps (the count stub's path).
     #[inline]
     pub fn wake_one(&self) {

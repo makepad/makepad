@@ -28,7 +28,7 @@ static MAIN_COMPILE_NS: AtomicU64 = AtomicU64::new(0);
 static LAST_FRAME: AtomicU64 = AtomicU64::new(0);
 static LOGGED: AtomicU64 = AtomicU64::new(0);
 /// the window's main-thread compiles by how they were satisfied (jit::MAIN_HOW_NAMES): count, wall ns
-static HOW: [[AtomicU64; 2]; 6] = [const { [const { AtomicU64::new(0) }; 2] }; 6];
+static HOW: [[AtomicU64; 2]; 7] = [const { [const { AtomicU64::new(0) }; 2] }; 7];
 static SUMMARY_DONE: AtomicBool = AtomicBool::new(false);
 /// the owner's service in the window by class (ns), and of it the requests a program thread's
 /// request was queued behind when they ended (ns)
@@ -355,8 +355,8 @@ pub(crate) fn ahead_over() {
 
 fn ahead_line() -> String {
     let ah = |i: usize| crate::jit::AHEAD_STATS[i].load(Relaxed).saturating_sub(crate::jit::AHEAD_AT_PRESENT[i].load(Relaxed));
-    format!("makepad-run post-present ahead since the present: {} bodies checked ({} taken by builds, {} dropped untaken at burst ends, {} late: their build had begun), cpu off the UI thread {:.0} ms, on it {:.0} ms; {} lowered ({} taken), cpu {:.0} ms",
-        ah(0), ah(1), crate::jit::AHEAD_DROPPED.load(Relaxed), crate::jit::AHEAD_LATE.load(Relaxed), ms(ah(4)), ms(ah(3)), ah(5), ah(6), ms(ah(7)))
+    format!("makepad-run post-present ahead since the present: {} bodies checked ({} taken by builds, {} dropped untaken at burst ends, {} late: their build had begun), cpu off the UI thread {:.0} ms, on it {:.0} ms; {} lowered ({} taken), cpu {:.0} ms; {}",
+        ah(0), ah(1), crate::jit::AHEAD_DROPPED.load(Relaxed), crate::jit::AHEAD_LATE.load(Relaxed), ms(ah(4)), ms(ah(3)), ah(5), ah(6), ms(ah(7)), crate::jit::bmemo::line())
 }
 
 /// The window's sums (one line).
@@ -377,7 +377,7 @@ pub fn summary() -> String {
         ms(c(5)),
         ms(c(6)),
         ms(c(7)),
-        (0..6).map(|k| format!("{} {} ({:.0} ms)", crate::jit::MAIN_HOW_NAMES[k], HOW[k][0].load(Relaxed), ms(HOW[k][1].load(Relaxed)))).collect::<Vec<_>>().join(", "),
+        (0..7).map(|k| format!("{} {} ({:.0} ms)", crate::jit::MAIN_HOW_NAMES[k], HOW[k][0].load(Relaxed), ms(HOW[k][1].load(Relaxed)))).collect::<Vec<_>>().join(", "),
         OWNER[0].load(Relaxed),
         ms(OWNER[1].load(Relaxed)),
         ms(RT[1].load(Relaxed)),

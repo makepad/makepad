@@ -414,6 +414,29 @@ pub fn served_during(t0: u64, t1: u64) -> String {
 }
 
 thread_local! {
+    /// rule I-CALL (OWNERARCH.DESIGN.md §3.2): this thread runs the path from a JIT call to existing
+    /// code (rt_hot), where nothing may wait: a request to the owner there is a bug (debug check)
+    static NO_WAIT: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Marks the calling thread's I-CALL path (rt_hot) while it lives.
+pub struct NoWait(bool);
+
+impl NoWait {
+    #[inline]
+    pub fn enter() -> NoWait {
+        NoWait(NO_WAIT.try_with(|n| n.replace(true)).unwrap_or(false))
+    }
+}
+
+impl Drop for NoWait {
+    #[inline]
+    fn drop(&mut self) {
+        let _ = NO_WAIT.try_with(|n| n.set(self.0));
+    }
+}
+
+thread_local! {
     static IS_OWNER: Cell<bool> = const { Cell::new(false) };
     /// requests this thread waits for (0: none): a watchdog kick then is ignored
     static IN_CALL: Cell<u32> = const { Cell::new(0) };
@@ -821,6 +844,7 @@ pub fn call_within<R>(class: Class, ms: u64, f: impl FnOnce() -> R) -> Option<R>
 
 fn request<R>(site: &'static std::panic::Location<'static>, class: Class, quick: bool, deadline: Option<std::time::Instant>, f: impl FnOnce() -> R) -> Option<R> {
     forbid_in_publish("a request", u32::MAX);
+    debug_assert!(!NO_WAIT.try_with(|n| n.get()).unwrap_or(false), "makepad: a request to the compiler's owner on a JIT call's path (rule I-CALL: rt_hot waits for nothing)");
     if is_owner() || CHILD.load(Ordering::Relaxed) {
         return Some(f());
     }

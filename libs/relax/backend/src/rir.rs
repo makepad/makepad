@@ -263,7 +263,7 @@ pub struct VReg(pub u32);
 
 /// Integer type of an operation: width in bits and signedness. Narrow values are
 /// kept extended to 64 bits in registers (sign- or zero-extended by type).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct IntTy {
     pub bits: u8,
     pub signed: bool,
@@ -274,7 +274,7 @@ pub const U64: IntTy = IntTy { bits: 64, signed: false };
 pub const I32: IntTy = IntTy { bits: 32, signed: true };
 pub const U32: IntTy = IntTy { bits: 32, signed: false };
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum IOp {
     Add,
     Sub,
@@ -308,7 +308,7 @@ pub enum Cond {
     Ge,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum FOp {
     Add,
     Sub,
@@ -323,7 +323,7 @@ pub enum FOp {
     MaxGt,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum FUn {
     Neg,
     Abs,
@@ -336,7 +336,7 @@ pub enum FUn {
     RoundAway,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Conv {
     /// re-extend an integer to a (narrower or wider) integer type
     IntToInt(IntTy),
@@ -706,7 +706,7 @@ pub enum Reloc {
     Value(u64),
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Hash, Debug)]
 pub enum Callee {
     /// through the function table slot (live mode) / direct (AOT)
     Fn(u32),
@@ -736,7 +736,7 @@ pub const ASM_PRESERVES_FLAGS: u32 = 32;
 
 /// An `asm!` block assembled at lowering (`asm` module): its machine code, with its operands
 /// in fixed registers.
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Hash, Debug)]
 pub struct AsmBlock {
     pub code: Vec<u8>,
     /// fields that hold a symbol's value: (offset in `code`, encoding, symbol)
@@ -755,7 +755,7 @@ pub struct AsmBlock {
 }
 
 /// An aggregate passed or returned by value under the C ABI.
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Hash, Debug)]
 pub struct CAgg {
     pub size: u32,
     pub align: u32,
@@ -764,7 +764,7 @@ pub struct CAgg {
     pub fields: Vec<(u32, Mem)>,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Hash, Debug)]
 pub enum CArg {
     /// the vreg holds the value (integers extended to 64 bits as everywhere in RIR)
     Scalar(Mem),
@@ -773,7 +773,7 @@ pub enum CArg {
 }
 
 /// C-family calling convention, separate from ABI identity and unwinding.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[repr(u8)]
 pub enum CConv { Host, SysV64, Win64 }
 
@@ -791,7 +791,7 @@ impl CConv {
 /// ABI argument vregs: [result address if `ret` is Some] then one per `args` entry.
 /// With an aggregate return the result is written through that address and the call
 /// has no result vregs; scalar results come back in the call's result vregs as usual.
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Hash, Debug)]
 pub struct CSig {
     pub conv: CConv,
     pub args: Vec<CArg>,
@@ -807,7 +807,7 @@ pub struct CSig {
     pub unwinds: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum AtomOrd {
     Relaxed,
     Acquire,
@@ -820,7 +820,7 @@ pub enum AtomOrd {
     Volatile,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum RmwOp {
     Xchg,
     Add,
@@ -835,7 +835,7 @@ pub enum RmwOp {
     UMin,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Hash, Debug)]
 pub enum Inst {
     Iconst(VReg, i64),
     Fconst(VReg, u64, bool),
@@ -936,7 +936,7 @@ pub enum Inst {
     VX3(VX, VReg, VReg, VReg, VReg),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Hash, Debug)]
 pub enum Term {
     Jump(u32),
     Branch(VReg, u32, u32),
@@ -958,7 +958,7 @@ pub enum Term {
 }
 
 /// The table of a `Term::Switch`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash)]
 pub struct SwitchTable {
     pub min: i64,
     pub targets: Vec<u32>,
@@ -1226,7 +1226,7 @@ pub struct Func {
 }
 
 /// A named local of the source and its storage (`Func::dbg`).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash)]
 pub struct DbgVar {
     /// its fn's inline context (`pos_ctx`): 0 the function itself, k an inlined copy
     pub ctx: u16,
@@ -1238,7 +1238,7 @@ pub struct DbgVar {
 }
 
 /// Storage of a `DbgVar`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash)]
 pub enum DbgLoc {
     /// one vreg per layout leaf (in leaf order); `DBG_NONE` = that leaf is no longer held
     Regs(Vec<VReg>),
@@ -1251,7 +1251,162 @@ pub enum DbgLoc {
 /// A `DbgLoc::Regs` leaf whose value no vreg holds any more.
 pub const DBG_NONE: VReg = VReg(u32::MAX);
 
+/// A function slot an `Inst` names (`Callee::Fn` / `Callee::CFn` / `FnAddr`), in place.
+pub fn inst_fn_slot_mut(i: &mut Inst) -> Option<&mut u32> {
+    match i {
+        Inst::Call(Callee::Fn(c) | Callee::CFn(c, _), _, _) | Inst::FnAddr(_, c) => Some(c),
+        _ => None,
+    }
+}
+
 impl Func {
+    /// Every function-slot id the body names, in place: calls and fn addresses, `sret_callees`,
+    /// the `nocapture` facts' callees and the `nounwind_inputs`. Symbols (`Sym`) are not slots,
+    /// even those whose value is a slot's thunk. Relax's back-end memo renames slots through this
+    /// (a body equal to another one up to a renaming of its slots compiles to the same code with
+    /// the same renaming of its relocations).
+    pub fn fn_slots_mut(&mut self, f: &mut dyn FnMut(&mut u32)) {
+        for b in &mut self.blocks {
+            for i in &mut b.insts {
+                if let Some(c) = inst_fn_slot_mut(i) {
+                    f(c);
+                }
+            }
+        }
+        for c in &mut self.sret_callees {
+            f(c);
+        }
+        for (c, _, _) in &mut self.nocapture {
+            if let Callee::Fn(c) | Callee::CFn(c, _) = c {
+                f(c);
+            }
+        }
+        for (c, _) in &mut self.nounwind_inputs {
+            f(c);
+        }
+    }
+
+    /// Structural equality of everything but `name`, with the function slots each side names
+    /// compared through its own map (`ma` for self, `mb` for `o`; block counts by bits). With
+    /// injective maps: the bodies are equal up to a renaming of their slots.
+    pub fn same_body_mapped(&self, ma: &mut dyn FnMut(u32) -> u32, o: &Func, mb: &mut dyn FnMut(u32) -> u32) -> bool {
+        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline, full, owned, nonnull, ranged, dyn_calls, naked, inl, dbg } = self;
+        let callee_eq = |a: &Callee, ma: &mut dyn FnMut(u32) -> u32, b: &Callee, mb: &mut dyn FnMut(u32) -> u32| match (a, b) {
+            (Callee::Fn(x), Callee::Fn(y)) => ma(*x) == mb(*y),
+            (Callee::CFn(x, xs), Callee::CFn(y, ys)) => ma(*x) == mb(*y) && xs == ys,
+            (Callee::Fn(_) | Callee::CFn(..), _) | (_, Callee::Fn(_) | Callee::CFn(..)) => false,
+            _ => a == b,
+        };
+        let inst_eq = |a: &Inst, ma: &mut dyn FnMut(u32) -> u32, b: &Inst, mb: &mut dyn FnMut(u32) -> u32| match (a, b) {
+            (Inst::Call(x, xa, xr), Inst::Call(y, ya, yr)) => xa == ya && xr == yr && callee_eq(x, ma, y, mb),
+            (Inst::FnAddr(v, x), Inst::FnAddr(w, y)) => v == w && ma(*x) == mb(*y),
+            (Inst::FnAddr(..), _) | (_, Inst::FnAddr(..)) => false,
+            _ => a == b,
+        };
+        blocks.len() == o.blocks.len()
+            && blocks.iter().zip(&o.blocks).all(|(a, b)| {
+                let Block { insts, pos, term, term_pos, count } = a;
+                insts.len() == b.insts.len()
+                    && insts.iter().zip(&b.insts).all(|(x, y)| inst_eq(x, ma, y, mb))
+                    && *pos == b.pos && *term == b.term && *term_pos == b.term_pos && count.to_bits() == b.count.to_bits()
+            })
+            && *vregs == o.vregs
+            && slots.len() == o.slots.len()
+            && slots.iter().zip(&o.slots).all(|(a, b)| {
+                let Slot { size, align, arg, born, ret } = a;
+                (*size, *align, *arg, *born, *ret) == (b.size, b.align, b.arg, b.born, b.ret)
+            })
+            && *params == o.params
+            && *rets == o.rets
+            && *file == o.file
+            && *noalias == o.noalias
+            && *withheld_noalias == o.withheld_noalias
+            && *plain_calls == o.plain_calls
+            && *deref == o.deref
+            && *cabi == o.cabi
+            && *sret == o.sret
+            && sret_callees.len() == o.sret_callees.len()
+            && sret_callees.iter().zip(&o.sret_callees).all(|(x, y)| ma(*x) == mb(*y))
+            && nocapture.len() == o.nocapture.len()
+            && nocapture.iter().zip(&o.nocapture).all(|(x, y)| x.1 == y.1 && x.2 == y.2 && callee_eq(&x.0, ma, &y.0, mb))
+            && nounwind_inputs.len() == o.nounwind_inputs.len()
+            && nounwind_inputs.iter().zip(&o.nounwind_inputs).all(|(x, y)| x.1 == y.1 && ma(x.0) == mb(y.0))
+            && *baseline == o.baseline
+            && *full == o.full
+            && *owned == o.owned
+            && *nonnull == o.nonnull
+            && *ranged == o.ranged
+            && *dyn_calls == o.dyn_calls
+            && *naked == o.naked
+            && *inl == o.inl
+            && *dbg == o.dbg
+    }
+
+    /// A hash of what `same_body_mapped` compares, the function slots replaced by `m(slot)`.
+    pub fn hash_body_mapped<H: std::hash::Hasher>(&self, h: &mut H, m: &mut dyn FnMut(u32) -> u32) {
+        use std::hash::Hash;
+        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline, full, owned, nonnull, ranged, dyn_calls, naked, inl, dbg } = self;
+        fn callee<H: std::hash::Hasher>(c: &Callee, h: &mut H, m: &mut dyn FnMut(u32) -> u32) {
+            match c {
+                Callee::Fn(x) => {
+                    0xf1u8.hash(h);
+                    m(*x).hash(h);
+                }
+                Callee::CFn(x, s) => {
+                    0xf2u8.hash(h);
+                    m(*x).hash(h);
+                    s.hash(h);
+                }
+                _ => c.hash(h),
+            }
+        }
+        blocks.len().hash(h);
+        for Block { insts, pos, term, term_pos, count } in blocks {
+            insts.len().hash(h);
+            for i in insts {
+                match i {
+                    Inst::Call(c, a, r) => {
+                        0xf0u8.hash(h);
+                        callee(c, h, m);
+                        a.hash(h);
+                        r.hash(h);
+                    }
+                    Inst::FnAddr(v, x) => {
+                        0xf3u8.hash(h);
+                        v.hash(h);
+                        m(*x).hash(h);
+                    }
+                    _ => i.hash(h),
+                }
+            }
+            pos.hash(h);
+            term.hash(h);
+            term_pos.hash(h);
+            count.to_bits().hash(h);
+        }
+        vregs.hash(h);
+        slots.len().hash(h);
+        for Slot { size, align, arg, born, ret } in slots {
+            (size, align, arg, born, ret).hash(h);
+        }
+        (params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret).hash(h);
+        sret_callees.len().hash(h);
+        for x in sret_callees {
+            m(*x).hash(h);
+        }
+        nocapture.len().hash(h);
+        for (c, i, r) in nocapture {
+            callee(c, h, m);
+            (i, r).hash(h);
+        }
+        nounwind_inputs.len().hash(h);
+        for (x, v) in nounwind_inputs {
+            m(*x).hash(h);
+            v.hash(h);
+        }
+        (baseline, full, owned, nonnull, ranged, dyn_calls, naked, inl, dbg).hash(h);
+    }
+
     /// Maps the debug table through a vreg renaming (`map(v)` None: v is gone).
     pub fn dbg_map_vregs(&mut self, map: &dyn Fn(VReg) -> Option<VReg>) {
         for d in self.dbg.iter_mut() {

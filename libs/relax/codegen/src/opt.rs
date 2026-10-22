@@ -16,7 +16,7 @@ pub static HIST: [std::sync::atomic::AtomicU64; 12] = [const { std::sync::atomic
 use relax_backend::rir::*;
 use relax_backend::passes::*;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OptCfg {
     /// O1: inline Relax core's builtins (scalar/math/slice helpers) into callers
     pub inline: bool,
