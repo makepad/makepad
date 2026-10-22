@@ -249,30 +249,24 @@ mod tests {
     }
     use makepad_widgets::makepad_draw::makepad_script::pod_heap::f16_to_f32 as platform_f16;
 
-    /// The local half decode is exact, subnormals included. Its last assertion is a deliberate TRIPWIRE on a platform
-    /// bug, not a contract: `pod_heap::f16_to_f32` doubles a subnormal whose leading bit is odd, which is why this
-    /// crate decodes its own halves (platform/ is the owner's; plan hdri-5 Task 6). When the platform is fixed that
-    /// assertion fails on purpose: then drop it, and the local decode may give way to the platform's.
+    /// The local half decode (a table, for the readback's speed) is exact, subnormals included, and agrees with the
+    /// platform's `pod_heap::f16_to_f32` on every half.
     #[test]
     fn halves_decode_exactly_subnormals_included() {
         for m in 1..1024u16 {
             assert_eq!(f16_to_f32(m), m as f32 / 16_777_216.0, "subnormal {m}");
             assert_eq!(f16_to_f32(0x8000 | m), -(m as f32) / 16_777_216.0);
         }
-        // the normals: (1 + m/1024) 2^(e-15), each exact in f32 (the platform's normal branch is right too, but in a debug
-        // build it panics below exponent 15: `exponent as u32 - 15` underflows)
+        // the normals: (1 + m/1024) 2^(e-15), each exact in f32
         for h in (0x0400..0x7c00u16).chain(0x8400..0xfc00) {
             let (s, e, m) = (if h & 0x8000 != 0 { -1.0f64 } else { 1.0 }, ((h >> 10) & 0x1f) as i32, (h & 0x3ff) as f64);
             assert_eq!(f16_to_f32(h) as f64, s * (1.0 + m / 1024.0) * 2f64.powi(e - 15), "{h:#06x}");
         }
         assert_eq!((f16_to_f32(0), f16_to_f32(0x3c00), f16_to_f32(0x7c00)), (0.0, 1.0, f32::INFINITY));
         assert!(f16_to_f32(0x7e00).is_nan());
-        // TRIPWIRE: the platform's doubles a subnormal whose leading bit is odd (2^-23 for 2^-24 x 2); why this one is local
-        assert_eq!(
-            (f16_to_f32(2), platform_f16(2)),
-            (2.0 / 16_777_216.0, 4.0 / 16_777_216.0),
-            "TRIPWIRE, not a contract: this asserts the platform's f16_to_f32 bug (it doubles 2^-23 to 2^-22). If the platform's \
-             decode is now right, the bug is fixed upstream: delete this assertion (and consider the platform's decode)"
-        );
+        for h in 0..=u16::MAX {
+            let (local, platform) = (f16_to_f32(h), platform_f16(h));
+            assert!(local.to_bits() == platform.to_bits() || (local.is_nan() && platform.is_nan()), "{h:#06x}");
+        }
     }
 }

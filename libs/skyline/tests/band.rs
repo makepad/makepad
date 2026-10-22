@@ -149,6 +149,7 @@ fn baseline(name: &str) -> Option<(Params, Band)> {
 
 /// A half-exact value `v` as the platform's `pod_heap::f16_to_f32` decoded it when the baselines were recorded: a subnormal
 /// (m 2^-24, m < 1024) whose leading bit k is odd came out doubled (its leading bit kept, OR'ed into the exponent's lowest bit).
+/// The platform decodes them exactly since 2026-10-22; the recorded baselines still carry the old decode.
 fn recorded_decode(v: f32) -> f32 {
     let m = (v.abs() * 16_777_216.0) as u32;
     if v == 0.0 || v.abs() >= 6.1035156e-5 || m as f32 != v.abs() * 16_777_216.0 { return v; }
