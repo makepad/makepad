@@ -544,13 +544,15 @@ impl Env {
     /// hides what stands behind it, a storm's bolt included. Without a
     /// skyline the base is drawn exactly as before.
     fn base_at(&self, d: Vec3f, without: Option<KeyTerm>, at: Sampling) -> Vec3f {
-        let c = self.base_under_skyline(d, without, at);
         let Some(s) = self.city_at(d) else {
-            return c;
+            return self.base_under_skyline(d, without, at);
         };
         if s == [0.0; 4] {
-            return c;
+            return self.base_under_skyline(d, without, at);
         }
+        // An opaque texel hides the base outright (`over_veiled`), so the base
+        // is not looked up behind it: a held bake's ranges, city and ground.
+        let c = if s[3] < 1.0 { self.base_under_skyline(d, without, at) } else { Vec3f::default() };
         match &self.weather {
             Some(weather) => skyline::over_veiled(s, c, &|x| weather.veil(d, x, self.weather_sun, self.dome)),
             None => skyline::over_veiled(s, c, &|x| x),

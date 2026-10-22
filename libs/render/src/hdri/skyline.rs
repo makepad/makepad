@@ -61,8 +61,16 @@ impl SkylineBand {
     /// it the skirt fading out over SKIRT_DEG (smoothstep), continuous across the band's bottom
     /// edge. `skirt` is this band's own (`skirt()`).
     pub fn sample_skirted(&self, skirt: &BandSkirt, d: Vec3f, turn_deg: f32) -> [f32; 4] {
-        let Some((el, u)) = self.place(d, turn_deg) else { return [0.0; 4] };
         let bottom = self.bottom_deg;
+        // Above the band or below its skirt, nothing (before the place's arcsine and
+        // arctangent, which most of a map's texels would pay for nothing). The test
+        // on d.y is looser than the one on el, which decides; NaN passes to it.
+        let y_of = |deg: f32| if deg.abs() >= 89.0 { deg.signum() * f32::INFINITY } else { deg.to_radians().sin() };
+        let (y_top, y_low) = (y_of(self.top_deg + 0.01), y_of(bottom - SKIRT_DEG - 0.01));
+        if d.y > y_top || d.y < y_low {
+            return [0.0; 4];
+        }
+        let Some((el, u)) = self.place(d, turn_deg) else { return [0.0; 4] };
         // The negated tests also turn a NaN direction away.
         if !(el <= self.top_deg && el >= bottom - SKIRT_DEG) {
             return [0.0; 4];
@@ -481,6 +489,29 @@ mod tests {
         }
         let sharp = b.sample(dir_at_u(0.5 / 64.0, -4.0 + 0.01), 0.0);
         assert!((sharp[0] - b.sample_skirted(&skirt, dir_at_u(0.5 / 64.0, -4.0 - eps), 0.0)[0]).abs() > 0.5, "the bottom row is not blurred: nothing to test");
+    }
+
+    /// The quick test on a direction's height (plan hdri-5 Task 8: most of a map's texels lie above the band or below
+    /// its skirt and skip the arcsine) turns away nothing the band or its skirt draws: just inside the top and just
+    /// above the skirt's end something is drawn, just outside nothing, round the turn; also for a band up to the zenith.
+    #[test]
+    fn the_quick_height_test_keeps_the_band_and_its_skirt_whole() {
+        for top in [12.0f32, 89.5] {
+            let b = SkylineBand { top_deg: top, ..a_band_with_a_lit_bottom_row(64) };
+            let skirt = b.skirt();
+            let end = b.bottom_deg - SKIRT_DEG;
+            for i in 0..64 {
+                let u = (i as f32 + 0.5) / 64.0;
+                let at = |el: f32| b.sample_skirted(&skirt, dir_at_u(u, el), 0.0);
+                // (an f32 arcsine near the zenith is good to a few hundredths of a degree)
+                assert!(at(top - if top < 89.0 { 0.002 } else { 0.1 })[3] > 0.0, "top {top}, u {u}: nothing just under the band's top");
+                assert!(at(end + 0.05)[3] > 0.0, "top {top}, u {u}: nothing just above the skirt's end");
+                if top < 89.0 {
+                    assert_eq!(at(top + 0.002), [0.0; 4], "u {u}: something just over the band's top");
+                }
+                assert_eq!(at(end - 0.002), [0.0; 4], "u {u}: something just under the skirt's end");
+            }
+        }
     }
 
     /// The skirt is the bottom row box-blurred over SKIRT_BLUR_DEG either side (wrapping), premultiplied: read just below

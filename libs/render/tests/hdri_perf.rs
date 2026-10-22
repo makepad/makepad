@@ -745,3 +745,69 @@ fn with_skyline_on_a_blooming_map_is_cheap() {
 
 /// `with_skyline_on_a_blooming_map_is_cheap`'s bound.
 const WITH_SKYLINE_MS: f64 = 15.0;
+
+/// A strip like the app's held one (512 x 46 over +25.6 .. -6.4 degrees, the skyline's
+/// defaults): clear sky above a ridge that rises and falls round the turn, opaque below it
+/// (the ranges, the city, the ground and the sea), with a light every 8 texels of the city's rows.
+fn held_strip() -> Arc<SkylineBand> {
+    let (w, h, top, bottom) = (512, 46, 25.6f32, -6.4f32);
+    let mut texels = vec![[0.0; 4]; w * h];
+    for y in 0..h {
+        let el = top - (y as f32 + 0.5) / h as f32 * (top - bottom);
+        for x in 0..w {
+            let u = (x as f32 + 0.5) / w as f32;
+            let ridge = 2.0 + 8.0 * (u * std::f32::consts::TAU * 3.0).sin().abs();
+            if el < ridge {
+                let light = x % 8 == 3 && el > 0.0 && el < 4.0;
+                texels[y * w + x] = if light { [0.08, 0.05, 0.02, 1.0] } else { [0.0004, 0.0005, 0.0007, 1.0] };
+            }
+        }
+    }
+    Arc::new(SkylineBand { w, h, texels, top_deg: top, bottom_deg: bottom })
+}
+
+/// A held drag's bake with the skyline on, against the same bake without it (plan hdri-5
+/// Task 8): the Moonlit night with one light layer at 512, the app's held bake. The skyline adds
+/// its attachment (`with_skyline_par`) and its texels in the bake, the band's part of a
+/// held step that is not the strip's render. Medians of 15, after one untimed of each.
+/// Measured +1.40 ms (17.33 ms without, 18.61 with, attaching 0.12) while the bake looked up
+/// the sky behind the strip's opaque texels too; -0.3 ms since it does not (`Env::base_at`),
+/// and the texels above the band and below its skirt skip its arcsine and arctangent.
+#[test]
+#[ignore = "release timing; see the module comment"]
+fn a_held_bake_with_the_skyline_costs_little_more_than_without() {
+    let mut p = preset("Moonlit night").expect("a built-in preset loads");
+    p.lights = vec![LightParams::default()];
+    let off = p.clone();
+    p.skyline = Some(SkylineParams { on: true, seed: 7, turn_deg: 0.0, lights_by_day: 0.0, settings: Default::default() });
+    let band = held_strip();
+    with_pool(|pool| {
+        let rows = |n: usize, f: &(dyn Fn(usize) + Sync)| pool.fan_out(Lane::Heavy, n, f);
+        let images = ImageSet::default();
+        let build = |p: &HdriParams| Env::new_for_width_par(p, &images, 512, &|| false, &rows).expect("nothing cancels it");
+        let (mut plain, mut attach, mut banded) = (Vec::new(), Vec::new(), Vec::new());
+        for round in 0..16 {
+            let env = build(&off);
+            let t = Instant::now();
+            std::hint::black_box(env.bake_par(512, |n, f| pool.fan_out(Lane::Heavy, n, f)));
+            let plain_ms = t.elapsed().as_secs_f64() * 1000.0;
+            let env = build(&p);
+            let t = Instant::now();
+            let env = env.with_skyline_par(band.clone(), &|| false, &rows).expect("nothing cancels it");
+            let attach_ms = t.elapsed().as_secs_f64() * 1000.0;
+            let t = Instant::now();
+            std::hint::black_box(env.bake_par(512, |n, f| pool.fan_out(Lane::Heavy, n, f)));
+            let banded_ms = t.elapsed().as_secs_f64() * 1000.0;
+            if round > 0 {
+                (plain.push(plain_ms), attach.push(attach_ms), banded.push(banded_ms));
+            }
+        }
+        let (plain, attach, banded) = (median(plain), median(attach), median(banded));
+        let extra = attach + banded - plain;
+        println!("hdri_perf: held 512 bake, Moonlit night: without the skyline {plain:6.2} ms; with it {banded:6.2} ms and the attachment {attach:5.2} ms: {extra:+5.2} ms");
+        assert!(extra < HELD_SKYLINE_EXTRA_MS, "the skyline adds {extra:.2} ms to a held bake, over {HELD_SKYLINE_EXTRA_MS} ms");
+    });
+}
+
+/// `a_held_bake_with_the_skyline_costs_little_more_than_without`'s bound.
+const HELD_SKYLINE_EXTRA_MS: f64 = 1.0;
