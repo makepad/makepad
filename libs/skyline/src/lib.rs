@@ -37,6 +37,16 @@ pub fn script_mod(vm: &mut ScriptVm) {
 /// in elevation, the horizon sits `horizon` of the way down.
 pub fn band_range_deg(p: &Params) -> (f64, f64) { let g = band_geom(p); (g.top, g.bottom) }
 
+/// The elevation range in degrees, (top, bottom), of a strip of `p` rendered `w` x `h` (`ViewSpec::strip`): its top
+/// row's top edge and its bottom row's bottom edge. The rows are square texels of 360 / w degrees about the horizon line
+/// (`ViewSpec::row_of`), and h is rounded, so they span h x 360 / w degrees, a little more or less than the band's
+/// own range (`band_range_deg`): this is the range to label a rendered strip with.
+pub fn strip_range_deg(p: &Params, w: usize, h: usize) -> (f64, f64) {
+    let deg = h as f64 * 360.0 / w.max(1) as f64;
+    let top = band_geom(p).horizon * deg;
+    (top, top - deg)
+}
+
 /// The strip's rows: its elevation range (degrees), its height in degrees and the horizon line (a fraction of the height
 /// from the top).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -56,6 +66,29 @@ pub fn band_geom(p: &Params) -> BandGeom {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The final review: a strip `w` wide renders `h` rows, h rounded from w x the band's degrees / 360, so its rows
+    /// span h x 360 / w degrees, not the band's own (band_range_deg). `strip_range_deg` is the range of the rows as
+    /// rendered: the top row's top edge and the bottom row's bottom edge fall on the view's rows 0 and h
+    /// (`ViewSpec::row_of`), at 512 (46 rows for 45.5: the drift is a third of a degree) and at 1024, at Size 1 and 2.
+    #[test]
+    fn the_strips_range_is_its_rendered_rows() {
+        let mut p = Params::default();
+        for k in [1.0, 2.0] {
+            p.set(P::Size as usize, k);
+            for w in [512usize, 1024] {
+                let v = ViewSpec::strip(&p, w);
+                let (top, bottom) = strip_range_deg(&p, v.w, v.h);
+                assert!(v.row_of(top.to_radians()).abs() < 1e-6, "Size {k}, {w}: the top {top} falls on row {}", v.row_of(top.to_radians()));
+                assert!((v.row_of(bottom.to_radians()) - v.h as f64).abs() < 1e-6, "Size {k}, {w}: the bottom {bottom} falls on row {}", v.row_of(bottom.to_radians()));
+                println!("Size {k}, {w} x {}: rows {top:.4} .. {bottom:.4}, the band {:?}", v.h, band_range_deg(&p));
+            }
+        }
+        // the premise: at 512 the band's own range is not the rows'
+        let p = Params::default();
+        let v = ViewSpec::strip(&p, 512);
+        assert!((strip_range_deg(&p, v.w, v.h).0 - band_range_deg(&p).0).abs() > 0.1);
+    }
 
     /// The band grows with Size (both ends, the horizon line where it was) and the strip's rows with it; a top or a bottom
     /// that Size pushes past 85 degrees stops there, the horizon line moving so the rows stay linear in elevation. At

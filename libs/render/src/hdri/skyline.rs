@@ -52,6 +52,22 @@ impl std::fmt::Debug for SkylineBand {
 }
 
 impl SkylineBand {
+    /// A band from a renderer's texels (the app's handoff, `to_skyline_band`), made safe for the map: a channel that
+    /// is not finite (NaN, an infinity) is 0, and alpha is held to 0..1. One such texel in the bottom row would
+    /// otherwise poison the skirt's running sum all the way round (`BandSkirt`), and a bilinear read would carry it
+    /// into the bake and its IBL.
+    pub fn new(w: usize, h: usize, mut texels: Vec<[f32; 4]>, top_deg: f32, bottom_deg: f32) -> SkylineBand {
+        for t in texels.iter_mut() {
+            for c in t.iter_mut() {
+                if !c.is_finite() {
+                    *c = 0.0;
+                }
+            }
+            t[3] = t[3].clamp(0.0, 1.0);
+        }
+        SkylineBand { w, h, texels, top_deg, bottom_deg }
+    }
+
     /// Bilinear premultiplied sample at map direction `d`, turned by `turn_deg`; 0 outside the band.
     /// The band alone, sharp to its bottom edge: the map reads it through `sample_skirted`. A
     /// positive turn moves the city toward a larger u (clockwise seen from above, the compass
@@ -367,12 +383,14 @@ pub struct SkylineLight {
     /// night's glow and moonlight, under the map's own ground gain.
     pub ambient_rgb: [f32; 3],
     /// The sky round the horizon at 1 and at 15 degrees, as the map draws it there (its
-    /// clouds, volume and weather veil included), without the discs and the stars.
+    /// clouds and volume included) before the weather's veil and its bolt, without the discs and
+    /// the stars: the map veils the strip once, in front of it (`over_veiled`).
     pub ring_low: [[f32; 3]; RING],
     pub ring_high: [[f32; 3]; RING],
     /// The map's own ground round the turn at GROUND_RING_DEG below the horizon (its base as the map
-    /// draws it there, without the skyline): what the strip's near ground takes in the app, so the
-    /// band's ground is this map's and runs into it without an edge.
+    /// draws it there, without the skyline, before the veil as the rings): what the strip's near
+    /// ground takes in the app, so the band's ground, veiled, is this map's and runs into it without
+    /// an edge.
     pub ground_ring: [[f32; 3]; RING],
 }
 
@@ -389,7 +407,7 @@ fn smooth(t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hdri::{dir_from_az_el, vec, CasterParams, Env, HdriParams, ImageSet, LightParams, SkylineParams, WeatherParams, SkyParams};
+    use crate::hdri::{dir_from_az_el, vec, CasterParams, Env, HdriParams, ImageSet, LightParams, Sampling, SkylineParams, WeatherParams, SkyParams};
     use crate::hdri::weather::Weather;
     use makepad_render_material::ibl;
     use std::sync::Arc;
@@ -608,19 +626,45 @@ mod tests {
         let mut night = HdriParams::default();
         night.sky.sun.mode = "manual".to_string();
         night.sky.sun.elevation_deg = -20.0;
-        for p in [HdriParams::default(), night] {
+        // and under the weather's veil (the final review: the skirt is held to the ground before the veil, so veiled
+        // once it is still no brighter than the veiled ground), the land then seen through the veil too: fog and rain on
+        // dry ground, held as strictly as the clear sky; and the fog and rain kinds, whose wet ground's puddles change
+        // finer than the 128 azimuths and three elevations the hold looks at (a known limit of the hold, not of the
+        // veil): measured and printed, not held.
+        let weather = |w: WeatherParams| {
+            let mut p = HdriParams::default();
+            p.sky.weather = Some(w);
+            p
+        };
+        let kind = |kind: &str| WeatherParams { kind: kind.to_string(), ..WeatherParams::default() };
+        let skies = [
+            ("noon", HdriParams::default(), true),
+            ("night", night, true),
+            ("dry fog", weather(WeatherParams { fog: 0.7, ..WeatherParams::default() }), true),
+            ("dry rain", weather(WeatherParams { rain: 0.6, fog: 0.1, ..WeatherParams::default() }), true),
+            ("fog", weather(kind("fog")), false),
+            ("rain", weather(kind("rain")), false),
+        ];
+        for (name, p, held) in skies {
             let (q, images) = with_band(&p, band.clone());
             let (plain, with) = (Env::new(&p), Env::new_with(&q, &images));
-            let land_light = light(Vec3f { x: 0.02, y: 0.02, z: 0.02 }) * with.scale();
+            let land = Vec3f { x: 0.02, y: 0.02, z: 0.02 };
+            let (mut worst, mut over) = (0.0f32, 0usize);
             for i in 0..=8 * (SKIRT_DEG as usize + 2) {
                 let el = -6.0 - 0.01 - i as f32 * 0.125;
                 for k in 0..180 {
                     let az = k as f32 * 2.0 + 0.5;
                     let (got, ground) = (light(with.radiance(dir(az, el))), light(plain.radiance(dir(az, el))));
+                    let land_light = light(veil_of(&with, dir(az, el), land)) * with.scale();
                     let most = ground.max(land_light);
-                    assert!(got <= most * (1.0 + 1e-4) + 1e-7, "az {az}, el {el}: {got} under the band, the ground {ground}, its land {land_light}");
+                    if got > most * (1.0 + 1e-4) + 1e-7 {
+                        over += 1;
+                        worst = worst.max(got / most - 1.0);
+                    }
+                    assert!(!held || got <= most * (1.0 + 1e-4) + 1e-7, "{name}: az {az}, el {el}: {got} under the band, the ground {ground}, its land {land_light}");
                 }
             }
+            println!("{name}: below the band, {over} of {} looks brighter than the ground, at most by {:.1} %", (8 * (SKIRT_DEG as usize + 2) + 1) * 180, 100.0 * worst);
             // the land's skirt meets the band: just above and just below its bottom, alike
             let (above, below) = (with.radiance(dir(20.0, -6.0 + 1e-3)), with.radiance(dir(20.0, -6.0 - 1e-3)));
             assert!((above - below).length() < 1e-4 * (1.0 + above.length()), "{above:?} {below:?}");
@@ -955,25 +999,120 @@ mod tests {
         vec![("clear", clear.clone()), ("fog", weather("fog")), ("rain", weather("rain")), ("clouds", clouds), ("overcast", weather("overcast")), ("storm", weather("storm"))]
     }
 
+    /// The map's veil along `d` (identity without a weather), map units before intensity.
+    fn veil_of(env: &Env, d: Vec3f, c: Vec3f) -> Vec3f {
+        match &env.weather {
+            Some(weather) => weather.veil(d, c, env.weather_sun, env.dome),
+            None => c,
+        }
+    }
+
     #[test]
     fn the_ring_is_the_maps_own_horizon() {
-        // Every entry of both rings is what the map draws there (lights removed, over the
-        // intensity), its clouds, its weather and their veil included: the map's own lookup.
+        // Every entry of both rings and of the ground ring is the map's own base there before the weather's veil (lights
+        // removed, over the intensity; its clouds, its volume and its wet ground included, the bolt left out): the strip
+        // is veiled once, by the map (`over_veiled`). Veiled, each entry is what the map draws there, the bolt aside.
+        // Without a weather the ring is the map's lookup itself, bit for bit.
         for (name, p) in skies() {
             let l = Env::new(&p).skyline_light();
             let env = Env::new(&HdriParams { lights: vec![], intensity_ev: 0.0, rotation_deg: 0.0, ..p.clone() });
+            let unveiled = Sampling { bare: true, unveiled: true, ..Sampling::default() };
             let mut worst = 0.0f32;
             for i in 0..RING {
                 let u = (i as f32 + 0.5) / RING as f32;
-                for (el, ring) in [(1.0, &l.ring_low), (15.0, &l.ring_high)] {
-                    let want = env.radiance(dir_at_u(u, el)) / env.scale();
+                for (el, ring) in [(1.0, &l.ring_low), (15.0, &l.ring_high), (-GROUND_RING_DEG, &l.ground_ring)] {
+                    let d = dir_at_u(u, el);
                     let got = vec(ring[i]);
-                    worst = worst.max((got - want).length() / want.length().max(1e-30));
-                    assert!(got == want, "{name}: {i} at {el}: {got:?} vs the map's {want:?}");
+                    assert!(got == env.base_under_skyline(d, None, unveiled), "{name}: {i} at {el}: {got:?} is not the unveiled base");
+                    let bolt = env.weather.as_ref().map_or(Vec3f::default(), |weather| weather.lightning(d, 0.0));
+                    let (seen, want) = (veil_of(&env, d, got) + bolt, env.radiance(d) / env.scale());
+                    worst = worst.max((seen - want).length() / want.length().max(1e-30));
+                    if env.weather.is_none() {
+                        assert!(got == want, "{name}: {i} at {el}: {got:?} vs the map's {want:?}");
+                    }
+                    assert!(close3(seen, want, 1e-5), "{name}: {i} at {el}: veiled {seen:?} vs the map's {want:?}");
                 }
             }
-            println!("{name}: the ring against the map, worst relative error {worst:.1e}; ring_low[0] {:?}", l.ring_low[0]);
+            println!("{name}: the veiled ring against the map, worst relative error {worst:.1e}; ring_low[0] {:?}", l.ring_low[0]);
         }
+        // the premise: under fog the veil changes the ring (the ring is not the visible horizon)
+        let fog = Env::new(&skies()[1].1);
+        let d = dir_at_u(0.5 / RING as f32, 1.0);
+        assert!((vec(fog.skyline_light().ring_low[0]) - fog.radiance(d) / fog.scale()).length() > 1e-3 * vec(fog.skyline_light().ring_low[0]).length());
+    }
+
+    /// The map under `weather` (fog, rain), the sun at 25 degrees: a band built as the app's strip is, from the map's own
+    /// light (`skyline_light`): its far rows a fully hazed ridge (the low ring itself, opaque), its near rows the map's
+    /// ground (the ground ring, opaque), both read at a column's centre. Veiled once by the map, the ridge is the map's
+    /// sky there and the band's ground the map's ground, within 1e-4; and the skirt held to the ground is no brighter
+    /// than it (`held_to`, against the unveiled ground, so it holds under the veil too). With `dry` (no wet ground,
+    /// whose puddles change the ground from one look to the next) the band's ground just above its bottom is the map's
+    /// ground there within GROUND_STEP (the ground ring is read 1.5 degrees higher; the skirt is held to the darkest
+    /// ground down its 4 degrees), and runs into the skirt without a seam. Before the fix the ridge showed
+    /// veil(veil(sky)) and the ground veil(veil(ground)): under fog a lighter band at the horizon.
+    fn the_band_under_weather_is_the_maps_own(name: &str, weather: WeatherParams, dry: bool) {
+        const GROUND_STEP: f32 = 0.02;
+        let mut p = HdriParams::default();
+        sun_at(&mut p, 25.0, 140.0);
+        p.sky.weather = Some(weather);
+        let plain = Env::new(&p);
+        assert!(plain.weather.is_some(), "{name}: the premise: a weather draws");
+        let l = plain.skyline_light();
+        // rows a degree tall from 4.5 to -5.5: centres 4, 3, ..., -5; rows 0..=4 (4..0 degrees) the ridge, 5.. the ground
+        let (w, h, top, bottom) = (RING, 10, 4.5f32, -5.5f32);
+        let texels = (0..w * h).map(|i| {
+            let (x, y) = (i % w, i / w);
+            let c = if y <= 4 { l.ring_low[x] } else { l.ground_ring[x] };
+            [c[0], c[1], c[2], 1.0]
+        }).collect();
+        let (q, images) = with_band(&p, SkylineBand { w, h, texels, top_deg: top, bottom_deg: bottom });
+        let city = Env::new_with(&q, &images);
+        let k = plain.scale();
+        let light = |c: Vec3f| 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z;
+        let (mut worst_far, mut worst_near, mut worst_step) = (0.0f32, 0.0f32, 0.0f32);
+        for i in 0..RING {
+            let u = (i as f32 + 0.5) / RING as f32;
+            // a fully hazed far texel and the map's sky beside it (the same direction, without the city)
+            let (far, sky) = (city.radiance(dir_at_u(u, 1.0)), plain.radiance(dir_at_u(u, 1.0)));
+            worst_far = worst_far.max((far - sky).length() / sky.length());
+            assert!(close3(far, sky, 1e-4), "{name}: u {u}: the hazed ridge {far:?}, the map's sky {sky:?}");
+            // the band's ground where the ground ring was read, and the map's ground there
+            let (near, ground) = (city.radiance(dir_at_u(u, -GROUND_RING_DEG)), plain.radiance(dir_at_u(u, -GROUND_RING_DEG)));
+            worst_near = worst_near.max((near - ground).length() / ground.length());
+            assert!(close3(near, ground, 1e-4), "{name}: u {u}: the band's ground {near:?}, the map's {ground:?}");
+            if dry {
+                // across the band's bottom: the strip's ground just above it against the map's own ground there, and
+                // just below it (the skirt), without a seam
+                let (above, below) = (city.radiance(dir_at_u(u, bottom + 0.01)), city.radiance(dir_at_u(u, bottom - 0.01)));
+                let ground = plain.radiance(dir_at_u(u, bottom + 0.01));
+                let step = (light(above) - light(ground)).abs() / light(ground);
+                worst_step = worst_step.max(step);
+                assert!(step < GROUND_STEP, "{name}: u {u}: the band's ground {above:?} over the map's {ground:?}: {step}");
+                // (the veil itself changes fast there, near the horizon: the map's own change over the same step aside)
+                let (plain_above, plain_below) = (plain.radiance(dir_at_u(u, bottom + 0.01)), plain.radiance(dir_at_u(u, bottom - 0.01)));
+                let seam = ((above - below) - (plain_above - plain_below)).length() / above.length();
+                assert!(seam < 1e-3, "{name}: u {u}: a seam at the band's bottom, {above:?} over {below:?} ({seam})");
+            }
+            // the skirt is never brighter than the map's own ground (nor than the band's ground, veiled)
+            for el in [bottom - 0.01, bottom - 0.5 * SKIRT_DEG, bottom - 0.99 * SKIRT_DEG] {
+                let d = dir_at_u(u, el);
+                let most = light(plain.radiance(d)).max(light(veil_of(&plain, d, vec(l.ground_ring[i])) * k));
+                assert!(light(city.radiance(d)) <= most * (1.0 + 1e-4) + 1e-7, "{name}: u {u}, el {el}: the skirt {:?} over the ground {most}", city.radiance(d));
+            }
+        }
+        println!("{name}: the ridge against the sky {worst_far:.1e}, the band's ground against the map's {worst_near:.1e}, across the bottom {worst_step:.4}");
+    }
+
+    #[test]
+    fn under_fog_the_band_is_the_maps_own() {
+        the_band_under_weather_is_the_maps_own("fog", WeatherParams { kind: "fog".to_string(), ..WeatherParams::default() }, false);
+        the_band_under_weather_is_the_maps_own("dry fog", WeatherParams { fog: 0.7, ..WeatherParams::default() }, true);
+    }
+
+    #[test]
+    fn under_rain_the_band_is_the_maps_own() {
+        the_band_under_weather_is_the_maps_own("rain", WeatherParams { kind: "rain".to_string(), ..WeatherParams::default() }, false);
+        the_band_under_weather_is_the_maps_own("dry rain", WeatherParams { rain: 0.6, fog: 0.1, ..WeatherParams::default() }, true);
     }
 
     #[test]
@@ -1091,14 +1230,28 @@ mod tests {
             p.sky.clouds.coverage = coverage;
             cases.push((name, el, p));
         }
+        // Under a weather the ground is the map's before its veil, as the rings are (the strip is veiled once, by the
+        // map): veiled, it is the ground the map draws. Fog, and rain on dry ground (a wet ground's puddles mirror the
+        // sky, which a white Lambertian facade does not); the rain's dimming of the sun is the ambient's then.
+        for (name, fog, rain) in [("fog", 0.6, 0.0), ("rain", 0.0, 0.6)] {
+            let mut p = HdriParams::default();
+            sun_at(&mut p, 35.0, 120.0);
+            p.sky.atmosphere.ground_color = [1.0; 3];
+            p.sky.weather = Some(WeatherParams { fog, rain, wet_ground: 0.0, ..WeatherParams::default() });
+            cases.push((name, 35.0, p));
+        }
         for (name, el, p) in cases {
             let env = Env::new(&p);
             let l = env.skyline_light();
-            let ground = env.radiance(dir(0.0, -90.0)) / env.scale();
+            let down = dir(0.0, -90.0);
+            let seen = env.radiance(down) / env.scale();
+            let ground = env.base_under_skyline(down, None, Sampling { bare: true, unveiled: true, ..Sampling::default() });
             let rise = el.to_radians().sin().max(0.0);
             let lit = vec(l.sun_rgb) * rise + vec(l.ambient_rgb);
-            println!("{name}: sun {:?} ambient {:?}, the ground {ground:?}, gain {:?}", l.sun_rgb, l.ambient_rgb, env.ground_gain);
+            println!("{name}: sun {:?} ambient {:?}, the ground {ground:?} ({seen:?} veiled), gain {:?}", l.sun_rgb, l.ambient_rgb, env.ground_gain);
+            assert!(env.weather.is_some() || ground == seen, "{name}: without a weather the unveiled ground is the map's");
             assert!(close3(lit, ground, 1e-4), "{name}: {lit:?} vs the ground {ground:?}");
+            assert!(close3(veil_of(&env, down, lit), seen, 1e-4), "{name}: veiled {:?} vs the map's ground {seen:?}", veil_of(&env, down, lit));
         }
     }
 
@@ -1159,6 +1312,40 @@ mod tests {
             assert!(env.bake(64) == base_map);
             assert_eq!(env.sun(), base_key);
         }
+    }
+
+    /// The final review: one NaN and one infinite texel in the band's bottom row (and an alpha past 1). Unguarded, the
+    /// skirt's running sum carries the NaN all the way round, and the map draws it there; through the handoff
+    /// (`SkylineBand::new`) the channels are 0, alpha is held to 0..1, and the skirt and the bake are finite everywhere.
+    #[test]
+    fn a_non_finite_texel_is_made_safe_at_the_handoff() {
+        let (w, h) = (128, 6);
+        let mut texels = vec![[0.1, 0.2, 0.3, 1.0]; w * h];
+        texels[(h - 1) * w + 10] = [f32::NAN, 0.5, 0.5, 1.0];
+        texels[(h - 1) * w + 70] = [0.5, f32::INFINITY, 0.5, f32::NEG_INFINITY];
+        texels[2 * w + 40] = [0.5, 0.5, 0.5, 7.0];
+        let raw = SkylineBand { w, h, texels: texels.clone(), top_deg: 10.0, bottom_deg: -5.0 };
+        let below = |b: &SkylineBand, u: f32| b.sample_skirted(&b.skirt(), dir_at_u(u, -5.0 - 0.5 * SKIRT_DEG), 0.0);
+        // the premise: far from both, half a turn round, the raw skirt is NaN
+        assert!(below(&raw, 0.75).iter().any(|c| !c.is_finite()), "the premise: one NaN poisons the skirt round the turn");
+        let safe = SkylineBand::new(w, h, texels, 10.0, -5.0);
+        assert_eq!(safe.texels[(h - 1) * w + 10], [0.0, 0.5, 0.5, 1.0]);
+        assert_eq!(safe.texels[(h - 1) * w + 70], [0.5, 0.0, 0.5, 0.0]);
+        assert_eq!(safe.texels[2 * w + 40], [0.5, 0.5, 0.5, 1.0]);
+        assert_eq!(safe.texels[0], [0.1, 0.2, 0.3, 1.0], "a finite texel is kept as it is");
+        for i in 0..w {
+            assert!(below(&safe, (i as f32 + 0.5) / w as f32).iter().all(|c| c.is_finite()), "the skirt at column {i}");
+        }
+        let p = HdriParams::default();
+        let in_skirt = dir_at_u(0.75, -5.0 - 0.5 * SKIRT_DEG);
+        let (q, images) = with_band(&p, raw);
+        let seen = Env::new_with(&q, &images).radiance(in_skirt);
+        assert!(!(seen.x.is_finite() && seen.y.is_finite() && seen.z.is_finite()), "the premise: the map draws it, {seen:?}");
+        let (q, images) = with_band(&p, safe);
+        let env = Env::new_with(&q, &images);
+        let seen = env.radiance(in_skirt);
+        assert!(seen.x.is_finite() && seen.y.is_finite() && seen.z.is_finite(), "{seen:?}");
+        assert!(env.bake(64).data.iter().all(|t| t.iter().all(|c| c.is_finite())), "the bake is finite");
     }
 
     #[test]

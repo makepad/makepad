@@ -249,6 +249,10 @@ mod tests {
     }
     use makepad_widgets::makepad_draw::makepad_script::pod_heap::f16_to_f32 as platform_f16;
 
+    /// The local half decode is exact, subnormals included. Its last assertion is a deliberate TRIPWIRE on a platform
+    /// bug, not a contract: `pod_heap::f16_to_f32` doubles a subnormal whose leading bit is odd, which is why this
+    /// crate decodes its own halves (platform/ is the owner's; plan hdri-5 Task 6). When the platform is fixed that
+    /// assertion fails on purpose: then drop it, and the local decode may give way to the platform's.
     #[test]
     fn halves_decode_exactly_subnormals_included() {
         for m in 1..1024u16 {
@@ -263,7 +267,12 @@ mod tests {
         }
         assert_eq!((f16_to_f32(0), f16_to_f32(0x3c00), f16_to_f32(0x7c00)), (0.0, 1.0, f32::INFINITY));
         assert!(f16_to_f32(0x7e00).is_nan());
-        // the platform's doubles a subnormal whose leading bit is odd (2^-23 for 2^-24 x 2); why this one is local
-        assert_eq!((f16_to_f32(2), platform_f16(2)), (2.0 / 16_777_216.0, 4.0 / 16_777_216.0));
+        // TRIPWIRE: the platform's doubles a subnormal whose leading bit is odd (2^-23 for 2^-24 x 2); why this one is local
+        assert_eq!(
+            (f16_to_f32(2), platform_f16(2)),
+            (2.0 / 16_777_216.0, 4.0 / 16_777_216.0),
+            "TRIPWIRE, not a contract: this asserts the platform's f16_to_f32 bug (it doubles 2^-23 to 2^-22). If the platform's \
+             decode is now right, the bug is fixed upstream: delete this assertion (and consider the platform's decode)"
+        );
     }
 }
