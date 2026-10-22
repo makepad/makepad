@@ -50,6 +50,28 @@ pub struct SkyLight {
     /// without an edge (the owner's ruling: the seam invisible). Unused in the example.
     pub ground: [[f32; 3]; RING],
     pub host_ground: bool,
+    /// The share of the host's own light (its sun and ambient) the skyline takes by night (`decode`): its light is
+    /// scaled by mix(1, this, `night_share`), so by day it is the host's whole and by night a small share, which keeps
+    /// the night's buildings near the example's dark (the owner's ruling, plan hdri-5 Task 8: "a share";
+    /// `HOST_LIGHT_NIGHT_SHARE`). 1 in the example (its light is 0 anyway).
+    pub night_light_share: f32,
+}
+
+/// The share of a host's own light the buildings take by night (`SkyLight::night_light_share`): on the generator's
+/// default night (Clear noon, the sun 20 degrees down) the facades then stand at about 5 % of the sky's brightness
+/// (`band::the_decoded_night_matches_the_example_over_the_generators_night`).
+pub const HOST_LIGHT_NIGHT_SHARE: f32 = 0.1;
+
+/// How a strip is rendered for a light (`SkyLight::plan`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum StripPlan {
+    /// One render (no decode, or no host light).
+    One(SkyLight),
+    /// The designed part in codes, decoded, plus the host's light alone in its units (`add_light`).
+    Split { designed: SkyLight, host: SkyLight },
+    /// By full night with no sun: the designed part, plus the host's light for a white ambient of 1 (`unit`, which
+    /// depends on the scene alone, so a host keeps it across held steps) times `ambient` (`add_scaled`).
+    Unit { designed: SkyLight, unit: SkyLight, ambient: [f32; 3] },
 }
 
 /// The example's sky at its horizon step as the codes its window shows (`DrawSkyBackdrop`, shaders.rs:
@@ -79,7 +101,7 @@ impl SkyLight {
     /// Today's look: night, the fixed HAZE_COL ring, no sun, no ambient, design gain 1.
     pub fn example() -> Self {
         Self { sun_u: 0.0, sun_el_deg: -90.0, sun_rgb: [0.0; 3], ambient_rgb: [0.0; 3], ring_low: [HAZE_COL; RING], ring_high: [HAZE_COL; RING],
-            lights_by_day: 0.0, design_gain: 1.0, decode: false, night_haze: 1.0, ground: [[0.0; 3]; RING], host_ground: false }
+            lights_by_day: 0.0, design_gain: 1.0, decode: false, night_haze: 1.0, ground: [[0.0; 3]; RING], host_ground: false, night_light_share: 1.0 }
     }
 
     /// The night's share of the look (`decode`): 0 above +2 degrees sun, 1 below -6, smooth between (the shaders'
@@ -173,17 +195,31 @@ impl SkyLight {
         std::array::from_fn(|c| a[c] + (b[c] - a[c]) * t)
     }
 
-    /// The light the strip is rendered with, split in two when its host's own light would otherwise go through the
-    /// decode (`decode`, by night or dusk, with a sun or an ambient): the designed part and the haze, the sky and the
-    /// ground in codes (`sun_rgb` and `ambient_rgb` 0, handed back by `to_host`), and the host's light alone, in its
-    /// own units (no decode, the designed colours and the rings 0), whose band is added to the first (`add_light`):
-    /// the strip is linear in its lights, so the two make the whole. None when one render is the whole.
-    pub fn split(&self) -> Option<(SkyLight, SkyLight)> {
+    /// The share of the host's own light the skyline takes (`decode`): mix(1, `night_light_share`, `night_share`).
+    pub fn host_share(&self) -> f32 {
+        if !self.decode { return 1.0; }
+        1.0 + (self.night_light_share - 1.0) * self.night_share()
+    }
+
+    /// How the strip is rendered for this light. Where the host's own light would otherwise go through the decode
+    /// (`decode` by night or dusk, with a sun or an ambient) it is rendered apart, in its own units, at its night share
+    /// (`host_share`): the strip is linear in its lights, so the parts make the whole. By full night without a sun the
+    /// host's part is a white ambient's times the ambient (`StripPlan::Unit`), which does not change with the sky.
+    pub fn plan(&self) -> StripPlan {
         let lit = self.sun_rgb.iter().chain(&self.ambient_rgb).any(|c| *c != 0.0);
-        if !self.coded() || !lit { return None; }
+        if !self.coded() || !lit { return StripPlan::One(self.clone()); }
+        let k = self.host_share();
         let designed = SkyLight { sun_rgb: [0.0; 3], ambient_rgb: [0.0; 3], ..self.clone() };
-        let host = SkyLight { design_gain: 0.0, decode: false, ring_low: [[0.0; 3]; RING], ring_high: [[0.0; 3]; RING], ground: [[0.0; 3]; RING], ..self.clone() };
-        Some((designed, host))
+        let host_only = |sun: [f32; 3], ambient: [f32; 3]| SkyLight {
+            sun_rgb: sun, ambient_rgb: ambient, design_gain: 0.0, decode: false, night_haze: 1.0, night_light_share: 1.0, lights_by_day: 0.0,
+            ring_low: [[0.0; 3]; RING], ring_high: [[0.0; 3]; RING], ground: [[0.0; 3]; RING], ..self.clone()
+        };
+        if self.night_share() >= 1.0 && self.sun_rgb == [0.0; 3] {
+            // the sun's height does not reach the host's part by full night (the shaders' day() is 0): one unit for any
+            let unit = SkyLight { sun_u: 0.0, sun_el_deg: -90.0, ..host_only([0.0; 3], [1.0; 3]) };
+            return StripPlan::Unit { designed, unit, ambient: self.ambient_rgb.map(|c| c * k) };
+        }
+        StripPlan::Split { designed, host: host_only(self.sun_rgb.map(|c| c * k), self.ambient_rgb.map(|c| c * k)) }
     }
 
     /// The strip as the host takes it (`decode`): each texel laid over the host's sky in codes, turned back into
@@ -235,7 +271,7 @@ impl SkyLight {
     /// A hash of every field's bits, for cache keys.
     pub fn hash(&self) -> u64 {
         let rings = self.ring_low.iter().chain(&self.ring_high).chain(&self.ground).flatten();
-        let floats = [&self.sun_u, &self.sun_el_deg].into_iter().chain(&self.sun_rgb).chain(&self.ambient_rgb).chain(rings).chain([&self.lights_by_day, &self.design_gain, &self.night_haze]);
+        let floats = [&self.sun_u, &self.sun_el_deg].into_iter().chain(&self.sun_rgb).chain(&self.ambient_rgb).chain(rings).chain([&self.lights_by_day, &self.design_gain, &self.night_haze, &self.night_light_share]);
         hash_bits(0x5c71_19b7_0000_0002, floats.map(|x| x.to_bits() as u64).chain([self.decode as u64, self.host_ground as u64]))
     }
 
@@ -255,11 +291,16 @@ impl SkyLight {
 /// The host's rings in codes (`SkyLight::codes`).
 struct Codes { haze_low: [[f32; 3]; RING], haze_high: [[f32; 3]; RING], low: [[f32; 3]; RING], high: [[f32; 3]; RING], ground: [[f32; 3]; RING] }
 
-/// Adds the host light's band (`SkyLight::split`) to the designed one, texel by texel, its light only: the two are the
+/// Adds the host light's band (`StripPlan::Split`) to the designed one, texel by texel, its light only: the two are the
 /// same scene, so their coverage is the same.
 pub fn add_light(designed: &mut [[f32; 4]], host: &[[f32; 4]]) {
+    add_scaled(designed, host, [1.0; 3]);
+}
+
+/// Adds `scale` times the host light's band (`StripPlan::Unit`: a white ambient's band x the ambient) to the designed one.
+pub fn add_scaled(designed: &mut [[f32; 4]], host: &[[f32; 4]], scale: [f32; 3]) {
     for (d, h) in designed.iter_mut().zip(host) {
-        for c in 0..3 { d[c] += h[c]; }
+        for c in 0..3 { d[c] += h[c] * scale[c]; }
     }
 }
 
@@ -376,23 +417,39 @@ mod tests {
         let day = SkyLight { sun_el_deg: 20.0, ..night.clone() };
         assert_eq!(day.to_code(0.0035), 0.0035);
     }
-    /// The host's own light is split off where it would go through the decode (by night or dusk, with a sun or an
-    /// ambient), and only there; the halves add up to the light.
+    /// The host's own light is rendered apart where it would go through the decode (by night or dusk, with a sun or
+    /// an ambient), and only there, at its night share; by full night as a unit ambient's band times the ambient.
     #[test]
-    fn the_hosts_light_is_split_off_the_decode() {
-        assert!(SkyLight::example().split().is_none());
-        let night = SkyLight { design_gain: 0.0264, decode: true, sun_el_deg: -20.0, ..SkyLight::example() };
-        assert!(night.split().is_none(), "no host light: one render");
-        let lit = SkyLight { ambient_rgb: [0.002, 0.002, 0.003], ..night.clone() };
-        let (designed, host) = lit.split().expect("an ambient by night");
-        assert_eq!((designed.sun_rgb, designed.ambient_rgb, designed.decode), ([0.0; 3], [0.0; 3], true));
-        assert_eq!((host.ambient_rgb, host.decode, host.design_gain), (lit.ambient_rgb, false, 0.0));
-        assert!(host.ring_low.iter().chain(&host.ring_high).chain(&host.ground).all(|c| *c == [0.0; 3]));
-        assert!(SkyLight { sun_el_deg: 20.0, ..lit.clone() }.split().is_none(), "by day nothing is decoded");
-        assert!(SkyLight { sun_el_deg: -4.0, ..lit }.split().is_some(), "at dusk the decode has a share");
+    fn the_hosts_light_is_rendered_apart_at_its_share() {
+        assert!(matches!(SkyLight::example().plan(), StripPlan::One(_)));
+        let night = SkyLight { design_gain: 0.0264, decode: true, sun_el_deg: -20.0, night_light_share: 0.1, ..SkyLight::example() };
+        assert!(matches!(night.plan(), StripPlan::One(_)), "no host light: one render");
+        let lit = SkyLight { ambient_rgb: [0.002, 0.004, 0.006], ..night.clone() };
+        match lit.plan() {
+            StripPlan::Unit { designed, unit, ambient } => {
+                assert_eq!((designed.sun_rgb, designed.ambient_rgb, designed.decode), ([0.0; 3], [0.0; 3], true));
+                assert_eq!((unit.ambient_rgb, unit.decode, unit.design_gain), ([1.0; 3], false, 0.0));
+                assert!(unit.ring_low.iter().chain(&unit.ring_high).chain(&unit.ground).all(|c| *c == [0.0; 3]));
+                for c in 0..3 { assert!((ambient[c] - 0.1 * lit.ambient_rgb[c]).abs() < 1e-9); }
+                // the unit is the same whatever the night's sun or ambient: a host keeps it
+                let other = SkyLight { sun_el_deg: -30.0, sun_u: 0.3, ambient_rgb: [0.01; 3], ..lit.clone() };
+                let StripPlan::Unit { unit: unit2, .. } = other.plan() else { panic!() };
+                assert_eq!(unit.hash(), unit2.hash());
+            }
+            plan => panic!("{plan:?}"),
+        }
+        let dusk = SkyLight { sun_el_deg: -4.0, ..lit.clone() };
+        let k = dusk.host_share();
+        assert!(k > 0.1 && k < 1.0, "{k}");
+        match dusk.plan() {
+            StripPlan::Split { host, .. } => for c in 0..3 { assert!((host.ambient_rgb[c] - k * lit.ambient_rgb[c]).abs() < 1e-9) },
+            plan => panic!("{plan:?}"),
+        }
+        assert!(matches!(SkyLight { sun_el_deg: 20.0, ..lit.clone() }.plan(), StripPlan::One(_)), "by day nothing is decoded");
+        assert_eq!(SkyLight { sun_el_deg: 20.0, ..lit }.host_share(), 1.0);
         let mut a = vec![[0.1, 0.2, 0.3, 1.0]];
-        add_light(&mut a, &[[0.01, 0.02, 0.03, 1.0]]);
-        assert_eq!(a, vec![[0.11, 0.22, 0.33, 1.0]]);
+        add_scaled(&mut a, &[[0.25, 0.5, 0.03, 1.0]], [1.0, 2.0, 0.0]);
+        assert_eq!(a, vec![[0.35, 1.2, 0.3, 1.0]]);
     }
     /// The coast ring: 1 on land, falling smoothly to 0 SHORE_DEG out to sea.
     #[test]
@@ -421,5 +478,7 @@ mod tests {
         assert_ne!(a.hash(), f.hash());
         let mut gr = a.clone(); gr.ground[3][2] = 0.1;
         assert_ne!(a.hash(), gr.hash());
+        let mut sh = a.clone(); sh.night_light_share = 0.5;
+        assert_ne!(a.hash(), sh.hash());
     }
 }

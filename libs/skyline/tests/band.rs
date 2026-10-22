@@ -279,7 +279,8 @@ fn city_rows(p: &Params, night: &Band) -> Vec<usize> {
     for y in (0..night.h).filter(|&y| row_el(p, night, y) > 0.0) {
         for x in 0..night.w { let i = y * night.w + x; if night.texels[i][3] > 0.9 && bare.texels[i][3] < 0.1 { out.push(i); } }
     }
-    assert!(out.len() > 200, "the city covers only {} texels", out.len());
+    // a held strip's 512 texels hold about a sixth of a 1024 one's
+    assert!(out.len() > 200 * night.w / 1024 / 2, "the city covers only {} texels", out.len());
     out
 }
 
@@ -545,65 +546,138 @@ fn facades(p: &Params, example: &Band) -> Vec<usize> {
 
 fn median_of(mut v: Vec<f32>) -> f32 { v.sort_by(f32::total_cmp); v[v.len() / 2] }
 
+/// The band at `p`, `w` px wide, for `light` as a host renders it (`SkyLight::plan`): one render, or the designed part
+/// plus the host's own light (split, or a white ambient's band times the ambient by full night).
+fn render_planned(p: &Params, w: usize, light: &SkyLight) -> Band {
+    use makepad_skyline::StripPlan;
+    match light.plan() {
+        StripPlan::One(l) => render_band_lit(p, w, &l),
+        StripPlan::Split { designed, host } => {
+            let (mut d, h) = (render_band_lit(p, w, &designed), render_band_lit(p, w, &host));
+            makepad_skyline::add_light(&mut d.texels, &h.texels);
+            d
+        }
+        StripPlan::Unit { designed, unit, ambient } => {
+            let (mut d, h) = (render_band_lit(p, w, &designed), render_band_lit(p, w, &unit));
+            makepad_skyline::add_scaled(&mut d.texels, &h.texels, ambient);
+            d
+        }
+    }
+}
+
+/// The generator's own light on the skyline (`Env::skyline_light`, recorded from the HDRI app's Clear noon with the
+/// sun 20 and 4 degrees down at azimuth 0; the rings' means round the turn): the sun, the ambient, the low and high
+/// rings and the ground ring.
+fn generator_light(el: f32) -> SkyLight {
+    let (ambient, low, high, ground) = if el <= -6.0 {
+        ([0.007159, 0.007213, 0.007090], [0.002425, 0.003698, 0.005547], [0.001995, 0.002918, 0.004238], [0.001289, 0.001226, 0.001064])
+    } else {
+        ([0.010262, 0.012005, 0.026110], [0.074004, 0.054856, 0.062610], [0.019506, 0.022105, 0.044778], [0.001847, 0.002041, 0.003916])
+    };
+    SkyLight { ambient_rgb: ambient, ring_low: [low; RING], ring_high: [high; RING], ground: [ground; RING], host_ground: true,
+        night_light_share: makepad_skyline::HOST_LIGHT_NIGHT_SHARE, sun_el_deg: el, ..decoded_night(0.0264, low) }
+}
+
+fn lum4(t: [f32; 4]) -> f32 { 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2] }
+
 /// Fix round 1 of Task 8 (review, Important 1): with `decode` a host's own light (here its ambient: moonlight, twilight)
-/// reaches the map in the host's units at night and at dusk, not through the decode. The light is split
-/// (`SkyLight::split`): the designed part in codes, decoded, plus the host's light rendered alone; so on the facades the
-/// light the ambient adds is about their albedo x the ambient (0.28 x the street canyon's 0.5..1, less what the night's
-/// fog takes), as it is without `decode`. One render with the ambient in codes, as before the fix, decoded it to about a
-/// thousandth of that at night. Tolerances: the ambient's share within 0.05..0.5 x its luminance, and the unsplit one
-/// under a tenth of the split one.
+/// reaches the map in the host's units at night and at dusk, not through the decode (at the owner's night share,
+/// `night_light_share`, set to 1 here to see all of it). Rendered apart (`SkyLight::plan`), on the facades the light
+/// the ambient adds is about their albedo x the ambient (0.28 x the street canyon's 0.5..1, less what the night's fog
+/// takes). One render with the ambient in codes, as before the fix, decoded it to about a thousandth of that at night.
+/// Tolerances: the ambient's share within 0.05..0.5 x its luminance, and the one-render one under a tenth of it.
 #[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
 fn a_hosts_ambient_reaches_the_facades_in_its_own_units() {
     let g = 0.0264f32;
     let p = city_params();
     let example = render_band(&p, 1024);
     let wall = facades(&p, &example);
-    let lum3 = |t: [f32; 4]| 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2];
     let ambient = [0.0020f32, 0.0022, 0.0030];
     let amb = 0.2126 * ambient[0] + 0.7152 * ambient[1] + 0.0722 * ambient[2];
     for el in [-20.0f32, -4.0] {
         let ring = [0.0022, 0.0027, 0.0038];
         let light = SkyLight { ambient_rgb: ambient, sun_el_deg: el, ring_high: [ring.map(|c| 1.8 * c); RING], ..decoded_night(g, ring) };
-        let (designed, host) = light.split().expect("an ambient by night or at dusk splits the light");
-        let (bd, bh, one) = (render_band_lit(&p, 1024, &designed), render_band_lit(&p, 1024, &host), render_band_lit(&p, 1024, &light));
-        let mut full = bd.texels.clone();
-        makepad_skyline::add_light(&mut full, &bh.texels);
-        let share = median_of(wall.iter().map(|i| lum3(full[*i]) - lum3(bd.texels[*i])).collect());
-        let unsplit = median_of(wall.iter().map(|i| lum3(one.texels[*i]) - lum3(bd.texels[*i])).collect());
-        println!("sun {el}: on the facades the ambient adds {share:.3e} split ({:.3} x its luminance), {unsplit:.3e} in one render", share / amb);
+        let designed = SkyLight { ambient_rgb: [0.0; 3], ..light.clone() };
+        let (bd, full, one) = (render_band_lit(&p, 1024, &designed), render_planned(&p, 1024, &light), render_band_lit(&p, 1024, &light));
+        let share = median_of(wall.iter().map(|i| lum4(full.texels[*i]) - lum4(bd.texels[*i])).collect());
+        let unsplit = median_of(wall.iter().map(|i| lum4(one.texels[*i]) - lum4(bd.texels[*i])).collect());
+        println!("sun {el}: on the facades the ambient adds {share:.3e} rendered apart ({:.3} x its luminance), {unsplit:.3e} in one render", share / amb);
         assert!(share > 0.05 * amb && share < 0.5 * amb, "sun {el}: the ambient adds {share} to the facades, its luminance {amb}");
         assert!(unsplit < 0.1 * share, "sun {el}: one render gave {unsplit}, the split {share}");
     }
 }
 
-/// Fix round 1 of Task 8 (review, Important 2): the night like the example over a sky that is not the example's backdrop
-/// (a generator-like night ring, blue and brighter at +15 degrees, as `Env::skyline_light` records at -20 degrees). What it
-/// rests on: the facades' light is g x the example's as its display shows it (within a factor 1.5 either way: the haze
-/// follows the host's sky), and the lit windows' hue (within 10 degrees). The facades against the sky are printed: that
-/// ratio follows the sky behind, which differs.
+/// The owner's ruling "a share" (plan hdri-5 Task 8): over the generator's own night (`generator_light`, the sun 20
+/// degrees down) the facades take HOST_LIGHT_NIGHT_SHARE of its ambient and stand near the example's dark: about 5 %
+/// of the sky's brightness just over the horizon (asserted 3..8 %; the example over its backdrop: about 2 % by this
+/// measure, 4 % by the window grab's); the lit windows keep the example's hue (within 10 degrees). The facades' light
+/// against g x the example's as displayed is printed: what the host's ambient adds over the designed light.
 #[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
-fn the_decoded_night_matches_the_example_over_another_sky() {
+fn the_decoded_night_matches_the_example_over_the_generators_night() {
     use makepad_skyline::{srgb_decode, BACKDROP_HORIZON};
     let g = 0.0264f32;
-    let ring = [0.0024f32, 0.0029, 0.0041];
-    let light = SkyLight { ring_high: [ring.map(|c| 1.7 * c); RING], ..decoded_night(g, ring) };
+    let light = generator_light(-20.0);
     let p = city_params();
-    let (example, host) = (render_band(&p, 1024), render_band_lit(&p, 1024, &light));
+    let (example, host) = (render_band(&p, 1024), render_planned(&p, 1024, &light));
     let lum3 = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
     let rgb = |t: [f32; 4]| [t[0], t[1], t[2]];
     let shown = |t: [f32; 4]| -> [f32; 3] { std::array::from_fn(|c| srgb_decode(t[c] + (1.0 - t[3]) * BACKDROP_HORIZON[c])) };
     let wall = facades(&p, &example);
-    let (f_ex, f_host) = (median_of(wall.iter().map(|i| g * lum3(shown(example.texels[*i]))).collect()), median_of(wall.iter().map(|i| lum3(rgb(host.texels[*i]))).collect()));
+    let (f_ex, f_host) = (median_of(wall.iter().map(|i| g * lum3(shown(example.texels[*i]))).collect()), median_of(wall.iter().map(|i| lum4(host.texels[*i])).collect()));
     let mut city = city_rows(&p, &example);
     city.sort_by(|a, b| lum3(shown(example.texels[*a])).total_cmp(&lum3(shown(example.texels[*b]))));
     let lit = &city[city.len() - (city.len() * 3 / 100).max(10)..];
     let mean = |f: &dyn Fn(usize) -> [f32; 3]| { let s = lit.iter().fold([0.0f32; 3], |s, i| { let c = f(*i); [s[0] + c[0], s[1] + c[1], s[2] + c[2]] }); s.map(|x| x / lit.len() as f32) };
     let (h_ex, h_host) = (hue(mean(&|i| shown(example.texels[i]))), hue(mean(&|i| rgb(host.texels[i]))));
-    let (sky_ex, sky_host) = (lum3(BACKDROP_HORIZON.map(srgb_decode)), lum3(ring));
-    println!("facades: host {f_host:.3e}, g x the example's as displayed {f_ex:.3e} (x{:.2}); against the sky: example {:.4}, host {:.4}; window hue example {h_ex:.1}, host {h_host:.1}",
-        f_host / f_ex, f_ex / g / sky_ex, f_host / sky_host);
-    assert!(f_host < 1.5 * f_ex && f_host > f_ex / 1.5, "facades: host {f_host}, g x the example's {f_ex}");
+    let (sky_ex, sky_host) = (lum3(BACKDROP_HORIZON.map(srgb_decode)), lum3(light.ring_low[0]));
+    let ratio = f_host / sky_host;
+    println!("night share {}: facades over the sky: host {ratio:.4}, example {:.4}; facades {f_host:.3e} = x{:.2} g x the example's as displayed; window hue example {h_ex:.1}, host {h_host:.1}",
+        makepad_skyline::HOST_LIGHT_NIGHT_SHARE, f_ex / g / sky_ex, f_host / f_ex);
+    assert!(ratio > 0.03 && ratio < 0.08, "the facades stand at {ratio} of the sky, not about 5 %");
     assert!((h_host - h_ex).abs() < 10.0, "window hue: host {h_host}, example {h_ex}");
+}
+
+/// The owner's ruling "a share": at dusk (the generator's own light with the sun 4 degrees down, the host's share
+/// part way to its whole, 0.24) the silhouettes keep some shape: the host's twilight on the facades adds at least half
+/// again their designed light (measured: 1.25e-3 against 6.6e-4) and lifts them over 1 % of the sky just over the
+/// horizon (the dusk sky there is bright: the facades stay far darker than it, under 60 %).
+#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn the_dusk_silhouettes_keep_some_shape() {
+    use makepad_skyline::StripPlan;
+    let light = generator_light(-4.0);
+    let p = city_params();
+    let StripPlan::Split { designed, .. } = light.plan() else { panic!("dusk renders the host's light apart") };
+    let (example, host, alone) = (render_band(&p, 1024), render_planned(&p, 1024, &light), render_band_lit(&p, 1024, &designed));
+    let wall = facades(&p, &example);
+    let (f, d) = (median_of(wall.iter().map(|i| lum4(host.texels[*i])).collect()), median_of(wall.iter().map(|i| lum4(alone.texels[*i])).collect()));
+    let sky = 0.2126 * light.ring_low[0][0] + 0.7152 * light.ring_low[0][1] + 0.0722 * light.ring_low[0][2];
+    println!("dusk: the facades {f:.3e} ({d:.3e} designed alone) against the sky {sky:.3e}: {:.3}; the host's share {:.3}", f / sky, light.host_share());
+    assert!(f > 1.5 * d, "the twilight adds little to the facades: {f} against {d} without it");
+    assert!(f > 0.01 * sky && f < 0.6 * sky, "dusk facades at {} of the sky", f / sky);
+}
+
+/// The owner's ruling "a share": a held strip (512) and a released one (1024) of the same scene, rendered as a host does
+/// (`SkyLight::plan`, the same at both widths), agree in the city's facade light (the median over the facades at
+/// each width) within 15 %, at night and at dusk. Measured: x1.11 at night and x1.10 at dusk, where the designed part
+/// alone differs more (x1.23, x1.18): the held strip's windows are sub-pixel and spread into their walls; the host's
+/// share is rendered the same way at both widths.
+#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn a_held_and_a_released_strip_light_the_facades_alike() {
+    let p = city_params();
+    for el in [-20.0f32, -4.0] {
+        let light = generator_light(el);
+        // the facade light as a host renders it, and the designed part alone (what the widths' own detail does)
+        let designed = match light.plan() { makepad_skyline::StripPlan::Unit { designed, .. } | makepad_skyline::StripPlan::Split { designed, .. } => designed, makepad_skyline::StripPlan::One(l) => l };
+        let facade = |w: usize, l: Option<&SkyLight>| {
+            let example = render_band(&p, w);
+            let host = match l { Some(l) => render_band_lit(&p, w, l), None => render_planned(&p, w, &light) };
+            median_of(facades(&p, &example).iter().map(|i| lum4(host.texels[*i])).collect())
+        };
+        let (held, released) = (facade(512, None), facade(1024, None));
+        let (held_d, released_d) = (facade(512, Some(&designed)), facade(1024, Some(&designed)));
+        println!("sun {el}: facades held (512) {held:.3e}, released (1024) {released:.3e}: x{:.3}; the designed part alone x{:.3}", held / released, held_d / released_d);
+        assert!((held / released - 1.0).abs() < 0.15, "sun {el}: held {held}, released {released}");
+    }
 }
 
 /// Night, noon and a sunset over the city, toned PNGs into `SKYLINE_VISUAL_DIR` (the whole strip and the city's sector).
