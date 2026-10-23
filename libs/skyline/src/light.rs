@@ -60,11 +60,12 @@ pub struct SkyLight {
     /// host) hands the sky as it shows it, since the light a far sea mirrors has come through the weather to the water.
     /// None (the example, a clear sky): the sea mirrors the rings.
     pub sea_sky: Option<([[f32; 3]; RING], [[f32; 3]; RING])>,
-    /// The share of the host's ground under standing water (its puddles' mean share, `Weather::puddle_share` in the engine;
-    /// 1 at Wet ground 1.00): the strip's land and shore below the horizon are water by this share, the ground darkened
-    /// through it and the scene mirrored by Fresnel (`DrawSkyGround`, `DrawSkyWater`). 0 in the example. Over a host's
-    /// ground (`host_ground`) the host's own floor holds the water instead: the strip leaves its land and shore below the
-    /// horizon to it (`leaves_land`) and draws no water there itself (`own_wet`).
+    /// The share of the host's ground under standing water (its puddles' mean share, `Weather::puddle_share` in the
+    /// engine; 1 at Wet ground 1.00): the strip's land and shore below the horizon are water by this share, the ground
+    /// darkened through it and the scene mirrored by Fresnel (`DrawSkyGround`, `DrawSkyWater`). 0 in the example. Over
+    /// a host's ground (`host_ground`) the host's own floor holds the water instead: the strip keeps its own ground
+    /// there and gives way to the floor by this share (`leaves_land`, `floor_share`), and draws no water on its land
+    /// itself (`own_wet`).
     pub wet: f32,
 }
 
@@ -122,12 +123,21 @@ impl SkyLight {
         if self.host_ground { 0.0 } else { self.wet }
     }
 
-    /// Whether the strip leaves its land and shore below the horizon to the host, clear there (`DrawSkyFinalCut`): a host's
-    /// ground (`host_ground`) under standing water (`wet` > 0). The host's floor shows through and holds the water, its
-    /// puddles and what they mirror (the skyline at the mirrored elevation, through the host's weather), so the band and the
-    /// host's floor below it are one floor (plan hdri-6 §5). The lakes and the sea stay the strip's.
+    /// Whether the strip gives way to the host's floor below the horizon (`DrawSkyFinalCut`): a host's ground
+    /// (`host_ground`) under standing water (`wet` > 0). Its land and shore there are its own ground between the
+    /// puddles and clear by their share (`floor_share`), where the host's floor shows its water and what it mirrors
+    /// (the skyline at the mirrored elevation, through the host's weather): so the band and the host's floor below it
+    /// are one floor (plan hdri-6 §5), the floor's dry ground never showing through (fix wave 1, the owner's D1). The
+    /// lakes and the sea stay the strip's.
     pub fn leaves_land(&self) -> bool {
         self.host_ground && self.wet > 0.0
+    }
+
+    /// The share of its land and shore below the horizon the strip leaves clear for the host's floor (the shaders'
+    /// `host_wet`): the puddles' share (`wet`, at most 1) where it gives way (`leaves_land`), else 0. The rest it
+    /// keeps, its own ground; its open water (the sea, the lakes) it keeps whole.
+    pub fn floor_share(&self) -> f32 {
+        if self.leaves_land() { self.wet.min(1.0) } else { 0.0 }
     }
 
     /// The night's share of the look (`decode`): 0 above +2 degrees sun, 1 below -6, smooth between (the shaders'
@@ -287,6 +297,12 @@ impl SkyLight {
             return rgb.map(|c| self.from_code(c).max(0.0));
         }
         let el = ((horizon * h as f64 - (y as f64 + 0.5)) * (std::f64::consts::TAU / w as f64)) as f32;
+        if el < 0.0 && behind < 1.0 && self.floor_share() > 0.0 {
+            // below the horizon where the strip gives way to the host's floor (`floor_share`): behind the texel is that
+            // floor, not the sky; its own ground, in codes, as the host takes it, by its coverage
+            let a = 1.0 - behind;
+            return rgb.map(|c| (a * self.from_code(c / a)).max(0.0));
+        }
         let sky = Self::sky_code(&codes.low, &codes.high, (x as f32 + 0.5) / w as f32, el);
         std::array::from_fn(|c| (self.from_code(rgb[c] + behind * sky[c]) - behind * self.from_code(sky[c])).max(0.0))
     }
@@ -440,17 +456,40 @@ mod tests {
         assert_eq!(l.design_gain, 1.0);
         assert_eq!(l.wet, 0.0);
     }
-    /// Plan hdri-6 §5: the strip draws its own wet ground (`own_wet`) unless it lies over a host's ground, which holds its
-    /// own water: then a wet light leaves the land to the host (`leaves_land`) and the strip draws no water there.
+    /// Plan hdri-6 §5: the strip draws its own wet ground (`own_wet`) unless it lies over a host's ground, which holds
+    /// its own water: then a wet light gives way to the host's floor (`leaves_land`) by the puddles' share
+    /// (`floor_share`, fix wave 1) and the strip draws no water there.
     #[test]
     fn a_hosts_wet_ground_is_the_hosts_own() {
         let wet = SkyLight { wet: 0.5, ..SkyLight::example() };
-        assert_eq!((wet.own_wet(), wet.leaves_land()), (0.5, false), "the strip's own wet ground (the example's)");
+        assert_eq!((wet.own_wet(), wet.leaves_land(), wet.floor_share()), (0.5, false, 0.0), "the strip's own wet ground (the example's)");
         let host = SkyLight { host_ground: true, ..wet.clone() };
-        assert_eq!((host.own_wet(), host.leaves_land()), (0.0, true), "a host's wet ground: the host's floor holds the water");
+        assert_eq!((host.own_wet(), host.leaves_land(), host.floor_share()), (0.0, true, 0.5), "a host's wet ground: the host's floor holds the water");
         let dry = SkyLight { wet: 0.0, ..host.clone() };
-        assert_eq!((dry.own_wet(), dry.leaves_land()), (0.0, false), "a host's dry ground is the strip's, as before");
-        assert!(!SkyLight { wet: f32::NAN, ..host }.leaves_land(), "a NaN wetness counts as dry");
+        assert_eq!((dry.own_wet(), dry.leaves_land(), dry.floor_share()), (0.0, false, 0.0), "a host's dry ground is the strip's, as before");
+        assert_eq!(SkyLight { wet: 1.5, ..host.clone() }.floor_share(), 1.0, "at most all of it");
+        let nan = SkyLight { wet: f32::NAN, ..host };
+        assert!(!nan.leaves_land() && nan.floor_share() == 0.0, "a NaN wetness counts as dry");
+    }
+    /// Plan hdri-6 fix wave 1: by a decoded night, a texel below the horizon that the strip keeps by a share where it
+    /// gives way to a host's floor (`floor_share`) is its own ground by its coverage, as the host takes it: the floor
+    /// is behind it, not the sky. Above the horizon, and on a host's dry ground, a texel is laid over the host's sky as
+    /// before.
+    #[test]
+    fn a_texel_kept_by_a_share_over_the_hosts_floor_is_its_own_ground() {
+        let (g, sky) = (0.02, [0.004, 0.005, 0.008]);
+        let night = SkyLight { design_gain: g, decode: true, night_haze: 0.25, ring_low: [sky; RING], ring_high: [sky; RING], sun_el_deg: -20.0,
+            host_ground: true, wet: 0.25, ..SkyLight::example() };
+        // one column, the horizon between its two rows: above it a half-covered texel, below it the ground kept by 0.75
+        let (above, below) = ([0.15, 0.1, 0.05, 0.5], [0.3, 0.225, 0.15, 0.75]);
+        let mut t = vec![above, below];
+        night.to_host(&mut t, 1, 2, 0.5);
+        for c in 0..3 { assert!((t[1][c] - 0.75 * g * srgb_decode(below[c] / 0.75)).abs() < 1e-7, "{:?}", t[1]); }
+        let dry = SkyLight { wet: 0.0, ..night.clone() };
+        let mut d = vec![above, below];
+        dry.to_host(&mut d, 1, 2, 0.5);
+        assert_eq!(t[0], d[0], "above the horizon: over the host's sky");
+        assert!((0..3).any(|c| (d[1][c] - t[1][c]).abs() > 1e-6), "a host's dry ground: over the host's sky, as before");
     }
     #[test]
     fn the_example_opts_out_of_the_decode() {

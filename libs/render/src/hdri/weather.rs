@@ -510,9 +510,17 @@ impl Weather {
     }
 
     /// `ground` with no puddles: the damp ground between them, its dull sheen included. What the skyline's strip takes
-    /// for its land when it draws the water over it itself (plan hdri-6 §5). A dry ground is `ground`'s, bit for bit.
+    /// for its own ground under a wet ground, the ground between the puddles, which it keeps where the floor does not
+    /// mirror (plan hdri-6 §5, fix wave 1). A dry ground is `ground`'s, bit for bit.
     pub fn ground_damp(&self, d: Vec3f, ground: Vec3f, gain: Vec3f, sky_at: &dyn Fn(Vec3f) -> Vec3f) -> Vec3f {
         self.ground_with(d, ground, gain, sky_at, Puddles::Dry)
+    }
+
+    /// `ground` all under water: a puddle's bottom and what it mirrors by Fresnel, wherever `d` looks. What the map
+    /// shows where the skyline's strip gives way to its floor under a wet ground (the puddles' share of the strip's
+    /// land, `Env`'s `under_band`). A dry ground is `ground`'s, bit for bit.
+    pub(crate) fn ground_water(&self, d: Vec3f, ground: Vec3f, gain: Vec3f, sky_at: &dyn Fn(Vec3f) -> Vec3f) -> Vec3f {
+        self.ground_with(d, ground, gain, sky_at, Puddles::Full)
     }
 
     fn ground_with(&self, d: Vec3f, ground: Vec3f, gain: Vec3f, sky_at: &dyn Fn(Vec3f) -> Vec3f, puddles: Puddles) -> Vec3f {
@@ -536,11 +544,11 @@ impl Weather {
         damp.mix(water, puddle)
     }
 
-    /// How much of what the ground along `d` mirrors `ground_with` lets through (`ground`, `ground_even` or
-    /// `ground_damp` by `puddles`): the damp ground's sheen between the puddles, Fresnel's term in them, by their share.
-    /// The ground is affine in the mirror, and this is its slope; 0 above the horizon or on a dry ground. What `Env`
-    /// takes out of the floor's veil where the mirror shows the skyline's strip, which is veiled over its own distance
-    /// instead (plan hdri-6 R1).
+    /// How much of what the ground along `d` mirrors `ground_with` lets through (`ground`, `ground_even`, `ground_damp`
+    /// or `ground_water` by `puddles`): the damp ground's sheen between the puddles, Fresnel's term in them, by their
+    /// share. The ground is affine in the mirror, and this is its slope; 0 above the horizon or on a dry ground. What
+    /// `Env` takes out of the floor's veil where the mirror shows the skyline's strip, which is veiled over its own
+    /// distance instead (plan hdri-6 R1).
     pub(crate) fn mirror_share(&self, d: Vec3f, puddles: Puddles) -> f32 {
         let wet = self.effects.wet_ground;
         if wet <= 0.0 || !(d.y < 0.0) {
@@ -557,6 +565,9 @@ impl Weather {
         let wet = self.effects.wet_ground;
         if wet <= 0.0 || !(d.y < 0.0) || puddles == Puddles::Dry {
             return 0.0;
+        }
+        if puddles == Puddles::Full {
+            return 1.0;
         }
         let down = (-d.y).min(1.0);
         // Far away the puddles are smaller than a texel: their mean share
@@ -848,12 +859,14 @@ fn flooded(cover: f32, flood: f32) -> f32 {
     if flood > 0.0 { 1.0 - (1.0 - cover) * (1.0 - flood) } else { cover }
 }
 
-/// How a wet ground's puddles are read: their field (the map's own), their mean share everywhere (`ground_even`), or none (`ground_damp`).
+/// How a wet ground's puddles are read: their field (the map's own), their mean share everywhere (`ground_even`), none
+/// (`ground_damp`), or everywhere (`ground_water`: the floor's water, what shows where the skyline's strip gives way).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Puddles {
     Field,
     Even,
     Dry,
+    Full,
 }
 
 /// The ground the dry sky drew along `d` (`ground`), lit by the clear sky,

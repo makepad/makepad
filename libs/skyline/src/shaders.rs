@@ -67,6 +67,9 @@ script_mod! {
         // the share of the host's ground under standing water (`SkyLight::wet`): the land and the shore below the horizon are
         // water by it. 0: dry (the example's)
         wet: uniform(0.0)
+        // over a host's wet ground, the share of its land and shore below the horizon the strip leaves to the host's
+        // floor, whose water shows there (`SkyLight::floor_share`: the puddles' share); 0 elsewhere
+        host_wet: uniform(0.0)
         // the horizon rings, RING x 4 texels: row 0 the sky at +1 degree, row 1 at +15 degrees, row 2 the host's ground,
         // row 3 the coast (x: 1 on land, 0 from SHORE_DEG out to sea; `SkyLight::ring_texels`, `coast_ring`)
         ring_tex: texture_2d(float)
@@ -141,6 +144,10 @@ script_mod! {
             // a lake stands on land columns only
             return vec3(sea, self.lake_at(u, al, px) * smoothstep(0.35, 0.6, g.x), self.wet * (1.0 - sea))
         }
+        // the share of a texel below the horizon the strip keeps over a host's wet floor (DrawSkyFinalCut), `wa` its
+        // open water (the sea, faded from the host's coast by day, and a lake): the water whole, the land and the shore
+        // by 1 - host_wet
+        floor_keep: fn(wa: float) -> float { return 1.0 - self.host_wet * (1.0 - wa) }
         // the sky at azimuth u, elevation el (rad): the low ring, toward the high one by +15 degrees
         sky_at: fn(u: float, el: float) -> vec3 { let a = self.ring_at(u, 0.125); return a + (self.ring_at(u, 0.375) - a) * clamp(el / 0.2617994, 0.0, 1.0) }
         // the sun's direction in the frame of a pixel at azimuth u: x to its right (growing u), y up, z along the view
@@ -308,6 +315,20 @@ script_mod! {
                 let v = self.pix_view(self.view_raw()); let ws = self.water_at(g, v.x, al, self.px0() * g.z)
                 let fr = 0.02 + 0.98 * pow(clamp(1.0 - al, 0.0, 1.0), 5.0)
                 c = c + (c * (0.35 * (1.0 - fr)) + self.sil * (0.5 * fr) - c) * max(ws.y, ws.z)
+            }
+            // over a host's wet floor (`host_wet`): by day the sea is the floor's water, by the floor's share (one
+            // reflection runs from the sea onto the floor, the owner's D2): no base of its own, the host's ground
+            // through it darkened as through a puddle (x 0.35 (1 - Fresnel)), the water shader mirroring at full
+            // strength. And the share of the land and shore the strip leaves to the floor (1 - `floor_keep`, of the
+            // host's ground) is taken out here, of the texel as the final keeps it, so the final's cut (the texel x
+            // floor_keep) leaves a lake's or the sea's own share whole
+            if al > 0.0 && self.host_wet > 0.0 {
+                let u = self.view_raw().x; let gr = self.ring_at(u, 0.625); let coast = self.coast_at(u)
+                let fr = 0.02 + 0.98 * pow(clamp(1.0 - al, 0.0, 1.0), 5.0)
+                c = c + (gr * (0.35 * (1.0 - fr)) - c) * ((1.0 - max(land, coast)) * self.host_wet * self.day())
+                let ws = self.water_at(g, self.pix_view(self.view_raw()).x, al, self.px0() * g.z)
+                let k = self.floor_keep(max(ws.x * (1.0 - coast * self.day()), ws.y))
+                if k > 0.0 { c = max(c - gr * (1.0 - k), vec3(0.0, 0.0, 0.0)) / k }
             }
             return vec4(c * gm, gm)
         }

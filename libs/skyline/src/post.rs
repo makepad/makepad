@@ -1,7 +1,8 @@
 //! After the scene: scene + mirror -> water (the light plus what the sea mirrors) -> blur H -> final (blur V, plus the
-//! colour, then the display tone shoulder; an export keeps the raw HDR; over a host's wet ground it leaves the land below
-//! the horizon out, `DrawSkyFinalCut`). A stage that would do nothing is left out;
-//! the final samples the light target the chain ends in. The blur takes the reflections with the lights, as the page's.
+//! colour, then the display tone shoulder; an export keeps the raw HDR; over a host's wet ground it gives way to the
+//! host's floor below the horizon by the puddles' share of its land, `DrawSkyFinalCut`). A stage that would do nothing
+//! is left out; the final samples the light target the chain ends in. The blur takes the reflections with the lights,
+//! as the page's.
 //! A band's distance (`SceneTarget::dist`) goes scene + mirror -> water (what the water mirrors) -> the water's choice
 //! (`DrawSkyWaterDist`: what it mirrors where the texel shows mostly the mirror, else its own) -> final, past the blur.
 //! Its light plane (the target's y and z, `at_lit`) goes with it, the water adding the lights it mirrors, and is blurred
@@ -48,7 +49,7 @@ script_mod! {
         tone: uniform(1.0)
         // the view inside the scene's targets (their margin cropped off): offset, size (uv)
         crop: uniform(vec4(0.0, 0.0, 1.0, 1.0))
-        // the share of the texel at scene uv the strip keeps: all of it (DrawSkyFinalCut's leaves a host's wet land out)
+        // the share of the texel at scene uv the strip keeps: all of it (DrawSkyFinalCut's gives way to a wet floor)
         keep: fn(uv: vec2) -> float { return 1.0 }
         pixel: fn(){
             let uv = self.crop.xy + self.pos * self.crop.zw; let c = self.scene_color.sample_nearest(uv); var e = self.scene_light.sample_nearest(uv)
@@ -61,12 +62,14 @@ script_mod! {
         }
     }
 
-    // The final over a host's ground under standing water (`SkyLight::leaves_land`): below the horizon the strip keeps only
-    // its open water, as DrawSkyWater reads it (the sea from its distance out, faded from the host's coast by day, and the
-    // lakes), and leaves the rest out (clear): its land and its shore, which are the host's ground (DrawSkyGround). The
-    // host's own floor shows through there, its puddles and what they mirror (the skyline at the mirrored elevation, through
-    // its weather), so the band and the host's floor below it are one floor (plan hdri-6 §5). Kept apart, so every other
-    // final is the shader it was.
+    // The final over a host's ground under standing water (`SkyLight::leaves_land`): below the horizon the strip keeps
+    // its open water whole, as DrawSkyWater reads it (the sea from its distance out, faded from the host's coast by
+    // day, and the lakes), and its land and its shore (the host's ground, DrawSkyGround) by 1 - the puddles' share
+    // (`floor_keep`, `SkyLight::floor_share`): the share it leaves clear is where the host's floor shows its water and
+    // what it mirrors (the skyline at the mirrored elevation, through its weather), the rest its own ground, so the
+    // band and the host's floor below it are one floor and the floor's dry ground never shows through it (plan hdri-6
+    // §5; fix wave 1, the owner's D1). DrawSkyGround and DrawSkyWater take that share out of the texel's land alone, so
+    // the cut applies once. Kept apart, so every other final is the shader it was.
     mod.draw.DrawSkyFinalCut = mod.std.set_type_default() do #(DrawSkyFinalCut::script_shader(vm)){
         ..mod.draw.DrawSkyFinal,
         ..mod.draw.SkyScene,
@@ -76,7 +79,7 @@ script_mod! {
             if al <= 0.0 { return 1.0 }
             let vr = vec3(fract(self.view_span.x + (pp.x - self.view_pad) / self.view_in().x * self.view_span.y), a, self.px0())
             let ws = self.water_at(g, self.pix_view(vr).x, al, vr.z * g.z)
-            return max(ws.x * (1.0 - self.coast_at(vr.x) * self.day()), ws.y)
+            return self.floor_keep(max(ws.x * (1.0 - self.coast_at(vr.x) * self.day()), ws.y))
         }
         // the colour, and the distance (DrawSkyFinal's `pixel` writes fb1); SkyScene's third output is written too, so no
         // backend leaves it undefined
@@ -135,7 +138,11 @@ script_mod! {
             // over a host's ground the day's sea fades in from the coast (the lights it mirrors at night stay)
             if self.host_ground > 0.5 { sea = sea * (1.0 - self.coast_at(vr.x) * self.day()) }
             // open water (the sea, a lake) mirrors by the Water reflections strength, standing water on the land as a puddle does
-            let open = max(sea, ws.y); let water = max(open, ws.z)
+            var open = max(sea, ws.y)
+            // over a host's wet floor: the open water's share of the texel the strip keeps (`floor_keep`; the final's
+            // cut then leaves it whole)
+            if self.host_wet > 0.0 { open = open / self.floor_keep(open) }
+            let water = max(open, ws.z)
             if water < 0.01 { return e }
             let fr = 0.02 + 0.98 * pow(clamp(1.0 - al, 0.0, 1.0), 5.0); let a0 = 0.004; let kz = mix(22.0, 13.0, rip)
             // by day the water mirrors the sky at the mirrored elevation, by its Fresnel term, where nothing mirrored stands in
@@ -145,6 +152,11 @@ script_mod! {
             if al >= 0.35 { return vec4(e.xyz + sky, e.w) }
             let sm = smoothstep(vec3(0.1, 0.0, 0.5), vec3(0.2, 0.012, 1.4), vec3(al, al, (al + a0) / (kz * v.z))); let w = self.pr_refl * fr * (1.0 - sm.x)
             var wk = w * open
+            // by day over a host's wet floor the sea mirrors as the floor's water does, at full strength, by the
+            // floor's share (the owner's D2; DrawSkyGround drops its base); a lake by its own
+            if self.host_wet > 0.0 && self.day() > 0.0 {
+                wk = fr * (1.0 - sm.x) * max(sea * mix(self.pr_refl, 1.0, self.host_wet * self.day()), ws.y * self.pr_refl) / self.floor_keep(max(sea, ws.y))
+            }
             if ws.z > 0.0 { wk = max(wk, fr * (1.0 - sm.x) * ws.z) }
             if wk < 0.003 { return vec4(e.xyz + sky, e.w) }
             let j = floor(kz * log(al + a0)); let alj = exp((j + 0.5) / kz) - a0; let nu = floor(mix(160.0, 700.0, rip))
@@ -278,9 +290,9 @@ pub struct Post {
     #[live] pub draw_water_day: DrawSkyWaterDay, #[live] pub draw_water_dist: DrawSkyWaterDist,
     #[live] pub draw_dist_across: DrawSkyDistBlur, #[live] pub draw_dist_down: DrawSkyDistBlur,
     /// The water and blur targets, a band's choice of the water's distance (`DrawSkyWaterDist`) and its light plane's
-    /// blur (`DrawSkyDistBlur`, across and down); what the last picture ran: the water, the blur's sigma (px, 0 none); the
-    /// scene's margin (px); whether its final leaves a host's wet land out (`SkyLight::leaves_land`); whether the water's
-    /// distance was chosen; whether the light plane was blurred.
+    /// blur (`DrawSkyDistBlur`, across and down); what the last picture ran: the water, the blur's sigma (px, 0 none);
+    /// the scene's margin (px); whether its final gives way to a host's wet floor (`SkyLight::leaves_land`); whether
+    /// the water's distance was chosen; whether the light plane was blurred.
     #[rust] pub water: Option<SceneTarget>, #[rust] pub blur: Option<SceneTarget>, #[rust] pub water_dist: Option<SceneTarget>,
     #[rust] pub dist_blur: Option<[SceneTarget; 2]>, #[rust] ran: (bool, f64),
     #[rust] margin: usize, #[rust] cut: bool, #[rust] chose: bool, #[rust] dist_blurred: bool,
@@ -360,8 +372,8 @@ impl Post {
             t.record(cx, v.w, v.h, |cx| d.draw_abs(cx, full));
             cx.attach_child_pass(head, t.pass.draw_pass_id(), None);
         }
-        // over a host's wet ground the final leaves the land below the horizon out, reading the scene's columns as the
-        // scene's shaders do (`DrawSkyFinalCut`)
+        // over a host's wet ground the final gives way to the host's floor below the horizon, reading the scene's
+        // columns as the scene's shaders do (`DrawSkyFinalCut`)
         self.cut = sc.light.leaves_land();
         if self.cut { sc.set_uniforms(cx, &mut self.draw_final_cut.draw_vars); }
         self.ran = (out.mirror.is_some(), sigma);
