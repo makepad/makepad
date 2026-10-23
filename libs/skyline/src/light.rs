@@ -118,24 +118,26 @@ impl SkyLight {
     }
 
     /// The wetness the strip draws itself (the shaders' `wet`, the reflection run's): `wet`, but 0 over a host's ground,
-    /// whose own floor holds the water (`leaves_land`), so there the band is the dry band with its land left out.
+    /// whose own floor holds the water (`leaves_land`), so there the band is the dry band with its floor given way.
     pub fn own_wet(&self) -> f32 {
         if self.host_ground { 0.0 } else { self.wet }
     }
 
-    /// Whether the strip gives way to the host's floor below the horizon (`DrawSkyFinalCut`): a host's ground
-    /// (`host_ground`) under standing water (`wet` > 0). Its land and shore there are its own ground between the
-    /// puddles and clear by their share (`floor_share`), where the host's floor shows its water and what it mirrors
-    /// (the skyline at the mirrored elevation, through the host's weather): so the band and the host's floor below it
-    /// are one floor (plan hdri-6 §5), the floor's dry ground never showing through (fix wave 1, the owner's D1). The
-    /// lakes and the sea stay the strip's.
+    /// Whether the strip gives way to the host's floor below the horizon (`DrawSkyGround`): a host's ground
+    /// (`host_ground`) under standing water (`wet` > 0). The strip keeps its own ground there (its near rise down to
+    /// its foot whole) but on its floor, the flat ground in front of the rise, where it leaves the puddles' share clear
+    /// (`floor_share`) and the host lays its puddles as its own field lays them, their water and what they mirror (the
+    /// skyline at the mirrored elevation, through the host's weather), the strip's ground between them: so the band
+    /// and the host's floor below it are one floor (plan hdri-6 §5), the floor's dry ground never showing through (fix
+    /// wave 1, the owner's D1). The lakes and the sea stay the strip's.
     pub fn leaves_land(&self) -> bool {
         self.host_ground && self.wet > 0.0
     }
 
-    /// The share of its land and shore below the horizon the strip leaves clear for the host's floor (the shaders'
-    /// `host_wet`): the puddles' share (`wet`, at most 1) where it gives way (`leaves_land`), else 0. The rest it
-    /// keeps, its own ground; its open water (the sea, the lakes) it keeps whole.
+    /// The share of its floor's land below the horizon (the shaders' `floor_at`) the strip leaves clear for the host's
+    /// floor (the shaders' `host_wet`): the puddles' mean share (`wet`, at most 1) where it gives way (`leaves_land`),
+    /// else 0; the host lays its own puddles over that floor by it. The rest it keeps, its own ground; its open water
+    /// (the sea, the lakes) it keeps whole.
     pub fn floor_share(&self) -> f32 {
         if self.leaves_land() { self.wet.min(1.0) } else { 0.0 }
     }

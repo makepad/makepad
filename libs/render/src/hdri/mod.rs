@@ -195,7 +195,7 @@ pub struct Env {
 /// the strip's own ground, the ground between the puddles. It takes precedence
 /// over `even_ground`.
 /// `water_ground` reads a wet ground all under water (`Weather::ground_water`):
-/// the floor's puddles where the strip gives way to them (`Env::under_band`).
+/// the floor's puddles where they lie over the strip's floor (`Env::under_band`).
 #[derive(Clone, Copy, Default)]
 struct Sampling<'a> {
     cache: Option<&'a volumetric::CloudCache>,
@@ -426,44 +426,64 @@ impl Env {
     /// The distance is None where the texel has no coverage (the glow, a prop's light over the sky) or the band no
     /// distance plane, and where the plane reads 0 (a distance the handoff made safe), which no surface the strip draws
     /// stands at. The light is None where there is none or the band has no light plane. The colour is `city_at`'s.
-    /// Where the strip gives way to this map's floor (`gives_way`) it is read on either side of the horizon apart
-    /// (`SkylineBand::sample_skirted_lit_parted`): a puddle mirrors what stands above it, not the floor the strip left.
     fn city_far_at(&self, d: Vec3f) -> Option<([f32; 4], Option<f32>, Option<skyline::TexelLight>)> {
         let ((band, turn), skirt) = (self.skyline.as_ref()?, self.city_skirt.as_ref()?);
-        let (s, far, light) = if self.gives_way() { band.sample_skirted_lit_parted(skirt, d, *turn) } else { band.sample_skirted_lit(skirt, d, *turn) };
+        let (s, far, light) = band.sample_skirted_lit(skirt, d, *turn);
         Some((s, far.filter(|&far| far > 0.0), light))
     }
 
     /// Whether the skyline's strip gives way to this map's floor: under standing water (the puddles' share above 0,
-    /// with a sky: what `skyline_light` hands as `wet`) the app's strip keeps its own ground below the horizon only
-    /// between the puddles and leaves their share clear (makepad_skyline's `SkyLight::floor_share`, plan hdri-6 fix
-    /// wave 1), for the floor's water to show through (`under_band`). False without a skyline, a weather, a sky or a
-    /// wet ground.
+    /// with a sky: what `skyline_light` hands as `wet`) the app's strip keeps its own ground below the horizon but on
+    /// its floor, the flat ground in front of its near rise, where it leaves the puddles' mean share clear
+    /// (makepad_skyline's `SkyLight::floor_share`, plan hdri-6 fix wave 1), and the map lays its puddles there
+    /// (`under_band`). False without a skyline, a weather, a sky or a wet ground.
     fn gives_way(&self) -> bool {
         self.skyline.is_some() && self.atmo.is_some() && self.weather.as_ref().is_some_and(|weather| weather.puddle_share() > 0.0)
     }
 
-    /// What the map shows along `d` behind a strip texel of coverage `a` (below 1): its base; but where the strip gives
-    /// way to the floor (`gives_way`, below the horizon), behind the share of its texel the strip left (the band's own
-    /// share there less `a`: all the clear inside its rows, in its skirt the share its bottom row left), the floor's
-    /// water (`Sampling::water_ground`: what the puddles show, their bottom and what they mirror), and behind the rest
-    /// the floor as it is. So the band's land is its own ground between the puddles and the floor's water in them,
-    /// never the floor's dry ground, which by the horizon is the horizon's haze (fix wave 1, D1). Elsewhere
-    /// `base_under_skyline` itself.
-    fn under_band(&self, d: Vec3f, a: f32, without: Option<KeyTerm>, at: Sampling) -> Vec3f {
-        let share = match &self.skyline {
-            Some((band, _)) if d.y < 0.0 && self.gives_way() => band.share_at(d),
-            _ => 0.0,
-        };
+    /// How the map lays strip texel `s` along `d` over what is behind it: the scale of the texel (its colour, its
+    /// coverage and its light) and that base behind it. Where the strip gives way to the floor (`gives_way`, below the
+    /// horizon) it has left the puddles' mean share m of its floor clear (`SkyLight::floor_share`): the share of the
+    /// texel left clear past what the band leaves below it (its skirt's fade), m of the texel's floor. The strip cannot
+    /// see the puddles; the map can: there the floor keeps its puddles as its own field lays them along `d` (p,
+    /// `Weather::puddle_cover`), the strip its own ground between them. So the texel's floor is the strip's ground by 1 -
+    /// p (the texel scaled as one colour from its kept 1 - m) and the floor's water by p (`Sampling::water_ground`: a
+    /// puddle's bottom and what it mirrors), and below the band's share the floor as it is: the puddles keep their shapes
+    /// over the band and run on into the floor's below it, and between them the strip's ground, never the floor's dry
+    /// ground, which by the horizon is its haze (fix wave 1, the owner's D1). A clear share the strip's floor does not
+    /// explain (more than m, or more than the ground it kept would leave) shows the floor as it is. Elsewhere (1,
+    /// `base_under_skyline`), the base not looked up behind an opaque texel.
+    fn under_band(&self, d: Vec3f, s: [f32; 4], without: Option<KeyTerm>, at: Sampling) -> (f32, Vec3f) {
+        let a = s[3];
+        let base = |at: Sampling| if a < 1.0 { self.base_under_skyline(d, without, at) } else { Vec3f::default() };
+        let (Some((band, _)), Some(weather)) = (&self.skyline, &self.weather) else { return (1.0, base(at)) };
+        if !(d.y < 0.0 && a > 0.0 && self.gives_way()) {
+            return (1.0, base(at));
+        }
+        let (share, m) = (band.share_at(d), weather.puddle_share().min(1.0));
         let left = share - a;
         if !(left > 0.0) {
-            return self.base_under_skyline(d, without, at);
+            return (1.0, base(at));
         }
-        let water = self.base_under_skyline(d, without, Sampling { water_ground: true, ..at });
-        if share >= 1.0 {
-            return water;
+        // the texel's floor: what the strip left over m, at most all of it and no more than the ground it kept
+        let kept = if m < 1.0 { a / ((1.0 - m) * share) } else { f32::INFINITY };
+        let floor = (left / (m * share)).min(1.0).min(kept);
+        let p = weather.puddle_cover(d, weather::Puddles::Field);
+        // the strip's ground over the texel's floor by 1 - p, the floor's water by p, the floor as it is the rest
+        let k = (a + (m - p) * floor * share) / a;
+        let (water, rest) = (p * floor * share, 1.0 - a * k - p * floor * share);
+        let behind = 1.0 - a * k;
+        if !(behind > 0.0) {
+            return (k, Vec3f::default());
         }
-        (water * left + self.base_under_skyline(d, without, at) * (1.0 - share)) * (1.0 / (1.0 - a))
+        let mut c = Vec3f::default();
+        if water > 0.0 {
+            c += self.base_under_skyline(d, without, Sampling { water_ground: true, ..at }) * water;
+        }
+        if rest > 1e-6 {
+            c += self.base_under_skyline(d, without, at) * rest;
+        }
+        (k, c * (1.0 / behind))
     }
 
     /// The skirt this map draws under `band` (turned by `turn` degrees): its bottom row blurred
@@ -564,13 +584,13 @@ impl Env {
     /// - `wet` and `ground_damp`: the puddles' mean share of the map's ground
     ///   (`Weather::puddle_share`, 0 on a dry ground or without a sky) and the
     ///   ground ring read with no puddles (`Weather::ground_damp`; the ground
-    ///   ring itself when `wet` is 0): under a wet ground the strip gives way
-    ///   to this map's own floor by the puddles' share of its land below the
-    ///   horizon, where the floor shows its water and what it mirrors
-    ///   (`SkyLight::floor_share` over a host's ground, `under_band`; plan
-    ///   hdri-6 §5, fix wave 1), so nothing is mirrored twice; over the rest it
-    ///   keeps its own ground, the damp ring (its near rise and land, its
-    ///   lakes' bottoms).
+    ///   ring itself when `wet` is 0): under a wet ground the strip keeps its
+    ///   own ground, the damp ring (its near rise down to its foot, its land,
+    ///   its lakes' bottoms), and on its floor, the flat ground in front of the
+    ///   rise, leaves the puddles' share clear (`SkyLight::floor_share` over a
+    ///   host's ground; plan hdri-6 §5, fix wave 1), where this map lays its
+    ///   puddles, their water and what they mirror (`under_band`), so nothing
+    ///   is mirrored twice.
     /// - `sun_rgb`: the sun's irradiance through the cover the key is dimmed
     ///   by (`cover_toward`), times the key's own fade over the horizon, / pi:
     ///   so under a closed deck the strip is as unlit by the sun as the key.
@@ -683,8 +703,9 @@ impl Env {
     /// its own distance, the base behind it as the map veils it; its lights
     /// shine through (`city_lit`, plan hdri-6 R4). The city hides what stands
     /// behind it, a storm's bolt included. Where the strip gives way to a wet
-    /// floor, what shows through it below the horizon is the floor's water
-    /// (`under_band`). Without a skyline the base is drawn exactly as before.
+    /// floor (`under_band`), the floor's puddles lie over the strip's floor as
+    /// the map's own field lays them, the strip's ground between them. Without
+    /// a skyline the base is drawn exactly as before.
     fn base_at(&self, d: Vec3f, without: Option<KeyTerm>, at: Sampling) -> Vec3f {
         // The distance and the light are read only where a weather veils the strip by them.
         let read = match &self.weather {
@@ -699,7 +720,10 @@ impl Env {
         }
         // An opaque texel hides the base outright (`over_veiled`), so the base
         // is not looked up behind it: a held bake's ranges, city and ground.
-        let c = if s[3] < 1.0 { self.under_band(d, s[3], without, at) } else { Vec3f::default() };
+        // Where the strip gives way to a wet floor the texel is scaled to the
+        // floor's puddles there (`under_band`).
+        let (k, c) = self.under_band(d, s, without, at);
+        let (s, light) = if k == 1.0 { (s, light) } else { (s.map(|c| c * k), light.map(|l| skyline::TexelLight { lum: l.lum * k, ..l })) };
         match &self.weather {
             Some(weather) => match self.city_lit(weather, d, s, light) {
                 None => skyline::over_veiled(s, c, &|x| self.city_veil(weather, d, far, x)),

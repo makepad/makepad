@@ -279,7 +279,7 @@ impl Skyline {
         let (pr, ci, po) = (&mut self.props, &mut self.city, &mut self.post);
         for v in [&mut self.draw_glow.draw_vars, &mut self.draw_range.draw_vars, &mut self.draw_ground.draw_vars, &mut self.trees.draw_trees.draw_vars,
             &mut ci.draw_city.draw_vars, &mut ci.draw_blit.draw_vars, &mut pr.draw_part.draw_vars, &mut pr.draw_blit.draw_vars,
-            &mut po.draw_final.draw_vars, &mut po.draw_final_cut.draw_vars, &mut po.draw_blur.draw_vars, &mut po.draw_water.draw_vars, &mut po.draw_water_day.draw_vars,
+            &mut po.draw_final.draw_vars, &mut po.draw_blur.draw_vars, &mut po.draw_water.draw_vars, &mut po.draw_water_day.draw_vars,
             &mut po.draw_water_dist.draw_vars, &mut po.draw_dist_across.draw_vars, &mut po.draw_dist_down.draw_vars] {
             v.texture_slots = Default::default();
         }

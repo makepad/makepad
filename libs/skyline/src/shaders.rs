@@ -67,8 +67,8 @@ script_mod! {
         // the share of the host's ground under standing water (`SkyLight::wet`): the land and the shore below the horizon are
         // water by it. 0: dry (the example's)
         wet: uniform(0.0)
-        // over a host's wet ground, the share of its land and shore below the horizon the strip leaves to the host's
-        // floor, whose water shows there (`SkyLight::floor_share`: the puddles' share); 0 elsewhere
+        // over a host's wet ground, the share of its floor's land below the horizon (`floor_at`) the strip leaves to the
+        // host's floor, which lays its puddles there (`SkyLight::floor_share`: the puddles' mean share); 0 elsewhere
         host_wet: uniform(0.0)
         // the horizon rings, RING x 4 texels: row 0 the sky at +1 degree, row 1 at +15 degrees, row 2 the host's ground,
         // row 3 the coast (x: 1 on land, 0 from SHORE_DEG out to sea; `SkyLight::ring_texels`, `coast_ring`)
@@ -144,10 +144,26 @@ script_mod! {
             // a lake stands on land columns only
             return vec3(sea, self.lake_at(u, al, px) * smoothstep(0.35, 0.6, g.x), self.wet * (1.0 - sea))
         }
-        // the share of a texel below the horizon the strip keeps over a host's wet floor (DrawSkyFinalCut), `wa` its
-        // open water (the sea, faded from the host's coast by day, and a lake): the water whole, the land and the shore
-        // by 1 - host_wet
-        floor_keep: fn(wa: float) -> float { return 1.0 - self.host_wet * (1.0 - wa) }
+        // the share of the fragment under the horizon, where only the ground draws under a host's wet floor (`host_wet`),
+        // for a fragment whose centre is under it (as the ground's own `al > 0`), in the upright run; elsewhere 0. The
+        // ground gives way to the host's floor there (`floor_at`), so what is drawn before it and reaches under the
+        // horizon (the ranges, the front treeline, the glow) leaves that share out, or it would show through
+        under_floor: fn() -> float {
+            let b = 0.0 - self.ang_raw(self.frag().y)
+            if self.host_wet > 0.0 && self.mirror < 0.5 && b > 0.0 { return self.cover(b, self.px0()) }
+            return 0.0
+        }
+        // the share of a pixel al rad below the horizon (raw elevation ang) in column g that is the strip's floor, the
+        // flat ground a host's wet floor lays its puddles on (DrawSkyGround, `host_wet`), where only the ground draws
+        // (`under_floor`). On the land (as `water_at` tells it from the sea) the near rise stands NEAR_RISE_M (500 m)
+        // off, its top g.y up: the rows down to its foot show the rise itself (`ground_d`), and water standing in front
+        // of it mirrors it, a near thing, from its foot down to its top's reflection, atan(2 EYE / 500 + tan g.y) (1.7
+        // degrees at Size 1), which the host's mirror about the horizon, a far scene's, cannot show; the strip keeps its
+        // own ground down to there (a puddle there shows the rise, about the ground's own colour), its floor below
+        floor_at: fn(g: vec4, al: float, ang: float) -> float {
+            let line = atan(2.0 * self.lake_eye / 500.0 + tan(g.y))
+            return (1.0 - smoothstep(0.0, 0.35, g.x) * (1.0 - self.cover(al - line, self.px0() * g.z))) * self.cover(0.0 - ang, self.px0())
+        }
         // the sky at azimuth u, elevation el (rad): the low ring, toward the high one by +15 degrees
         sky_at: fn(u: float, el: float) -> vec3 { let a = self.ring_at(u, 0.125); return a + (self.ring_at(u, 0.375) - a) * clamp(el / 0.2617994, 0.0, 1.0) }
         // the sun's direction in the frame of a pixel at azimuth u: x to its right (growing u), y up, z along the view
@@ -239,9 +255,11 @@ script_mod! {
             // the city's own light: fades with the lights by day
             return vec4(vec3(1.0, 0.55, 0.25) * (dome * 0.10) * (self.lit * self.design_gain), 0.0)
         }
-        // no coverage, so no distance; its light burns over downtown, at downtown's distance from the camera (m)
+        // no coverage, so no distance; its light burns over downtown, at downtown's distance from the camera (m); under a
+        // host's wet floor only its share over the horizon (`under_floor`)
         fragment: fn(){
-            let e = self.pixel()
+            var e = self.pixel()
+            if self.host_wet > 0.0 { e = e * (1.0 - self.under_floor()) }
             self.fb0 = vec4(0.0, 0.0, 0.0, 0.0)
             self.fb1 = e
             self.fb2 = self.at_lit(0.0, 0.0, e.xyz, length(self.city_d() * self.city_dir() - self.city_cam()) * 70.0)
@@ -288,7 +306,12 @@ script_mod! {
             return vec4(c.xyz + (hz * c.w - c.xyz) * self.aerial(5000.0 * pow(6.0, (4.0 - k) * 0.25)), c.w)
         }
         // at the range's distance, its trees' too (`dk`)
-        fragment: fn(){ let c = self.pixel(); self.fb0 = c; self.fb1 = vec4(0.0, 0.0, 0.0, c.w); self.fb2 = self.at_dist(c.w, self.dk) }
+        // (under a host's wet floor, only its share over the horizon: `under_floor`)
+        fragment: fn(){
+            var c = self.pixel()
+            if self.host_wet > 0.0 { c = c * (1.0 - self.under_floor()) }
+            self.fb0 = c; self.fb1 = vec4(0.0, 0.0, 0.0, c.w); self.fb2 = self.at_dist(c.w, self.dk)
+        }
     }
 
     // The ground band: the near ground rise over land, flat sea below the horizon.
@@ -308,6 +331,8 @@ script_mod! {
             // a host's own ground over the land and on out to sea from its coast, so the band's ground is the map's
             // and the land meets the sea without an edge (`SkyLight::host_ground`, `coast_ring`)
             if self.host_ground > 0.5 { let u = self.view_raw().x; c = mix(c, self.ring_at(u, 0.625), max(land, self.coast_at(u))) }
+            // the land's own colour (the host's ground on its land; what a host's wet floor takes the place of)
+            let cl = c
             // water standing on the land (a lake, the host's wetness on the land and the shore): (1 - Fresnel) of the ground
             // shows through it, darkened as through a puddle, and by Fresnel the dark water the night sea shows (its 0.5 sil);
             // the water shader adds what it mirrors
@@ -319,16 +344,20 @@ script_mod! {
             // over a host's wet floor (`host_wet`): by day the sea is the floor's water, by the floor's share (one
             // reflection runs from the sea onto the floor, the owner's D2): no base of its own, the host's ground
             // through it darkened as through a puddle (x 0.35 (1 - Fresnel)), the water shader mirroring at full
-            // strength. And the share of the land and shore the strip leaves to the floor (1 - `floor_keep`, of the
-            // host's ground) is taken out here, of the texel as the final keeps it, so the final's cut (the texel x
-            // floor_keep) leaves a lake's or the sea's own share whole
+            // strength. And on its floor (`floor_at`) the strip gives way to the host's: the share host_wet of the
+            // land there (its colour `cl`; in the sea's columns the coast's, the host's ground `gr`) is left clear,
+            // and its open water (the sea, faded from the host's coast by day, and a lake) is kept whole, so a lake's
+            // edge keeps its water and the cover is applied once; the host lays its puddles there (plan hdri-6 fix wave
+            // 1, the owner's D1)
             if al > 0.0 && self.host_wet > 0.0 {
                 let u = self.view_raw().x; let gr = self.ring_at(u, 0.625); let coast = self.coast_at(u)
                 let fr = 0.02 + 0.98 * pow(clamp(1.0 - al, 0.0, 1.0), 5.0)
                 c = c + (gr * (0.35 * (1.0 - fr)) - c) * ((1.0 - max(land, coast)) * self.host_wet * self.day())
                 let ws = self.water_at(g, self.pix_view(self.view_raw()).x, al, self.px0() * g.z)
-                let k = self.floor_keep(max(ws.x * (1.0 - coast * self.day()), ws.y))
-                if k > 0.0 { c = max(c - gr * (1.0 - k), vec3(0.0, 0.0, 0.0)) / k }
+                let gw = self.host_wet * (1.0 - max(ws.x * (1.0 - coast * self.day()), ws.y)) * self.floor_at(g, al, self.ang_raw(pp.y))
+                var lc = cl
+                if ws.x > 0.0 { lc = gr }
+                return vec4(max(c * gm - lc * gw, vec3(0.0, 0.0, 0.0)), gm - gw)
             }
             return vec4(c * gm, gm)
         }

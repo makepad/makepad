@@ -1,5 +1,6 @@
-//! The post shaders (the final composite and its cut, the blur, the water by night and by day, a band's choice of the
-//! water's distance, the blur of a band's light plane) compile for Metal, HLSL and GLSL ES (no GPU needed).
+//! The post shaders (the final composite, the blur, the water by night and by day, a band's choice of the water's
+//! distance, the blur of a band's light plane) and the ground band, which gives way to a host's wet floor (plan hdri-6
+//! fix wave 1: the cut the final made before), compile for Metal, HLSL and GLSL ES (no GPU needed).
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(dead_code)]
 pub use makepad_skyline::makepad_widgets;
@@ -18,7 +19,7 @@ fn post_shaders_compile_for_every_backend() {
         shaders::script_mod(vm);
         post::script_mod(vm);
         let broken = vm.eval(script! { use mod.draw.*; DrawQuad{ pixel: fn(){ return self.no_such_field } } });
-        let shaders = [("final", vm.eval(script! { mod.draw.DrawSkyFinal })), ("final_cut", vm.eval(script! { mod.draw.DrawSkyFinalCut })), ("blur", vm.eval(script! { mod.draw.DrawSkyBlur })),
+        let shaders = [("final", vm.eval(script! { mod.draw.DrawSkyFinal })), ("ground", vm.eval(script! { mod.draw.DrawSkyGround })), ("blur", vm.eval(script! { mod.draw.DrawSkyBlur })),
             ("water", vm.eval(script! { mod.draw.DrawSkyWater })), ("water_day", vm.eval(script! { mod.draw.DrawSkyWaterDay })),
             ("water_dist", vm.eval(script! { mod.draw.DrawSkyWaterDist })), ("dist_blur", vm.eval(script! { mod.draw.DrawSkyDistBlur })), ("broken", broken)];
         for (name, shader) in shaders {

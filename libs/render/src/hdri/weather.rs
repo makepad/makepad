@@ -517,8 +517,8 @@ impl Weather {
     }
 
     /// `ground` all under water: a puddle's bottom and what it mirrors by Fresnel, wherever `d` looks. What the map
-    /// shows where the skyline's strip gives way to its floor under a wet ground (the puddles' share of the strip's
-    /// land, `Env`'s `under_band`). A dry ground is `ground`'s, bit for bit.
+    /// shows in the puddles it lays over the skyline's strip where the strip gives way to its floor under a wet ground
+    /// (`Env`'s `under_band`). A dry ground is `ground`'s, bit for bit.
     pub(crate) fn ground_water(&self, d: Vec3f, ground: Vec3f, gain: Vec3f, sky_at: &dyn Fn(Vec3f) -> Vec3f) -> Vec3f {
         self.ground_with(d, ground, gain, sky_at, Puddles::Full)
     }
