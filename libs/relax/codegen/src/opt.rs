@@ -629,6 +629,51 @@ fn site_rule(options: &relax_session::Options, callee: &Func, id: u32, nargs: us
     })
 }
 
+/// PGO: a site the counts saw run at least this often per call of the function being inlined
+/// into (profile::inline_freqs units: 0.1 per run) is very hot: any body up to the
+/// inline(always) size may inline there (LLVM's hot-callsite threshold, which rustc PGO uses: it
+/// inlines html_parse's process_entity) -- if the body does not loop: what inlining saves is the
+/// call, and a body that iterates per call (sdf_glyphs' esdt over a row: +5.6% instructions when
+/// it went into each caller) pays for its call many times over.
+const PGO_VERY_HOT: f32 = 1.0;
+/// ... a body loops when it runs more instructions per call than this many times its size
+/// (HotSpot's back-edge / invocation ratio: a loop body is one that iterates about that often per
+/// call). Measured on the counts: llm_host's HostDecodeBench::step
+/// 3.9 (inlined: its caller specialises it), sdf_glyphs' esdt 31 (kept out of line).
+const PGO_LOOP_WORK: f64 = 8.0;
+
+/// A counted body's instructions executed per call over its size (1: straight-line code; a loop
+/// raises it by its trips). None: no counts.
+pub fn work_per_size(f: &Func) -> Option<f64> {
+    let entry = f.blocks.first().map_or(-1.0, |b| b.count);
+    if entry <= 0.0 {
+        return None;
+    }
+    let (mut work, mut size) = (0.0f64, 0usize);
+    for b in &f.blocks {
+        size += b.insts.len() + 1;
+        work += b.count.max(0.0) as f64 * (b.insts.len() + 1) as f64;
+    }
+    Some(work / entry as f64 / size.max(1) as f64)
+}
+
+fn pgo_site_limits(lim: &InlineLimits, counted: bool, priority: u32, callee: &Func) -> InlineLimits {
+    let loops = || match work_per_size(callee) {
+        Some(w) => w > PGO_LOOP_WORK,
+        None => relax_backend::regalloc::loop_depths(callee, &reachable(callee)).iter().any(|d| *d > 0),
+    };
+    if counted && f32::from_bits(priority) >= PGO_VERY_HOT && !loops() {
+        InlineLimits { hot_insts: lim.hot_insts.max(lim.always_insts), ..*lim }
+    } else {
+        *lim
+    }
+}
+
+fn inline_trace(name: &str) -> bool {
+    static T: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    T.get_or_init(|| std::env::var("MAKEPAD_RUN_INLINE_TRACE").ok().filter(|s| !s.is_empty())).as_deref().is_some_and(|t| name.ends_with(t))
+}
+
 /// Frequencies must describe this exact RIR. New blocks inherit the site's priority.
 /// The queue uses stable block/instruction indices: splitting invalidates only the tail,
 /// whose calls are enqueued again in the new continuation block.
@@ -642,6 +687,8 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
     use std::collections::BinaryHeap;
     let depths = relax_backend::regalloc::loop_depths(f, &reachable(f));
     let freqs = freqs.filter(|v| v.len() == f.blocks.len());
+    // PGO: a counted body's frequencies are per entry (profile::inline_freqs: 0.1 per run per call)
+    let counted = freqs.is_some() && relax_backend::profile::has_counts(f);
     let mut priorities: Vec<(u32, bool, bool)> = depths.iter().enumerate().map(|(b, d)| {
         freqs.map_or((*d, *d >= 1 && f.blocks.len() <= 64, false), |v| (v[b].max(0.0).to_bits(), v[b] >= HOT_FREQ, v[b] == 0.0))
     }).collect();
@@ -742,6 +789,8 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
     for p in &f.params { kdef[p.0 as usize].0 = 1; }
     for b in 0..f.blocks.len() { note_defs(&mut kdef, &f.blocks[b].insts, f.vregs.len()); }
     let mut specialized: std::collections::HashMap<(u32, bool, Vec<Option<i64>>), Option<Box<Func>>> = std::collections::HashMap::new();
+    // MAKEPAD_RUN_INLINE_TRACE=<suffix>: every site decision of the callers whose name ends with it
+    let trace = inline_trace(&f.name);
     while let Some((_, _, _, Reverse(bi), Reverse(ii))) = queue.pop() {
         let Some(Inst::Call(Callee::Fn(id), args, rets)) = f.blocks[bi].insts.get(ii) else { continue };
         let (id, args, rets) = (*id, args.clone(), rets.clone());
@@ -786,7 +835,8 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
             // ... and one no bigger than the call itself costs nothing: no allowance at all.
             let no_growth = cost == 0;
             let attrs = found.unwrap().1;
-            let rule = site_rule(options, shape, id, args.len(), rets.len(), attrs, priorities[bi].1, priorities[bi].2, single(*ancestry[bi].last().unwrap(), id), ancestry[bi].len() - 1, multi_depths[bi], lim);
+            let lim_b = pgo_site_limits(lim, counted, priorities[bi].0, shape);
+            let rule = site_rule(options, shape, id, args.len(), rets.len(), attrs, priorities[bi].1, priorities[bi].2, single(*ancestry[bi].last().unwrap(), id), ancestry[bi].len() - 1, multi_depths[bi], &lim_b);
             // New admissions respect the actual growth ceiling, including ABI moves.
             let growth = size.saturating_add(args.len()).saturating_add(
                 shape.blocks.iter().filter(|b| matches!(b.term, Term::Ret(_))).count().saturating_mul(rets.len())
@@ -847,6 +897,14 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
             if let Some(s) = stats.as_deref_mut() {
                 let r = why.unwrap_or(SiteRemark { pos: f.blocks[bi].pos.get(ii).copied().unwrap_or(0), callee: id, why: WHY_NO_BODY, hot: priorities[bi].1, size: 0, a: 0, b: 0 });
                 s.remarks.push(r);
+            }
+        }
+        if trace {
+            let fq = f32::from_bits(priorities[bi].0);
+            let name = found.map_or_else(|| format!("fn#{}", id), |(p, _)| unsafe { &*p }.name.clone());
+            match &pick {
+                Some((c, r, g, sz, cost, free, _, ic)) => eprintln!("inline-trace {}: take {} freq {:.2} rule {} size {} (body {}) growth {} cost {} free {} ctx {} | budget {} priced {} limit {}", f.name, name, fq, r, sz, inline_inst_count(c), g, cost, free, ic, budget, priced, growth_limit),
+                None => eprintln!("inline-trace {}: left {} freq {:.2} tries {} work/size {:?} | budget {} priced {} limit {}", f.name, name, fq, tries.len(), found.and_then(|(p, _)| work_per_size(unsafe { &*p })), budget, priced, growth_limit),
             }
         }
         let Some((callee, rule, growth, size, cost, free, no_growth, in_context)) = pick else { continue };
@@ -916,7 +974,8 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
                     0
                 } else if let Some((_, attrs)) = found {
                     let c = callee.unwrap();
-                    let rule = site_rule(options, c, *id, args.len(), rets.len(), attrs, priorities[bi].1, priorities[bi].2, single(*ancestry[bi].last().unwrap(), *id), ancestry[bi].len() - 1, multi_depths[bi], lim);
+                    let lim_b = pgo_site_limits(lim, counted, priorities[bi].0, c);
+                    let rule = site_rule(options, c, *id, args.len(), rets.len(), attrs, priorities[bi].1, priorities[bi].2, single(*ancestry[bi].last().unwrap(), *id), ancestry[bi].len() - 1, multi_depths[bi], &lim_b);
                     if ancestry[bi].contains(id) || rule.is_none() {
                         2
                     } else if attrs & ATTR_COLD != 0 && rule != Some(RULE_COST) && !(inline_inst_count(c) <= INLINE_FREE_INSTS && inline_inst_count(c) <= free_budget) {

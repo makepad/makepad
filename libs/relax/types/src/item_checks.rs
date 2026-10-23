@@ -130,17 +130,24 @@ pub fn duplicate_exported_macros(prog: &Program, own: &[bool]) -> Vec<String> {
 /// associated type of a trait impl is no less visible than the impl itself (the least visible of
 /// the trait and the types of its trait reference).
 pub fn private_assoc_types(prog: &Program, tcx: &Tcx, own: &[bool]) -> Vec<String> {
-    fn adts(tcx: &Tcx, t: TyId, out: &mut Vec<DefId>, depth: u32) {
+    fn adts(prog: &Program, tcx: &Tcx, t: TyId, out: &mut Vec<DefId>, depth: u32) {
         if depth > 24 { return; }
         match tcx.tys.kind(t).clone() {
-            TyKind::Adt(d, args, _) => { out.push(d); for &a in tcx.tys.list(args) { adts(tcx, a, out, depth + 1); } }
+            TyKind::Adt(d, args, _) => { out.push(d); for &a in tcx.tys.list(args) { adts(prog, tcx, a, out, depth + 1); } }
             TyKind::Dyn(td, args, binds, ..) => {
                 out.push(td);
-                for &a in tcx.tys.list(args) { adts(tcx, a, out, depth + 1); }
-                for b in tcx.tys.list(binds) { adts(tcx, b.1, out, depth + 1); }
+                for &a in tcx.tys.list(args) { adts(prog, tcx, a, out, depth + 1); }
+                for b in tcx.tys.list(binds) { adts(prog, tcx, b.1, out, depth + 1); }
             }
-            TyKind::Ref(_, x, _) | TyKind::Ptr(_, x) | TyKind::Slice(x) | TyKind::Array(x, _) => adts(tcx, x, out, depth + 1),
-            TyKind::Tuple(l) => for &x in tcx.tys.list(l) { adts(tcx, x, out, depth + 1); },
+            TyKind::Ref(_, x, _) | TyKind::Ptr(_, x) | TyKind::Slice(x) | TyKind::Array(x, _) => adts(prog, tcx, x, out, depth + 1),
+            TyKind::Tuple(l) => for &x in tcx.tys.list(l) { adts(prog, tcx, x, out, depth + 1); },
+            // a projection names its associated type and that type's trait (DefIdVisitorSkeleton
+            // visit_projection_term), then its arguments
+            TyKind::Alias(_, a) => if let crate::types::AliasTyKind::Projection { def_id } = a.kind {
+                out.push(def_id);
+                out.push(prog.def(def_id).parent);
+                for &x in tcx.tys.list(a.args) { adts(prog, tcx, x, out, depth + 1); }
+            },
             _ => {}
         }
     }
@@ -159,7 +166,7 @@ pub fn private_assoc_types(prog: &Program, tcx: &Tcx, own: &[bool]) -> Vec<Strin
         let mut tys: Vec<DefId> = Vec::new();
         let args = tcx.generic_indices_of(prog, imp).identity_args(&tcx.tys);
         for a in tcx.impl_trait_ref(prog, imp, &args).args.iter() {
-            if let crate::consts::GenericArg::Type(t) = a { adts(tcx, *t, &mut tys, 0); }
+            if let crate::consts::GenericArg::Type(t) = a { adts(prog, tcx, *t, &mut tys, 0); }
         }
         let mut known = written(tr) || !own.get(prog.def(tr).krate as usize).copied().unwrap_or(false);
         for d in tys {
@@ -175,12 +182,20 @@ pub fn private_assoc_types(prog: &Program, tcx: &Tcx, own: &[bool]) -> Vec<Strin
             if adef.kind != DefKind::AssocTy || adef.parent != imp { continue; }
             let Ok(t) = tcx.type_of(prog, ad) else { continue };
             let mut used = Vec::new();
-            adts(tcx, t, &mut used, 0);
+            adts(prog, tcx, t, &mut used, 0);
             for u in used {
                 if !own.get(prog.def(u).krate as usize).copied().unwrap_or(false) || !written(u) { continue; }
-                if prog.vis_wider(vis, prog.def_item_vis(u)) {
+                // (a trait's associated item has the trait's visibility: rustc resolve_visibility
+                // of an inherited visibility directly inside a trait)
+                let owner = if prog.def(u).kind == DefKind::AssocTy && prog.def(prog.def(u).parent).kind == DefKind::Trait { prog.def(u).parent } else { u };
+                if prog.vis_wider(vis, prog.def_item_vis(owner)) {
                     let pos = prog.files[adef.file as usize].ast.item(adef.item).name.lo;
-                    errors.push(prog.record_error(adef.file, pos, "typeck", format!("E0446: private type `{}` in public interface", prog.syms.str(prog.def(u).name))));
+                    let what = match prog.def(u).kind {
+                        DefKind::Trait => format!("trait `{}`", prog.syms.str(prog.def(u).name)),
+                        DefKind::AssocTy => format!("associated type `{}::{}`", prog.syms.str(prog.def(prog.def(u).parent).name), prog.syms.str(prog.def(u).name)),
+                        _ => format!("type `{}`", prog.syms.str(prog.def(u).name)),
+                    };
+                    errors.push(prog.record_error(adef.file, pos, "typeck", format!("E0446: private {} in public interface", what)));
                     break;
                 }
             }

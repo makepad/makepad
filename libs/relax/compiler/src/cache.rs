@@ -2099,6 +2099,15 @@ impl Cache {
                     return None;
                 }
             }
+            SymKind::TierRec(id) => {
+                e.u8(12);
+                let key = u.fns[id as usize].key.clone();
+                let mut cr = Vec::new();
+                if self.enc_fnkey(u, &key, e, &mut cr, 0).is_none() {
+                    self.why("loop counter key");
+                    return None;
+                }
+            }
             SymKind::Rw(k) => {
                 // a constant's per-domain copy holds the value, so it is named as the copy of the
                 // constant's data object (tag 10: the link copies the linked object again), never
@@ -6805,6 +6814,16 @@ impl Linker {
                     }
                 };
                 u.syms.intern(SymKind::Thunk(id), u.entry(id))
+            }
+            12 => {
+                let id = match self.image_slot_at(u, d) {
+                    Some(id) => id,
+                    None => {
+                        let key = self.dec_fnkey(u, d, 0)?;
+                        u.fn_id(key)
+                    }
+                };
+                crate::jit::loop_counter_sym(u, id)
             }
             8 => {
                 let sz = d.u64()?;

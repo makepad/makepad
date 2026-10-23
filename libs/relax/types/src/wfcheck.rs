@@ -752,7 +752,29 @@ pub mod obligations {
         match def.kind {
             DefKind::Struct | DefKind::Enum | DefKind::Union => with_wfcx(prog, tcx, did, |w| { check_type_defn(w, ast, item); check_defaults(w, ast, item); }),
             DefKind::Fn | DefKind::AssocFn | DefKind::ForeignFn => {
+                // the associated types a trait method's `impl Trait` returns become
+                // (ImplTraitInTraitData::Trait): wfcheck.rs check_associated_type_bounds -- their
+                // bounds are well formed, under the method's assumptions (assumed_wf_types of an
+                // RPITIT are its fn's)
+                let mut opaques: Vec<DefId> = Vec::new();
+                if def.kind == DefKind::AssocFn && prog.def(def.parent).kind == DefKind::Trait {
+                    opaques = prog.impl_trait_in_trait_data.iter().filter_map(|(_, v)| match v {
+                        relax_front::assoc::ImplTraitInTraitData::Trait { fn_def_id, opaque_def_id } if *fn_def_id == did => Some(*opaque_def_id),
+                        _ => None,
+                    }).collect();
+                    opaques.sort_unstable_by_key(|d| d.0);
+                }
                 let mut errors = with_wfcx(prog, tcx, did, |w| check_fn(w, ast, item));
+                if errors.is_empty() {
+                    for &o in &opaques {
+                        let bounds = tcx.explicit_item_bounds(prog, o).to_vec();
+                        // (the bounds name the RPITIT's own copies of the fn's lifetimes, whose
+                        // relation to the fn's where-clauses this environment does not have: their
+                        // region obligations are not judged here)
+                        errors.extend(with_wfcx(prog, tcx, did, |w| for b in &bounds { w.clause_obligations(b, item.lo) })
+                            .into_iter().filter(|e| !e.contains("E0309") && !e.contains("E0310") && !e.contains("lifetime")));
+                    }
+                }
                 if def.kind != DefKind::ForeignFn { errors.extend(check_opaque_cycles(prog, tcx, did, item.lo)); }
                 if matches!(item.kind, ItemKind::Fn(sig, _, _) if ast.fn_sig(sig).asyncness) { errors.extend(check_async_recursion(prog, tcx, did, item.lo)); }
                 errors

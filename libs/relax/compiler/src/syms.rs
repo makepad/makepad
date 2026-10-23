@@ -42,6 +42,9 @@ pub enum SymKind {
     Site(u32),
     /// a function slot's permanent callable address (fn pointers stored in data)
     Thunk(u32),
+    /// a function slot's loop counter (its tier record's back-edge word: jit.rs `loop_counter`),
+    /// which the slot's own baseline / O1 / O2 code decrements per loop iteration
+    TierRec(u32),
     /// an anonymous mutable block (a promoted temporary lowering placed in static memory):
     /// index into `Syms::rw_blocks` (size, align)
     Rw(u32),
@@ -941,6 +944,7 @@ pub fn describe(u: &Unit, s: Sym) -> String {
             }
         }
         Some(SymKind::Thunk(id)) => format!("thunk:{}", stable_fn_name(u, id)),
+        Some(SymKind::TierRec(id)) => format!("loop-counter:{}", stable_fn_name(u, id)),
         Some(SymKind::Provided(n)) => format!("provided:{}", n),
         Some(SymKind::Rw(k)) => {
             let b = u.syms.rw_blocks.lock().unwrap_or_else(|e| e.into_inner());
@@ -1188,7 +1192,8 @@ pub fn class_of(k: &SymKind) -> relax_backend::rir::SymClass {
         // storage every domain has its own copy of, at the same offset of its static block
         SymKind::Static(_) | SymKind::Rw(_) => SymClass::Domain,
         SymKind::Data(_) | SymKind::Thunk(_) | SymKind::Missing(_) => SymClass::Near,
-        SymKind::Foreign(_) | SymKind::Provided(_) | SymKind::StaticAddr(_) => SymClass::Far,
+        // (the tier records are a reservation of their own, outside the code area)
+        SymKind::Foreign(_) | SymKind::Provided(_) | SymKind::StaticAddr(_) | SymKind::TierRec(_) => SymClass::Far,
         SymKind::Site(_) | SymKind::ThreadLocal(_) => SymClass::Imm,
     }
 }

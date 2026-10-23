@@ -157,7 +157,12 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         for e in par_map(&defs, |&d| {
             let mut tries = 0;
             loop {
-                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| relax_types::wfcheck::obligations::check_def(prog, tcx, d)));
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut v = relax_types::wfcheck::obligations::check_def(prog, tcx, d);
+                    // rustc_privacy check_mod_privacy: the types of the item's signature
+                    v.extend(relax_types::privacy_types::check_item(prog, tcx, d));
+                    v
+                }));
                 match r {
                     Ok(v) => break v,
                     Err(p) if (crate::preempt::is_preempted(&*p) || p.is::<crate::preempt::NeedsLoad>() || p.is::<crate::preempt::OwnerBusy>()) && tries < 100 => { tries += 1; std::thread::yield_now(); }
@@ -292,6 +297,11 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
             let unsafety = relax_types::unsafety::check_body(prog, tcx, &body);
             if !unsafety.is_empty() {
                 return (unsafety, Vec::new());
+            }
+            // rustc_privacy check_mod_privacy: the types of the body's expressions and patterns
+            let privacy = relax_types::privacy_types::check_body(prog, tcx, &body);
+            if !privacy.is_empty() {
+                return (privacy, Vec::new());
             }
             // E0004 / E0005 and the pattern lints (rustc check_match: its errors stop the body
             // before borrowck); an internal failure of the analysis reports nothing

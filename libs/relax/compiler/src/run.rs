@@ -3245,6 +3245,7 @@ fn summary_inner(why: &str) {
                 m(0), m(1) as f64 / 1e6, m(2) as f64 / 1e6, m(3) as f64 / 1e6, m(4), m(5) as f64 / 1e6, m(6), m(7) as f64 / 1e6, m(8), m(9) as f64 / 1e6, m(10), m(11) as f64 / 1e6);
             verbose!("makepad-run: owner by site: {}", crate::owner::sites_summary(14));
             verbose!("makepad-run: publish O1 on the owner by kind: {}", jit::publish_opt_summary());
+            verbose!("makepad-run: O3 candidate takes: {}", jit::cand_skip_summary());
         }
         if !SILENT.load(Ordering::Relaxed) {
             let b = |i: usize| crate::owner::PURE_BAILS[i].load(Ordering::Relaxed);

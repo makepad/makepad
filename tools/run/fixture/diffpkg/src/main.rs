@@ -7,7 +7,7 @@ macro_rules! d { ($($a:tt)*) => { println!("D {}", format!($($a)*)) } }
 #[path = "../../../../../libs/relax/compiler/rwbench/src/box3d_scene.rs"]
 mod box3d_scene;
 
-const PROGRAMS: &[(&str, fn())] = &[("box3d", box3d), ("static_tables", static_tables), ("font", font), ("zone_swap", zone_swap)];
+const PROGRAMS: &[(&str, fn())] = &[("box3d", box3d), ("static_tables", static_tables), ("font", font), ("zone_swap", zone_swap), ("inflate_files", inflate_files)];
 
 fn main() {
     let arg = std::env::args().nth(1).unwrap_or_default();
@@ -137,4 +137,61 @@ fn wait_for_swap() {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     d!("zone: no swap within 180 s");
+}
+
+/// zlib streams of real PNG files (their IDAT chunks) through makepad-fast-inflate with the size hint
+/// the asset importer passes: per file the result length and a hash of the bytes. The files: every
+/// .png under DIFF_INFLATE_DIR (default the repo's apps/), sorted, at most DIFF_INFLATE_MAX (64).
+/// (PGO3 10-22: the Sandbox race's texture decode faulted in deflate_decompress_with's counted code.)
+fn inflate_files() {
+    let root = std::env::var("DIFF_INFLATE_DIR").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../../../apps").to_string());
+    let max: usize = std::env::var("DIFF_INFLATE_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(64);
+    let mut files = Vec::new();
+    let mut todo = vec![std::path::PathBuf::from(&root)];
+    while let Some(d) = todo.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                todo.push(p);
+            } else if p.extension().is_some_and(|x| x == "png") {
+                files.push(p);
+            }
+        }
+    }
+    files.sort();
+    files.truncate(max);
+    for f in &files {
+        let Ok(b) = std::fs::read(f) else { continue };
+        if b.len() < 33 || &b[1..4] != b"PNG" {
+            continue;
+        }
+        let be = |o: usize| u32::from_be_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) as usize;
+        let (w, h, depth, color, interlace) = (be(16), be(20), b[24] as usize, b[25], b[28]);
+        let ch = match color { 0 | 3 => 1, 2 => 3, 4 => 2, 6 => 4, _ => continue };
+        let mut z = Vec::new();
+        let mut o = 8;
+        while o + 12 <= b.len() {
+            let n = be(o);
+            if o + 12 + n > b.len() {
+                break;
+            }
+            if &b[o + 4..o + 8] == b"IDAT" {
+                z.extend_from_slice(&b[o + 8..o + 8 + n]);
+            }
+            o += 12 + n;
+        }
+        let expect = if interlace == 0 { ((w * ch * depth + 7) / 8 + 1) * h } else { 0 };
+        let name = f.strip_prefix(&root).unwrap_or(f).display().to_string();
+        match makepad_fast_inflate::zlib_decompress_vec_with_hint(&z, expect) {
+            Ok(v) => {
+                let mut x = 0xcbf29ce484222325u64;
+                for &c in &v {
+                    x = (x ^ c as u64).wrapping_mul(0x100000001b3);
+                }
+                d!("inflate {} in={} out={} {:016x}", name, z.len(), v.len(), x);
+            }
+            Err(e) => d!("inflate {} in={} error {:?}", name, z.len(), e),
+        }
+    }
 }

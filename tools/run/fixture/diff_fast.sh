@@ -28,6 +28,9 @@ M=$T/makepad
 export MAKEPAD_RUN_STD=${MAKEPAD_RUN_STD:-$root/libs/relax/compiler/std}
 cache=${DIFF_CACHE:-${TMPDIR:-/tmp}/diff_fast_cache}
 jobs=${DIFF_JOBS:-4}
+# DIFF_TIERS: the JIT tiers (default "o1 base o3"; `counted`: O3 on at call threshold 1 with every counted
+# build kept installed, MAKEPAD_RUN_PGO_HOLD=1 -- the PGO counted code itself)
+difftiers=${DIFF_TIERS:-o1 base o3}
 sleepms=${DIFF_SLEEP_MS:-250}
 work=$(mktemp -d "${TMPDIR:-/tmp}/diff_fast.XXXXXX") || exit 2
 mkdir -p "$cache"
@@ -57,6 +60,7 @@ job() {
         case $k in
         o1) tier="MAKEPAD_RUN_O1=always MAKEPAD_RUN_O3=0"; ms=0 ;;
         base) tier="MAKEPAD_RUN_O3=0"; ms=0 ;;
+        counted) tier="MAKEPAD_RUN_O3=1 MAKEPAD_RUN_PGO_HOLD=1"; ms=$sleepms ;;
         *) tier="MAKEPAD_RUN_O3=1 MAKEPAD_RUN_GUARDS=${DIFF_GUARDS:-1} MAKEPAD_RUN_GUARDS_READY=16 MAKEPAD_RUN_GUARDS_FAILS=64"; ms=$sleepms ;;
         esac
         env $tier MAKEPAD_RUN_O3_CALLS=1 DIFF_SLEEP_MS=$ms \
@@ -79,6 +83,7 @@ pkgjob() {
         case $k in
         o1) tier="MAKEPAD_RUN_O1=always MAKEPAD_RUN_O3=0"; ms=0 ;;
         base) tier="MAKEPAD_RUN_O3=0"; ms=0 ;;
+        counted) tier="MAKEPAD_RUN_O3=1 MAKEPAD_RUN_PGO_HOLD=1"; ms=$sleepms ;;
         *) tier="MAKEPAD_RUN_O3=1 MAKEPAD_RUN_GUARDS=${DIFF_GUARDS:-1} MAKEPAD_RUN_GUARDS_READY=16 MAKEPAD_RUN_GUARDS_FAILS=64"; ms=$sleepms ;;
         esac
         (cd "$root" && env $tier MAKEPAD_RUN_O3_CALLS=1 DIFF_SLEEP_MS=$ms MAKEPAD_HAL_BACKEND=headless \
@@ -106,13 +111,13 @@ for dir in $pkgdirs; do
     fi
     for prog in $("$pkgtarget/release/$pkg" --list); do pkgprogs="$pkgprogs $pkg~$prog"; done
 done
-for p in $progs $known $pkgprogs; do for k in native o1 base o3; do echo "$p $k"; done; done | xargs -P "$jobs" -n 2 "$0" --job "$work"
+for p in $progs $known $pkgprogs; do for k in native $difftiers; do echo "$p $k"; done; done | xargs -P "$jobs" -n 2 "$0" --job "$work"
 check() {
     p=$1; fail=
     sed -n 's/^test [A-Za-z0-9_:]* \.\.\. //; /^D /p' "$work/$p.native.raw" > "$work/$p.native.d"
     nrc=$(cat "$work/$p.native.rc" 2>/dev/null); [ -s "$work/$p.native.d" ] || fail="native run produced no D lines (rc $nrc): $(head -3 "$work/$p.native.raw" | cut -c1-200)"
     sum=$(cksum < "$work/$p.native.d")
-    for k in o1 base o3; do
+    for k in $difftiers; do
         [ -n "$fail" ] && break
         sed -n 's/^test [A-Za-z0-9_:]* \.\.\. //; /^D /p' "$work/$p.$k.raw" > "$work/$p.$k.d"
         rc=$(cat "$work/$p.$k.rc" 2>/dev/null)
@@ -142,7 +147,7 @@ done
 [ -n "$kfixed" ] && echo "diff: known-failing programs now pass, git mv them from known/ to diff/:$kfixed"
 # per tier: programs whose D lines and exit status equal the native run's (each tier on its own)
 tiers=
-for k in o1 base o3; do
+for k in $difftiers; do
     t=0; tn=0
     for p in $progs $pkgprogs; do
         tn=$((tn + 1))

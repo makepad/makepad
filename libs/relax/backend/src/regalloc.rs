@@ -5341,6 +5341,16 @@ pub fn copy_reuse(options: &relax_session::Options, f: &Func, al: &Alloc) -> Has
         for u in &tu {
             last.insert(u.0, b.insts.len());
         }
+        // last definition of each vreg in the block: a copy defined again later in the block is not
+        // what is live out (`u = v; ..read v..; u = w`: the allocator gives u's register away
+        // between the two definitions, the deflate counted-code fault of PGO3, 10-22)
+        let mut last_def: HashMap<u32, usize> = HashMap::new();
+        for (ii, i) in b.insts.iter().enumerate() {
+            uses_defs(i, &mut us, &mut ds);
+            for d in &ds {
+                last_def.insert(d.0, ii);
+            }
+        }
         // spilled vreg -> (its register copy, that register)
         let mut have: Vec<(u32, u32, u8)> = Vec::new();
         for (ii, i) in b.insts.iter().enumerate() {
@@ -5350,7 +5360,7 @@ pub fn copy_reuse(options: &relax_session::Options, f: &Func, al: &Alloc) -> Has
                     if let Some(&(_, c, r)) = have.iter().find(|h| h.0 == u.0) {
                         if last.get(&c).map_or(false, |&l| l >= ii) {
                             out.insert((al.inst_pos(bi, ii), u.0), r);
-                        } else if !no_live_out {
+                        } else if !no_live_out && last_def.get(&c).map_or(true, |&d| d < ii) {
                             // not read again in the block: its register still holds it when the
                             // copy is live out of the block (not redefined since: `have` drops it)
                             pending.push((bi as u32, al.inst_pos(bi, ii), u.0, c, r));
