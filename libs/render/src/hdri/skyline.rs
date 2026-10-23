@@ -4,7 +4,9 @@
 //! and the fog veil each texel over the distance to what it shows (`dist`, the
 //! city 1-3 km off, the far ranges farther; plan hdri-6 R1), never more than
 //! their whole path, and the rain's shafts hang behind it (§5b). A texel
-//! without a distance is veiled over the whole path (`Env::city_veil`).
+//! without a distance is veiled over the whole path (`Env::city_veil`). A wet
+//! ground mirrors the strip over the same distance and does not veil it again
+//! along the floor (`Env::over_city`, `Env::base_layer`).
 //!
 //! The engine never touches the GPU and does not depend on makepad-skyline: the
 //! strip is plain data. Its convention is the skyline's: rows linear in
@@ -1892,34 +1894,66 @@ mod tests {
     }
 
     /// The wet ground mirrors the city over the city's distance (plan hdri-6 R1): the light runs city -> puddle -> eye,
-    /// about the city's distance, so the puddle shows the city veiled over it, by Fresnel, through the veil along its own
-    /// direction once more. The rain kind at night on a full water floor, an opaque lit texel 12 degrees up, 2 km off:
-    /// above the horizon the veil over 2 km, and in the puddle 12 degrees down that light by Fresnel through the puddle's
-    /// veil, brighter than the whole path's veil let through before. The sky mirrored beside it is unchanged.
+    /// about the city's distance, and the veil is applied once. So the share of the puddle's view the mirror takes
+    /// (Fresnel) runs to the city and is veiled over its 2 km, in place of the sky the floor's veil shows there; it is
+    /// not veiled along the floor once more. The rain kind at night on a full water floor, an opaque lit block 2 km off,
+    /// 12 degrees up (where the floor's own veil is thin) and 2 degrees up (where the floor's path is km long and a
+    /// second veil would leave next to nothing): above the horizon the veil over 2 km; in the puddle as far down, that
+    /// light by Fresnel, about the light above. A half-covered texel (2 degrees up) mirrors its share so, the sky beside
+    /// it as before; by day (where the floor's in-scatter is bright) a lit and a dark block 2 degrees up too. The sky
+    /// mirrored beside the block is unchanged.
     #[test]
     fn a_puddle_mirrors_the_city_through_its_distance() {
-        let p = rain_kind(-20.0, Some(1.0));
-        let s = [40.0, 30.0, 20.0, 1.0];
-        let (b, u) = block_band(s, 12.0, Some(2000.0));
-        let (q, images) = with_band(&p, b);
-        let (plain, city) = (Env::new(&p), Env::new_with(&q, &images));
-        let rain = city.weather.as_ref().expect("rain draws");
-        let k = city.scale();
-        let (up, down) = (dir_at_u(u, 12.0), dir_at_u(u, -12.0));
-        let above = rain.veil_within(up, rgb(s), city.weather_sun, city.dome, 2000.0) * k;
-        assert!(close3(city.radiance(up), above, 1e-5), "above the horizon {:?}, veiled over 2 km {above:?}", city.radiance(up));
-        let through = |d: Vec3f| veil_of(&city, d, Vec3f::all(1.0)) - veil_of(&city, d, Vec3f::default());
-        let t_down = through(down);
-        let fresnel = 0.02 + 0.98 * (1.0 - 12.0f32.to_radians().sin()).powi(5);
-        let mirrored = city.radiance(down) - plain.radiance(down);
-        let light = above - plain.radiance(up);
-        let want = vec3f(light.x * t_down.x, light.y * t_down.y, light.z * t_down.z) * fresnel;
-        assert!(close3(mirrored, want, 1e-3), "the puddle shows {mirrored:?}, the city veiled over its 2 km by Fresnel {want:?}");
-        let whole = rain.veil_without_virga(up, rgb(s), city.weather_sun, city.dome) * k - plain.radiance(up);
-        let before = whole.x * t_down.x * fresnel;
-        println!("the mirrored city: {:.4} over its distance, {before:.4} over the whole path", mirrored.x);
-        assert!(mirrored.x > 2.0 * before, "the mirror {mirrored:?} is no brighter than the whole path's veil let through ({before})");
-        let aside = dir_at_u(u + 10.0 / 360.0, -12.0);
-        assert_eq!(city.radiance(aside), plain.radiance(aside), "10 degrees round the turn the puddle mirrors the sky alone");
+        let (night, day) = (rain_kind(-20.0, Some(1.0)), rain_kind(25.0, Some(1.0)));
+        let lit = [40.0, 30.0, 20.0, 1.0];
+        for (p, el, s) in [(&night, 2.0f32, lit), (&night, 12.0, lit), (&night, 2.0, [20.0, 15.0, 10.0, 0.5]), (&day, 2.0, lit), (&day, 2.0, [0.02, 0.015, 0.01, 1.0])] {
+            let (b, u) = block_band(s, el, Some(2000.0));
+            let (q, images) = with_band(p, b);
+            let (plain, city) = (Env::new(p), Env::new_with(&q, &images));
+            let rain = city.weather.as_ref().expect("rain draws");
+            let k = city.scale();
+            let a = s[3];
+            let (up, down) = (dir_at_u(u, el), dir_at_u(u, -el));
+            // the strip's own light there: its coverage veiled over its 2 km, veil_D(s) - (1 - a) veil_D(0)
+            let veil = |c: Vec3f| rain.veil_within(up, c, city.weather_sun, city.dome, 2000.0);
+            let own = (veil(rgb(s)) - veil(Vec3f::default()) * (1.0 - a)) * k;
+            let above = own + plain.radiance(up) * (1.0 - a);
+            assert!(close3(city.radiance(up), above, 1e-5), "{el} deg, a {a}: above the horizon {:?}, veiled over 2 km {above:?}", city.radiance(up));
+            // the full water floor's mirror share is Fresnel's term
+            let fresnel = 0.02 + 0.98 * (1.0 - el.to_radians().sin()).powi(5);
+            // what the puddle showed of the sky up there, through the floor's veil
+            let sky_seen = veil_of(&city, down, plain.radiance(up) * (1.0 / k)) * k;
+            let mirrored = city.radiance(down) - plain.radiance(down);
+            let want = (own - sky_seen * a) * fresnel;
+            assert!(close3(mirrored, want, 1e-4), "{el} deg, a {a}: the puddle shows {mirrored:?}, the city veiled over its 2 km in place of the sky, by Fresnel {want:?}");
+            // veiled along the floor once more, as before this fix
+            let through = |d: Vec3f| veil_of(&city, d, Vec3f::all(1.0)) - veil_of(&city, d, Vec3f::default());
+            let light = above - plain.radiance(up);
+            let twice = light.x * through(down).x * fresnel;
+            println!("{el} deg, a {a}: the mirrored city {:.4}, the light above by Fresnel {:.4}, veiled twice {twice:.2e}", mirrored.x, light.x * fresnel);
+            assert!(light.x <= 0.0 || mirrored.x >= 0.5 * light.x * fresnel, "{el} deg, a {a}: the mirror {mirrored:?} keeps under half the light above by Fresnel ({light:?})");
+            let aside = dir_at_u(u + 10.0 / 360.0, -el);
+            assert_eq!(city.radiance(aside), plain.radiance(aside), "{el} deg, a {a}: 10 degrees round the turn the puddle mirrors the sky alone");
+        }
+    }
+
+    /// A weather whose rain and fog are 0 veils nothing, and the wet ground's mirror of the strip is as before, bit for
+    /// bit, with a distance plane or without (plan hdri-6 R1's must-hold): a clear night and a clear day at Wet ground
+    /// 1.00 and 0.8, a lit and a dark block 2 and 12 degrees up, the puddles below them.
+    #[test]
+    fn with_no_rain_or_fog_the_mirror_is_as_before() {
+        for (sun_el, wet_ground) in [(-20.0, 1.0), (25.0, 1.0), (-20.0, 0.8)] {
+            let mut p = HdriParams { lights: vec![], ..HdriParams::default() };
+            sun_at(&mut p, sun_el, 140.0);
+            p.sky.weather = Some(WeatherParams { wet_ground, ..WeatherParams::default() });
+            for (el, s) in [(2.0f32, [40.0, 30.0, 20.0, 1.0]), (12.0, [0.02, 0.015, 0.01, 1.0]), (2.0, [20.0, 15.0, 10.0, 0.5])] {
+                let env = |far: Option<f32>| { let (b, _) = block_band(s, el, far); let (q, images) = with_band(&p, b); Env::new_with(&q, &images) };
+                let (before, after, u) = (env(None), env(Some(2000.0)), block_band(s, el, None).1);
+                for (du, e) in [(0.0, -el), (0.0, -el - 0.4), (0.5 / 360.0, -el), (0.0, el)] {
+                    let d = dir_at_u(u + du, e);
+                    assert_eq!(after.radiance(d), before.radiance(d), "sun {sun_el}, wet {wet_ground}, block {el} deg ({s:?}): at {e} deg");
+                }
+            }
+        }
     }
 }

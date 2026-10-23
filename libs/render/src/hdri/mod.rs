@@ -69,6 +69,7 @@ pub use image_light::ImageSet;
 // hdri::bake_env_map, load_env_map, detect_sun, remove_sun, as the spec names them.
 pub use envmap::*;
 
+use std::cell::Cell;
 use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -668,11 +669,21 @@ impl Env {
     /// the strip covers `v`, veiled as `base_at` veils it, over the strip's distance there: what a wet ground mirrors (the
     /// light runs from the city to the puddle and on to the eye, about the city's distance). Without a skyline, `seen`
     /// itself.
+    /// Where the texel has a distance, `own` gets the strip's own light in it, `veil_D(s) - (1 - a) veil_D(0)` (its
+    /// coverage veiled over its distance), and the coverage `a`: the floor does not veil that light again (`base_layer`).
     /// The strip is seen only through `city_at`, which is None until the skirt is built, so the dome, the ground gain and
     /// the skirt's hold never see the mirrored city, and a map built with the band and one it is attached to agree.
-    fn over_city(&self, v: Vec3f, seen: Vec3f, weather: &weather::Weather) -> Vec3f {
+    fn over_city(&self, v: Vec3f, seen: Vec3f, weather: &weather::Weather, own: &Cell<Option<(Vec3f, f32)>>) -> Vec3f {
         match self.city_far_at(v) {
-            Some((s, far)) if s != [0.0; 4] => skyline::over_veiled(s, seen, &|x| self.city_veil(weather, v, far, x)),
+            Some((s, far)) if s != [0.0; 4] => {
+                let veil = |x| self.city_veil(weather, v, far, x);
+                if far.is_some() {
+                    let behind = 1.0 - s[3];
+                    let lit = veil(vec3f(s[0], s[1], s[2]));
+                    own.set(Some((if behind > 0.0 { lit - veil(Vec3f::default()) * behind } else { lit }, s[3])));
+                }
+                skyline::over_veiled(s, seen, &veil)
+            }
             _ => seen,
         }
     }
@@ -855,19 +866,26 @@ impl Env {
                     // reflection is light from below, which the engine's directional
                     // light does not carry (plan 2's N3 takes out exactly what the key
                     // carries, no more).
+                    // The strip's own light in the mirror and its coverage, where it has a distance (`over_city`).
+                    let city = Cell::new(None);
                     let seen = |v: Vec3f| {
                         let sky = weather.veil(v, self.sky_layers(v, atmo, None, at.cache, !at.bare), self.weather_sun, self.dome)
                             + weather.lightning(v, at.texel);
                         // The skyline stands over the sky it mirrors: a puddle shows the city where it stands above the
                         // horizon, veiled as the map veils it there (plan hdri-6 §5).
-                        self.over_city(v, sky, weather)
+                        self.over_city(v, sky, weather, &city)
                     };
-                    let c = if at.damp_ground {
-                        weather.ground_damp(d, dry(d), self.ground_gain, &seen)
+                    let puddles = if at.damp_ground {
+                        weather::Puddles::Dry
                     } else if at.even_ground {
-                        weather.ground_even(d, dry(d), self.ground_gain, &seen)
+                        weather::Puddles::Even
                     } else {
-                        weather.ground(d, dry(d), self.ground_gain, &seen)
+                        weather::Puddles::Field
+                    };
+                    let c = match puddles {
+                        weather::Puddles::Dry => weather.ground_damp(d, dry(d), self.ground_gain, &seen),
+                        weather::Puddles::Even => weather.ground_even(d, dry(d), self.ground_gain, &seen),
+                        weather::Puddles::Field => weather.ground(d, dry(d), self.ground_gain, &seen),
                     };
                     // The base behind the veil, for the skyline's strip, which the map veils once (`base_at`).
                     if at.unveiled {
@@ -876,7 +894,22 @@ impl Env {
                     // Rain haze, its virga and fog between the eye and all of it, lit
                     // by the dome above them; then the bolt and its flash, which stand
                     // inside the rain.
-                    weather.veil(d, c, self.weather_sun, self.dome) + weather.lightning(d, at.texel)
+                    let veiled = match city.get().filter(|_| weather.veils()) {
+                        // (a weather that veils nothing passes `c` itself, bit for bit)
+                        None => weather.veil(d, c, self.weather_sun, self.dome),
+                        // The mirror shows the strip, veiled over its distance (plan hdri-6 R1: the light runs city ->
+                        // puddle -> eye, about the city's distance, and is veiled once). The share of the view the mirror
+                        // takes there (`mirror_share`, k, of it the strip's coverage a) runs to the strip, not along the
+                        // floor: its light `own` is not veiled again, and the floor's in-scatter is left off that share.
+                        // The rest of the texel (the puddle's bottom, the damp ground, the sky beside the strip's
+                        // coverage) keeps the floor's veil. Where the floor's veil is thin this is the old sum.
+                        Some((own, a)) => {
+                            let k = weather.mirror_share(d, puddles);
+                            weather.veil(d, c - own * k, self.weather_sun, self.dome) + own * k
+                                - weather.veil(d, Vec3f::default(), self.weather_sun, self.dome) * (a * k)
+                        }
+                    };
+                    veiled + weather.lightning(d, at.texel)
                 }
             },
             None => {

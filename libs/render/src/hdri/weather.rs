@@ -476,6 +476,11 @@ impl Weather {
         self.effects.wet_ground > 0.0
     }
 
+    /// True when the veil does anything: rain or fog (`veil_with` skips each at 0, and then passes `c` itself).
+    pub fn veils(&self) -> bool {
+        self.effects.rain > 0.0 || self.effects.fog > 0.0
+    }
+
     /// The ground below the horizon under this weather. `ground` is what the
     /// dry sky drew along `d`, lit by the clear sky; `gain` is what this map's
     /// sky does to that light (`Env` measures it: under a closed deck the
@@ -524,6 +529,22 @@ impl Weather {
         let damp = c * (1.0 - WET_DARKEN * wet) + mirror * (fresnel * WET_SHEEN * wet);
         let water = c * (PUDDLE_BOTTOM * (1.0 - fresnel)) + mirror * fresnel;
         damp.mix(water, puddle)
+    }
+
+    /// How much of what the ground along `d` mirrors `ground_with` lets through (`ground`, `ground_even` or
+    /// `ground_damp` by `puddles`): the damp ground's sheen between the puddles, Fresnel's term in them, by their share.
+    /// The ground is affine in the mirror, and this is its slope; 0 above the horizon or on a dry ground. What `Env`
+    /// takes out of the floor's veil where the mirror shows the skyline's strip, which is veiled over its own distance
+    /// instead (plan hdri-6 R1).
+    pub(crate) fn mirror_share(&self, d: Vec3f, puddles: Puddles) -> f32 {
+        let wet = self.effects.wet_ground;
+        if wet <= 0.0 || !(d.y < 0.0) {
+            return 0.0;
+        }
+        let down = (-d.y).min(1.0);
+        let fresnel = WATER_F0 + (1.0 - WATER_F0) * (1.0 - down).powi(5);
+        let damp = fresnel * WET_SHEEN * wet;
+        damp + (fresnel - damp) * self.puddle_cover(d, puddles)
     }
 
     /// The puddles' share of the ground along `d` (0..1; 0 above the horizon or on a dry ground).
@@ -1276,6 +1297,28 @@ mod tests {
 
     fn vec3f_of(d: [f32; 3]) -> Vec3f {
         vec3f(d[0], d[1], d[2])
+    }
+
+    /// `mirror_share` is the slope of the ground in what it mirrors (`ground_with` is affine in it), for every way the
+    /// puddles are read, on a damp, a puddled, a flooding and a flooded floor, near the horizon and near the feet.
+    #[test]
+    fn the_mirror_share_is_the_grounds_slope_in_its_mirror() {
+        for wet_ground in [0.3, 0.7, 0.95, 1.0] {
+            let mut sky = sky_with("clear");
+            sky.weather.as_mut().unwrap().wet_ground = wet_ground;
+            let w = Weather::new(&sky, sun()).unwrap();
+            let one = Vec3f::all(1.0);
+            for puddles in [Puddles::Field, Puddles::Even, Puddles::Dry] {
+                for i in 0..48 {
+                    let d = dir_from_az_el(i as f32 * 7.5, -[0.3, 1.0, 2.0, 5.0, 12.0, 40.0][i % 6]);
+                    let at = |m: f32| w.ground_with(d, vec3f(0.2, 0.15, 0.1), one, &|_| Vec3f::all(m), puddles);
+                    let slope = (at(10.0) - at(0.0)).x / 10.0;
+                    let share = w.mirror_share(d, puddles);
+                    assert!((slope - share).abs() <= 1e-5, "wet {wet_ground}, {puddles:?}, {d:?}: the slope {slope}, the share {share}");
+                }
+            }
+            assert_eq!(w.mirror_share(dir_from_az_el(10.0, 5.0), Puddles::Field), 0.0, "above the horizon nothing is mirrored");
+        }
     }
 
     #[test]
