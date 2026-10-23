@@ -418,6 +418,15 @@ impl Env {
         Some(band.sample_skirted(skirt, d, *turn))
     }
 
+    /// `city_at` with the distance (m) of what the texel shows (`SkylineBand::sample_skirted_far`): None where it has
+    /// no coverage (the glow, a prop's light over the sky) or the band no distance plane, and where the plane reads 0 (a
+    /// distance the handoff made safe), which no surface the strip draws stands at. The colour is `city_at`'s.
+    fn city_far_at(&self, d: Vec3f) -> Option<([f32; 4], Option<f32>)> {
+        let ((band, turn), skirt) = (self.skyline.as_ref()?, self.city_skirt.as_ref()?);
+        let (s, far) = band.sample_skirted_far(skirt, d, *turn);
+        Some((s, far.filter(|&far| far > 0.0)))
+    }
+
     /// The skirt this map draws under `band` (turned by `turn` degrees): its bottom row blurred
     /// (`SkylineBand::skirt`), held at every azimuth to the darkest of this map's own base (the
     /// generated ground, a photograph's) at the band's bottom, half way down the skirt and at its
@@ -628,12 +637,19 @@ impl Env {
     /// The base under the lights along `d`, in the map's own frame: the
     /// mode's own base layer, a base image, or both through the image's mask;
     /// then the skyline over all of it, the weather's veil in front of the
-    /// city as it is in front of the sky, the rain's shafts apart, which hang
-    /// behind it (`city_veil`, `skyline::over_veiled`). The city
+    /// city as it is in front of the sky, over the distance to what the strip
+    /// shows there and without the rain's shafts, which hang behind it
+    /// (`city_veil`, `skyline::over_veiled`): the strip's coverage veiled over
+    /// its own distance, the base behind it as the map veils it. The city
     /// hides what stands behind it, a storm's bolt included. Without a
     /// skyline the base is drawn exactly as before.
     fn base_at(&self, d: Vec3f, without: Option<KeyTerm>, at: Sampling) -> Vec3f {
-        let Some(s) = self.city_at(d) else {
+        // The distance is read only where a weather veils the strip by it.
+        let read = match &self.weather {
+            Some(_) => self.city_far_at(d),
+            None => self.city_at(d).map(|s| (s, None)),
+        };
+        let Some((s, far)) = read else {
             return self.base_under_skyline(d, without, at);
         };
         if s == [0.0; 4] {
@@ -643,27 +659,35 @@ impl Env {
         // is not looked up behind it: a held bake's ranges, city and ground.
         let c = if s[3] < 1.0 { self.base_under_skyline(d, without, at) } else { Vec3f::default() };
         match &self.weather {
-            Some(weather) => skyline::over_veiled(s, c, &|x| self.city_veil(weather, d, x)),
+            Some(weather) => skyline::over_veiled(s, c, &|x| self.city_veil(weather, d, far, x)),
             None => skyline::over_veiled(s, c, &|x| x),
         }
     }
 
     /// `seen`, the map's sky along `v` above the horizon (veiled, its bolt in), with the skyline's strip laid over it where
-    /// the strip covers `v`, veiled as `base_at` veils it: what a wet ground mirrors. Without a skyline, `seen` itself.
+    /// the strip covers `v`, veiled as `base_at` veils it, over the strip's distance there: what a wet ground mirrors (the
+    /// light runs from the city to the puddle and on to the eye, about the city's distance). Without a skyline, `seen`
+    /// itself.
     /// The strip is seen only through `city_at`, which is None until the skirt is built, so the dome, the ground gain and
     /// the skirt's hold never see the mirrored city, and a map built with the band and one it is attached to agree.
     fn over_city(&self, v: Vec3f, seen: Vec3f, weather: &weather::Weather) -> Vec3f {
-        match self.city_at(v) {
-            Some(s) if s != [0.0; 4] => skyline::over_veiled(s, seen, &|x| self.city_veil(weather, v, x)),
+        match self.city_far_at(v) {
+            Some((s, far)) if s != [0.0; 4] => skyline::over_veiled(s, seen, &|x| self.city_veil(weather, v, far, x)),
             _ => seen,
         }
     }
 
-    /// The veil the skyline's strip gets along `d` (`base_at`, `over_city`): the rain haze and the fog, not the rain's
-    /// shafts, which hang far off behind the city (plan hdri-6 §5b). The base behind the strip keeps them (`over_veiled`
-    /// lays the strip over the base as the map veils it), and so does the key's cover.
-    fn city_veil(&self, weather: &weather::Weather, d: Vec3f, x: Vec3f) -> Vec3f {
-        weather.veil_without_virga(d, x, self.weather_sun, self.dome)
+    /// The veil the skyline's strip gets along `d` (`base_at`, `over_city`): the rain haze and the fog over the distance
+    /// `far` (m) to what the strip shows there (plan hdri-6 R1: the city 1-3 km off stays visible under rain, the far
+    /// ranges veiled more; never more than the whole path, `Weather::veil_within`), and not the rain's shafts, which hang
+    /// far off behind the city (§5b). A texel without a distance (None: no coverage, the glow; a band without the
+    /// plane) is veiled over the whole path, as before. The base behind the strip keeps the whole veil and its shafts
+    /// (`over_veiled` lays the strip over the base as the map veils it), and so does the key's cover.
+    fn city_veil(&self, weather: &weather::Weather, d: Vec3f, far: Option<f32>, x: Vec3f) -> Vec3f {
+        match far {
+            Some(far) => weather.veil_within(d, x, self.weather_sun, self.dome, far),
+            None => weather.veil_without_virga(d, x, self.weather_sun, self.dome),
+        }
     }
 
     /// [`Self::base_at`] without the skyline.

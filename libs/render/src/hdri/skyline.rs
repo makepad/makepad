@@ -1,6 +1,10 @@
 //! The skyline layer: a city strip the app renders on the GPU (makepad-skyline)
 //! and hands over in `ImageSet::skyline`, laid over the base under every light
-//! and caster, with the weather in front of it (`Env::base_at`).
+//! and caster, with the weather in front of it (`Env::base_at`): the rain haze
+//! and the fog veil each texel over the distance to what it shows (`dist`, the
+//! city 1-3 km off, the far ranges farther; plan hdri-6 R1), never more than
+//! their whole path, and the rain's shafts hang behind it (§5b). A texel
+//! without a distance is veiled over the whole path (`Env::city_veil`).
 //!
 //! The engine never touches the GPU and does not depend on makepad-skyline: the
 //! strip is plain data. Its convention is the skyline's: rows linear in
@@ -418,8 +422,10 @@ impl BandPeaks {
 /// every veil is affine in its input at a fixed direction: veil(x) = M·x + k, so this is
 /// veil((1-a)·c + s) for the base's own unveiled c, and what the base added after its
 /// veil (a storm's bolt) is covered by the city as the sky is. A host may pass a veil
-/// without the rain's shafts (`Env::city_veil`); the base is then the fully veiled one,
-/// and the result is veil_nv(s) + (1-a)·(base - veil_nv(0)).
+/// without the rain's shafts, over the texel's own distance (`Env::city_veil`); the base
+/// is then the fully veiled one, and the result is veil_D(s) + (1-a)·(base - veil_D(0)):
+/// with veil_D(x) = T·x + (1-T)·L, the texel's coverage veiled over its distance
+/// (T·s + a·(1-T)·L) over the base as the map veils it.
 pub fn over_veiled(s: [f32; 4], base: Vec3f, veil: &dyn Fn(Vec3f) -> Vec3f) -> Vec3f {
     let behind = 1.0 - s[3];
     let lit = veil(vec3f(s[0], s[1], s[2]));
@@ -1767,5 +1773,153 @@ mod tests {
             let above = b.sample_skirted_far(&skirt, dir_at_u(u, -6.0 + 1e-3), 0.0).1.expect("the band's bottom has a distance");
             assert!((above - want).abs() < 1e-2 * want, "x {x}: just above the bottom edge {above} m, the skirt {want}");
         }
+    }
+
+    /// A band of 1 degree rows from 20.5 down to -3.5 degrees, 360 columns, transparent but for a 3 x 3 block of `s`
+    /// centred at column 90 and elevation `el` (whole degrees), each texel of it `far` m off (None: no distance plane);
+    /// and the strip's u at the block's centre. Near the centre a bilinear read sees the block alone.
+    fn block_band(s: [f32; 4], el: f32, far: Option<f32>) -> (SkylineBand, f32) {
+        let (w, h, top) = (360usize, 24usize, 20.5f32);
+        let row = (top - el - 0.5).round() as usize;
+        let in_block = |i: usize| (i / w).abs_diff(row) <= 1 && (i % w).abs_diff(90) <= 1;
+        let texels = (0..w * h).map(|i| if in_block(i) { s } else { [0.0; 4] }).collect();
+        let dist = match far {
+            Some(far) => (0..w * h).map(|i| if in_block(i) { far } else { 0.0 }).collect(),
+            None => Vec::new(),
+        };
+        (SkylineBand::new(w, h, texels, dist, top, top - h as f32), 90.5 / w as f32)
+    }
+
+    /// The rain kind with no light layers, its sun at `sun_el` degrees, its ground `wet_ground` wet (None: the kind's own).
+    fn rain_kind(sun_el: f32, wet_ground: Option<f32>) -> HdriParams {
+        let mut p = HdriParams { lights: vec![], ..HdriParams::default() };
+        sun_at(&mut p, sun_el, 140.0);
+        let w = WeatherParams { kind: "rain".to_string(), ..WeatherParams::default() };
+        p.sky.weather = Some(match wet_ground { Some(wet_ground) => WeatherParams { wet_ground, ..w }, None => w });
+        p
+    }
+
+    /// Plan hdri-6 R1: the weather veils a strip texel over the distance to what it shows. Under the rain kind at night an
+    /// opaque city texel at 1 degree, 2 km off, is the veil over 2 km: T c + (1 - T) L, its transmittance T that of the
+    /// rain and the fog over 2 km (`Weather::veil_within`; its own test holds T to the slabs' constants), at least e^3
+    /// times the transmittance over the whole path the strip was veiled by before (about 3.5 km of fog, 11 km of rain).
+    #[test]
+    fn under_the_rain_kind_the_city_keeps_its_distance_light() {
+        let p = rain_kind(-20.0, None);
+        let c = [0.4, 0.3, 0.2, 1.0];
+        let env = |s: [f32; 4]| { let (b, _) = block_band(s, 1.0, Some(2000.0)); let (q, images) = with_band(&p, b); Env::new_with(&q, &images) };
+        let (city, black) = (env(c), env([0.0, 0.0, 0.0, 1.0]));
+        let u = block_band(c, 1.0, None).1;
+        let d = dir_at_u(u, 1.0);
+        let rain = city.weather.as_ref().expect("rain draws");
+        let k = city.scale();
+        let want = rain.veil_within(d, rgb(c), city.weather_sun, city.dome, 2000.0) * k;
+        let got = city.radiance(d);
+        assert!(close3(got, want, 1e-5), "the city {got:?}, veiled over its 2 km {want:?}");
+        // T c + (1 - T) L: what of the texel passes, against the black texel's in-scatter alone
+        let t = (got - black.radiance(d)).x / (c[0] * k);
+        let within = |far: f32| (rain.veil_within(d, Vec3f::all(1.0), city.weather_sun, city.dome, far) - rain.veil_within(d, Vec3f::default(), city.weather_sun, city.dome, far)).x;
+        let whole = (rain.veil_without_virga(d, Vec3f::all(1.0), city.weather_sun, city.dome) - rain.veil_without_virga(d, Vec3f::default(), city.weather_sun, city.dome)).x;
+        println!("through the rain at 1 degree: {t:.4} over 2 km ({:.4} by the veil), {whole:.2e} over the whole path", within(2000.0));
+        assert!((t - within(2000.0)).abs() <= 1e-4 * t, "{t} passes, the veil over 2 km passes {}", within(2000.0));
+        assert!(t >= 3.0f32.exp() * whole, "{t} passes over 2 km, {whole} over the whole path: not e^3 more");
+    }
+
+    /// At or beyond the slabs' path (the far ranges at the horizon) a texel is veiled as before, bit for bit: 1000 km and
+    /// the ground's 60 km cap (makepad_skyline's FAR_M), against a band without a distance plane. (At the path itself:
+    /// the weather's own test, `a_veil_within_a_distance_takes_the_slab_path_to_it`.)
+    #[test]
+    fn a_far_texel_veils_as_before() {
+        for p in [rain_kind(-20.0, None), rain_kind(25.0, None), rain_kind(25.0, Some(1.0))] {
+            let c = [0.4, 0.3, 0.2, 1.0];
+            let env = |far: Option<f32>| { let (b, _) = block_band(c, 1.0, far); let (q, images) = with_band(&p, b); Env::new_with(&q, &images) };
+            let (before, u) = (env(None), block_band(c, 1.0, None).1);
+            for far in [1.0e6, 6.0e4] {
+                let after = env(Some(far));
+                for el in [0.5, 1.0, 1.5] {
+                    let d = dir_at_u(u, el);
+                    assert_eq!(after.radiance(d), before.radiance(d), "{far} m at {el} degrees");
+                }
+            }
+        }
+    }
+
+    /// A texel without a distance is veiled as before: a band without a distance plane (the shaft-free veil over the whole
+    /// path, plan hdri-6 §5b), and in a band with one, a light without coverage (the glow) and the base around it.
+    #[test]
+    fn a_texel_without_a_distance_veils_as_before() {
+        let p = rain_kind(25.0, None);
+        let c = [0.4, 0.3, 0.2, 1.0];
+        let (b, u) = block_band(c, 1.0, None);
+        let (q, images) = with_band(&p, b);
+        let city = Env::new_with(&q, &images);
+        let rain = city.weather.as_ref().expect("rain draws");
+        let d = dir_at_u(u, 1.0);
+        assert_eq!(city.radiance(d), rain.veil_without_virga(d, rgb(c), city.weather_sun, city.dome) * city.scale());
+        let glow = [0.5, 0.3, 0.1, 0.0];
+        let env = |far: Option<f32>| { let (b, _) = block_band(glow, 1.0, far); let (q, images) = with_band(&p, b); Env::new_with(&q, &images) };
+        let (before, after) = (env(None), env(Some(2000.0)));
+        for (du, el) in [(0.0, 1.0), (0.0, 0.5), (3.0 / 360.0, 1.0), (0.0, 5.0)] {
+            let d = dir_at_u(u + du, el);
+            assert_eq!(after.radiance(d), before.radiance(d), "{du} {el}");
+        }
+    }
+
+    /// `over_veiled` with a veil over the texel's distance: veil_D(s) + (1 - a)(base - veil_D(0)). The veil is affine,
+    /// veil_D(x) = T x + (1 - T) L, so this is T s + a (1 - T) L + (1 - a) base: the texel's coverage veiled over its own
+    /// distance, a veil_D(s / a), and the base behind as the map veils it (its shafts and all). A dark half-covered texel
+    /// 2 km off under the rain kind by day.
+    #[test]
+    fn a_half_covered_texel_veils_its_share_by_its_distance() {
+        let p = rain_kind(25.0, None);
+        let s = [0.02, 0.015, 0.01, 0.5];
+        let (b, u) = block_band(s, 1.0, Some(2000.0));
+        let (q, images) = with_band(&p, b);
+        let (plain, city) = (Env::new(&p), Env::new_with(&q, &images));
+        let rain = city.weather.as_ref().expect("rain draws");
+        let k = city.scale();
+        let d = dir_at_u(u, 1.0);
+        let veil = |c: Vec3f| rain.veil_within(d, c, city.weather_sun, city.dome, 2000.0);
+        let a = s[3];
+        let base = plain.radiance(d) * (1.0 / k);
+        let want = (veil(rgb(s) * (1.0 / a)) * a + base * (1.0 - a)) * k;
+        let got = city.radiance(d);
+        assert!(close3(got, want, 1e-5), "the half-covered texel {got:?}, its share veiled over 2 km over the veiled base {want:?}");
+        // and so not its share veiled over the whole path
+        let before = (rain.veil_without_virga(d, rgb(s) * (1.0 / a), city.weather_sun, city.dome) * a + base * (1.0 - a)) * k;
+        println!("the half-covered texel: {:.4} over its distance, {:.4} over the whole path, the base behind {:.4}", got.x, before.x, plain.radiance(d).x);
+        assert!(!close3(got, before, 1e-3), "{got:?}: as before {before:?}");
+    }
+
+    /// The wet ground mirrors the city over the city's distance (plan hdri-6 R1): the light runs city -> puddle -> eye,
+    /// about the city's distance, so the puddle shows the city veiled over it, by Fresnel, through the veil along its own
+    /// direction once more. The rain kind at night on a full water floor, an opaque lit texel 12 degrees up, 2 km off:
+    /// above the horizon the veil over 2 km, and in the puddle 12 degrees down that light by Fresnel through the puddle's
+    /// veil, brighter than the whole path's veil let through before. The sky mirrored beside it is unchanged.
+    #[test]
+    fn a_puddle_mirrors_the_city_through_its_distance() {
+        let p = rain_kind(-20.0, Some(1.0));
+        let s = [40.0, 30.0, 20.0, 1.0];
+        let (b, u) = block_band(s, 12.0, Some(2000.0));
+        let (q, images) = with_band(&p, b);
+        let (plain, city) = (Env::new(&p), Env::new_with(&q, &images));
+        let rain = city.weather.as_ref().expect("rain draws");
+        let k = city.scale();
+        let (up, down) = (dir_at_u(u, 12.0), dir_at_u(u, -12.0));
+        let above = rain.veil_within(up, rgb(s), city.weather_sun, city.dome, 2000.0) * k;
+        assert!(close3(city.radiance(up), above, 1e-5), "above the horizon {:?}, veiled over 2 km {above:?}", city.radiance(up));
+        let through = |d: Vec3f| veil_of(&city, d, Vec3f::all(1.0)) - veil_of(&city, d, Vec3f::default());
+        let t_down = through(down);
+        let fresnel = 0.02 + 0.98 * (1.0 - 12.0f32.to_radians().sin()).powi(5);
+        let mirrored = city.radiance(down) - plain.radiance(down);
+        let light = above - plain.radiance(up);
+        let want = vec3f(light.x * t_down.x, light.y * t_down.y, light.z * t_down.z) * fresnel;
+        assert!(close3(mirrored, want, 1e-3), "the puddle shows {mirrored:?}, the city veiled over its 2 km by Fresnel {want:?}");
+        let whole = rain.veil_without_virga(up, rgb(s), city.weather_sun, city.dome) * k - plain.radiance(up);
+        let before = whole.x * t_down.x * fresnel;
+        println!("the mirrored city: {:.4} over its distance, {before:.4} over the whole path", mirrored.x);
+        assert!(mirrored.x > 2.0 * before, "the mirror {mirrored:?} is no brighter than the whole path's veil let through ({before})");
+        let aside = dir_at_u(u + 10.0 / 360.0, -12.0);
+        assert_eq!(city.radiance(aside), plain.radiance(aside), "10 degrees round the turn the puddle mirrors the sky alone");
     }
 }

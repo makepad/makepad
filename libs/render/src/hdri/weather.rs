@@ -675,24 +675,34 @@ impl Weather {
     /// the veil as the map draws it, the clouds and their light included
     /// (`Env` measures it once per map).
     pub fn veil(&self, d: Vec3f, c: Vec3f, sun_irradiance: Vec3f, ambient: Vec3f) -> Vec3f {
-        self.veil_with(d, c, sun_irradiance, ambient, true)
+        self.veil_with(d, c, sun_irradiance, ambient, true, f32::INFINITY)
     }
 
-    /// `veil` without the rain's shafts: the rain haze and the fog only. What stands in front of the shafts, the skyline's
-    /// strip, is veiled by it (plan hdri-6 §5b).
+    /// `veil` without the rain's shafts: the rain haze and the fog only, over their whole path along `d`. What stands in
+    /// front of the shafts, the skyline's strip, is veiled so (plan hdri-6 §5b) where its distance is not known
+    /// (`veil_within`).
     pub fn veil_without_virga(&self, d: Vec3f, c: Vec3f, sun_irradiance: Vec3f, ambient: Vec3f) -> Vec3f {
-        self.veil_with(d, c, sun_irradiance, ambient, false)
+        self.veil_with(d, c, sun_irradiance, ambient, false, f32::INFINITY)
     }
 
-    /// `veil`'s body; `shafts` lays the rain's virga over the haze.
-    fn veil_with(&self, d: Vec3f, c: Vec3f, sun_irradiance: Vec3f, ambient: Vec3f, shafts: bool) -> Vec3f {
+    /// `veil_without_virga` in front of what stands `far_m` (metres) along `d`: the rain haze and the fog over their path
+    /// to it, each slab's path capped at `far_m`, never more than the whole path; the same colours scatter in. What the
+    /// skyline's strip shows is veiled so, over its own distance (plan hdri-6 R1): the city 1-3 km off stays visible
+    /// under rain, the far ranges veiled more. At or beyond the path this is `veil_without_virga`, bit for bit (the
+    /// capped path is the path itself); still affine in `c`.
+    pub fn veil_within(&self, d: Vec3f, c: Vec3f, sun_irradiance: Vec3f, ambient: Vec3f, far_m: f32) -> Vec3f {
+        self.veil_with(d, c, sun_irradiance, ambient, false, far_m)
+    }
+
+    /// `veil`'s body; `shafts` lays the rain's virga over the haze, and the slabs' paths are capped at `far_m`.
+    fn veil_with(&self, d: Vec3f, c: Vec3f, sun_irradiance: Vec3f, ambient: Vec3f, shafts: bool, far_m: f32) -> Vec3f {
         let mut c = c;
         // The air under a deck is lit by what that deck passes down, as the
         // clouds' own undersides are: `ambient` is that deck's light, the
         // kind's cloud light included, so a storm's rain is dark.
         let grey = luminance(ambient);
         if self.effects.rain > 0.0 {
-            let through = (-self.rain_depth(d)).exp();
+            let through = (-self.rain_depth_within(d, far_m)).exp();
             let haze = grey * if self.effects.snow { SNOWFALL_ALBEDO } else { RAIN_ALBEDO };
             c = c * through + vec3f(haze, haze, haze) * (1.0 - through);
             // Shafts of rain under the deck are denser curtains of it: they
@@ -702,7 +712,7 @@ impl Weather {
             }
         }
         if self.effects.fog > 0.0 {
-            let through = (-self.fog_depth(d)).exp();
+            let through = (-self.fog_depth_within(d, far_m)).exp();
             // Fog is lit by the dome, greyed as the clouds grey it (half on a
             // clear day, all of it under a closed deck), and by the sun:
             // evenly, from the many scatterings inside it, and with a glow
@@ -739,11 +749,20 @@ impl Weather {
     }
 
     fn fog_depth(&self, d: Vec3f) -> f32 {
-        slab_depth(d.y, thickened(self.effects.fog) * FOG_ZENITH, FOG_HEIGHT_M, FOG_RANGE_M)
+        self.fog_depth_within(d, f32::INFINITY)
     }
 
     fn rain_depth(&self, d: Vec3f) -> f32 {
-        slab_depth(d.y, self.effects.rain * RAIN_ZENITH, self.rain_height, RAIN_RANGE_M)
+        self.rain_depth_within(d, f32::INFINITY)
+    }
+
+    /// `fog_depth` and `rain_depth` over the path along `d` capped at `far_m` (`slab_depth`).
+    fn fog_depth_within(&self, d: Vec3f, far_m: f32) -> f32 {
+        slab_depth(d.y, thickened(self.effects.fog) * FOG_ZENITH, FOG_HEIGHT_M, FOG_RANGE_M, far_m)
+    }
+
+    fn rain_depth_within(&self, d: Vec3f, far_m: f32) -> f32 {
+        slab_depth(d.y, self.effects.rain * RAIN_ZENITH, self.rain_height, RAIN_RANGE_M, far_m)
     }
 
     /// How much a shaft of virga darkens along `d`: 0..VIRGA_DARKEN. Shafts
@@ -813,15 +832,30 @@ pub fn relit_ground(d: Vec3f, ground: Vec3f, gain: Vec3f) -> Vec3f {
 }
 
 /// Optical depth along a ray of elevation sine `sin_elevation` through a level
-/// slab `height_m` thick whose depth straight up is `zenith_depth`. A level
-/// path is capped at `range_m`; below the horizon the ray ends on the ground,
-/// an eye height below, once the atmosphere's ground blend (GROUND_BLEND) is
-/// past. The two branches meet at the horizon.
-fn slab_depth(sin_elevation: f32, zenith_depth: f32, height_m: f32, range_m: f32) -> f32 {
+/// slab `height_m` thick whose depth straight up is `zenith_depth`, over its
+/// path (`slab_path`) up to `far_m`: what stands nearer is seen through only
+/// that much of the slab. `f32::INFINITY` (or any `far_m` at least the path)
+/// is the whole path, bit for bit (`capped`).
+fn slab_depth(sin_elevation: f32, zenith_depth: f32, height_m: f32, range_m: f32, far_m: f32) -> f32 {
     if !(zenith_depth > 0.0) {
         return 0.0;
     }
-    let path = if sin_elevation >= 0.0 {
+    zenith_depth / height_m * capped(slab_path(sin_elevation, height_m, range_m), far_m)
+}
+
+/// `path` capped at `far_m`: `far_m` where it is shorter, else `path` itself, the very float (also a NaN path, which
+/// `f32::min` would turn into `far_m`; a NaN `far_m` caps nothing).
+fn capped(path: f32, far_m: f32) -> f32 {
+    if far_m < path { far_m } else { path }
+}
+
+/// The path (m) a ray of elevation sine `sin_elevation` runs through a level
+/// slab `height_m` thick. A level path is capped at `range_m`; below the
+/// horizon the ray ends on the ground, an eye height below, once the
+/// atmosphere's ground blend (GROUND_BLEND) is past. The two branches meet at
+/// the horizon.
+fn slab_path(sin_elevation: f32, height_m: f32, range_m: f32) -> f32 {
+    if sin_elevation >= 0.0 {
         height_m / (sin_elevation + height_m / range_m)
     } else {
         // Just below the horizon the atmosphere still draws distant haze (its
@@ -829,8 +863,7 @@ fn slab_depth(sin_elevation: f32, zenith_depth: f32, height_m: f32, range_m: f32
         // shortens to the ground an eye height below as the ground takes over.
         let ground = EYE_M / (-sin_elevation + EYE_M / range_m);
         range_m + (ground - range_m) * smooth(0.0, GROUND_BLEND, -sin_elevation)
-    };
-    zenith_depth / height_m * path
+    }
 }
 
 /// A fog amount as the depth it gives, per FOG_ZENITH: linear over the kinds'
@@ -1066,7 +1099,7 @@ mod tests {
         assert!(feet > 0.5, "the ground at the feet still shows: {feet}");
         // The kind's own fog 0.7 is within 3 % of its linear depth.
         let kind = weather("fog").fog_depth(up);
-        let linear = slab_depth(1.0, 0.7 * FOG_ZENITH, FOG_HEIGHT_M, FOG_RANGE_M);
+        let linear = slab_depth(1.0, 0.7 * FOG_ZENITH, FOG_HEIGHT_M, FOG_RANGE_M, f32::INFINITY);
         assert!((kind / linear - 1.0).abs() < 0.03, "{kind} vs {linear}");
     }
 
@@ -1404,6 +1437,61 @@ mod tests {
         for az in 0..36 { let d = dir_from_az_el(az as f32 * 10.0, 8.0); assert_eq!(fog.veil_without_virga(d, c, sun_light, dome), fog.veil(d, c, sun_light, dome)); }
         let differ = (0..360).any(|az| { let d = dir_from_az_el(az as f32, 8.0); rain.virga(d) > 0.05 && rain.veil_without_virga(d, c, sun_light, dome) != rain.veil(d, c, sun_light, dome) });
         assert!(differ, "the premise: a shaft hangs at 8 degrees and only the veil with it darkens there");
+    }
+
+    /// Plan hdri-6 R1: the veil over what stands `far_m` along `d` is the shaft-free veil with each slab's path capped at
+    /// `far_m`: its transmittance the rain's and the fog's depth over that path from their own constants, its in-scatter
+    /// the same colours. At or beyond the path it is `veil_without_virga`, bit for bit.
+    #[test]
+    fn a_veil_within_a_distance_takes_the_slab_path_to_it() {
+        let (sun_light, dome) = (vec3f(3.0, 2.8, 2.5), vec3f(0.3, 0.35, 0.5));
+        let rain = weather("rain");
+        let d = dir_from_az_el(30.0, 1.0);
+        let far = 2000.0f32;
+        // the premise: both slabs' paths at 1 degree run past 2 km
+        let (fog_path, rain_path) = (slab_path(d.y, FOG_HEIGHT_M, FOG_RANGE_M), slab_path(d.y, rain.rain_height, RAIN_RANGE_M));
+        assert!(fog_path > far && rain_path > far, "{fog_path} {rain_path}");
+        let (t_rain, t_fog) = ((-(rain.effects.rain * RAIN_ZENITH / rain.rain_height * far)).exp(), (-(thickened(rain.effects.fog) * FOG_ZENITH / FOG_HEIGHT_M * far)).exp());
+        let within = |c: Vec3f| rain.veil_within(d, c, sun_light, dome, far);
+        let zero = within(Vec3f::default());
+        for c in [vec3f(1.0, 1.0, 1.0), vec3f(5.0, 0.5, 0.1)] {
+            let slope = within(c) - zero;
+            let want = c * (t_rain * t_fog);
+            assert!((slope - want).length() <= 1e-5 * want.length(), "{c:?}: {slope:?} passes, the slabs' depth over 2 km {want:?}");
+        }
+        // the in-scatter: the rain's grey haze, then the fog's own light, over their capped paths
+        let grey = luminance(dome);
+        let sky = dome.mix(vec3f(grey, grey, grey), 0.5 + 0.5 * rain.coverage);
+        let even = FOG_DIFFUSE * rain.sun_dir.y.max(0.0) / std::f32::consts::PI;
+        let fog_light = sky + sun_light * (rain.fog_glow * (even + hg_phase(d.dot(rain.sun_dir), FOG_G)));
+        let want = Vec3f::all(grey * RAIN_ALBEDO * (1.0 - t_rain)) * t_fog + fog_light * (1.0 - t_fog);
+        assert!((zero - want).length() <= 1e-5 * want.length(), "the in-scatter {zero:?}, the veil's colours over 2 km {want:?}");
+        // far beyond today's path today's veil, and so at the path itself: the cap hands the same float back
+        let c = vec3f(0.7, 0.5, 0.3);
+        for path in [fog_path, rain_path] {
+            for far in [path, path * 2.0, f32::INFINITY, f32::NAN] {
+                assert_eq!(capped(path, far).to_bits(), path.to_bits(), "{path} capped at {far}");
+            }
+            assert_eq!(capped(path, far), far);
+        }
+        assert!(capped(f32::NAN, f32::INFINITY).is_nan(), "a NaN path stays one, as before the cap");
+        for d in [d, dir_from_az_el(200.0, 8.0), dir_from_az_el(30.0, -0.5), dir_from_az_el(30.0, -5.0), dir_from_az_el(30.0, 40.0)] {
+            let path = slab_path(d.y, FOG_HEIGHT_M, FOG_RANGE_M).max(slab_path(d.y, rain.rain_height, RAIN_RANGE_M));
+            for far in [path, 1.0e6, f32::INFINITY] {
+                assert_eq!(rain.veil_within(d, c, sun_light, dome, far), rain.veil_without_virga(d, c, sun_light, dome), "{d:?} at {far} m");
+            }
+        }
+        for kind in ["fog", "storm", "snow"] {
+            let w = weather(kind);
+            assert_eq!(w.veil_within(d, c, sun_light, dome, 1.0e6), w.veil_without_virga(d, c, sun_light, dome), "{kind}");
+        }
+        // nearer, a thinner veil, and nothing at all at the eye
+        assert!(within(c).x > rain.veil_without_virga(d, c, sun_light, dome).x);
+        assert_eq!(rain.veil_within(d, c, sun_light, dome, 0.0), c);
+        // still affine in c (`skyline::over_veiled` relies on it)
+        let (x, y, a, b) = (vec3f(2.0, 0.3, 0.1), vec3f(0.1, 4.0, 1.0), 0.7, -0.4);
+        let (lhs, rhs) = (within(x * a + y * b), within(x) * a + within(y) * b - zero * (a + b - 1.0));
+        assert!((lhs - rhs).length() <= 1e-5 * (1.0 + lhs.length()), "{lhs:?} vs {rhs:?}");
     }
 }
 
