@@ -27,7 +27,12 @@
 //! `MAKEPAD_DEREVERB_TAPS` (default `local/dereverb_ref/taps`), with its
 //! checkpoint at `MAKEPAD_DEREVERB_CKPT` (default
 //! `local/stems_ref/ckpt/dereverb_mel_band_roformer_anvuew_sdr_19.1729.ckpt`).
-//! It skips on the same terms.
+//! It skips on the same terms. The taps are 352800 frames from 60 s into a
+//! 16-bit 44.1 kHz stereo vocal stem with heavy echo, through
+//! audio-separator's `MelBandRoformer` (built from the checkpoint's own
+//! `dereverb_mel_band_roformer_anvuew.yaml`, `model.double()`, on the CPU),
+//! with the reference's `zero_dc` applied to the masked spectrum before the
+//! inverse transform, which that class leaves out.
 
 use makepad_ai_common::backend::DeviceRuntime;
 use makepad_ai_stems::config::{AUDIO_CHANNELS, DIM, FEATURES, FREQ_BINS};
