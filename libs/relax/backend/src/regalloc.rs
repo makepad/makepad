@@ -2591,6 +2591,26 @@ fn dead_spill_stores(
     // the same position (an instruction reads its operands before its result goes home)
     let mut ev: Vec<Vec<(u32, bool, usize, u32)>> = vec![Vec::new(); nb];
     let simple = |i: &Inst| matches!(i, Inst::IBin(..) | Inst::IBinI(..) | Inst::ICmp(..) | Inst::ICmpI(..) | Inst::Load(..) | Inst::Store(..) | Inst::LoadX(..) | Inst::StoreX(..) | Inst::Conv(..) | Inst::Mov(..));
+    // An instruction whose one result only the next instruction reads may be emitted together with
+    // it, at the next instruction's position (arm64 shifted operands `add d, x, a, lsl k`, madd,
+    // rev + shift; x64 folded loads / compares): its operands are then read there -- from a window
+    // only if that window still holds them there, else from the slot -- and its own result may never
+    // be written (no write event: it kills no earlier store of a value sharing its slot). A region
+    // holds a value only up to its last use, so a deferred read past it reads the slot.
+    let mut nuses = vec![0u32; nv];
+    for (bi, b) in f.blocks.iter().enumerate() {
+        if reach[bi] {
+            let k0 = tab.first[bi] as usize;
+            for k in 0..=b.insts.len() {
+                for &u in tab.uses(k0 + k) {
+                    nuses[u as usize] += 1;
+                }
+            }
+        }
+    }
+    // (position, vreg) writes of deferrable results: their own store is judged, earlier ones stay live
+    let mut soft: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+    let deferrable = |b: &Block, k0: usize, k: usize| -> bool { k + 1 < b.insts.len() && matches!(tab.defs(k0 + k), [t] if nuses[*t as usize] == 1 && tab.uses(k0 + k + 1).contains(t)) };
     for (bi, b) in f.blocks.iter().enumerate() {
         if !reach[bi] {
             continue;
@@ -2599,17 +2619,22 @@ fn dead_spill_stores(
         for k in 0..=b.insts.len() {
             let p = if k < b.insts.len() { block_start[bi] + 2 * k as u32 + 1 } else { block_end[bi] - 1 };
             let reg_read = k < b.insts.len() && simple(&b.insts[k]);
+            let deferred = k < b.insts.len() && deferrable(b, k0, k);
             for &u in tab.uses(k0 + k) {
                 if let Some(si) = slot_ix(u) {
                     // a no-op move between two values of one slot reads nothing
                     let same = matches!(b.insts.get(k), Some(Inst::Mov(d, s2)) if s2.0 == u && loc[d.0 as usize] == loc[u as usize]);
-                    if !same && !(reg_read && (in_region.contains(&(u, bi as u32)) || in_win(u, p))) {
+                    let in_reg = if deferred { in_win(u, p) && in_win(u, p + 2) } else { in_region.contains(&(u, bi as u32)) || in_win(u, p) };
+                    if !same && !(reg_read && in_reg) {
                         ev[bi].push((p, true, si, u));
                     }
                 }
             }
             if k < b.insts.len() {
                 for &d in tab.defs(k0 + k) {
+                    if deferred {
+                        soft.insert((p + 1, d));
+                    }
                     if let Some(si) = slot_ix(d) {
                         let same = matches!(b.insts[k], Inst::Mov(_, s2) if loc[s2.0 as usize] == loc[d as usize]);
                         if !same {
@@ -2635,8 +2660,11 @@ fn dead_spill_stores(
     let mut gen = vec![0u64; nb * words];
     let mut kill = vec![0u64; nb * words];
     for bi in 0..nb {
-        for &(_, rd, si, _) in &ev[bi] {
+        for &(p, rd, si, v) in &ev[bi] {
             let (w, m) = (bi * words + si / 64, 1u64 << (si % 64));
+            if !rd && soft.contains(&(p, v)) {
+                continue;
+            }
             if kill[w] & m == 0 {
                 if rd {
                     gen[w] |= m;
@@ -2668,7 +2696,9 @@ fn dead_spill_stores(
                     // the store at the defining instruction (position p - 1)
                     out.insert((p - 1, v));
                 }
-                need[w] &= !m;
+                if !soft.contains(&(p, v)) {
+                    need[w] &= !m;
+                }
             }
         }
     }
@@ -5707,4 +5737,51 @@ pub fn domain_base_blocks(f: &Func, sym_class: u64, reach: &[bool]) -> Vec<usize
     let mut out: Vec<usize> = reads.iter().zip(&keep).filter(|x| *x.1).map(|x| *x.0).collect();
     out.sort_unstable();
     out
+}
+
+#[cfg(test)]
+mod dead_store_tests {
+    use super::*;
+
+    /// `v1 = load [base]; v2 = v1 << 3; v3 = x + v2; store [base + 8], v3` with v1 spilled and a def
+    /// window over v1's definition and its read: the shift (one result, read only by the add) may be
+    /// emitted with the add (arm64 `add v3, x, v1, lsl #3`), reading v1 at the add's position, past the
+    /// window -- from the slot. v1's store home must stay (the arm64 O3 miscompile of powi's `work` /
+    /// race_pack under more call-crossing spills). With v2 read twice the shift stands alone and the
+    /// window serves v1's only read: the store is dead.
+    fn skipped(v2_twice: bool) -> bool {
+        let w = IntTy { bits: 64, signed: false };
+        let mut f = Func::new("dead_store".into(), 0);
+        let (x, base) = (f.vreg(Cls::I), f.vreg(Cls::I));
+        f.params = vec![x, base];
+        f.rets = vec![Cls::I];
+        let b = f.block();
+        let (v1, v2, v3, v4) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
+        let mut insts = vec![Inst::Load(Mem::Int(8, false), v1, base, 0), Inst::IBinI(IOp::Shl, w, v2, v1, 3), Inst::IBin(IOp::Add, w, v3, x, v2)];
+        insts.push(if v2_twice { Inst::IBin(IOp::Add, w, v4, v3, v2) } else { Inst::Mov(v4, v3) });
+        insts.push(Inst::Store(Mem::Int(8, false), base, 8, v4));
+        for i in insts {
+            f.blocks[b as usize].insts.push(i);
+            f.blocks[b as usize].pos.push(0);
+        }
+        f.blocks[b as usize].term = Term::Ret(vec![v4]);
+        f.verify().unwrap();
+        let reach = reachable(&f);
+        let tab = OpTab::new(&f, &reach);
+        let n = f.blocks[0].insts.len() as u32;
+        let (block_start, block_end) = (vec![0u32], vec![2 * (n + 1)]);
+        let mut loc = vec![Loc::Reg(1); f.vregs.len()];
+        loc[v1.0 as usize] = Loc::Stack(8);
+        loc[v2.0 as usize] = Loc::Stack(16);
+        // v1: defined at position 2 (instruction 0), read at 3 (instruction 1)
+        let def_wins = [(v1.0, 2, 3, 9u8)];
+        let out = dead_spill_stores(&f, &reach, &tab, &block_start, &block_end, &loc, &Default::default(), &[], &def_wins);
+        out.contains(&(1, v1.0))
+    }
+
+    #[test]
+    fn deferred_reads_keep_the_store() {
+        assert!(!skipped(false), "v1 is read from its slot when the shift is emitted with the add");
+        assert!(skipped(true), "a shift read by two instructions stands alone: the window serves v1");
+    }
 }

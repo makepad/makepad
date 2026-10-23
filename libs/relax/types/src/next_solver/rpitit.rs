@@ -353,6 +353,8 @@ impl Tcx {
         env.opaque_owner = Some(owner);
         env.regions = env.regions.with_binder(None);
         let state = crate::tcx::EvalState::new();
+        // (the errors belong to the opaque, whoever asks for its bounds first: reported by its check)
+        state.errors.replace(Some(Vec::new()));
         let cx = EvalCx::new(prog, self, crate::tcx::TypingEnv { param_env: Default::default(), mode: crate::tcx::TypingMode::non_body_analysis(), limit: crate::tcx::RecursionLimit::for_item(prog, owner) }, &state);
         let mut result = Vec::new();
         match prog.def_id_to_node_id[&opaque].1 {
@@ -374,6 +376,13 @@ impl Tcx {
             }
             _ => panic!("non-opaque declaration"),
         }
+        let _ = self.declaration_queries(prog, opaque).opaque_bound_errors.set(state.errors.take().unwrap_or_default());
         result
+    }
+
+    /// The errors of lowering an opaque type's bounds (`impl Deref<Target = Missing>`).
+    pub fn opaque_bound_errors(&self, prog: &Program, opaque: DefId) -> &[String] {
+        let _ = self.explicit_item_bounds(prog, opaque);
+        self.declaration_queries(prog, opaque).opaque_bound_errors.get().map_or(&[], |v| v.as_slice())
     }
 }

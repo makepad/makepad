@@ -1432,6 +1432,14 @@ impl<'a> Fcx<'a> {
             let PredicateKind::Clause(ClauseKind::Trait(c)) = &p.kind else { continue };
             let Some(crate::consts::GenericArg::Type(self_ty)) = c.trait_ref.args.first() else { continue };
             if !self.tcx.tys.eq_mod_regions(*self_ty, t) { continue; }
+            // probe.rs WhereClauseCandidate: a higher-ranked bound's vars become fresh regions
+            // (`T: for<'a> Trait<&'a ()>` then `T::f()`)
+            let kind;
+            let c = if p.bound_vars.is_empty() { c } else {
+                kind = self.infcx.instantiate_predicate_binder_with_infer(p);
+                let PredicateKind::Clause(ClauseKind::Trait(c)) = &kind else { continue };
+                c
+            };
             let mut args = Vec::new();
             for a in &c.trait_ref.args[1..] {
                 match a {
@@ -1964,30 +1972,25 @@ impl<'a> Fcx<'a> {
             if matches!(self.tcx.tys.kind(self.infcx.shallow_resolve(t)), TyKind::FloatVar(_)) { self.eq(t, self.tcx.tys.f64_); }
         }
         self.retry_goals(false);
-        for (x, xt, target) in std::mem::take(&mut self.deferred_casts) {
-            // cast.rs:check/try_coercion_cast and check_ref_cast:1215-1251:
-            // fallback precedes coercion, then the array-to-element exception.
-            if self.try_coerce(xt, target, Some(x)) { continue; }
-            let sx = self.shallow(xt);
-            let st = self.shallow(target);
-            if let (TyKind::Ref(source_mut, inner, _), TyKind::Ptr(target_mut, pointee)) =
-                (self.tcx.tys.kind(sx).clone(), self.tcx.tys.kind(st).clone()) {
-                if source_mut || !target_mut {
-                    // cast.rs check_ref_cast: the referent is structurally resolved (an alias of an array)
-                    let inner = self.norm(inner);
-                    if let TyKind::Array(element, _) = self.tcx.tys.kind(self.shallow(inner)).clone() {
-                        let snapshot = self.start_snapshot();
-                        if self.eq(element, pointee) {
-                            self.commit_from(snapshot);
-                            self.set_coerce(x.0, Coerce::RefToRaw(source_mut), target);
-                        } else { self.rollback_to(snapshot); }
-                    }
-                }
-                // (a reference that is no array pointer cast is the cast check's E0606)
+        // rustc check_casts: every cast is checked in order, its coercion first; a later cast's
+        // coercion cannot decide an earlier cast's types (inference/order-dependent-cast-inference)
+        let deferred = std::mem::take(&mut self.deferred_casts);
+        let checks = std::mem::take(&mut self.cast_checks);
+        let mut order: Vec<(Option<(ExprId, TyId, TyId)>, Option<(ExprId, TyId, TyId, u32)>)> = Vec::new();
+        if checks.is_empty() {
+            order.extend(deferred.into_iter().map(|d| (Some(d), None)));
+        } else {
+            let mut deferred: Vec<Option<(ExprId, TyId, TyId)>> = deferred.into_iter().map(Some).collect();
+            for c in checks {
+                let d = deferred.iter_mut().find(|d| d.is_some_and(|d| d.0 == c.0)).and_then(|d| d.take());
+                order.push((d, Some(c)));
             }
-            self.record_cast_borrow(x, xt, target);
+            order.extend(deferred.into_iter().flatten().map(|d| (Some(d), None)));
         }
-        for (x, xt, target, lo) in std::mem::take(&mut self.cast_checks) { self.check_cast_final(x, xt, target, lo); }
+        for (d, check) in order {
+            if let Some((x, xt, target)) = d { self.finish_deferred_cast(x, xt, target); }
+            if let Some((x, xt, target, lo)) = check { self.check_cast_final(x, xt, target, lo); }
+        }
         // pending pointer-to-dyn coercions, now that their pointees are known
         for (ex, a, x, pos) in std::mem::take(&mut self.deferred_dyn) {
             self.finish_dyn_coercion(ex, a, x, pos);

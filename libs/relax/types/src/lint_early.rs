@@ -3445,6 +3445,26 @@ fn trailing_semis(prog: &Program, own: &[bool]) {
     }
 }
 
+// ---------------------------------------------------------------- incomplete_include
+
+pub const INCOMPLETE_INCLUDE: Lint = lint::lint("incomplete_include");
+
+/// rustc_builtin_macros source_util `ExpandInclude::make_expr`: an `include!` in expression
+/// position whose file holds more than one expression (the parser records the call).
+fn incomplete_includes(prog: &Program, own: &[bool]) {
+    let mut seen = std::collections::HashSet::new();
+    for (path, call) in crate::macros::uses::take_incomplete_include() {
+        let Some(file) = prog.file_paths.iter().position(|p| *p == path) else { continue };
+        let krate = prog.file_crate.get(file).copied().unwrap_or(u32::MAX);
+        if !own.get(krate as usize).copied().unwrap_or(false) || !seen.insert((file, call)) { continue; }
+        let pf = &prog.files[file];
+        let pos = pf.lint_pos(call);
+        let def = enclosing_def(prog, file as u32, pos, krate);
+        let attrs = lint::attrs_at_call(prog, def, file as u32, call);
+        emit_in(prog, def, &attrs, &INCOMPLETE_INCLUDE, file as u32, pos, "include macro expected single expression in source");
+    }
+}
+
 // ---------------------------------------------------------------- meta_variable_misuse
 
 pub const META_VARIABLE_MISUSE: Lint = lint::lint("meta_variable_misuse");
@@ -3479,6 +3499,7 @@ pub const UNUSED_MACRO_RULES: Lint = lint::lint("unused_macro_rules");
 pub fn finish(prog: &Program, own: &[bool]) {
     if !lint::enabled() { return; }
     trailing_semis(prog, own);
+    incomplete_includes(prog, own);
     meta_variable_misuse(prog, own);
     cfg_attr_empties(prog, own);
     named_args_positional(prog, own);

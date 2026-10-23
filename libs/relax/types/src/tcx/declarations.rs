@@ -17,6 +17,8 @@ pub(crate) struct DefQueries {
     pub super_predicates: DeclarationCell<Vec<Predicate>>,
     filtered_supers: Mutex<crate::fxhash::HashMap<Sym, Arc<DeclarationCell<Vec<Predicate>>>>>,
     pub explicit_item_bounds: DeclarationCell<Vec<Predicate>>,
+    /// an opaque type's bound-lowering errors (E0412 ..), set by its explicit_item_bounds
+    pub opaque_bound_errors: OnceLock<Vec<String>>,
     pub item_bounds: DeclarationCell<Vec<Predicate>>,
     pub impl_super_outlives: DeclarationCell<Vec<Predicate>>,
     pub generics: DeclarationCell<GenericIndices>,

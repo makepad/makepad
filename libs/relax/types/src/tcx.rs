@@ -1657,6 +1657,9 @@ impl Tcx {
             errors.extend(self.check_item_type_defaults(prog, did));
         }
         errors.extend_from_slice(self.signature_errors(prog, did));
+        if def.kind == DefKind::OpaqueTy && self.validates(prog, def.file) {
+            for e in self.opaque_bound_errors(prog, did) { if !errors.contains(e) { errors.push(e.clone()); } }
+        }
         if prog.item_defs.get(&(def.file, def.item.0)) == Some(&did) {
             errors.extend(crate::item_checks::duplicate_generic_params(prog, did));
             if self.validates(prog, def.file) { errors.extend(crate::item_checks::generic_param_rules(prog, did)); }

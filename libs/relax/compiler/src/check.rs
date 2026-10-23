@@ -378,7 +378,10 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         }
     }
     let mut seeds = Vec::new();
-    for (_, o) in outcomes {
+    // rustc: an item whose body failed its checks (borrowck included) is tainted: it is never evaluated
+    let mut tainted: std::collections::HashSet<crate::program::DefId> = std::collections::HashSet::new();
+    for (i, o) in outcomes {
+        if !o.errors.is_empty() || !o.diags.is_empty() { tainted.insert(fns[i].0.owner); }
         errors.extend(o.errors);
         borrow_diagnostics.extend(o.diags);
         if let Some(d) = o.seed { seeds.push(d); }
@@ -396,7 +399,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     // rustc_hir_analysis check_crate: every static and every non-generic, non-associated const
     // item of the checked crates is evaluated, used or not; one that cannot be evaluated is an
     // E0080 (the unit notes it, reported below with the builds' other notes)
-    eval_items(up, &own);
+    eval_items(up, &own, &tainted);
     // rustc_monomorphize: a program's `main` and what it reaches, instantiated -- the constants
     // generic code evaluates there (post-monomorphization E0080) -- in a check of a program
     if options.const_fuel && !compile && errors.is_empty() && borrow_diagnostics.is_empty() && unsafe { (&*up).errors.is_empty() } { mono_check(up, &own, root); }
@@ -737,7 +740,7 @@ fn is_follow_on(e: &str) -> bool {
 
 /// Evaluates the checked crates' statics and non-generic const items (rustc evaluates them in
 /// `cargo check`, used or not). A body with type errors is skipped: those errors are reported.
-fn eval_items(up: *mut Unit, own: &[bool]) {
+fn eval_items(up: *mut Unit, own: &[bool], tainted: &std::collections::HashSet<crate::program::DefId>) {
     let u = unsafe { &mut *up };
     let items: Vec<(crate::program::DefId, bool)> = (0..u.prog.defs.len())
         .filter(|&i| own[u.prog.defs[i].krate as usize])
@@ -751,7 +754,7 @@ fn eval_items(up: *mut Unit, own: &[bool]) {
         .collect();
     let _job = jit::compile_job();
     for (d, is_static) in items {
-        if !u.tcx.typeck(&u.prog, d).errors.is_empty() { continue; }
+        if tainted.contains(&d) || !u.tcx.typeck(&u.prog, d).errors.is_empty() { continue; }
         let before = unsafe { (&*up).errors.len() };
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::owner::call(crate::owner::Class::App, || unsafe {
             let u = &mut *up;

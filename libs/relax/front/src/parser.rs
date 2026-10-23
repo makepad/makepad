@@ -122,6 +122,8 @@ pub struct Parser<'a> {
     ty_frags: crate::fxhash::HashSet<u32>,
     /// starts of the `$e:expr` / `$l:literal` substitutions of expansion text (check only): the kind
     meta_frags: crate::fxhash::HashMap<u32, &'static str>,
+    /// starts of the `$b:block` substitutions of expansion text (check only)
+    block_frags: crate::fxhash::HashSet<u32>,
     /// Offsets of the parens a transcription added around multi-token `$e:expr` fragments.
     synth_parens: crate::fxhash::HashSet<u32>,
     /// file context for built-in macros (file!, module_path!, env!, cfg of derive inputs)
@@ -210,6 +212,7 @@ impl<'a> Parser<'a> {
             frag_groups: Default::default(),
             ty_frags: Default::default(),
             meta_frags: Default::default(),
+            block_frags: Default::default(),
             synth_parens: Default::default(),
             bctx: None,
             mod_stack: Vec::new(),
@@ -1809,6 +1812,9 @@ impl<'a> Parser<'a> {
             if b & crate::macros::TY_FRAG != 0 {
                 self.ty_frags.insert(base + a);
             }
+            if b & crate::macros::BLOCK_FRAG != 0 && crate::lexer::validation_enabled() {
+                self.block_frags.insert(base + a);
+            }
             if b & (crate::macros::EXPR_FRAG | crate::macros::LIT_FRAG) != 0 && crate::lexer::validation_enabled() {
                 self.meta_frags.insert(base + a, if b & crate::macros::EXPR_FRAG != 0 { "expr" } else { "literal" });
             }
@@ -1945,6 +1951,15 @@ impl<'a> Parser<'a> {
         Ok(Some(r))
     }
 
+    /// After the one expression of an `include!` in expression position: tokens left are the
+    /// incomplete_include lint (reported at the call by the lint pass).
+    fn incomplete_include_check(&self) {
+        if self.kind() != T::Eof && crate::macros::uses::recording() {
+            let call = self.exp_map.floor(self.lo()).map_or(0, |(_, r)| r.2);
+            crate::macros::uses::incomplete_include(self.bctx.as_ref().map_or("", |c| c.path.as_str()), call);
+        }
+    }
+
     /// Moves to the end of the current macro expansion's tokens.
     fn skip_to_eof(&mut self) {
         while self.kind() != T::Eof {
@@ -2019,6 +2034,7 @@ impl<'a> Parser<'a> {
             // file is ignored (rustc_expand base.rs `ExpandInclude::make_expr`, lint incomplete_include)
             if include {
                 let e = p.expr()?;
+                p.incomplete_include_check();
                 p.skip_to_eof();
                 return Ok(vec![Stmt::Expr(e, false)]);
             }
@@ -3605,6 +3621,14 @@ impl<'a> Parser<'a> {
             T::KwFalse => LitKind::Bool(false),
             _ => return self.err("expected literal"),
         };
+        // a literal of an expansion was not cooked by the file's token validation (it was a macro
+        // argument): rustc reports its suffix when the parser consumes it
+        if self.exp_depth > 0 && matches!(k, LitKind::Int | LitKind::Float) {
+            let t = self.tok();
+            if let Err(msg) = crate::lexer::validate_number(self.tok_text(t), k == LitKind::Float) {
+                return Err(PErr { pos: t.lo, msg });
+            }
+        }
         self.pos += 1;
         Ok(self.mk_expr(ExprKind::Lit(k), lo))
     }
@@ -4656,6 +4680,14 @@ impl<'a> Parser<'a> {
         Ok(if attrs.is_empty() || self.cfg_present(&attrs) { Some(e) } else { None })
     }
 
+    /// rustc_parse parse_expr_block: a labeled or unsafe block, or a closure body after its return
+    /// type, is written out, not a `$b:block` fragment.
+    fn no_block_frag(&self) -> PResult<()> {
+        if self.kind() == T::OpenBrace && !self.block_frags.is_empty() && self.block_frags.contains(&{ self.tok().lo }) {
+            return Err(PErr { pos: self.tok().lo, msg: "cannot use a `block` macro fragment here".to_string() });
+        }
+        Ok(())
+    }
     fn label(&mut self) -> PResult<Option<Ident>> {
         if self.kind() == T::Lifetime && self.nth(1) == T::Colon {
             let t = self.label_tok()?;
@@ -4739,6 +4771,7 @@ impl<'a> Parser<'a> {
             }
             T::KwUnsafe => {
                 self.pos += 1;
+                self.no_block_frag()?;
                 let b = self.block()?;
                 Ok(self.mk_expr(ExprKind::Unsafe(b), lo))
             }
@@ -4762,6 +4795,7 @@ impl<'a> Parser<'a> {
                     T::KwWhile => self.while_expr(label, lo),
                     T::KwFor => self.for_expr(label, lo),
                     T::OpenBrace => {
+                        self.no_block_frag()?;
                         let b = self.block()?;
                         Ok(self.mk_expr(ExprKind::Block(b, OptIdent::from(label)), lo))
                     }
@@ -4893,8 +4927,8 @@ impl<'a> Parser<'a> {
                                 let file = p.bctx.as_ref().map_or("", |c| c.path.as_str()).to_string();
                                 crate::macros::uses::trailing_semi(&file, p.lo(), lo, &def.def_file);
                             }
+                            if include { p.incomplete_include_check(); p.skip_to_eof(); }
                             p.eat(T::Semi);
-                            if include { p.skip_to_eof(); }
                             Ok(e)
                         })?;
                         self.parse_cfg_select_rest(rest, 0)?;
@@ -4981,6 +5015,7 @@ impl<'a> Parser<'a> {
         let (ret, body) = if self.eat(T::RArrow) {
             let ty = self.ty()?;
             let blo = self.lo();
+            self.no_block_frag()?;
             let b = self.block()?;
             (Some(ty), self.mk_expr(ExprKind::Block(b, OptIdent::NONE), blo))
         } else {

@@ -554,12 +554,21 @@ pub mod obligations {
             // under the item's outlives environment and the types it may assume well formed.
             if fulfilled {
                 let outlives = self.outlives_environment();
+                let mut region_failed = false;
                 for e in self.infcx.resolve_regions_with_outlives_env(self.prog, &outlives) {
                     if let crate::infer::lexical_region_resolve::RegionResolutionError::GenericBoundFailure(ty, sub, span) = e {
                         if let Some(msg) = self.generic_bound_failure(ty, sub) {
                             let span = if span == 0 { self.prog.files[file as usize].ast.item(self.prog.def(self.def).item).lo } else { span };
                             if seen.insert((span, msg.clone())) { out.push(self.prog.record_error(file, span, "typeck", msg)); }
                         }
+                    } else if !region_failed {
+                        // report_region_errors: a region the item's constraints cannot give a value (two
+                        // regions equated or ordered that its outlives environment does not relate). Relax's
+                        // constraints carry no SubregionOrigin, so the error is reported once per item,
+                        // without the origin's code (E0308 lifetime mismatch, E0478, E0491, E0803 ..)
+                        region_failed = true;
+                        let span = self.prog.files[file as usize].ast.item(self.prog.def(self.def).item).lo;
+                        out.push(self.prog.record_error(file, span, "typeck", "lifetime mismatch: the item's region constraints cannot be satisfied".to_string()));
                     }
                 }
             }
@@ -707,7 +716,8 @@ pub mod obligations {
         };
         let parent_impl = (d.parent != crate::program::NO_DEF && prog.def(d.parent).kind == DefKind::Impl).then_some(d.parent);
         match d.kind {
-            DefKind::Fn | DefKind::AssocFn => {
+            // (a foreign fn is rustc's DefKind::Fn)
+            DefKind::Fn | DefKind::AssocFn | DefKind::ForeignFn => {
                 if let Some(imp) = parent_impl { out.extend(header(imp)); }
                 if let Some(sig) = tcx.fn_sig(prog, def) {
                     let liberate = |t: TyId| crate::next_solver::dyn_compatibility::liberate_late_bound_regions(tcx, def, t);
@@ -752,7 +762,11 @@ pub mod obligations {
                 errors.extend(with_wfcx(prog, tcx, did, |w| check_impl(w, ast, item)));
                 errors
             }
-            DefKind::Trait => with_wfcx(prog, tcx, did, |w| { check_defaults(w, ast, item); w.check_where_clauses(item.lo); }),
+            DefKind::Trait => {
+                let mut errors = with_wfcx(prog, tcx, did, |w| { check_defaults(w, ast, item); w.check_where_clauses(item.lo); });
+                errors.extend(crate::gat_bounds::check(prog, tcx, did));
+                errors
+            }
             DefKind::Static | DefKind::ForeignStatic => with_wfcx(prog, tcx, did, |w| check_static(w, ast, item)),
             DefKind::AssocConst => with_wfcx(prog, tcx, did, |w| check_assoc_const(w, ast, item)),
             DefKind::AssocTy => with_wfcx(prog, tcx, did, |w| check_assoc_ty(w, ast, item)),

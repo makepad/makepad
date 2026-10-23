@@ -143,6 +143,30 @@ impl Fcx<'_> {
         ok
     }
 
+    /// cast.rs:check/try_coercion_cast and check_ref_cast:1215-1251 of a cast whose types were
+    /// open at the cast: fallback precedes coercion, then the array-to-element exception.
+    pub(super) fn finish_deferred_cast(&mut self, x: ExprId, xt: TyId, target: TyId) {
+            if self.try_coerce(xt, target, Some(x)) { return; }
+            let sx = self.shallow(xt);
+            let st = self.shallow(target);
+            if let (TyKind::Ref(source_mut, inner, _), TyKind::Ptr(target_mut, pointee)) =
+                (self.tcx.tys.kind(sx).clone(), self.tcx.tys.kind(st).clone()) {
+                if source_mut || !target_mut {
+                    // cast.rs check_ref_cast: the referent is structurally resolved (an alias of an array)
+                    let inner = self.norm(inner);
+                    if let TyKind::Array(element, _) = self.tcx.tys.kind(self.shallow(inner)).clone() {
+                        let snapshot = self.start_snapshot();
+                        if self.eq(element, pointee) {
+                            self.commit_from(snapshot);
+                            self.set_coerce(x.0, Coerce::RefToRaw(source_mut), target);
+                        } else { self.rollback_to(snapshot); }
+                    }
+                }
+                // (a reference that is no array pointer cast is the cast check's E0606)
+            }
+            self.record_cast_borrow(x, xt, target);
+    }
+
     /// `CastCheck::check`, reporting at `lo`.
     pub(super) fn check_cast_final(&mut self, e: ExprId, expr_ty: TyId, cast_ty: TyId, lo: u32) {
         let expr_ty = self.deeply_resolve_ignoring_regions_with_obligations(expr_ty);
