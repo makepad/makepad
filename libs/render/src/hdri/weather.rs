@@ -72,6 +72,11 @@ const RAIN_RANGE_M: f32 = 12_000.0;
 /// Rain is a dull grey of the ambient; falling snow is nearly white.
 const RAIN_ALBEDO: f32 = 0.6;
 const SNOWFALL_ALBEDO: f32 = 0.9;
+/// The share of the light the rain and the fog take out of a light's beam that they scatter forward, close round it
+/// (plan hdri-6 R4: lights shine through): a light seen through them keeps exp(-(1 - LIGHT_FORWARD) tau) of its light
+/// (`light_through`), its glow, where a surface keeps exp(-tau). Fog and rain droplets are many wavelengths across and
+/// scatter mostly forward; 0.75 is the brief's start, which shows the Rain kind's city lights 1-2 km off.
+pub(crate) const LIGHT_FORWARD: f32 = 0.75;
 /// The most a shaft of virga darkens the rain haze and what is behind it.
 const VIRGA_DARKEN: f32 = 0.5;
 /// Radius of the circle the shaft noise is read on (cells): the azimuth wraps
@@ -713,6 +718,22 @@ impl Weather {
     /// capped path is the path itself); still affine in `c`.
     pub fn veil_within(&self, d: Vec3f, c: Vec3f, sun_irradiance: Vec3f, ambient: Vec3f, far_m: f32) -> Vec3f {
         self.veil_with(d, c, sun_irradiance, ambient, false, far_m)
+    }
+
+    /// The share of a light's own light that reaches the eye through the rain and the fog from `far_m` (metres) along `d`
+    /// (plan hdri-6 R4): exp(-(1 - LIGHT_FORWARD) tau), tau their optical depth over the path `veil_within` takes (each
+    /// slab's path capped at `far_m`, never more than the whole path; INFINITY: the whole path). What they scatter
+    /// forward stays round the light, so a light keeps more than a surface's exp(-tau), never more than F of what it
+    /// lost; the haze in front of it is the surface's, added once (`Env::base_at`). 1 where nothing veils.
+    pub fn light_through(&self, d: Vec3f, far_m: f32) -> f32 {
+        let mut tau = 0.0;
+        if self.effects.rain > 0.0 {
+            tau += self.rain_depth_within(d, far_m);
+        }
+        if self.effects.fog > 0.0 {
+            tau += self.fog_depth_within(d, far_m);
+        }
+        (-(1.0 - LIGHT_FORWARD) * tau).exp()
     }
 
     /// `veil`'s body; `shafts` lays the rain's virga over the haze, and the slabs' paths are capped at `far_m`.
@@ -1480,6 +1501,33 @@ mod tests {
         for az in 0..36 { let d = dir_from_az_el(az as f32 * 10.0, 8.0); assert_eq!(fog.veil_without_virga(d, c, sun_light, dome), fog.veil(d, c, sun_light, dome)); }
         let differ = (0..360).any(|az| { let d = dir_from_az_el(az as f32, 8.0); rain.virga(d) > 0.05 && rain.veil_without_virga(d, c, sun_light, dome) != rain.veil(d, c, sun_light, dome) });
         assert!(differ, "the premise: a shaft hangs at 8 degrees and only the veil with it darkens there");
+    }
+
+    /// Plan hdri-6 R4: a light seen through the rain and the fog keeps exp(-(1 - LIGHT_FORWARD) tau) of its light, tau
+    /// the slabs' depth over the path `veil_within` takes (here from their own constants over 2 km at 1 degree, and the
+    /// whole path at INFINITY): more than a surface's exp(-tau), never more than F of what it lost (what it keeps over
+    /// exp(-tau) is light scattered forward, not made). A weather that veils nothing passes it whole.
+    #[test]
+    fn a_light_keeps_its_forward_scattered_light() {
+        let (sun_light, dome) = (vec3f(3.0, 2.8, 2.5), vec3f(0.3, 0.35, 0.5));
+        for kind in ["rain", "storm", "fog", "snow"] {
+            let w = weather(kind);
+            for (el, far) in [(1.0f32, 2000.0f32), (1.0, f32::INFINITY), (8.0, 500.0), (-2.0, 1000.0), (30.0, f32::INFINITY)] {
+                let d = dir_from_az_el(30.0, el);
+                let tau = w.rain_depth_within(d, far) + w.fog_depth_within(d, far);
+                let t = (w.veil_within(d, Vec3f::all(1.0), sun_light, dome, far) - w.veil_within(d, Vec3f::default(), sun_light, dome, far)).x;
+                let l = w.light_through(d, far);
+                assert!((l - (-(1.0 - LIGHT_FORWARD) * tau).exp()).abs() <= 1e-6, "{kind} at {el} deg, {far} m: {l}, tau {tau}");
+                assert!(l >= t && l - t <= LIGHT_FORWARD * (1.0 - t) + 1e-6, "{kind} at {el} deg, {far} m: the light keeps {l}, a surface {t}");
+            }
+        }
+        let rain = weather("rain");
+        let d = dir_from_az_el(30.0, 1.0);
+        let t2k = (-(rain.effects.rain * RAIN_ZENITH / rain.rain_height * 2000.0 + thickened(rain.effects.fog) * FOG_ZENITH / FOG_HEIGHT_M * 2000.0)).exp();
+        assert!((rain.light_through(d, 2000.0) - t2k.powf(1.0 - LIGHT_FORWARD)).abs() <= 1e-5, "the rain kind over 2 km");
+        let mut clear = weather("rain");
+        (clear.effects.rain, clear.effects.fog) = (0.0, 0.0);
+        assert_eq!(clear.light_through(d, 2000.0), 1.0, "nothing veils");
     }
 
     /// Plan hdri-6 R1: the veil over what stands `far_m` along `d` is the shaft-free veil with each slab's path capped at

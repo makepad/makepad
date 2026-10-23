@@ -4,9 +4,12 @@
 //! and the fog veil each texel over the distance to what it shows (`dist`, the
 //! city 1-3 km off, the far ranges farther; plan hdri-6 R1), never more than
 //! their whole path, and the rain's shafts hang behind it (§5b). A texel
-//! without a distance is veiled over the whole path (`Env::city_veil`). A wet
-//! ground mirrors the strip over the same distance and does not veil it again
-//! along the floor (`Env::over_city`, `Env::base_layer`).
+//! without a distance is veiled over the whole path (`Env::city_veil`). Its
+//! lights shine through (R4): the light in a texel (`light`) keeps the light
+//! the rain and the fog scatter forward round it, over the distance it burns
+//! at (`Env::city_lit`, `Weather::light_through`), a light over the sky too.
+//! A wet ground mirrors the strip over the same distance and does not veil it
+//! again along the floor (`Env::over_city`, `Env::base_layer`).
 //!
 //! The engine never touches the GPU and does not depend on makepad-skyline: the
 //! strip is plain data. Its convention is the skyline's: rows linear in
@@ -49,6 +52,11 @@ pub struct SkylineBand {
     /// (makepad_skyline's `Band::dist`), 0 where its coverage is 0. Empty: a band without a distance plane, whose every
     /// read has no distance (`sample_skirted_far`).
     pub dist: Vec<f32>,
+    /// The light in each texel (makepad_skyline's `Band::light`), in the layout of `texels`: [L, L D], L the luminance
+    /// (Rec. 709) of the light the strip adds there over its surfaces (windows, beacons, lamps, the glow, what its water
+    /// mirrors of them), in the texel's own units, and D the light-weighted distance (m) it burns at. Empty: a band
+    /// without a light plane, every texel of it surface (`sample_skirted_lit`).
+    pub light: Vec<[f32; 2]>,
     /// Elevation of the top row's top edge and the bottom row's bottom edge, degrees.
     pub top_deg: f32,
     pub bottom_deg: f32,
@@ -81,7 +89,24 @@ impl SkylineBand {
                 *d = 0.0;
             }
         }
-        SkylineBand { w, h, texels, dist, top_deg, bottom_deg }
+        SkylineBand { w, h, texels, dist, light: Vec::new(), top_deg, bottom_deg }
+    }
+
+    /// This band with the light plane `light` (`SkylineBand::light`, the app's handoff), made safe as `new` makes the
+    /// texels: a value that is not finite or is negative is 0, and so is a light-weighted distance without light.
+    pub fn with_light(mut self, mut light: Vec<[f32; 2]>) -> SkylineBand {
+        for l in light.iter_mut() {
+            for c in l.iter_mut() {
+                if !(c.is_finite() && *c >= 0.0) {
+                    *c = 0.0;
+                }
+            }
+            if l[0] == 0.0 {
+                l[1] = 0.0;
+            }
+        }
+        self.light = light;
+        self
     }
 
     /// Bilinear premultiplied sample at map direction `d`, turned by `turn_deg`; 0 outside the band.
@@ -108,11 +133,20 @@ impl SkylineBand {
     /// its colour, and the blend between the two over FADE_DEG). None where the coverage is 0 or the band has no
     /// distance plane. The colour is `sample_skirted`'s, bit for bit.
     pub fn sample_skirted_far(&self, skirt: &BandSkirt, d: Vec3f, turn_deg: f32) -> ([f32; 4], Option<f32>) {
+        let (c, far, _) = self.skirted::<true>(skirt, d, turn_deg);
+        (c, far)
+    }
+
+    /// `sample_skirted_far` with the light in the texel (`light`, bilinear as its colour): its luminance and the distance
+    /// it burns at, the light-weighted mean (plan hdri-6 R4). Over the band's lowest FADE_DEG the band's share of it,
+    /// none in the skirt below (the skirt is the strip's ground, all surface). None where there is no light or the band
+    /// has no light plane. The colour and the distance are `sample_skirted_far`'s, bit for bit.
+    pub fn sample_skirted_lit(&self, skirt: &BandSkirt, d: Vec3f, turn_deg: f32) -> ([f32; 4], Option<f32>, Option<TexelLight>) {
         self.skirted::<true>(skirt, d, turn_deg)
     }
 
-    /// `sample_skirted`, and with `FAR` the distance (`sample_skirted_far`): one body, so the two colours are one.
-    fn skirted<const FAR: bool>(&self, skirt: &BandSkirt, d: Vec3f, turn_deg: f32) -> ([f32; 4], Option<f32>) {
+    /// `sample_skirted`, and with `FAR` the distance and the light (`sample_skirted_lit`): one body, so the colours are one.
+    fn skirted<const FAR: bool>(&self, skirt: &BandSkirt, d: Vec3f, turn_deg: f32) -> ([f32; 4], Option<f32>, Option<TexelLight>) {
         let bottom = self.bottom_deg;
         // Above the band or below its skirt, nothing (before the place's arcsine and
         // arctangent, which most of a map's texels would pay for nothing). The test
@@ -120,34 +154,62 @@ impl SkylineBand {
         let y_of = |deg: f32| if deg.abs() >= 89.0 { deg.signum() * f32::INFINITY } else { deg.to_radians().sin() };
         let (y_top, y_low) = (y_of(self.top_deg + 0.01), y_of(bottom - SKIRT_DEG - 0.01));
         if d.y > y_top || d.y < y_low {
-            return ([0.0; 4], None);
+            return ([0.0; 4], None, None);
         }
-        let Some((el, u)) = self.place(d, turn_deg) else { return ([0.0; 4], None) };
+        let Some((el, u)) = self.place(d, turn_deg) else { return ([0.0; 4], None, None) };
         // The negated tests also turn a NaN direction away.
         if !(el <= self.top_deg && el >= bottom - SKIRT_DEG) {
-            return ([0.0; 4], None);
+            return ([0.0; 4], None, None);
         }
         // The distance of premultiplied distance pd under alpha a.
         let far = |pd: f32, a: f32| (FAR && self.has_dist() && a > 0.0).then(|| pd / a);
         if el >= bottom + FADE_DEG {
             let (c, pd) = self.bilinear_far::<FAR>(el, u);
-            return (c, far(pd, c[3]));
+            return (c, far(pd, c[3]), self.light_at::<FAR>(el, u, 1.0));
         }
         let (ground, gpd) = (skirt.at(u), if FAR { skirt.dist_at(u) } else { 0.0 });
         if el >= bottom {
             let (sharp, spd) = self.bilinear_far::<FAR>(el, u);
             let t = smooth((el - bottom) / FADE_DEG);
             let c: [f32; 4] = std::array::from_fn(|c| ground[c] + (sharp[c] - ground[c]) * t);
-            return (c, far(gpd + (spd - gpd) * t, c[3]));
+            return (c, far(gpd + (spd - gpd) * t, c[3]), self.light_at::<FAR>(el, u, t));
         }
         let fade = smooth((el - (bottom - SKIRT_DEG)) / SKIRT_DEG);
         let c = ground.map(|c| c * fade);
-        (c, far(gpd * fade, c[3]))
+        (c, far(gpd * fade, c[3]), None)
     }
 
     /// Whether the band has a distance plane (`dist`, one per texel).
     fn has_dist(&self) -> bool {
         self.dist.len() >= self.w * self.h
+    }
+
+    /// Whether the band has a light plane (`light`, one per texel).
+    fn has_light(&self) -> bool {
+        self.light.len() >= self.w * self.h
+    }
+
+    /// With `FAR`, the light at elevation `el` (inside the band) and strip u, read with the colour's lerps, `share` of it
+    /// (the band's share over its lowest FADE_DEG); None without light or without a light plane.
+    fn light_at<const FAR: bool>(&self, el: f32, u: f32, share: f32) -> Option<TexelLight> {
+        if !FAR || !self.has_light() {
+            return None;
+        }
+        let (w, h) = (self.w, self.h);
+        let x = u * w as f32 - 0.5;
+        let y = ((self.top_deg - el) / (self.top_deg - self.bottom_deg) * h as f32 - 0.5).clamp(0.0, (h - 1) as f32);
+        let (x0, y0) = (x.floor(), y.floor());
+        let (fx, fy) = (x - x0, y - y0);
+        let column = |i: f32| (i as i64).rem_euclid(w as i64) as usize;
+        let (c0, c1) = (column(x0), column(x0 + 1.0));
+        let (r0, r1) = (y0 as usize, (y0 as usize + 1).min(h - 1));
+        let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+        let at = |k: usize| {
+            let l = |r: usize, c: usize| self.light[r * w + c][k];
+            lerp(lerp(l(r0, c0), l(r0, c1), fx), lerp(l(r1, c0), l(r1, c1), fx), fy)
+        };
+        let (lum, ld) = (at(0), at(1));
+        (lum > 0.0 && ld > 0.0).then(|| TexelLight { lum: lum * share, far: ld / lum })
     }
 
     /// The band's skirt: its bottom row blurred (`BandSkirt`), built once with the map.
@@ -201,6 +263,26 @@ impl SkylineBand {
     /// once per map.
     pub fn peaks(&self) -> BandPeaks {
         BandPeaks::new(self)
+    }
+}
+
+/// The light in a read of the band (`SkylineBand::sample_skirted_lit`): its luminance (Rec. 709, premultiplied as the
+/// texel's colour) and the distance (m) it burns at.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TexelLight {
+    pub lum: f32,
+    pub far: f32,
+}
+
+impl TexelLight {
+    /// Texel `s` split into its surface (the texel less its light, its coverage kept) and its light: the light's share
+    /// of the texel's luminance, at most all of it, in the texel's colour (the plane hands the light's luminance, not
+    /// its hue).
+    pub fn split(&self, s: [f32; 4]) -> ([f32; 4], Vec3f) {
+        let all = 0.2126 * s[0] + 0.7152 * s[1] + 0.0722 * s[2];
+        let k = if all > 0.0 { (self.lum / all).min(1.0) } else { 0.0 };
+        let light = vec3f(s[0] * k, s[1] * k, s[2] * k);
+        ([s[0] - light.x, s[1] - light.y, s[2] - light.z, s[3]], light)
     }
 }
 
@@ -502,13 +584,13 @@ fn smooth(t: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::hdri::{dir_from_az_el, vec, CasterParams, Env, HdriParams, ImageSet, LightParams, Sampling, SkylineParams, WeatherParams, SkyParams};
-    use crate::hdri::weather::Weather;
+    use crate::hdri::weather::{Weather, LIGHT_FORWARD};
     use makepad_render_material::ibl;
     use std::sync::Arc;
 
     fn band(top: f32, bottom: f32, rgba: [f32; 4]) -> SkylineBand {
         let (w, h) = (64, 16);
-        SkylineBand { w, h, texels: vec![rgba; w * h], dist: Vec::new(), top_deg: top, bottom_deg: bottom }
+        SkylineBand { w, h, texels: vec![rgba; w * h], dist: Vec::new(), light: Vec::new(), top_deg: top, bottom_deg: bottom }
     }
     fn with_band(p: &HdriParams, b: SkylineBand) -> (HdriParams, ImageSet) {
         let mut p = p.clone();
@@ -600,7 +682,7 @@ mod tests {
                 if y < h - 1 { [0.1, 0.2, 0.3, 1.0] } else if x % 8 == 0 { [4.0, 3.0, 2.0, 1.0] } else { [0.05, 0.05, 0.1, 0.5] }
             })
             .collect();
-        SkylineBand { w, h, texels, dist: Vec::new(), top_deg: 12.0, bottom_deg: -4.0 }
+        SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: 12.0, bottom_deg: -4.0 }
     }
 
     /// The band runs on into its skirt: over its lowest FADE_DEG its texels blend into the skirt, which below the band's
@@ -715,7 +797,7 @@ mod tests {
         let (w, h) = (360, 8);
         let land = [0.02, 0.02, 0.02, 1.0];
         let texels = (0..w * h).map(|i| if i / w == h - 1 && (144..216).contains(&(i % w)) { [3.0, 3.2, 3.5, 1.0] } else { land }).collect();
-        let band = SkylineBand { w, h, texels, dist: Vec::new(), top_deg: 20.0, bottom_deg: -6.0 };
+        let band = SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: 20.0, bottom_deg: -6.0 };
         let light = |c: Vec3f| 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z;
         let mut night = HdriParams::default();
         night.sky.sun.mode = "manual".to_string();
@@ -779,7 +861,7 @@ mod tests {
         let (w, h) = (360, 4);
         let mut t = vec![[0.0; 4]; w * h];
         for y in 0..h { t[y * w + 90] = [1.0, 1.0, 1.0, 1.0]; } // a post at strip u = 90.5/360
-        let b = SkylineBand { w, h, texels: t, dist: Vec::new(), top_deg: 2.0, bottom_deg: -2.0 };
+        let b = SkylineBand { w, h, texels: t, dist: Vec::new(), light: Vec::new(), top_deg: 2.0, bottom_deg: -2.0 };
         let u_post = 90.5 / 360.0;
         // direction whose equirect u is u_post (+ 30 deg after a 30-degree turn)
         assert!(b.sample(dir_at_u(u_post, 0.0), 0.0)[3] > 0.9);
@@ -795,7 +877,7 @@ mod tests {
         let (w, h) = (360, 4);
         let mut t = vec![[0.0; 4]; w * h];
         for y in 0..h { t[y * w + 180] = [1.0, 1.0, 1.0, 1.0]; }
-        let b = SkylineBand { w, h, texels: t, dist: Vec::new(), top_deg: 2.0, bottom_deg: -2.0 };
+        let b = SkylineBand { w, h, texels: t, dist: Vec::new(), light: Vec::new(), top_deg: 2.0, bottom_deg: -2.0 };
         assert!(b.sample(dir(0.5, 0.0), 0.0)[3] > 0.9, "x/w = 0.5 is north");
         assert_eq!(b.sample(dir(0.5, 3.0), 0.0), [0.0; 4], "above the band");
         assert_eq!(b.sample(dir(0.5, -3.0), 0.0), [0.0; 4], "below the band");
@@ -995,7 +1077,7 @@ mod tests {
         // Column c is x/w = (c + 0.5)/w, azimuth (x/w - 0.5) * 360; row r spans 10 - r t .. 10 - (r + 1) t.
         let (column, row) = ((210.0 / texel_deg) as usize, (5.0 / texel_deg) as usize - 1);
         texels[row * w + column] = [bright, bright, bright, 1.0];
-        let (q, images) = with_band(&p, SkylineBand { w, h, texels, dist: Vec::new(), top_deg: 10.0, bottom_deg: 0.0 });
+        let (q, images) = with_band(&p, SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: 10.0, bottom_deg: 0.0 });
         (q, images, 30.0 + 0.5 * texel_deg, 5.0 + 0.5 * texel_deg)
     }
 
@@ -1059,7 +1141,7 @@ mod tests {
                 [c(), c(), c(), 1.0]
             })
             .collect();
-        let b = SkylineBand { w, h, texels, dist: Vec::new(), top_deg: 12.0, bottom_deg: -3.0 };
+        let b = SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: 12.0, bottom_deg: -3.0 };
         let (peaks, skirt) = (b.peaks(), b.skirt());
         for _ in 0..300 {
             // the band and its skirt: -40 to +20 degrees
@@ -1206,7 +1288,7 @@ mod tests {
         let el = top - (row as f32 + 0.5) * (top - bottom) / h as f32;
         let mut texels = vec![[0.0f32; 4]; w * h];
         texels[row * w + 90] = [40.0, 30.0, 20.0, 0.0];
-        let (q, images) = with_band(&p, SkylineBand { w, h, texels, dist: Vec::new(), top_deg: top, bottom_deg: bottom });
+        let (q, images) = with_band(&p, SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: top, bottom_deg: bottom });
         let (plain, city) = (Env::new(&p), Env::new_with(&q, &images));
         let u = 90.5 / w as f32;
         let (up, down) = (dir_at_u(u, el), dir_at_u(u, -el));
@@ -1235,7 +1317,7 @@ mod tests {
         let el = top - (row as f32 + 0.5) * (top - bottom) / h as f32;
         let mut texels = vec![[0.0f32; 4]; w * h];
         texels[row * w + 90] = [40.0, 30.0, 20.0, 0.0];
-        let (q, images) = with_band(&p, SkylineBand { w, h, texels, dist: Vec::new(), top_deg: top, bottom_deg: bottom });
+        let (q, images) = with_band(&p, SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: top, bottom_deg: bottom });
         let (plain, city) = (Env::new(&p), Env::new_with(&q, &images));
         let u = 90.5 / w as f32;
         let (up, down) = (dir_at_u(u, el), dir_at_u(u, -el));
@@ -1259,7 +1341,7 @@ mod tests {
         let mut texels = vec![[0.0f32; 4]; w * h];
         // a light 11.5 degrees up, as in `a_puddle_mirrors_a_city_light_above_it`
         texels[8 * w + 90] = [40.0, 30.0, 20.0, 0.0];
-        let band = SkylineBand { w, h, texels, dist: Vec::new(), top_deg: 20.0, bottom_deg: -4.0 };
+        let band = SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: 20.0, bottom_deg: -4.0 };
         let (u, radius) = (90.5 / w as f32, 0.5f32.to_radians());
         for wet in [0.0, 1.0] {
             let mut p = HdriParams { lights: vec![], ..HdriParams::default() };
@@ -1351,7 +1433,7 @@ mod tests {
             let c = if y <= 4 { l.ring_low[x] } else { l.ground_ring[x] };
             [c[0], c[1], c[2], 1.0]
         }).collect();
-        let (q, images) = with_band(&p, SkylineBand { w, h, texels, dist: Vec::new(), top_deg: top, bottom_deg: bottom });
+        let (q, images) = with_band(&p, SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: top, bottom_deg: bottom });
         let city = Env::new_with(&q, &images);
         let k = plain.scale();
         let light = |c: Vec3f| 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z;
@@ -1624,7 +1706,7 @@ mod tests {
         for k in 0..40 {
             texels[(4 + k % 16) * w + 100 + 3 * k] = [40.0, 30.0, 20.0, 1.0];
         }
-        let city = SkylineBand { w, h, texels, dist: Vec::new(), top_deg: 3.0, bottom_deg: -4.0 };
+        let city = SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: 3.0, bottom_deg: -4.0 };
         let (q, images) = with_band(&p, city.clone());
         let built = Env::new_with(&q, &images);
         let bloom = |env: &Env| env.studio.caster(0).and_then(|c| c.bloom()).map(|b| b.energy());
@@ -1677,7 +1759,7 @@ mod tests {
         texels[(h - 1) * w + 10] = [f32::NAN, 0.5, 0.5, 1.0];
         texels[(h - 1) * w + 70] = [0.5, f32::INFINITY, 0.5, f32::NEG_INFINITY];
         texels[2 * w + 40] = [0.5, 0.5, 0.5, 7.0];
-        let raw = SkylineBand { w, h, texels: texels.clone(), dist: Vec::new(), top_deg: 10.0, bottom_deg: -5.0 };
+        let raw = SkylineBand { w, h, texels: texels.clone(), dist: Vec::new(), light: Vec::new(), top_deg: 10.0, bottom_deg: -5.0 };
         let below = |b: &SkylineBand, u: f32| b.sample_skirted(&b.skirt(), dir_at_u(u, -5.0 - 0.5 * SKIRT_DEG), 0.0);
         // the premise: far from both, half a turn round, the raw skirt is NaN
         assert!(below(&raw, 0.75).iter().any(|c| !c.is_finite()), "the premise: one NaN poisons the skirt round the turn");
@@ -1954,6 +2036,121 @@ mod tests {
                     assert_eq!(after.radiance(d), before.radiance(d), "sun {sun_el}, wet {wet_ground}, block {el} deg ({s:?}): at {e} deg");
                 }
             }
+        }
+    }
+
+    /// `b` with a light plane: each texel's light the `share` of its luminance (Rec. 709), burning `far` m off.
+    fn lit(b: SkylineBand, share: f32, far: f32) -> SkylineBand {
+        let light = b.texels.iter().map(|t| { let l = share * (0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2]); [l, l * far] }).collect();
+        b.with_light(light)
+    }
+
+    /// The share of what stands `far` m along `d` that the strip's veil passes there (`Weather::veil_within`).
+    fn through(env: &Env, d: Vec3f, far: f32) -> f32 {
+        let w = env.weather.as_ref().expect("a weather");
+        (w.veil_within(d, Vec3f::all(1.0), env.weather_sun, env.dome, far) - w.veil_within(d, Vec3f::default(), env.weather_sun, env.dome, far)).x
+    }
+
+    /// Plan hdri-6 R4: the city's lights carry farther through rain and fog than its buildings. Fog and rain droplets
+    /// scatter forward, so a light seen through them keeps exp(-(1 - LIGHT_FORWARD) tau) of its light, where a surface
+    /// keeps exp(-tau) (Task 9's veil, unchanged); the haze in front of both is added once. Under the rain kind at night,
+    /// an opaque texel all light and one all surface, both 1655 m off at 1 degree (the city's p75), against an opaque
+    /// black texel there (the in-scatter alone).
+    #[test]
+    fn under_the_rain_kind_the_city_lights_shine_through() {
+        let p = rain_kind(-20.0, None);
+        let (far, c) = (1655.0, [0.4, 0.3, 0.2, 1.0]);
+        let env = |b: SkylineBand| { let (q, images) = with_band(&p, b); Env::new_with(&q, &images) };
+        let (b, u) = block_band(c, 1.0, Some(far));
+        let (light, surface, black) = (env(lit(b.clone(), 1.0, far)), env(b), env(block_band([0.0, 0.0, 0.0, 1.0], 1.0, Some(far)).0));
+        let d = dir_at_u(u, 1.0);
+        let k = surface.scale();
+        let t = through(&surface, d, far);
+        let kept = |env: &Env| (env.radiance(d) - black.radiance(d)).x / (c[0] * k);
+        let (tl, ts) = (kept(&light), kept(&surface));
+        let want = t.powf(1.0 - LIGHT_FORWARD);
+        println!("1655 m at 1 degree under the rain kind: the light keeps {tl:.4} (exp(-(1 - F) tau) {want:.4}), the surface {ts:.4} (exp(-tau) {t:.4})");
+        assert!((ts - t).abs() <= 1e-4 * t, "the surface keeps {ts}, its veil passes {t}");
+        assert!((tl - want).abs() <= 1e-3 * want, "the light keeps {tl}, not exp(-(1 - F) tau) = {want}");
+        assert!(close3(light.radiance(d), black.radiance(d) + rgb(c) * (want * k), 1e-4), "the light texel {:?}: the in-scatter once, the light by {want}", light.radiance(d));
+    }
+
+    /// Plan hdri-6 R4: light without coverage (the glow, a lamp or a beacon's halo over the sky) is veiled over the
+    /// distance it burns at, the light-weighted one the plane hands, and not over the whole path. A light over the
+    /// transparent sky 2 km off at 1 degree, under the rain kind at night: the map's own sky behind it, and its light by
+    /// exp(-(1 - F) tau) over 2 km.
+    #[test]
+    fn a_light_over_the_sky_is_veiled_by_its_own_distance() {
+        let p = rain_kind(-20.0, None);
+        let glow = [0.5, 0.3, 0.1, 0.0];
+        let (b, u) = block_band(glow, 1.0, Some(2000.0));
+        let (q, images) = with_band(&p, lit(b, 1.0, 2000.0));
+        let (plain, city) = (Env::new(&p), Env::new_with(&q, &images));
+        let d = dir_at_u(u, 1.0);
+        let k = city.scale();
+        let want = through(&city, d, 2000.0).powf(1.0 - LIGHT_FORWARD);
+        let w = city.weather.as_ref().unwrap();
+        let whole = (w.veil_without_virga(d, Vec3f::all(1.0), city.weather_sun, city.dome) - w.veil_without_virga(d, Vec3f::default(), city.weather_sun, city.dome)).x;
+        let got = city.radiance(d) - plain.radiance(d);
+        println!("a light over the sky 2 km off: {:.4} of it kept (exp(-(1 - F) tau) over 2 km {want:.4}), {whole:.2e} over the whole path", got.x / (glow[0] * k));
+        assert!(close3(got, rgb(glow) * (want * k), 1e-4), "the light over the sky {got:?}, veiled over its 2 km {:?}", rgb(glow) * (want * k));
+    }
+
+    /// Plan hdri-6 R4's must-hold: a weather whose rain and fog are 0, and no weather, draw a band with a light plane
+    /// exactly as without one, bit for bit: directly and in the puddles of a wet ground, a lit, a dark, a half-covered
+    /// block and a light over the sky, with a distance plane and without.
+    #[test]
+    fn the_lights_rule_is_bit_identical_without_fog_or_rain() {
+        let cases: [(f32, Option<f32>); 5] = [(-20.0, None), (25.0, None), (-20.0, Some(1.0)), (25.0, Some(1.0)), (-20.0, Some(0.8))];
+        for (sun_el, wet) in cases {
+            let mut p = HdriParams { lights: vec![], ..HdriParams::default() };
+            sun_at(&mut p, sun_el, 140.0);
+            p.sky.weather = wet.map(|wet_ground| WeatherParams { wet_ground, ..WeatherParams::default() });
+            for (el, s, far) in [(2.0f32, [40.0, 30.0, 20.0, 1.0], Some(2000.0)), (12.0, [0.02, 0.015, 0.01, 1.0], Some(2000.0)), (2.0, [20.0, 15.0, 10.0, 0.5], Some(2000.0)),
+                (2.0, [0.5, 0.3, 0.1, 0.0], Some(2000.0)), (2.0, [40.0, 30.0, 20.0, 1.0], None)] {
+                let (b, u) = block_band(s, el, far);
+                let env = |b: SkylineBand| { let (q, images) = with_band(&p, b); Env::new_with(&q, &images) };
+                let (before, after) = (env(b.clone()), env(lit(b, 0.8, 1500.0)));
+                for (du, e) in [(0.0, -el), (0.0, -el - 0.4), (0.5 / 360.0, -el), (0.0, el), (0.0, el + 0.5)] {
+                    let d = dir_at_u(u + du, e);
+                    assert_eq!(after.radiance(d), before.radiance(d), "sun {sun_el}, wet {wet:?}, block {el} deg ({s:?}, {far:?}): at {e} deg");
+                }
+            }
+        }
+    }
+
+    /// Plan hdri-6 R4 in the wet ground's mirror: a puddle mirrors the lights as the weather shows them, by the share of
+    /// its view the mirror takes (Fresnel on a full water floor), veiled once: a light keeps exp(-(1 - F) tau) over its
+    /// distance, its surface Task 9's veil. The rain kind at night on Wet ground 1.00, 2 km off: an opaque block all
+    /// light 2 and 12 degrees up, one half light, and a light over the sky (no coverage, the puddle shows it over the
+    /// sky it mirrors). The sky mirrored beside the block is unchanged.
+    #[test]
+    fn a_puddle_mirrors_the_lights_as_the_weather_shows_them() {
+        let p = rain_kind(-20.0, Some(1.0));
+        for (el, s, share) in [(2.0f32, [40.0, 30.0, 20.0, 1.0], 1.0f32), (12.0, [40.0, 30.0, 20.0, 1.0], 1.0), (2.0, [40.0, 30.0, 20.0, 1.0], 0.5), (2.0, [20.0, 15.0, 10.0, 0.0], 1.0)] {
+            let (b, u) = block_band(s, el, Some(2000.0));
+            let (q, images) = with_band(&p, lit(b, share, 2000.0));
+            let (plain, city) = (Env::new(&p), Env::new_with(&q, &images));
+            let rain = city.weather.as_ref().expect("rain draws");
+            let k = city.scale();
+            let a = s[3];
+            let (up, down) = (dir_at_u(u, el), dir_at_u(u, -el));
+            let veil = |c: Vec3f| rain.veil_within(up, c, city.weather_sun, city.dome, 2000.0);
+            let (light, surface) = (rgb(s) * share, rgb(s) * (1.0 - share));
+            let tl = through(&city, up, 2000.0).powf(1.0 - LIGHT_FORWARD);
+            // the strip's own light there: its surface veiled over its 2 km (none for a light over the sky), its light by tl
+            let covered = if a > 0.0 { veil(surface) - veil(Vec3f::default()) * (1.0 - a) } else { Vec3f::default() };
+            let own = (covered + light * tl) * k;
+            let above = own + plain.radiance(up) * (1.0 - a);
+            assert!(close3(city.radiance(up), above, 1e-4), "{el} deg, a {a}, share {share}: above the horizon {:?}, {above:?}", city.radiance(up));
+            let fresnel = 0.02 + 0.98 * (1.0 - el.to_radians().sin()).powi(5);
+            let sky_seen = veil_of(&city, down, plain.radiance(up) * (1.0 / k)) * k;
+            let mirrored = city.radiance(down) - plain.radiance(down);
+            let want = (own - sky_seen * a) * fresnel;
+            println!("{el} deg, a {a}, share {share}: the puddle mirrors {:.4}, the light above by Fresnel {:.4}", mirrored.x, (own.x - sky_seen.x * a) * fresnel);
+            assert!(close3(mirrored, want, 1e-3), "{el} deg, a {a}, share {share}: the puddle shows {mirrored:?}, the lights as the rain shows them, by Fresnel {want:?}");
+            let aside = dir_at_u(u + 10.0 / 360.0, -el);
+            assert_eq!(city.radiance(aside), plain.radiance(aside), "{el} deg: 10 degrees round the turn the puddle mirrors the sky alone");
         }
     }
 }

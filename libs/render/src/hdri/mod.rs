@@ -419,13 +419,14 @@ impl Env {
         Some(band.sample_skirted(skirt, d, *turn))
     }
 
-    /// `city_at` with the distance (m) of what the texel shows (`SkylineBand::sample_skirted_far`): None where it has
-    /// no coverage (the glow, a prop's light over the sky) or the band no distance plane, and where the plane reads 0 (a
-    /// distance the handoff made safe), which no surface the strip draws stands at. The colour is `city_at`'s.
-    fn city_far_at(&self, d: Vec3f) -> Option<([f32; 4], Option<f32>)> {
+    /// `city_at` with the distance (m) of what the texel shows and the light in it (`SkylineBand::sample_skirted_lit`).
+    /// The distance is None where the texel has no coverage (the glow, a prop's light over the sky) or the band no
+    /// distance plane, and where the plane reads 0 (a distance the handoff made safe), which no surface the strip draws
+    /// stands at. The light is None where there is none or the band has no light plane. The colour is `city_at`'s.
+    fn city_far_at(&self, d: Vec3f) -> Option<([f32; 4], Option<f32>, Option<skyline::TexelLight>)> {
         let ((band, turn), skirt) = (self.skyline.as_ref()?, self.city_skirt.as_ref()?);
-        let (s, far) = band.sample_skirted_far(skirt, d, *turn);
-        Some((s, far.filter(|&far| far > 0.0)))
+        let (s, far, light) = band.sample_skirted_lit(skirt, d, *turn);
+        Some((s, far.filter(|&far| far > 0.0), light))
     }
 
     /// The skirt this map draws under `band` (turned by `turn` degrees): its bottom row blurred
@@ -641,16 +642,17 @@ impl Env {
     /// city as it is in front of the sky, over the distance to what the strip
     /// shows there and without the rain's shafts, which hang behind it
     /// (`city_veil`, `skyline::over_veiled`): the strip's coverage veiled over
-    /// its own distance, the base behind it as the map veils it. The city
-    /// hides what stands behind it, a storm's bolt included. Without a
-    /// skyline the base is drawn exactly as before.
+    /// its own distance, the base behind it as the map veils it; its lights
+    /// shine through (`city_lit`, plan hdri-6 R4). The city hides what stands
+    /// behind it, a storm's bolt included. Without a skyline the base is
+    /// drawn exactly as before.
     fn base_at(&self, d: Vec3f, without: Option<KeyTerm>, at: Sampling) -> Vec3f {
-        // The distance is read only where a weather veils the strip by it.
+        // The distance and the light are read only where a weather veils the strip by them.
         let read = match &self.weather {
             Some(_) => self.city_far_at(d),
-            None => self.city_at(d).map(|s| (s, None)),
+            None => self.city_at(d).map(|s| (s, None, None)),
         };
-        let Some((s, far)) = read else {
+        let Some((s, far, light)) = read else {
             return self.base_under_skyline(d, without, at);
         };
         if s == [0.0; 4] {
@@ -660,7 +662,10 @@ impl Env {
         // is not looked up behind it: a held bake's ranges, city and ground.
         let c = if s[3] < 1.0 { self.base_under_skyline(d, without, at) } else { Vec3f::default() };
         match &self.weather {
-            Some(weather) => skyline::over_veiled(s, c, &|x| self.city_veil(weather, d, far, x)),
+            Some(weather) => match self.city_lit(weather, d, s, light) {
+                None => skyline::over_veiled(s, c, &|x| self.city_veil(weather, d, far, x)),
+                Some((surface, lit)) => skyline::over_veiled(surface, c, &|x| self.city_veil(weather, d, far, x)) + lit,
+            },
             None => skyline::over_veiled(s, c, &|x| x),
         }
     }
@@ -671,21 +676,42 @@ impl Env {
     /// itself.
     /// Where the texel has a distance, `own` gets the strip's own light in it, `veil_D(s) - (1 - a) veil_D(0)` (its
     /// coverage veiled over its distance), and the coverage `a`: the floor does not veil that light again (`base_layer`).
+    /// Its lights are seen as the weather shows them (`city_lit`, plan hdri-6 R4) and go into `own` too, a light without
+    /// coverage (the glow, a lamp over the sky) with a = 0, so it is veiled once, over the distance it burns at.
     /// The strip is seen only through `city_at`, which is None until the skirt is built, so the dome, the ground gain and
     /// the skirt's hold never see the mirrored city, and a map built with the band and one it is attached to agree.
     fn over_city(&self, v: Vec3f, seen: Vec3f, weather: &weather::Weather, own: &Cell<Option<(Vec3f, f32)>>) -> Vec3f {
         match self.city_far_at(v) {
-            Some((s, far)) if s != [0.0; 4] => {
+            Some((s, far, light)) if s != [0.0; 4] => {
                 let veil = |x| self.city_veil(weather, v, far, x);
-                if far.is_some() {
-                    let behind = 1.0 - s[3];
-                    let lit = veil(vec3f(s[0], s[1], s[2]));
-                    own.set(Some((if behind > 0.0 { lit - veil(Vec3f::default()) * behind } else { lit }, s[3])));
+                // the texel's surface, and its light as the weather shows it on top (none: the texel all surface, + 0 exactly)
+                let split = self.city_lit(weather, v, s, light);
+                let (surface, lit) = split.unwrap_or((s, Vec3f::default()));
+                let behind = 1.0 - s[3];
+                let covered = far.map(|_| {
+                    let c = veil(vec3f(surface[0], surface[1], surface[2]));
+                    (if behind > 0.0 { c - veil(Vec3f::default()) * behind } else { c }, s[3])
+                });
+                match (covered, split.is_some()) {
+                    (Some((c, a)), _) => own.set(Some((c + lit, a))),
+                    (None, true) => own.set(Some((lit, 0.0))),
+                    (None, false) => {}
                 }
-                skyline::over_veiled(s, seen, &veil)
+                skyline::over_veiled(surface, seen, &veil) + lit
             }
             _ => seen,
         }
+    }
+
+    /// Texel `s` along `d` split into its surface and its light as the weather shows the light (plan hdri-6 R4: the
+    /// city's lights shine through rain and fog): the surface (`TexelLight::split`) for `city_veil` to veil, and the
+    /// light by `Weather::light_through` over the distance it burns at, the forward-scattered share kept. None where
+    /// the texel has no light, the band no light plane, or the weather veils nothing (a weather with rain and fog at 0
+    /// draws as before, bit for bit).
+    fn city_lit(&self, weather: &weather::Weather, d: Vec3f, s: [f32; 4], light: Option<skyline::TexelLight>) -> Option<([f32; 4], Vec3f)> {
+        let light = light.filter(|_| weather.veils())?;
+        let (surface, lit) = light.split(s);
+        Some((surface, lit * weather.light_through(d, light.far)))
     }
 
     /// The veil the skyline's strip gets along `d` (`base_at`, `over_city`): the rain haze and the fog over the distance

@@ -67,7 +67,7 @@ fn render_band_lit(p: &Params, w: usize, light: &SkyLight) -> Band {
             assert!(Cx::monotonic_now() - t0 < 300.0, "band timed out");
         };
         let Ok(b) = got else { last = None; continue }; // the warm-up rounds can fail
-        if last.as_ref().is_some_and(|l| (l.w, l.h) == (b.w, b.h) && l.texels == b.texels && l.dist == b.dist) { break b; }
+        if last.as_ref().is_some_and(|l| (l.w, l.h) == (b.w, b.h) && l.texels == b.texels && l.dist == b.dist && l.light == b.light) { break b; }
         last = Some(b);
     };
     hal.close(info.session);
@@ -144,7 +144,7 @@ fn baseline(name: &str) -> Option<(Params, Band)> {
     p.load_web_json(&json).unwrap();
     assert_eq!(bytes.len(), w * h * 16, "{name}: baseline size");
     let texels = bytes.chunks_exact(16).map(|t| std::array::from_fn(|c| f32::from_le_bytes(t[c * 4..c * 4 + 4].try_into().unwrap()))).collect();
-    Some((p, Band { w, h, texels, dist: Vec::new() }))
+    Some((p, Band { w, h, texels, dist: Vec::new(), light: Vec::new() }))
 }
 
 /// A half-exact value `v` as the platform's `pod_heap::f16_to_f32` decoded it when the baselines were recorded: a subnormal
@@ -253,7 +253,7 @@ fn a_band_is_read_back_from_the_frame_that_drew_it() {
     let got = bands_from_one_draw(&[(a.clone(), 512), (a.clone(), 512), (a.clone(), 512), (b.clone(), 512), (a.clone(), 512), (b.clone(), 512), (a.clone(), 512)]);
     assert!(got.iter().all(Option::is_some), "a band waited for a second draw: {:?}", got.iter().map(Option::is_some).collect::<Vec<_>>());
     assert!(got.iter().all(|g| g.as_ref().is_some_and(|g| g.2 == 1)), "a band took more than its one draw: {:?}", got.iter().map(|g| g.as_ref().map(|g| g.2)).collect::<Vec<_>>());
-    let got: Vec<Band> = got.into_iter().map(|g| g.map_or(Band { w: 0, h: 0, texels: vec![], dist: vec![] }, |g| g.0)).collect();
+    let got: Vec<Band> = got.into_iter().map(|g| g.map_or(Band { w: 0, h: 0, texels: vec![], dist: vec![], light: vec![] }, |g| g.0)).collect();
     let (want_a, want_b) = (render_band(&a, 512), render_band(&b, 512));
     assert!(got[4].texels == want_a.texels && got[6].texels == want_a.texels, "the defaults' band read from one draw is not the rig's");
     assert!(got[3].texels == want_b.texels && got[5].texels == want_b.texels, "the denser city's band read from one draw is not the rig's (a stale read?)");
@@ -1790,4 +1790,88 @@ fn the_band_hands_each_texels_distance() {
     assert!(n_dark > 1000 && worst_dark >= 0.99, "the sea's dark reflections: {n_dark} texels, the least x{worst_dark}");
     assert!(n_pud > 1000 && worst_pud <= 0.05, "the puddles that show their ground: {n_pud} texels, worst {worst_pud}");
     assert!(n_pud_lit > 20 && worst_pud_lit >= 0.99, "the puddles that mirror windows: {n_pud_lit} texels, the least x{worst_pud_lit}");
+}
+
+/// Plan hdri-6 R4 (the host lets the strip's lights shine through its weather): the band hands the light in each texel,
+/// `Band::light` = [L, L D]. At night: 2048 px at Sharpness 1 (no blur, the app's), 4096 px at Sharpness 0 (the lights
+/// blurred, 0.6 px, the plane with them), and 2048 px over the strip's own wet ground (0.6, which mirrors the lights):
+/// - L is the light the final adds there, the lights the water mirrors too: the band's luminance less the same band with
+///   its lights off (Intensity 0, so the windows, beacons and lamps go dark and the glow stays), plus the light that
+///   band keeps (the glow), to a half's precision; every texel has a finite, non-negative L and D;
+/// - a lit window (an opaque texel above the horizon the lights brighten and the march lights) has L > 0, and at
+///   Sharpness 1, where the march's light is all the lights add (no prop in front), the light-weighted distance of
+///   what they add (the lights-off band's taken off) is the march's depth there;
+/// - the unlit sky (a texel that shows nothing) holds no light, and the ground the lights do not reach (below the
+///   horizon, the band and its lights-off twin alike and no light kept there) none that shows: mostly none, at most a
+///   trace under a half's step of the ground (a lamp far off);
+/// - a city beacon's halo over the sky (the march's red light, no coverage; the glow behind it taken off as above)
+///   burns at its beacon's distance, which the march now keeps as its depth there (not its far 60 km); blurred, at the
+///   city's distances (under 6 km).
+#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn the_band_hands_its_light() {
+    let lum = |t: [f32; 4]| 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2];
+    for (w, sharp, wet) in [(2048, 1.0, 0.0), (4096, 0.0, 0.0), (2048, 1.0, 0.6)] {
+        let light = SkyLight { wet, ..SkyLight::example() };
+        let mut p = Params::default();
+        p.set(P::Sharp as usize, sharp);
+        let sigma = makepad_skyline::post::blur_sigma(&p, &render::ViewSpec::strip(&p, w));
+        assert_eq!(sigma > 0.0, sharp < 1.0, "Sharpness {sharp} at {w} px: the blur's sigma {sigma}");
+        let mut dark = p.clone();
+        dark.set(P::Lights as usize, 0.0);
+        let (on, off) = (render_band_lit(&p, w, &light), render_band_lit(&dark, w, &light));
+        let (_, lit, _) = march_city(&p, render::ViewSpec::strip(&p, w));
+        let n = on.w * on.h;
+        assert_eq!((on.light.len(), off.light.len()), (n, n), "a band hands its light per texel");
+        let (mut worst, mut n_win, mut win_lit, mut n_win_d, mut win_off, mut n_sky, mut n_ground, mut ground_lit, mut n_halo, mut far_halo) = (0.0f64, 0, 0, 0, 0, 0, 0, 0, 0, 0.0f32);
+        for i in 0..n {
+            let (t, l, o) = (on.texels[i], on.light[i], off.texels[i]);
+            assert!(l.iter().all(|v| v.is_finite() && *v >= 0.0), "texel {i}: light {l:?}");
+            // the light the final adds: what the lights add, and what the lights-off band keeps (the glow)
+            let want = (lum(t) - lum(o) + off.light[i][0]) as f64;
+            worst = worst.max((l[0] as f64 - want).abs() / ((lum(t) + lum(o)) as f64 + 1e-4));
+            // a lit window: opaque, above the horizon, no prop in front, the lights brighten it
+            let el = row_el(&p, &on, i / on.w);
+            // the light the lights add (L, L D), the lights-off band's (the glow) taken off, and the march's own light
+            let (ll, lld, ml) = (l[0] - off.light[i][0], l[1] - off.light[i][1], lum([lit[i][0], lit[i][1], lit[i][2], 1.0]));
+            if t[3] >= 0.999 && el > 0.0 && lum(t) - lum(o) > 0.002 && ml > 0.0 {
+                n_win += 1;
+                if l[0] > 0.0 { win_lit += 1; }
+                // (where the march's light is all of it: no prop's in front)
+                if sharp == 1.0 && (ml - ll).abs() <= 0.01 * ml {
+                    n_win_d += 1;
+                    if ((lld / ll) as f64 / lit[i][3] as f64 - 1.0).abs() > 0.01 { win_off += 1; }
+                }
+            }
+            if t == [0.0; 4] {
+                n_sky += 1;
+                assert_eq!(l, [0.0; 2], "texel {i} (row {}): shows nothing, but holds light", i / on.w);
+            }
+            if el < 0.0 && t == o && off.light[i][0] == 0.0 {
+                n_ground += 1;
+                // (a faint lamp far off, or the blur of one, can add less than a half's step of the ground there, 2^-10 of it)
+                assert!(l[0] <= lum(t) / 1024.0, "texel {i}: ground the lights do not reach, but holds light {l:?}, the ground {t:?}");
+                if l[0] > 0.0 { ground_lit += 1; }
+            }
+            // a city beacon's halo over the sky: the march's red light where it covers nothing, above the horizon; the
+            // march's depth there is the beacon's
+            if t[3] == 0.0 && el > 0.0 && lit[i][0] > 1e-3 && lit[i][0] > 4.0 * lit[i][1] && ll > 0.0 {
+                assert!(lit[i][3] < 6e4, "texel {i}: a beacon's halo at the march's far {}", lit[i][3]);
+                // unblurred, where the march's light is all the lights add: its distance; blurred, the farthest it burns at
+                if sharp < 1.0 {
+                    n_halo += 1;
+                    far_halo = far_halo.max(lld / ll);
+                } else if (ml - ll).abs() <= 0.02 * ml {
+                    n_halo += 1;
+                    far_halo = far_halo.max(((lld / ll) / lit[i][3] - 1.0).abs());
+                }
+            }
+        }
+        println!("Sharpness {sharp} ({w} px, blur {sigma:.2} px), wet {wet}: the light within {:.3} % of what the lights add; {win_lit} of {n_win} lit window texels hold light, {win_off} of {n_win_d} lit by the march alone burn over 1 % off its depth; {n_sky} sky texels hold none, {ground_lit} of {n_ground} ground texels a trace; {n_halo} beacon halo texels, {}",
+            100.0 * worst, if sharp < 1.0 { format!("the farthest burning at {far_halo:.0} m") } else { format!("at most {:.2} % off their beacon's distance", 100.0 * far_halo) });
+        assert!(worst <= 0.01, "Sharpness {sharp}: the light plane is {:.2} % off what the lights add", 100.0 * worst);
+        assert!(n_win > 100 && win_lit == n_win, "Sharpness {sharp}: {win_lit} of {n_win} lit window texels hold light");
+        assert!(sharp != 1.0 || (n_win_d > 50 && win_off * 100 <= n_win_d), "the windows' light: {win_off} of {n_win_d} burn over 1 % off the march's depth");
+        assert!(n_sky > 10000 && n_ground > 10000 && ground_lit * 10 < n_ground, "Sharpness {sharp}: {n_sky} sky, {n_ground} ground texels ({ground_lit} with a trace of light)");
+        assert!(n_halo > 10 && far_halo <= if sharp < 1.0 { 6000.0 } else { 0.01 }, "Sharpness {sharp}: {n_halo} halo texels, {far_halo}");
+    }
 }

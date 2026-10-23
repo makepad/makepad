@@ -74,8 +74,8 @@ impl ViewSpec {
 
 /// A pass with RGBA16F targets cleared to transparent: two (colour + coverage, light + coverage), or one (`color` and
 /// `light` are the same texture); for a band (`Skyline::draw_job`), one more after them, `dist`: the distance (m) of what
-/// each pixel shows premultiplied by its coverage, (a D, 0, 0, a), the shaders' next output (the scene's fb2; the water's
-/// and the final's fb1).
+/// each pixel shows premultiplied by its coverage, and its light plane, (a D, L Dl / 1000, L, a) (`SkyScene::at_lit`),
+/// the shaders' next output (the scene's fb2; the water's and the final's fb1).
 pub struct SceneTarget { pub pass: DrawPass, pub list: DrawList2d, pub color: Texture, pub light: Texture, pub dist: Option<Texture> }
 
 impl SceneTarget {
@@ -273,13 +273,13 @@ impl Skyline {
     /// Lets go of every target (an export core between jobs), and of the shaders' hold on the textures.
     pub fn release(&mut self) {
         (self.scene, self.mirror, self.drawn, self.props.pl) = (None, None, None, None);
-        (self.post.water, self.post.blur, self.post.water_dist) = (None, None, None);
+        (self.post.water, self.post.blur, self.post.water_dist, self.post.dist_blur) = (None, None, None, None);
         self.city.release(); self.trees.release();
         let (pr, ci, po) = (&mut self.props, &mut self.city, &mut self.post);
         for v in [&mut self.draw_glow.draw_vars, &mut self.draw_range.draw_vars, &mut self.draw_ground.draw_vars, &mut self.trees.draw_trees.draw_vars,
             &mut ci.draw_city.draw_vars, &mut ci.draw_blit.draw_vars, &mut pr.draw_part.draw_vars, &mut pr.draw_blit.draw_vars,
             &mut po.draw_final.draw_vars, &mut po.draw_final_cut.draw_vars, &mut po.draw_blur.draw_vars, &mut po.draw_water.draw_vars, &mut po.draw_water_day.draw_vars,
-            &mut po.draw_water_dist.draw_vars] {
+            &mut po.draw_water_dist.draw_vars, &mut po.draw_dist_across.draw_vars, &mut po.draw_dist_down.draw_vars] {
             v.texture_slots = Default::default();
         }
     }

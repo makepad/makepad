@@ -3,12 +3,14 @@
 //!
 //! Every scene shader writes the scene pass's RGBA16F targets, all blending premultiplied-over:
 //! `fb0` the premultiplied colour and coverage, `fb1` the light and the same coverage, and for a band
-//! `fb2` the distance (m) of what it draws premultiplied by that coverage, (a D, 0, 0, a). So a nearer
-//! silhouette hides the lights behind it, and the final pass adds the light back on top; and the
-//! third target holds the coverage-weighted distance of what each pixel shows. Shaders of other
-//! stages (the city, the parts, the final pass) join the scene with `..mod.draw.SkyScene`,
-//! which also gives them the off-centre view, the city camera and the page's integer hashes
-//! (checked against `rng.rs` on the GPU by `tests/checks.rs`).
+//! `fb2` the distance (m) of what it draws premultiplied by that coverage, and its light plane: (a D,
+//! L Dl / 1000, L, a), L the luminance of its light, Dl the distance (m) that light burns at. So a
+//! nearer silhouette hides the lights behind it, and the final pass adds the light back on top; and
+//! the third target holds the coverage-weighted distance of what each pixel shows and the
+//! light-weighted distance of the lights it shows (plan hdri-6 R4: the host lets the lights shine
+//! through its weather). Shaders of other stages (the city, the parts, the final pass) join the
+//! scene with `..mod.draw.SkyScene`, which also gives them the off-centre view, the city camera and
+//! the page's integer hashes (checked against `rng.rs` on the GPU by `tests/checks.rs`).
 use makepad_widgets::makepad_draw::*;
 
 script_mod! {
@@ -21,8 +23,8 @@ script_mod! {
     // The view uniforms are set by `SceneCtx::set_uniforms`; a parameter's uniform has its key's name.
     mod.draw.SkyScene = {
         fb1: fragment_output(1, vec4f)
-        // the distance (`SceneTarget::dist`, a band's alone; another pass drops it): written by every shader of the
-        // scene, `at_dist`; the passes after the scene hand it on in their second output
+        // the distance and the light plane (`SceneTarget::dist`, a band's alone; another pass drops it): written by every
+        // shader of the scene, `at_dist` / `at_lit`; the passes after the scene hand it on in their second output
         fb2: fragment_output(2, vec4f)
         // the scene pass's size in pixels
         view_size: uniform(vec2(1.0, 1.0))
@@ -156,6 +158,10 @@ script_mod! {
         // the distance output (fb2) of a surface d m away drawn at coverage a: premultiplied, so the target holds the
         // coverage-weighted distance of the visible surfaces, the nearest winning where it is opaque
         at_dist: fn(a: float, d: float) -> vec4 { return vec4(a * d, 0.0, 0.0, a) }
+        // `at_dist` with the light plane of light e (fb1's, premultiplied) burning dl m off: its luminance L (Rec. 709) in
+        // z and L dl in y (in km, so a bright far light stays inside a half's range), blended as the light is, so the target
+        // holds the light-weighted distance of the lights the pixel shows, a nearer surface hiding those behind it
+        at_lit: fn(a: float, d: float, e: vec3, dl: float) -> vec4 { let l = dot(e, vec3(0.2126, 0.7152, 0.0722)); return vec4(a * d, l * dl * 0.001, l, a) }
         // the fragment's raw view: azimuth u (0..1), raw elevation (rad), radians per pixel
         view_raw: fn() -> vec3 {
             let pp = self.frag()
@@ -226,11 +232,12 @@ script_mod! {
             // the city's own light: fades with the lights by day
             return vec4(vec3(1.0, 0.55, 0.25) * (dome * 0.10) * (self.lit * self.design_gain), 0.0)
         }
-        // no coverage, so no distance
+        // no coverage, so no distance; its light burns over downtown, at downtown's distance from the camera (m)
         fragment: fn(){
+            let e = self.pixel()
             self.fb0 = vec4(0.0, 0.0, 0.0, 0.0)
-            self.fb1 = self.pixel()
-            self.fb2 = vec4(0.0, 0.0, 0.0, 0.0)
+            self.fb1 = e
+            self.fb2 = self.at_lit(0.0, 0.0, e.xyz, length(self.city_d() * self.city_dir() - self.city_cam()) * 70.0)
         }
     }
 

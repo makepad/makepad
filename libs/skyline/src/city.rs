@@ -210,6 +210,10 @@ script_mod! {
                         pb = pb - ray.o; let tb2 = dot(pb, ray.d); let bd = length(pb - ray.d * tb2) / (max(tb2, 0.01) * px)
                         // it burns day and night
                         em += tr * vec3(1.0, 0.08, 0.03) * (exp(-bd * bd / 3.0) * step(0.0, tb2) * self.lights * 0.07 * (0.4 + 0.6 * exp(-tb2 * sz * (0.004 + 0.0185 * self.haze))) * self.design_gain)
+                        // where no surface covers the pixel yet, its depth is the beacon's own, so the beacon's halo over
+                        // the sky burns at its distance (a band's light plane, `at_lit`); a pixel without a surface has no
+                        // coverage, so nothing else reads that depth
+                        if hits == 0.0 && bd < 5.0 && tb2 > 0.0 { depth = min(depth, tb2 * hl * (70.0 * sz)) }
                     }
                     if ray.sa.y > 0.0 {
                         // the nearest surface, then (where it only partly covers the pixel) the next two: the page's `shadeCity`
@@ -294,14 +298,14 @@ script_mod! {
         }
     }
 
-    // The march's result in the scene list (and mirrored in the reflection run), at the march's depth.
+    // The march's result in the scene list (and mirrored in the reflection run), at the march's depth, its lights too.
     mod.draw.DrawSkyCityBlit = mod.std.set_type_default() do #(DrawSkyCityBlit::script_shader(vm)){
         ..mod.draw.DrawQuad,
         ..mod.draw.SkyScene,
         ..mod.draw.SkyCityDepth,
         fragment: fn(){
             let uv = self.up_uv(); let c = self.city_col.sample_nearest(uv); let lit = self.city_lit.sample_nearest(uv)
-            self.fb0 = c; self.fb1 = vec4(lit.xyz, c.w); self.fb2 = self.at_dist(c.w, lit.w)
+            self.fb0 = c; self.fb1 = vec4(lit.xyz, c.w); self.fb2 = self.at_lit(c.w, lit.w, lit.xyz, lit.w)
         }
     }
 

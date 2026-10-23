@@ -393,8 +393,8 @@ script_mod! {
             }
             // by day the body is lit by the ambient and the sun (no normal: by its height)
             let day = self.day_lit(vec3(0.18, 0.18, 0.18), 1.0, 0.35 + 0.65 * max(sin(self.sun_el), 0.0))
-            // at the instance's distance (m) there: a plane's, or the line's point the pixel sees
-            self.fb0 = vec4(self.tone(if h1.w > 0.0 { h1.w } else { fd }, hzc, day) * m, m); self.fb1 = vec4(em, m); self.fb2 = self.at_dist(m, fd)
+            // at the instance's distance (m) there: a plane's, or the line's point the pixel sees; its lights there too
+            self.fb0 = vec4(self.tone(if h1.w > 0.0 { h1.w } else { fd }, hzc, day) * m, m); self.fb1 = vec4(em, m); self.fb2 = self.at_lit(m, fd, em, fd)
         }
     }
 

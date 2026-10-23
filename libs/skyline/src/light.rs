@@ -258,21 +258,10 @@ impl SkyLight {
     pub fn to_host(&self, texels: &mut [[f32; 4]], w: usize, h: usize, horizon: f64) {
         if !self.coded() || w == 0 || texels.len() < w * h { return; }
         let codes = self.codes();
-        let px = std::f64::consts::TAU / w as f64;
         let rows = |y0: usize, chunk: &mut [[f32; 4]]| {
             for (k, t) in chunk.iter_mut().enumerate() {
-                let behind = 1.0 - t[3].clamp(0.0, 1.0);
-                if behind <= 0.0 {
-                    // opaque: the sky behind does not count
-                    for c in 0..3 { t[c] = self.from_code(t[c]).max(0.0); }
-                    continue;
-                }
-                let (x, y) = (k % w, y0 + k / w);
-                let el = ((horizon * h as f64 - (y as f64 + 0.5)) * px) as f32;
-                let sky = Self::sky_code(&codes.low, &codes.high, (x as f32 + 0.5) / w as f32, el);
-                for c in 0..3 {
-                    t[c] = (self.from_code(t[c] + behind * sky[c]) - behind * self.from_code(sky[c])).max(0.0);
-                }
+                let rgb = self.host_texel(&codes, [t[0], t[1], t[2]], t[3], (k % w, y0 + k / w), (w, h), horizon);
+                t[..3].copy_from_slice(&rgb);
             }
         };
         let texels = &mut texels[..w * h];
@@ -287,6 +276,36 @@ impl SkyLight {
                 s.spawn(move || rows(i * per, chunk));
             }
         });
+    }
+
+    /// Colour `rgb` of the texel at (x, y) of `w` x `h` with coverage `a` (premultiplied codes) as the host takes it
+    /// (`to_host`, while `coded`): laid over the host's sky in codes, turned back into the host's light, less that sky.
+    fn host_texel(&self, codes: &Codes, rgb: [f32; 3], a: f32, (x, y): (usize, usize), (w, h): (usize, usize), horizon: f64) -> [f32; 3] {
+        let behind = 1.0 - a.clamp(0.0, 1.0);
+        if behind <= 0.0 {
+            // opaque: the sky behind does not count
+            return rgb.map(|c| self.from_code(c).max(0.0));
+        }
+        let el = ((horizon * h as f64 - (y as f64 + 0.5)) * (std::f64::consts::TAU / w as f64)) as f32;
+        let sky = Self::sky_code(&codes.low, &codes.high, (x as f32 + 0.5) / w as f32, el);
+        std::array::from_fn(|c| (self.from_code(rgb[c] + behind * sky[c]) - behind * self.from_code(sky[c])).max(0.0))
+    }
+
+    /// The light plane (`Band::light`, [L, L D] a texel) as the host takes it beside `to_host`'s texels, from the strip's
+    /// `texels` as drawn (before `to_host`): L becomes the luminance the light adds to the texel the host takes, that
+    /// texel less the one without its light (its share of the texel's luminance, at most all of it, taken off each
+    /// channel, as the map splits it: `TexelLight::split`); D is kept. A no-op where `to_host` is one.
+    pub fn light_to_host(&self, texels: &[[f32; 4]], light: &mut [[f32; 2]], w: usize, h: usize, horizon: f64) {
+        if !self.coded() || w == 0 || texels.len() < w * h || light.len() < w * h { return; }
+        let codes = self.codes();
+        for (i, (t, l)) in texels[..w * h].iter().zip(&mut light[..w * h]).enumerate() {
+            if !(l[0] > 0.0) { continue; }
+            let all = luminance([t[0], t[1], t[2]]);
+            let k = if all > 0.0 { (l[0] / all).min(1.0) } else { 0.0 };
+            let host = |rgb: [f32; 3]| luminance(self.host_texel(&codes, rgb, t[3], (i % w, i / w), (w, h), horizon));
+            let lit = (host([t[0], t[1], t[2]]) - host([t[0] * (1.0 - k), t[1] * (1.0 - k), t[2] * (1.0 - k)])).max(0.0);
+            *l = [lit, lit * (l[1] / l[0])];
+        }
     }
 
     /// How much of the city's lights are on: 0 above +2 degrees sun, 1 below -6, smooth between,
@@ -469,6 +488,39 @@ mod tests {
         day.to_host(&mut d, 1, 1, 0.5);
         assert_eq!(d, vec![[0.5, 0.4, 0.3, 1.0]]);
         assert_eq!(day.ring_texels()[..3], sky);
+    }
+    /// Plan hdri-6 R4: the light plane goes to the host with the texels. By a decoded night a texel's light is what it
+    /// adds to the texel the host takes, that texel less the one without its light (its share of the texel's
+    /// luminance off each channel): more than its share of the decoded texel, the decode being convex; a light over the
+    /// sky likewise over the host's sky; its distance is kept, a texel without light keeps none. By day, or without
+    /// `decode`, the plane is as drawn.
+    #[test]
+    fn the_light_plane_goes_to_the_host_with_the_texels() {
+        let (g, sky) = (0.02, [0.004, 0.005, 0.008]);
+        let night = SkyLight { design_gain: g, decode: true, night_haze: 0.25, ring_low: [sky; RING], ring_high: [sky; RING], sun_el_deg: -20.0, ..SkyLight::example() };
+        // an opaque window, half its luminance light; a light over the sky, all of it; a surface without light
+        let texels = vec![[0.5, 0.4, 0.3, 1.0], [0.3, 0.1, 0.05, 0.0], [0.2, 0.2, 0.2, 1.0]];
+        let (l0, l1) = (0.5 * luminance([0.5, 0.4, 0.3]), luminance([0.3, 0.1, 0.05]));
+        let drawn = vec![[l0, l0 * 1500.0], [l1, l1 * 2200.0], [0.0, 0.0]];
+        let mut light = drawn.clone();
+        night.light_to_host(&texels, &mut light, 3, 1, 0.5);
+        let mut host = texels.clone();
+        night.to_host(&mut host, 3, 1, 0.5);
+        // the opaque window: the decoded texel less the decoded half of it
+        let rest = night.host_texel(&night.codes(), [0.25, 0.2, 0.15], 1.0, (0, 0), (3, 1), 0.5);
+        let want = luminance([host[0][0], host[0][1], host[0][2]]) - luminance(rest);
+        assert!((light[0][0] - want).abs() <= 1e-6 * want && (light[0][1] / light[0][0] - 1500.0).abs() < 1e-2, "{:?}, want {want}", light[0]);
+        assert!(light[0][0] > 0.5 * luminance([host[0][0], host[0][1], host[0][2]]), "{:?}: the decode is convex", light[0]);
+        // the light over the sky: all of what the host takes of it
+        assert!((light[1][0] - luminance([host[1][0], host[1][1], host[1][2]])).abs() <= 1e-6, "{:?} {:?}", light[1], host[1]);
+        assert!((light[1][1] / light[1][0] - 2200.0).abs() < 1e-2);
+        assert_eq!(light[2], [0.0, 0.0]);
+        let mut day = drawn.clone();
+        SkyLight { sun_el_deg: 30.0, ..night.clone() }.light_to_host(&texels, &mut day, 3, 1, 0.5);
+        assert_eq!(day, drawn, "by day the plane is as drawn");
+        let mut example = drawn.clone();
+        SkyLight::example().light_to_host(&texels, &mut example, 3, 1, 0.5);
+        assert_eq!(example, drawn, "without decode the plane is as drawn");
     }
     /// Between day and night the codes stay in one scale: a host light turned into a code and back is itself at every
     /// sun height, and the code runs from the light itself (by day) to its sRGB code / design_gain (by night).
