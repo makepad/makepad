@@ -292,6 +292,7 @@ impl Tcx {
         };
         let Some(sig) = self.fn_sig(prog, m) else { return Vec::new() };
         let Some(&recv) = sig.params.first() else { return Vec::new() };
+        let (recv_full, self_full) = (crate::next_solver::dyn_compatibility::liberate_late_bound_regions(self, m, recv), self_ty);
         let (recv, self_ty) = (self.tys.erase_all_regions(recv), self.tys.erase_all_regions(self_ty));
         for t in [recv, self_ty] {
             if self.tys.has_error(t) || self.tys.has_assoc(t) || self.tys.has_opaque(t) || self.tys.has_infer(t) { return Vec::new(); }
@@ -299,17 +300,18 @@ impl Tcx {
         let Some(legacy) = self.lang_items.get(crate::lang_items::LangItem::LegacyReceiver) else { return Vec::new() };
         let env = self.param_env_id(prog, m);
         let parent_params = self.generic_indices_of(prog, def.parent).types_consts.len() as u32;
-        // 0: neither feature, 1: arbitrary_self_types, 2: with pointers
-        let valid = |level: u8| -> Result<(), bool> {
+        // 0: neither feature, 1: arbitrary_self_types, 2: with pointers. Ok: the step of the
+        // autoderef chain (with its regions) that is `Self`.
+        let valid = |level: u8| -> Result<TyId, bool> {
             let infcx = crate::infer::InferCtxt::for_item(self, prog, crate::tcx::TypingMode::non_body_analysis(), m);
             let same = |a: TyId, b: TyId| infcx.at(prog, env.clone()).eq(a, b).is_ok();
-            if same(self_ty, recv) { return Ok(()); }
+            if same(self_ty, recv) { return Ok(recv_full); }
             let generic_param = |t: TyId| matches!(self.tys.kind(t), TyKind::Param(i) if *i >= parent_params);
             if generic_param(recv) { return Err(true); }
-            let mut cur = recv;
+            let (mut cur, mut cur_full) = (recv, recv_full);
             for _ in 0..32 {
                 if generic_param(cur) { return Err(true); }
-                if same(self_ty, cur) { return Ok(()); }
+                if same(self_ty, cur) { return Ok(cur_full); }
                 if level == 0 {
                     // (a trait object implements no `LegacyReceiver`; asking would need the dyn
                     // compatibility of a trait whose own signature is being checked)
@@ -317,18 +319,47 @@ impl Tcx {
                     let goal = Goal { param_env: env.clone(), predicate: collect::trait_predicate(legacy, vec![GenericArg::Type(cur)]) };
                     if !infcx.evaluate_obligation(prog, goal).must_apply_modulo_regions() { break; }
                 }
-                let next = match self.tys.kind(cur) {
+                let next = match self.tys.kind(cur_full) {
                     TyKind::Ref(_, t, _) => Some(*t),
                     TyKind::Ptr(_, t) if level == 2 => Some(*t),
                     TyKind::Ptr(..) | TyKind::Error | TyKind::Infer(_) | TyKind::Dyn(..) => None,
-                    _ => crate::typeck::probe::overloaded_deref_ty(&infcx, prog, &env, cur),
+                    _ => crate::typeck::probe::overloaded_deref_ty(&infcx, prog, &env, cur_full),
                 };
                 let Some(next) = next else { break };
+                cur_full = next;
                 cur = self.tys.erase_all_regions(next);
             }
             Err(false)
         };
-        let Err(generic) = valid(0) else { return Vec::new() };
+        let step = match valid(0) {
+            Ok(step) => step,
+            Err(generic) => return self.invalid_receiver(prog, m, recv, &valid, generic),
+        };
+        // receiver_is_valid: `wfcx.eq(MethodReceiver, self_ty, step)` with the regions; the region
+        // checker of the fn's well-formedness (its assumed well-formed types) then reports a region
+        // that cannot be equal as "mismatched `self` parameter type" (E0308)
+        if !self.tys.has_infer(step) && self.tys.flags(step).contains(crate::types::TypeFlags::HAS_FREE_REGIONS) {
+            let infcx = crate::infer::InferCtxt::for_item(self, prog, crate::tcx::TypingMode::non_body_analysis(), m);
+            if infcx.at(prog, env.clone()).eq(self_full, step).is_ok() {
+                let mut wf: Vec<TyId> = Vec::new();
+                if parent.kind == DefKind::Impl {
+                    wf.push(self_full);
+                    if let Some(args) = self.impl_trait_args.get(&def.parent) { wf.extend_from_slice(args); }
+                }
+                wf.extend(sig.params.iter().map(|&t| crate::next_solver::dyn_compatibility::liberate_late_bound_regions(self, m, t)));
+                wf.push(crate::next_solver::dyn_compatibility::liberate_late_bound_regions(self, m, sig.ret));
+                if !infcx.resolve_regions(prog, env.clone(), &wf).is_empty() {
+                    let pos = self_param_pos(prog, def.file, item.lo, item.name.hi);
+                    return vec![prog.record_error(def.file, pos, "typeck", "E0308: mismatched `self` parameter type".to_string())];
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    fn invalid_receiver(&self, prog: &Program, m: DefId, recv: TyId, valid: &dyn Fn(u8) -> Result<TyId, bool>, generic: bool) -> Vec<String> {
+        let def = prog.def(m);
+        let item = prog.files[def.file as usize].ast.item(def.item);
         let shown = crate::typeck::ty_to_string(false, prog, self, recv);
         let pos = self_param_pos(prog, def.file, item.lo, item.name.hi);
         let crate_features = prog.crates[def.krate as usize].features(prog);

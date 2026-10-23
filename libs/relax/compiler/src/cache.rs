@@ -2724,6 +2724,7 @@ impl Cache {
     /// `stop` (a mid-run write: the main thread waits for the owner thread) is asked every 256
     /// slots; yes drops this record (false comes back) and a later write makes it again.
     pub fn record_manifest(&mut self, u: &Unit, root: u32, order: &[u32], present: usize, stop: &dyn Fn() -> bool) -> bool {
+        let t0 = std::time::Instant::now();
         if !crate::preempt::is_stopped() && relax_codegen::warm::enabled() {
             for (id, f) in u.fns.iter().enumerate() {
                 if !f.compiled && !f.history().inlined_into.is_empty() {
@@ -2760,6 +2761,7 @@ impl Cache {
                 }
             }
         }
+        if self.verbose { eprintln!("makepad-run cache: manifest phases: {} slots keyed in {:.1} ms", order.len(), t0.elapsed().as_secs_f64() * 1e3); }
         let old: HashSet<&[u8]> = self.manifest.iter().map(|b| b.as_slice()).collect();
         let new = list.iter().filter(|b| !old.contains(b.0.as_slice())).count();
         // the same start as before (within 2%), the loaded manifest still valid and its image
@@ -5449,6 +5451,9 @@ mod cold_tests {
         again.loaded_in(&mut prog, 2, dir.clone());
         assert_fingerprints(&again, &prog);
         assert!(again.pending.is_empty());
+        // its writers write the three records again; they finish before the folder goes
+        again.finish_in(&mut prog, dir.clone());
+        assert_eq!(again.records, 3);
         // Repeated completion/finalization must not write a crate's record twice.
         cold.loaded_in(&mut prog, 0, dir.clone());
         cold.finish_in(&mut prog, dir.clone());

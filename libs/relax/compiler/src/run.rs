@@ -299,6 +299,29 @@ pub(crate) fn clear_dead<T>(slot: &mut Option<T>) {
     }
 }
 
+/// rustc's crate locator finds `extern crate proc_macro;` in the sysroot for any crate (a
+/// `#![crate_type = "proc-macro"]` file checked on its own, a test's helper). Relax's sysroot is
+/// its std dir, whose `proc_macro` the app graph otherwise never loads (proc-macro crates run in the
+/// macro host): a check whose root unit declares the crate gets it as a dependency unit.
+fn with_sysroot_proc_macro(mut units: unitgraph::Units, std_dir: &str) -> unitgraph::Units {
+    let pm_root = format!("{}/proc_macro/lib.rs", std_dir);
+    if units.units.iter().any(|u| u.name == "proc_macro") || !crate::vfs::exists(&pm_root) { return units; }
+    let wants = |u: &unitgraph::GraphUnit| crate::vfs::read_shared(&u.src_path).is_ok_and(|src| {
+        const NEEDLE: &[u8] = b"extern crate proc_macro";
+        src.windows(NEEDLE.len()).any(|w| w == NEEDLE)
+    });
+    let roots: Vec<usize> = units.roots.iter().copied().filter(|&r| r < units.units.len() && !units.units[r].kind.iter().any(|k| k == "proc-macro") && wants(&units.units[r])).collect();
+    if roots.is_empty() { return units; }
+    let pm = units.units.len();
+    units.units.push(unitgraph::GraphUnit {
+        pkg_id: format!("path+file://{}/proc_macro#proc_macro@0.0.0", std_dir),
+        kind: vec!["lib".to_string()], name: "proc_macro".to_string(), src_path: pm_root, edition: "2021".to_string(),
+        host: false, mode: "build".to_string(), features: Vec::new(), deps: Vec::new(),
+    });
+    for r in roots { units.units[r].deps.push((pm, "proc_macro".to_string())); }
+    units
+}
+
 pub(crate) fn resolve_package(
     sess: &std::sync::Arc<crate::Session>,
     workspace: &str,
@@ -334,6 +357,7 @@ pub(crate) fn resolve_package(
     } else {
         std::fs::read(units_json).map_err(|e| format!("{}: {}", units_json, e)).and_then(|d| unitgraph::Units::from_json(&d))
     }?;
+    let units = if check_only { with_sysroot_proc_macro(units, std_dir) } else { units };
     let t_load = Instant::now();
     let mut g = unitgraph::load(&units, check_only)?;
     let t_loaded = Instant::now();
@@ -2123,8 +2147,10 @@ static SETTLE_WHY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::ne
 fn try_settle(compiled: u64, drops: &mut jit::SettleDrops, trim: bool) -> bool {
     let up = unsafe { RUN_UNIT };
     if up.is_null() { return false; }
-    // a front write and the whole pending cache: structural work, a program-class request (rule
-    // I-PUB: no publish; its records go in bounded publishes with step 4 of OWNERARCH.DESIGN.md)
+    // the deferred cache records first, in bounded publishes (the type side they are keyed from
+    // is retired below: what installs add meanwhile is flushed in the request)
+    jit::drain_records_bounded();
+    // a front write: structural work, a program-class request (rule I-PUB: no publish)
     let Some(Some((drops, pending, spill, at, landmark, retired))) = Some(crate::owner::call(crate::owner::Class::App, || {
         if jit::COMPILED_FNS.load(Ordering::Relaxed) != compiled {
             SETTLE_WHY.store(1, Ordering::Relaxed);
@@ -2309,6 +2335,8 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
             let _job = jit::compile_job();
             jit::reassert_signals();
             flush_errors(false);
+            // the deferred cache records of this tick's installs (rule I-PUB: bounded publishes)
+            if jit::records_due() { jit::drain_records_bounded(); }
             if settle_on {
                 let present = FIRST_PRESENT_WALL.load(Ordering::Acquire).max(DOMAIN_PRESENT_WALL.load(Ordering::Acquire));
                 if present != settle_present {
@@ -2876,7 +2904,10 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
     if up.is_null() {
         return None;
     }
-    let mut parts = [0f64; 3];
+    // the deferred cache records in bounded publishes (a program thread waits for one batch);
+    // the request below holds only what installs add meanwhile
+    jit::drain_records_bounded();
+    let mut parts = [0f64; 4];
     let mut n_imgs = 0;
     // the files whose front images this write holds: the collected program below is recorded
     // only if no file was loaded since (its restore maps every file from these images)
@@ -2886,6 +2917,7 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
     let spill = {
         let u = unsafe { &mut *up };
         u.flush_cache_records();
+        parts[3] = held.elapsed().as_secs_f64() * 1e3;
         // the startup manifest, once its window has closed (first present + 5 s after main):
         // what the exit recorded before, so a killed or force-quit app starts warm too; the exit
         // writes it again only if O2 code replaced startup code since (record_manifest)
@@ -2977,7 +3009,7 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
             }
             (ready, retired_boot, t)
         }) {
-            if std::env::var_os("MAKEPAD_RUN_CACHE_TRACE").is_some() { verbose!("makepad-run cache: collected record held the unit lock {:.1} ms", t.elapsed().as_secs_f64() * 1e3); }
+            verbose!("makepad-run cache: collected record held the owner {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
             drop(retired_boot);
             if let Some((report, dest, payload)) = ready {
                 if let Some(written) = crate::cache::Cache::commit_collected(report, dest, payload) {
@@ -2989,7 +3021,7 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
             }
         }
     }
-    if std::env::var_os("MAKEPAD_RUN_CACHE_TRACE").is_some() { verbose!("makepad-run cache: mid write held the unit lock {:.1} ms (manifest to {:.1}, front images to {:.1}, crate records to {:.1}, then spill)", held1, parts[0], parts[1], parts[2]); }
+    verbose!("makepad-run cache: mid write held the owner {:.1} ms (records to {:.1}, manifest to {:.1}, front images to {:.1}, crate records to {:.1}, then spill)", held1, parts[3], parts[0], parts[1], parts[2]);
     crate::inspect::flightrec::event("cache.write", &format!("mid write: {} records, {} images; held the owner {:.1} ms (manifest {:.1}, front images {:.1}, crate records {:.1})", n, n_imgs, held1, parts[0], parts[1], parts[2]), (held1 * 1e6) as u64, 0);
     // All temporary encoders and retired boot arrays are now outside compiler locks.
     crate::memstat::trim();

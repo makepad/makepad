@@ -290,6 +290,42 @@ impl<'a> Parser<'a> {
             msg: format!("{} (found {:?} `{}`)", msg, t.kind, text),
         })
     }
+    /// rustc_span `Ident::is_reserved` of a lifetime/label name (without its quote): the special
+    /// identifiers (`_`), the keywords used always or reserved always, and the edition keywords
+    /// (`async`/`await`/`dyn`/`try` from 2018, `gen` from 2024).
+    fn reserved_name(name: &[u8], edition: u16) -> bool {
+        match name {
+            b"_" | b"as" | b"break" | b"const" | b"continue" | b"crate" | b"else" | b"enum" | b"extern" | b"false"
+            | b"fn" | b"for" | b"if" | b"impl" | b"in" | b"let" | b"loop" | b"match" | b"mod" | b"move" | b"mut"
+            | b"pub" | b"ref" | b"return" | b"self" | b"Self" | b"static" | b"struct" | b"super" | b"trait"
+            | b"true" | b"type" | b"unsafe" | b"use" | b"where" | b"while" | b"abstract" | b"become" | b"box"
+            | b"do" | b"final" | b"macro" | b"override" | b"priv" | b"typeof" | b"unsized" | b"virtual"
+            | b"yield" => true,
+            b"async" | b"await" | b"dyn" | b"try" => edition >= 2018,
+            b"gen" => edition >= 2024,
+            _ => false,
+        }
+    }
+    /// A lifetime token in a lifetime position (rustc_parse `expect_lifetime`): a non-raw
+    /// reserved name other than `'_` / `'static` is "lifetimes cannot use keyword names".
+    fn lifetime_tok(&mut self) -> PResult<Ident> {
+        let t = self.bump();
+        let name = &self.tok_text(t)[1..];
+        if !name.starts_with(b"r#") && !matches!(name, b"_" | b"static") && Self::reserved_name(name, self.edition) {
+            return Err(PErr { pos: t.lo, msg: "lifetimes cannot use keyword names".to_string() });
+        }
+        Ok(Ident { lo: t.lo, hi: t.hi })
+    }
+    /// A label (rustc_parse `eat_label`): any non-raw reserved name, `'_` and `'static` included,
+    /// is "labels cannot use keyword names".
+    fn label_tok(&mut self) -> PResult<Ident> {
+        let t = self.bump();
+        let name = &self.tok_text(t)[1..];
+        if !name.starts_with(b"r#") && Self::reserved_name(name, self.edition) {
+            return Err(PErr { pos: t.lo, msg: "labels cannot use keyword names".to_string() });
+        }
+        Ok(Ident { lo: t.lo, hi: t.hi })
+    }
     fn expect(&mut self, k: T) -> PResult<Tok> {
         if self.kind() == k {
             if k == T::CloseBrace && self.doc_before() {
@@ -1886,10 +1922,16 @@ impl<'a> Parser<'a> {
             // expansions for statement macros nested through blocks (nom's alt_trait_inner! /
             // succ! chains of depth 21 took every byte of memory under `makepad check`)
             let macros = self.macros.take();
+            let undo = self.tok_undo.len();
             let one_expr = self.outer_attrs().is_ok() && self.expr().is_ok() && self.kind() == T::Semi && self.nth(1) == T::Eof;
             self.macros = macros;
             let semi = self.lo();
             self.pos = save;
+            // the `>>` / `>=` this look-ahead split are whole again for the real parse below
+            while self.tok_undo.len() > undo {
+                let (k, t) = self.tok_undo.pop().unwrap();
+                self.toks.edit(k as usize, |x| *x = t);
+            }
             if one_expr {
                 let file = self.bctx.as_ref().map_or("", |c| c.path.as_str()).to_string();
                 crate::macros::uses::trailing_semi(&file, semi, lo, &def.def_file);
@@ -2901,7 +2943,13 @@ impl<'a> Parser<'a> {
                 if self.nth(n2) == T::KwSelfValue && matches!(self.nth(n2 + 1), T::Comma | T::CloseParen) {
                     self.pos += n2 + 1;
                     let lt = match lt {
-                        Some(t) => Some(Ident { lo: t.lo, hi: t.hi }),
+                        Some(t) => {
+                            let name = &self.tok_text(t)[1..];
+                            if !name.starts_with(b"r#") && !matches!(name, b"_" | b"static") && Self::reserved_name(name, self.edition) {
+                                return Err(PErr { pos: t.lo, msg: "lifetimes cannot use keyword names".to_string() });
+                            }
+                            Some(Ident { lo: t.lo, hi: t.hi })
+                        }
                         None => None,
                     };
                     Ok(Some(SelfParam::Ref(lt, m)))
@@ -3166,19 +3214,19 @@ impl<'a> Parser<'a> {
             let attrs = self.outer_attrs()?;
             let attrs = self.ast.push_list(attrs);
             if self.kind() == T::Lifetime {
-                let t = self.bump();
+                let t = self.lifetime_tok()?;
                 let mut bounds = Vec::new();
                 if self.eat(T::Colon) {
                     while self.kind() == T::Lifetime {
-                        let b = self.bump();
-                        bounds.push(Ident { lo: b.lo, hi: b.hi });
+                        let b = self.lifetime_tok()?;
+                        bounds.push(b);
                         if !self.eat(T::Plus) {
                             break;
                         }
                     }
                 }
                 let bounds = self.ast.push_list(bounds);
-                params.push(GenericParam { attrs, name: Ident { lo: t.lo, hi: t.hi }, kind: GenericParamKind::Lifetime(bounds) });
+                params.push(GenericParam { attrs, name: t, kind: GenericParamKind::Lifetime(bounds) });
             } else if self.eat(T::KwConst) {
                 let name = self.ident_tok()?;
                 self.expect(T::Colon)?;
@@ -3234,18 +3282,18 @@ impl<'a> Parser<'a> {
             match self.kind() {
                 T::OpenBrace | T::Semi | T::Eq | T::Eof => break,
                 T::Lifetime => {
-                    let t = self.bump();
+                    let t = self.lifetime_tok()?;
                     self.expect(T::Colon)?;
                     let mut bs = Vec::new();
                     while self.kind() == T::Lifetime {
-                        let b = self.bump();
-                        bs.push(Ident { lo: b.lo, hi: b.hi });
+                        let b = self.lifetime_tok()?;
+                        bs.push(b);
                         if !self.eat(T::Plus) {
                             break;
                         }
                     }
                     let bs = self.ast.push_list(bs);
-                    preds.push(WherePred::Lifetime(Ident { lo: t.lo, hi: t.hi }, bs));
+                    preds.push(WherePred::Lifetime(t, bs));
                 }
                 _ => {
                     let hrtb = self.hrtb()?;
@@ -3301,8 +3349,7 @@ impl<'a> Parser<'a> {
 
     fn bound(&mut self) -> PResult<Bound> {
         if self.kind() == T::Lifetime {
-            let t = self.bump();
-            return Ok(Bound::Lifetime(Ident { lo: t.lo, hi: t.hi }));
+            return Ok(Bound::Lifetime(self.lifetime_tok()?));
         }
         if self.kind() == T::KwUse && self.nth(1) == T::Lt {
             self.pos += 1;
@@ -3432,8 +3479,7 @@ impl<'a> Parser<'a> {
             }
             let arg = match self.kind() {
                 T::Lifetime => {
-                    let t = self.bump();
-                    GenericArg::Lifetime(Ident { lo: t.lo, hi: t.hi })
+                    GenericArg::Lifetime(self.lifetime_tok()?)
                 }
                 T::Ident | T::RawIdent if self.nth(1) == T::Eq => {
                     let name = self.ident_tok()?;
@@ -3605,8 +3651,7 @@ impl<'a> Parser<'a> {
             T::And | T::AndAnd => {
                 self.eat_amp();
                 let lt = if self.kind() == T::Lifetime {
-                    let t = self.bump();
-                    Some(Ident { lo: t.lo, hi: t.hi })
+                    Some(self.lifetime_tok()?)
                 } else {
                     None
                 };
@@ -4611,13 +4656,13 @@ impl<'a> Parser<'a> {
         Ok(if attrs.is_empty() || self.cfg_present(&attrs) { Some(e) } else { None })
     }
 
-    fn label(&mut self) -> Option<Ident> {
+    fn label(&mut self) -> PResult<Option<Ident>> {
         if self.kind() == T::Lifetime && self.nth(1) == T::Colon {
-            let t = self.bump();
+            let t = self.label_tok()?;
             self.pos += 1;
-            Some(Ident { lo: t.lo, hi: t.hi })
+            Ok(Some(t))
         } else {
-            None
+            Ok(None)
         }
     }
 
@@ -4708,7 +4753,7 @@ impl<'a> Parser<'a> {
                 Ok(self.mk_expr(ExprKind::Block(b, OptIdent::NONE), lo))
             }
             T::Lifetime => {
-                let label = self.label();
+                let label = self.label()?;
                 if label.is_none() {
                     return self.err("unexpected lifetime");
                 }
@@ -4790,8 +4835,7 @@ impl<'a> Parser<'a> {
             T::KwBreak => {
                 self.pos += 1;
                 let label = if self.kind() == T::Lifetime {
-                    let t = self.bump();
-                    Some(Ident { lo: t.lo, hi: t.hi })
+                    Some(self.label_tok()?)
                 } else {
                     None
                 };
@@ -4801,8 +4845,7 @@ impl<'a> Parser<'a> {
             T::KwContinue => {
                 self.pos += 1;
                 let label = if self.kind() == T::Lifetime {
-                    let t = self.bump();
-                    Some(Ident { lo: t.lo, hi: t.hi })
+                    Some(self.label_tok()?)
                 } else {
                     None
                 };

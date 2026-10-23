@@ -17,6 +17,11 @@
 //! A worker holds no compiler-generation state while it idles, but its thread-local caches and
 //! arena chunks belong to the generation it last ran in: the zone swap calls `retire_idle`
 //! and waits for the workers to end before it destroys the old generation.
+//!
+//! A section's own bookkeeping (its `ScopeData`, each task's box and result packet) is kept
+//! memory, and a task counts as finished only once its worker handed its chunks back and is
+//! idle again: when `scope` returns, nothing of the section touches the compiler generation any
+//! more, so the caller may destroy it, and `retire_idle` then ends every worker that ran it.
 use crate::zone_alloc;
 use relax_session::sync::{Condvar, Mutex};
 use std::any::Any;
@@ -25,7 +30,17 @@ use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-type Task = Box<dyn FnOnce() + Send + 'static>;
+type Task = Box<dyn FnOnce() -> Done + Send + 'static>;
+
+/// A task's completion, handed from the task to its worker: dropping it finishes the task in its
+/// section (`ScopeData::finish_one`), also when it is dropped by an unwind.
+struct Done(Arc<ScopeData>);
+
+impl Drop for Done {
+    fn drop(&mut self) {
+        self.0.finish_one();
+    }
+}
 
 enum Slot {
     /// Waiting for a task.
@@ -102,18 +117,26 @@ fn worker_main(w: Arc<Worker>) {
         };
         let Some(task) = task else { break };
         // the task catches its own panics; a panic that escapes it (a result dropped in the task
-        // itself) is handled the same way
-        let escaped = std::panic::catch_unwind(AssertUnwindSafe(task)).is_err();
-        if escaped || TASK_PANICKED.with(|p| p.replace(false)) {
+        // itself) is handled the same way (its `Done` finished the task while unwinding)
+        let done = std::panic::catch_unwind(AssertUnwindSafe(task)).ok();
+        if done.is_none() || TASK_PANICKED.with(|p| p.replace(false)) {
             // end this worker: a fresh thread has none of the half-run task's thread-local state
-            let _k = zone_alloc::kept();
-            w.pool.dying.lock().unwrap_or_else(|e| e.into_inner()).push(w.clone());
+            {
+                let _k = zone_alloc::kept();
+                w.pool.dying.lock().unwrap_or_else(|e| e.into_inner()).push(w.clone());
+            }
+            drop(done);
             break;
         }
         // what the worker left in its chunks is for every thread to reuse, not held for its next task
         zone_alloc::compiler_hand_back();
-        let _k = zone_alloc::kept();
-        w.pool.idle.lock().unwrap_or_else(|e| e.into_inner()).push(w.clone());
+        {
+            let _k = zone_alloc::kept();
+            w.pool.idle.lock().unwrap_or_else(|e| e.into_inner()).push(w.clone());
+        }
+        // only now the section may end (and its caller destroy the generation): this worker
+        // holds nothing of it and is idle, so a `retire_idle` after the section ends it
+        drop(done);
     }
     w.pool.alive.fetch_sub(1, Ordering::Relaxed);
 }
@@ -263,17 +286,14 @@ fn scope_in<'env, F, T>(pool: &'static Pool, f: F) -> T
 where
     F: for<'scope> FnOnce(&'scope Scope<'scope, 'env>) -> T,
 {
-    let scope = Scope {
-        pool,
-        data: Arc::new(ScopeData {
-            pending: AtomicUsize::new(0),
-            panicked: AtomicBool::new(false),
-            lock: Mutex::new(()),
-            done: Condvar::new(),
-        }),
-        scope: PhantomData,
-        env: PhantomData,
-    };
+    // kept: a worker's last touch of a task's section comes after the section may have ended
+    let data = zone_alloc::kept_with(|| Arc::new(ScopeData {
+        pending: AtomicUsize::new(0),
+        panicked: AtomicBool::new(false),
+        lock: Mutex::new(()),
+        done: Condvar::new(),
+    }));
+    let scope = Scope { pool, data, scope: PhantomData, env: PhantomData };
     let result = catch_unwind(AssertUnwindSafe(|| f(&scope)));
     scope.data.wait_all();
     match result {
@@ -290,18 +310,13 @@ impl<'scope, 'env> Scope<'scope, 'env> {
         F: FnOnce() -> T + Send + 'scope,
         T: Send + 'scope,
     {
-        let packet = Arc::new(Packet { result: Mutex::new(None), ready: Condvar::new(), scope: self.data.clone() });
+        let packet = zone_alloc::kept_with(|| Arc::new(Packet { result: Mutex::new(None), ready: Condvar::new(), scope: self.data.clone() }));
         self.data.pending.fetch_add(1, Ordering::Relaxed);
         let (p, data) = (packet.clone(), self.data.clone());
         let main = move || {
-            // finishes the task whatever happens below, also when dropping a result panics
-            struct Finish(Arc<ScopeData>);
-            impl Drop for Finish {
-                fn drop(&mut self) {
-                    self.0.finish_one();
-                }
-            }
-            let _finish = Finish(data);
+            // finishes the task whatever happens below, also when dropping a result panics; on a
+            // normal return the worker drops it once it is idle again
+            let done = Done(data);
             let r = catch_unwind(AssertUnwindSafe(f));
             if r.is_err() {
                 TASK_PANICKED.with(|t| t.set(true));
@@ -310,12 +325,13 @@ impl<'scope, 'env> Scope<'scope, 'env> {
             p.ready.notify_all();
             // everything the task borrowed or returned is released before the scope may end
             drop(p);
+            done
         };
-        let boxed: Box<dyn FnOnce() + Send + 'scope> = Box::new(main);
+        let boxed: Box<dyn FnOnce() -> Done + Send + 'scope> = zone_alloc::kept_with(|| Box::new(main));
         // SAFETY: `scope` waits for `pending` to reach zero before it returns, also on a panic of
-        // its closure, and `main` decrements it only after it dropped `f`'s result handle; the
-        // erased lifetime is never used past that point.
-        let task: Task = unsafe { std::mem::transmute::<Box<dyn FnOnce() + Send + 'scope>, Task>(boxed) };
+        // its closure, and the task's `Done` decrements it only after `main` dropped `f`'s result
+        // handle; the erased lifetime is never used past that point.
+        let task: Task = unsafe { std::mem::transmute::<Box<dyn FnOnce() -> Done + Send + 'scope>, Task>(boxed) };
         if let Err((task, e)) = dispatch(self.pool, task) {
             // like std::thread::scope: no thread, no task; the section must not wait for it
             drop(task);
@@ -456,11 +472,9 @@ mod tests {
                     s.spawn(|| std::thread::yield_now());
                 }
             });
-            // a section ends when its tasks finished; the workers go idle right after (a task
-            // dispatched before that starts a worker, which is allowed): wait for all of them
-            while pool.idle.lock().unwrap_or_else(|e| e.into_inner()).len() != pool.stats().1 {
-                std::thread::yield_now();
-            }
+            // a section ends only once the workers that ran its tasks are idle again (the zone
+            // swap's `retire_idle` right after a section ends them all)
+            assert_eq!(pool.idle.lock().unwrap_or_else(|e| e.into_inner()).len(), pool.stats().1);
         }
         // 2000 tasks in sections of 4 never need more than 4 workers (fewer when a task of the
         // first section ended before the next spawn of that section)

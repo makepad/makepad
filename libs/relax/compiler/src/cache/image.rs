@@ -28,6 +28,8 @@ impl Cache {
     /// With the image, the slots it holds.
     /// Err: `stop` said yes (asked every 256 slots); the caller drops the manifest for now.
     pub(super) fn build_image(&mut self, u: &Unit, ids: &[u32], stop: &dyn Fn() -> bool) -> Result<Option<(Vec<u8>, u32)>, ()> {
+        let t0 = std::time::Instant::now();
+        let mut ph = [0f64; 5];
         // the entry each slot takes, decided first (slot keys need the cache mutably)
         let mut chosen: Vec<(u32, u128, Vec<u32>)> = Vec::with_capacity(ids.len());
         let pend: HashMap<u128, usize> = self.pending.iter().enumerate().filter(|(_, e)| e.1.kind == KIND_CODE).map(|(i, e)| (e.1.key, i)).collect();
@@ -54,6 +56,7 @@ impl Cache {
                 n += 1;
             }
         }
+        ph[0] = t0.elapsed().as_secs_f64() * 1e3;
         if n == 0 {
             return Ok(None);
         }
@@ -81,6 +84,7 @@ impl Cache {
             }
         }
         data.settle();
+        ph[1] = t0.elapsed().as_secs_f64() * 1e3;
         // the functions thunk symbols name (fn pointers in data: vtables, callbacks) are keys
         // too: the prelink makes their slots with the others, so linking a thunk is a lookup by
         // bytes instead of a fn key decode per symbol (Stage: ~18k of 22k thunks)
@@ -102,6 +106,7 @@ impl Cache {
             tab.keys.list[k] = b;
             r
         }).collect();
+        ph[2] = t0.elapsed().as_secs_f64() * 1e3;
         for c in key_crates.iter().flatten().flatten() {
             let next = tab.crates.len() as u32;
             if *tab.crate_at.entry(*c).or_insert(next) == next {
@@ -143,11 +148,12 @@ impl Cache {
             }
         }
         data.encode(&mut e);
+        ph[3] = t0.elapsed().as_secs_f64() * 1e3;
         e.u32(n);
         e.0.extend_from_slice(&slots.0);
         e.bytes(&blob);
         if self.verbose {
-            eprintln!("makepad-run cache: startup image of {} slots ({} keys, {} symbols, {} crates, {} KB code)", n, tab.keys.list.len(), tab.syms.list.len(), tab.crates.len(), blob.len() / 1024);
+            eprintln!("makepad-run cache: startup image of {} slots ({} keys, {} symbols, {} crates, {} KB code); ms: slots to {:.1}, data to {:.1}, key crates to {:.1}, encoded {:.1}", n, tab.keys.list.len(), tab.syms.list.len(), tab.crates.len(), blob.len() / 1024, ph[0], ph[1], ph[2], ph[3]);
         }
         Ok(Some((e.0, n)))
     }

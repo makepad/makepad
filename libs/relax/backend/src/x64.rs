@@ -5401,6 +5401,17 @@ impl<'a> Gen<'a> {
                 }
                 self.fin_f(d, xd);
             }
+            // a target whose bounds the source type holds exactly (f32: up to 16 bits, f64: up to 32;
+            // i32 from f64 keeps its cvttsd2si fast path): clamp in the source precision, convert
+            // once -- branchless, no f64 detour (sdf's f32 -> u8 was cvtss2sd + three compares)
+            // MAKEPAD_RUN_OPT=-f2iclamp: the f64 compare path for these too
+            Conv::FToInt(from64, it) if it.bits <= if from64 { 32 } else { 16 } && !(it.signed && it.bits == 32) && !crate::stats::opt_off(options, "-f2iclamp") => {
+                // a spilled source loads into XS2, the working register (XS holds the bounds)
+                let xs = self.use_f(s, XS2);
+                let rd = self.def_i(d, R10);
+                self.f_to_int_clamped(from64, it, xs, rd);
+                self.fin_i(d, rd);
+            }
             Conv::FToInt(from64, it) => {
                 let xs = self.use_f(s, XS);
                 // work in f64 (exact for f32 inputs)
@@ -5497,6 +5508,63 @@ impl<'a> Gen<'a> {
         }
         self.f_to_int_slow(it);
         self.a.mov_rr(rd, RAX);
+    }
+
+    /// Saturating float (xs) -> int whose bounds the float type holds exactly, Rust `as`
+    /// semantics, into rd: unsigned `max(x, 0)` (maxss returns its second operand for NaN: 0),
+    /// signed NaN -> +0 by a cmpord mask first, then max with lo; min with hi; one truncating
+    /// convert (64-bit: signed results come out sign-extended, as values are kept). The bounds are
+    /// pool constants. Works in XS2 / XS only; xs is never XS.
+    fn f_to_int_clamped(&mut self, from64: bool, it: IntTy, xs: u8, rd: u8) {
+        debug_assert!(xs != XS, "f_to_int_clamped: the source in XS (the bounds register)");
+        let bits = it.bits as i32;
+        let (lo, hi): (f64, f64) = if it.signed { (-(2f64).powi(bits - 1), (2f64).powi(bits - 1) - 1.0) } else { (0.0, (2f64).powi(bits) - 1.0) };
+        let fb = |x: f64| if from64 { x.to_bits() } else { (x as f32).to_bits() as u64 };
+        let pfx = if from64 { 0xf2 } else { 0xf3 };
+        if self.avx {
+            // three-operand forms: no copy of x first
+            let pp = if from64 { 3 } else { 2 };
+            if it.signed {
+                self.a.vex_rr(pp, 1, false, 0xc2, XS, xs, xs); // vcmpordss XS, x, x
+                self.a.byte(7);
+                self.a.vex_rr(0, 1, false, 0x54, XS2, xs, XS); // vandps XS2, x, XS
+                let at = self.a.vex_rip(pp, 1, false, 0x5f, XS2, XS2); // vmaxss XS2, XS2, [rip + lo]
+                self.fpool.push((at, fb(lo)));
+            } else {
+                self.a.vex_rr(0, 1, false, 0x57, XS, XS, XS); // vxorps XS, XS, XS
+                self.a.vex_rr(pp, 1, false, 0x5f, XS2, xs, XS); // vmaxss XS2, x, XS
+            }
+            let at = self.a.vex_rip(pp, 1, false, 0x5d, XS2, XS2); // vminss XS2, XS2, [rip + hi]
+            self.fpool.push((at, fb(hi)));
+            self.a.sse_rr(pfx, 0x2c, rd, XS2, true);
+            return;
+        }
+        self.a.movf_rr(from64, XS2, xs);
+        if it.signed {
+            // cmpordss / cmpordsd XS, XS (all ones unless NaN); andps XS2, XS
+            self.a.movf_rr(from64, XS, xs);
+            self.a.sse_rr(pfx, 0xc2, XS, XS, false);
+            self.a.byte(7);
+            self.a.sse_rr(0, 0x54, XS2, XS, false);
+            self.sse_pool(pfx, 0x5f, XS2, fb(lo)); // maxss / maxsd XS2, [rip + lo]
+        } else {
+            self.a.sse_rr(0, 0x57, XS, XS, false); // xorps XS, XS
+            self.a.sse_rr(pfx, 0x5f, XS2, XS, false); // maxss / maxsd XS2, XS
+        }
+        self.sse_pool(pfx, 0x5d, XS2, fb(hi)); // minss / minsd XS2, [rip + hi]
+        self.a.sse_rr(pfx, 0x2c, rd, XS2, true); // cvttss2si / cvttsd2si rd64, XS2
+    }
+
+    /// `op xd, [rip + c]` (legacy SSE, scalar: reads the pool entry's low 4 / 8 bytes)
+    fn sse_pool(&mut self, pfx: u8, op: u8, xd: u8, bits: u64) {
+        self.a.byte(pfx);
+        self.a.rex(false, xd, 0, 0, false);
+        self.a.byte(0x0f);
+        self.a.byte(op);
+        self.a.byte(((xd & 7) << 3) | 5);
+        let at = self.a.pos();
+        self.a.u32(0);
+        self.fpool.push((at, bits));
     }
 
     /// Saturating f64 (in XS2) -> int in rax, Rust `as` semantics.

@@ -5097,6 +5097,10 @@ impl<'a> Fcx<'a> {
                     // as Option<u32>`, `(1, 2) as (u32, u32)` types its literals); when none applies
                     // the cast check reports E0605
                     self.try_coerce(xt, target, Some(*x));
+                } else if matches!((&kx, &kt), (TyKind::Ref(..), TyKind::Ref(_, p, _)) if matches!(self.tcx.tys.kind(self.shallow(*p)), TyKind::Infer(_))) {
+                    // `z as &_`: rustc checks the cast at the end of typeck (check_casts), where
+                    // try_coercion_cast's reborrow coercion decides `_` (`&mut i32 as &_`: i32)
+                    self.deferred_casts.push((*x, xt, target));
                 } else if let (TyKind::Ref(m1, a, _), TyKind::Ref(m2, bt, _)) = (&kx, &kt) {
                     // a cast is first a coercion when one applies (rustc cast.rs
                     // try_coercion_cast): `&s as &str` is a deref coercion of &String

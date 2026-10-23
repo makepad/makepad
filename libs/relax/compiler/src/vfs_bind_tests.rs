@@ -40,6 +40,10 @@ fn a_forgotten_preload_leaves_no_read_binding_behind() {
         std::mem::forget(prog);
         crate::zone_alloc::compiler_generation()
     };
+    // the swap's drained state: the front's fork/join workers (the demand plan's sections) end
+    // before the old generation is destroyed (zone_swap.rs `unexpected_threads`)
+    crate::pool::retire_idle();
+    assert_eq!(crate::pool::stats().1, 0, "every pool worker ended");
     crate::zone_alloc::compiler_begin_generation();
     let (chunks, _) = crate::zone_alloc::compiler_destroy_generation(old);
     assert!(chunks > 0, "the forgotten state was in the destroyed generation");

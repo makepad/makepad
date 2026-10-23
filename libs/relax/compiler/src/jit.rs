@@ -6327,11 +6327,6 @@ impl Unit {
     }
 
     /// Encodes up to `count` deferred cache records, in install order (owner thread). True: more are left.
-    /// Deferred cache records not encoded yet.
-    fn pending_cache_left(&self) -> usize {
-        self.pending_cache_records.len() - self.pending_cache_cursor
-    }
-
     fn record_cache_batch(&mut self, count: usize) -> bool {
         if self.pending_cache_records.is_empty() { return false; }
         let Some(mut cache) = self.cache.take() else { return false };
@@ -6342,6 +6337,7 @@ impl Unit {
             cache.record_pending(self, &record);
         }
         self.cache = Some(cache);
+        PENDING_RECORDS.store(self.pending_cache_records.len() - self.pending_cache_cursor, Ordering::Relaxed);
         if self.pending_cache_cursor == self.pending_cache_records.len() {
             self.pending_cache_records = Vec::new();
             self.pending_cache_cursor = 0;
@@ -6352,24 +6348,31 @@ impl Unit {
     }
 }
 
-/// A background drain of the deferred cache records is queued (one at a time)
-static RECORD_DRAIN: AtomicBool = AtomicBool::new(false);
+/// Deferred cache records not encoded yet (written on the owner; read by the run monitor, which
+/// drains them: `records_due`)
+static PENDING_RECORDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// After the first present: the deferred cache records are encoded in batches of
-/// POST_PRESENT_BATCH, each its own publish (a program thread's request is served between two),
-/// while a full batch is left.
-fn drain_cache_records() {
-    if RECORD_DRAIN.swap(true, Ordering::AcqRel) {
-        return;
+/// After the first present: a full batch of deferred cache records waits. The run monitor then
+/// drains them (`drain_records_bounded`); an install never posts a drain itself: a drain posted at
+/// a lazy compile's install ran just before that thread's next request and delayed it (Stage cold:
+/// the UI queued behind 736 of 1279 drains)
+pub(crate) fn records_due() -> bool {
+    FIRST_PRESENT.load(Ordering::Acquire) && PENDING_RECORDS.load(Ordering::Relaxed) >= RECORD_BATCH
+}
+
+/// Encodes every deferred cache record in publishes of RECORD_BATCH, from a thread that is not
+/// the owner (the startup release, the run monitor, the cache writer, the settle): what a program
+/// thread waits for is one batch, never the whole backlog (OWNERARCH.DESIGN.md §6.1, step 4).
+pub(crate) fn drain_records_bounded() {
+    debug_assert!(!owner::is_owner());
+    loop {
+        let _job = compile_job();
+        let more = owner::publish(|| {
+            let up = SPEC_UNIT.load(Ordering::Acquire);
+            !SPEC_STOP.load(Ordering::SeqCst) && !up.is_null() && unsafe { (&mut *up).record_cache_batch(RECORD_BATCH) }
+        });
+        if !more { break; }
     }
-    owner::post_publish(|| {
-        let up = SPEC_UNIT.load(Ordering::Acquire);
-        let more = !SPEC_STOP.load(Ordering::SeqCst) && !up.is_null() && unsafe { (&mut *up).record_cache_batch(POST_PRESENT_BATCH) && (&*up).pending_cache_left() >= POST_PRESENT_BATCH };
-        RECORD_DRAIN.store(false, Ordering::Release);
-        if more {
-            drain_cache_records();
-        }
-    });
 }
 
 /// Installs a slot's compiled code (on the owner thread): perf map, O3 counter, and the
@@ -6422,13 +6425,7 @@ unsafe fn install_compiled(up: *mut Unit, id: u32, code: &[u8], map: Vec<(u32, u
                     u.cache = Some(c);
                     if let Some(p) = deferred {
                         u.pending_cache_records.push(Some(p));
-                        // a drain per full batch: one per install made a publish of 1-3 records per
-                        // lazy compile (Stage cold: 28k publishes, the UI queued behind 12.7k of
-                        // them); a last partial batch goes with the next cache write (mid-run or
-                        // exit: flush_cache_records)
-                        if FIRST_PRESENT.load(Ordering::Acquire) && u.pending_cache_left() >= POST_PRESENT_BATCH {
-                            drain_cache_records();
-                        }
+                        PENDING_RECORDS.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
@@ -14413,11 +14410,10 @@ extern "C" fn relax_first_present() {
     }
 }
 
-/// Records encoded per owner request of the work that follows the first
-/// present: a request is not interrupted, so the main thread's next lazy compile waits for the batch
-/// that is running (256 records took 50-100 ms: a hitch in the first frames); the batches are small
-/// and the owner serves the program's requests between them.
-const POST_PRESENT_BATCH: usize = 24;
+/// Deferred cache records encoded per publish (rule I-PUB: bounded by an item count). A publish is
+/// not interrupted, so a program thread's next request waits for the batch that is running
+/// (~10 us per record on Stage); the owner serves the program's requests between two batches.
+const RECORD_BATCH: usize = 8;
 
 /// Releases speculation, O1 inline candidates and O3 at the first present, never on wall
 /// time (Stage needs 40-58 s from main to present; a clock released speculation in the middle
@@ -14456,17 +14452,9 @@ pub fn startup_main(runtime: &crate::options::RuntimeOptions) {
         STARTUP_PHASE.store(2, Ordering::Release);
         SPEC_WAKE.notify_all();
         set_worker();
-        // the cache entries of the installs made before the present, in batches that give way
-        // to the program's own requests (Background); nothing of the unit is kept in between
-        loop {
-            let _job = compile_job();
-            let more = owner::publish(|| {
-                let up = SPEC_UNIT.load(Ordering::Acquire);
-                !SPEC_STOP.load(Ordering::SeqCst) && !up.is_null() && unsafe { (&mut *up).record_cache_batch(POST_PRESENT_BATCH) }
-            });
-            if !more { break; }
-            std::thread::yield_now();
-        }
+        // the cache entries of the installs made before the present; nothing of the unit is kept
+        // in between
+        drain_records_bounded();
         let roots = std::mem::take(&mut *STARTUP_ROOTS.lock().unwrap());
         let cached = std::mem::take(&mut *STARTUP_CACHED.lock().unwrap());
         for (unit, id, depth) in roots {

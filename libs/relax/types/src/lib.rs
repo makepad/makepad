@@ -65,6 +65,7 @@ pub mod lint_tail_drop;
 pub mod lint_recursion;
 pub mod lint_nonlocal;
 pub mod item_checks;
+pub mod proc_macro_harness;
 pub mod feature_gate;
 pub mod transmute;
 pub mod wfcheck;
