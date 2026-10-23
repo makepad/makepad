@@ -855,9 +855,9 @@ impl Env {
             Some(atmo) => match &self.weather {
                 // Below the horizon the ground lit by this map's own sky (D7): a
                 // deck the Clouds or the volume close lights it with no weather too.
-                None => weather::relit_ground(d, self.sky_layers(d, atmo, without, at.cache, !at.bare), self.ground_gain),
+                None => weather::relit_ground(d, self.sky_layers(d, atmo, without, at), self.ground_gain),
                 Some(weather) => {
-                    let dry = |v: Vec3f| self.sky_layers(v, atmo, without, at.cache, !at.bare);
+                    let dry = |v: Vec3f| self.sky_layers(v, atmo, without, at);
                     // Below the horizon: the ground lit by this map's own sky (D7),
                     // and the wet ground's mirror of the sky above it.
                     // The mirror shows the sky as the weather shows it: through the
@@ -869,7 +869,7 @@ impl Env {
                     // The strip's own light in the mirror and its coverage, where it has a distance (`over_city`).
                     let city = Cell::new(None);
                     let seen = |v: Vec3f| {
-                        let sky = weather.veil(v, self.sky_layers(v, atmo, None, at.cache, !at.bare), self.weather_sun, self.dome)
+                        let sky = weather.veil(v, self.sky_layers(v, atmo, None, at), self.weather_sun, self.dome)
                             + weather.lightning(v, at.texel);
                         // The skyline stands over the sky it mirrors: a puddle shows the city where it stands above the
                         // horizon, veiled as the map veils it there (plan hdri-6 §5).
@@ -929,16 +929,12 @@ impl Env {
     /// night ground and the volume's bases have the weathered ground colour.
     /// `without` leaves the key's disc out (plan 2's N3: no sun disc under
     /// `KeyTerm::Sun`, the moon's key share off under `KeyTerm::Moon`).
-    /// `points` false leaves out the discs and the stars as well, which a mean
-    /// over a few hundred directions cannot sample (`dome_light`).
-    fn sky_layers(
-        &self,
-        d: Vec3f,
-        atmo: &atmosphere::Atmosphere,
-        without: Option<KeyTerm>,
-        cache: Option<&volumetric::CloudCache>,
-        points: bool,
-    ) -> Vec3f {
+    /// `at` is what the lookup samples with: `points` is `!at.bare` (no discs,
+    /// no stars: a mean over a few hundred directions cannot sample them,
+    /// `dome_light`), the cloud march is `at.cache`, and the night's layers
+    /// band-limit to `at.texel` (plan hdri-7 D10).
+    fn sky_layers(&self, d: Vec3f, atmo: &atmosphere::Atmosphere, without: Option<KeyTerm>, at: Sampling) -> Vec3f {
+        let points = !at.bare;
         // The ground under the sky, as the weather leaves it (snow is white).
         let g = self
             .weather
@@ -982,7 +978,7 @@ impl Env {
         c += discs;
         if let Some(volume) = &self.volumetric {
             if d.y > 0.0 {
-                let m = match cache {
+                let m = match at.cache {
                     Some(cache) => cache.sample(volume, d),
                     None => volume.march(d),
                 };
@@ -1026,7 +1022,7 @@ impl Env {
             for i in 0..COLUMNS {
                 let azimuth = (i as f32 + turn) * 360.0 / COLUMNS as f32;
                 let d = dir_from_az_el(azimuth, elevation);
-                let drawn = self.sky_layers(d, atmo, None, None, false);
+                let drawn = self.sky_layers(d, atmo, None, Sampling { bare: true, ..Sampling::default() });
                 // What sky_layers draws with no clouds, and without the points.
                 let open = atmo.sky(d) + self.night.as_ref().map_or(Vec3f::default(), |night| night.glow(d));
                 dome.mean += drawn;
@@ -2636,5 +2632,89 @@ mod tests {
         assert!(Env::new_cancellable(&sun_under_leaves(1.0, 10.0, 10.0), &images, &|| true).is_none(), "cancelled in the pre-pass");
         assert!(Env::new_cancellable(&sun_under_leaves(1.0, 10.0, 10.0), &images, &|| false).is_some());
         assert!(Env::new_cancellable(&sun_under_leaves(0.0, 10.0, 10.0), &images, &|| true).is_some(), "no bloom: nothing slow to stop");
+    }
+
+    // ---- plan hdri-7: the night's bit-identity across commits ------------------------------------------------------
+
+    /// Where the pre-plan-7 night baselines live (`local/` is not committed; a machine without them skips).
+    fn night_baseline_dir() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../local/agent_state/hdri/night-baseline")
+    }
+
+    /// The maps the night baselines hold: the three night presets, the moonlit night under rain with clouds 0.5, and a
+    /// studio whose one window is filled with the moonlit night's sky.
+    fn night_baseline_cases() -> Vec<(&'static str, HdriParams)> {
+        use super::presets::preset;
+        let moonlit = preset("Moonlit night").unwrap();
+        let mut rain = moonlit.clone();
+        rain.sky.weather = Some(WeatherParams { kind: "rain".to_string(), ..WeatherParams::default() });
+        rain.sky.clouds.coverage = 0.5;
+        let window = LightParams { gobo: Some(GoboParams { panes_x: 1, panes_y: 1, frame: 0.0, fill_sky: true, ..GoboParams::default() }), ..LightParams::default() };
+        let studio = HdriParams { mode: "studio".to_string(), lights: vec![window], ..moonlit.clone() };
+        vec![("moonlit", moonlit), ("starry", preset("Starry night").unwrap()), ("blue_hour", preset("Blue hour").unwrap()), ("moonlit_rain", rain), ("studio_window", studio)]
+    }
+
+    /// Everything of a map the night baselines pin, as f32s: its 128 bake; its key (a flag, then its nine numbers) and
+    /// the keyless copy when there is one; the strip's light (every field the base has); rows 300..308 of its 2048 bake.
+    fn night_dump(p: &HdriParams) -> Vec<f32> {
+        let env = Env::new(p);
+        let mut out: Vec<f32> = Vec::new();
+        let map = env.bake(128);
+        out.extend(map.data.iter().flatten());
+        match env.sun() {
+            Some(k) => {
+                out.push(1.0);
+                out.extend([k.dir.x, k.dir.y, k.dir.z, k.radiance.x, k.radiance.y, k.radiance.z, k.cos_radius, k.facing, k.cos_cover]);
+                if let Some(keyless) = env.bake_keyless_par(&map, |n, f| (0..n).for_each(f)) {
+                    out.extend(keyless.data.iter().flatten());
+                }
+            }
+            None => out.push(0.0),
+        }
+        let l = env.skyline_light();
+        out.extend([l.sun_u, l.sun_el_deg]);
+        out.extend(l.sun_rgb.iter().chain(&l.ambient_rgb));
+        for ring in [&l.ring_low, &l.ring_high, &l.ground_ring, &l.sea_low, &l.sea_high, &l.ground_damp] {
+            out.extend(ring.iter().flatten());
+        }
+        out.push(l.wet);
+        let rows = env.bake_par(2048, |_, f| (300..308).for_each(f));
+        out.extend(rows.data[300 * 2048..308 * 2048].iter().flatten());
+        out
+    }
+
+    /// Writes the night baselines (plan hdri-7 Task 1a, at the base, before any engine change): `HDRI_NIGHT_RECORD=1`.
+    #[test]
+    #[ignore = "records local/agent_state/hdri/night-baseline: HDRI_NIGHT_RECORD=1"]
+    fn record_night_baseline() {
+        if std::env::var_os("HDRI_NIGHT_RECORD").is_none() {
+            return eprintln!("HDRI_NIGHT_RECORD not set, nothing written");
+        }
+        let dir = night_baseline_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, p) in night_baseline_cases() {
+            let bytes: Vec<u8> = night_dump(&p).iter().flat_map(|x| x.to_le_bytes()).collect();
+            std::fs::write(dir.join(format!("{name}.f32")), &bytes).unwrap();
+            println!("night baseline {name}: {} floats", bytes.len() / 4);
+        }
+    }
+
+    /// Plan hdri-7: with no night block every map is the pre-plan-7 base's, bit for bit (the baselines Task 1a recorded;
+    /// skipped where they are missing).
+    #[test]
+    fn night_bakes_match_the_pre_plan7_baseline() {
+        let dir = night_baseline_dir();
+        for (name, p) in night_baseline_cases() {
+            let Ok(bytes) = std::fs::read(dir.join(format!("{name}.f32"))) else {
+                eprintln!("no night baseline {name}, skipped");
+                continue;
+            };
+            let want: Vec<u32> = bytes.chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect();
+            let got: Vec<u32> = night_dump(&p).iter().map(|x| x.to_bits()).collect();
+            assert_eq!(got.len(), want.len(), "{name}: the dump's length");
+            let first = got.iter().zip(&want).position(|(g, w)| g != w);
+            assert!(first.is_none(), "{name}: float {} differs: {} vs {}", first.unwrap(), f32::from_bits(got[first.unwrap()]), f32::from_bits(want[first.unwrap()]));
+            println!("night baseline {name}: identical");
+        }
     }
 }

@@ -811,3 +811,83 @@ fn a_held_bake_with_the_skyline_costs_little_more_than_without() {
 
 /// `a_held_bake_with_the_skyline_costs_little_more_than_without`'s bound.
 const HELD_SKYLINE_EXTRA_MS: f64 = 1.0;
+
+/// One held bake of `p` at `width` as the app's job pays it (plan hdri-7 §5): Env::new_for_width_par plus bake_par on
+/// the Heavy lane, ms.
+fn held_bake_ms(pool: &TaskPool, p: &HdriParams, width: usize) -> f64 {
+    let rows = |n: usize, f: &(dyn Fn(usize) + Sync)| pool.fan_out(Lane::Heavy, n, f);
+    let images = ImageSet::default();
+    let t = Instant::now();
+    let env = Env::new_for_width_par(p, &images, width, &|| false, &rows).expect("nothing cancels it");
+    std::hint::black_box(env.bake_par(width, |n, f| pool.fan_out(Lane::Heavy, n, f)));
+    t.elapsed().as_secs_f64() * 1000.0
+}
+
+/// The held cost of a night layer (plan hdri-7 §5): `preset_name` at `width` (`held_bake_ms`), without and with
+/// `patch`, alternating, medians of 15 after one untimed round. (base ms, extra ms).
+fn night_layer_extra(pool: &TaskPool, preset_name: &str, width: usize, patch: &dyn Fn(&mut HdriParams)) -> (f64, f64) {
+    let off = preset(preset_name).expect("a built-in preset loads");
+    let mut on = off.clone();
+    patch(&mut on);
+    let (mut base, mut with) = (Vec::new(), Vec::new());
+    for round in 0..16 {
+        let (b, w) = (held_bake_ms(pool, &off, width), held_bake_ms(pool, &on, width));
+        if round > 0 {
+            base.push(b);
+            with.push(w);
+        }
+    }
+    let (base, with) = (median(base), median(with));
+    (base, with - base)
+}
+
+/// The night's layers a held drag pays for (plan hdri-7), each the patch that switches it on over a preset. Tasks 2
+/// to 4 add a row each.
+fn night_layers() -> Vec<(&'static str, fn(&mut HdriParams))> {
+    vec![]
+}
+
+/// What one layer may add to a held 512 bake, and all of them together (plan hdri-7 §5: "about +20 %").
+const HELD_NIGHT_LAYER_SHARE: f64 = 0.2;
+const HELD_NIGHT_ALL_SHARE: f64 = 0.4;
+
+/// Plan hdri-7 Task 1a: the held and released night bakes the layers' budgets are shares of.
+#[test]
+#[ignore = "release timing; see the module comment"]
+fn the_held_night_bakes_are_measured() {
+    with_pool(|pool| {
+        for name in ["Moonlit night", "Starry night"] {
+            for width in [512, 1024] {
+                let (base, same) = night_layer_extra(pool, name, width, &|_| {});
+                println!("hdri_perf: {name} at {width}: {base:6.2} ms (Env build + bake_par); the same settings twice differ by {same:+5.2} ms");
+                assert!(base > 0.0);
+            }
+        }
+    });
+}
+
+/// Plan hdri-7 §5: each night layer adds at most a fifth to a held 512 bake of "Moonlit night" and of "Starry night",
+/// all of them together at most two fifths; the released 1024 cost is printed beside it. (Task 3 adds a held nebula
+/// Size drag after the per-layer rows.)
+#[test]
+#[ignore = "release timing; see the module comment"]
+fn held_night_layers_cost_at_most_a_fifth_more() {
+    let layers = night_layers();
+    with_pool(|pool| {
+        for name in ["Moonlit night", "Starry night"] {
+            for (layer, patch) in &layers {
+                let (base, extra) = night_layer_extra(pool, name, 512, patch);
+                println!("hdri_perf: held 512, {name}, {layer}: {base:6.2} ms {extra:+5.2} ms ({:+.0} %)", 100.0 * extra / base);
+                assert!(extra / base <= HELD_NIGHT_LAYER_SHARE, "{name}: {layer} adds {:.0} % to a held bake", 100.0 * extra / base);
+                let (base, extra) = night_layer_extra(pool, name, 1024, patch);
+                println!("hdri_perf: released 1024, {name}, {layer}: {base:6.2} ms {extra:+5.2} ms");
+            }
+            if layers.len() > 1 {
+                let all = |p: &mut HdriParams| layers.iter().for_each(|(_, patch)| patch(p));
+                let (base, extra) = night_layer_extra(pool, name, 512, &all);
+                println!("hdri_perf: held 512, {name}, all {} layers: {base:6.2} ms {extra:+5.2} ms ({:+.0} %)", layers.len(), 100.0 * extra / base);
+                assert!(extra / base <= HELD_NIGHT_ALL_SHARE, "{name}: the layers together add {:.0} %", 100.0 * extra / base);
+            }
+        }
+    });
+}

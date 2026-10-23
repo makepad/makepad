@@ -1541,7 +1541,7 @@ mod tests {
 #[cfg(test)]
 mod env_tests {
     use super::*;
-    use crate::hdri::{az_el_from_dir, vec, Env, HdriParams, KeyTerm, WEATHER_KIND_NAMES};
+    use crate::hdri::{az_el_from_dir, vec, Env, HdriParams, KeyTerm, Sampling, WEATHER_KIND_NAMES};
 
     fn sky_params(kind: Option<&str>) -> HdriParams {
         let mut p = HdriParams::default();
@@ -1669,7 +1669,7 @@ mod env_tests {
             for j in 0..rows {
                 let elevation = ((j as f32 + 0.5) / rows as f32).asin().to_degrees();
                 for i in 0..columns {
-                    sum += env.sky_layers(dir_from_az_el((i as f32 + 0.25) * 360.0 / columns as f32, elevation), atmo, Some(KeyTerm::Sun), None, true);
+                    sum += env.sky_layers(dir_from_az_el((i as f32 + 0.25) * 360.0 / columns as f32, elevation), atmo, Some(KeyTerm::Sun), Sampling::default());
                 }
             }
             let fine = luminance(sum * (1.0 / (rows * columns) as f32));
@@ -1700,7 +1700,7 @@ mod env_tests {
             for el in [90.0f32, 30.0] {
                 let d = dir_from_az_el(17.0, el);
                 let through = (-weather.rain_depth(d)).exp();
-                let dry = env.sky_layers(d, atmo, None, None, true);
+                let dry = env.sky_layers(d, atmo, None, Sampling::default());
                 let rained = (dry * through + vec3f(haze, haze, haze) * (1.0 - through)) * (1.0 - weather.virga(d));
                 let want = fog.veil(d, rained, env.weather_sun, env.dome) + weather.lightning(d, 0.0);
                 let got = env.radiance(d);
