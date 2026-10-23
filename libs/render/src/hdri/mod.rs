@@ -2759,6 +2759,11 @@ mod tests {
     /// and 2048, and the light a dust takes off them carries that (the Milky Way's: a 10.5 % block), which is the stars'
     /// sampling, not the layer's. Held against released is 512 against 1024 (`held_and_released_agree`); an export
     /// width, 1024 against 2048 (each layer's ignored `*_at_export_widths` test).
+    ///
+    /// The two make the whole layer only if everything that dims the stars goes through `star_transmittance`, so that is
+    /// checked first, at every starlit texel centre of the `width` bake: `deep_sky` with the stars on is `deep_sky` with
+    /// them off plus `stars` times `star_transmittance`. A layer that dims the stars some other way fails there, instead
+    /// of passing with its dimming unmeasured.
     fn widths_agree(base: &HdriParams, set: &dyn Fn(&mut HdriParams), width: usize, block_share: f32, total_share: f32, what: &str) {
         let lum = |t: &[f32; 4]| 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2];
         let starless = |p: &HdriParams| {
@@ -2774,7 +2779,26 @@ mod tests {
             a.data.iter().zip(&b.data).map(|(x, y)| lum(x) - lum(y)).collect::<Vec<f32>>()
         };
         blocks_agree(&added(width), &added(2 * width), width, block_share, total_share, &format!("{what}, its light"));
-        let env = Env::new(&on);
+        let (env, dark_env) = (Env::new(&on), Env::new(&on_dark));
+        if let (Some(lit), Some(dark)) = (env.night.as_ref(), dark_env.night.as_ref()) {
+            let (h, texel) = (width / 2, std::f32::consts::TAU / width as f32);
+            let (mut starlit, mut dimmed) = (0usize, 0usize);
+            for i in 0..width * h {
+                let uv = [((i % width) as f32 + 0.5) / width as f32, ((i / width) as f32 + 0.5) / h as f32];
+                let d = vec(ibl::equirect_uv_to_dir(uv));
+                let stars = lit.stars(d);
+                if stars.max_elem() <= 0.0 {
+                    continue;
+                }
+                let t = lit.star_transmittance(d);
+                let (got, want) = (lit.deep_sky(d, texel), dark.deep_sky(d, texel) + stars * t);
+                assert!((got - want).length() <= 1.0e-5 * got.length().max(want.length()), "{what}: along {d:?} the stars are dimmed outside star_transmittance ({t}): {got:?} against {want:?}");
+                starlit += 1;
+                dimmed += (t < 1.0) as usize;
+            }
+            assert!(starlit > 0, "{what}: the premise: stars at the texel centres");
+            println!("{what}: every dimming of the stars goes through star_transmittance ({dimmed} of {starlit} starlit texels dimmed)");
+        }
         let taken = |w: usize| {
             let take = |d: Vec3f| vec3f(1.0 - env.night.as_ref().map_or(1.0, |n| n.star_transmittance(d)), 0.0, 0.0);
             bake_par_with(w, &take, four_threads).data.iter().map(|t| t[0]).collect::<Vec<f32>>()
@@ -2782,6 +2806,8 @@ mod tests {
         let (held, released) = (taken(width), taken(2 * width));
         if held.iter().chain(&released).any(|t| *t > 0.0) {
             blocks_agree(&held, &released, width, block_share, total_share, &format!("{what}, the stars' light its dust takes"));
+        } else {
+            println!("{what}: it dims no star");
         }
     }
 
