@@ -112,6 +112,22 @@ const STAR_MAG_LIMIT: f32 = 6.5;
 const STAR_HASH_FLOOR: f32 = 1.0e-4;
 /// The sun's apparent magnitude. A magnitude 0 star gives SUN_IRRADIANCE x 10^(0.4 x -26.74).
 const SUN_MAGNITUDE: f32 = -26.74;
+/// Square arcseconds in a steradian: (180 / pi x 3600)^2.
+const ARCSEC2_PER_SR: f32 = 4.254_517e10;
+/// The SQM conversion: a sky of 0 mag/arcsec² shines 10.8e4 cd/m².
+const SQM_CD_M2: f32 = 10.8e4;
+
+/// A surface brightness `mu` (mag/arcsec²) as unadapted engine luminance, on the stars' own anchor (a magnitude-mu
+/// star in every square arcsecond): 17.13 x 10^(-0.4 mu). Plan hdri-7 (the Milky Way, the nebulas).
+pub(super) fn mag_arcsec2_to_radiance(mu: f32) -> f32 {
+    SUN_IRRADIANCE * 10.0f32.powf(0.4 * (SUN_MAGNITUDE - mu)) * ARCSEC2_PER_SR
+}
+
+/// cd/m² per unadapted engine unit, from the SQM conversion on the same anchor: about 6303 (the sun's 20 units of
+/// irradiance are then about 126 klx). Plan hdri-7 (the aurora's lines, `spectrum::line_xyz_per_rayleigh`).
+pub(super) fn cd_m2_per_engine_unit() -> f32 {
+    SQM_CD_M2 / mag_arcsec2_to_radiance(0.0)
+}
 /// A star is two parts, both of a fixed angular size:
 /// - a sharp core, about a pixel at 4K;
 /// - a halo about half a pixel wide at 512x256, which keeps the brighter stars
@@ -929,5 +945,15 @@ mod tests {
         assert!(luminance(turned.radiance(turned_dir)) > 100.0 * beside);
         let map = turned.bake(32);
         assert!(map.data.iter().all(|t| t.iter().all(|v| v.is_finite() && *v >= 0.0)));
+    }
+
+    /// Plan hdri-7 §5 (physical scale): a surface brightness as engine luminance on the stars' own anchor: the default
+    /// glow's zenith is 21.89 mag/arcsec² (G0, 3.0e-8), 2.5 magnitudes are 10x, and one unit is about 6300 cd/m².
+    #[test]
+    fn surface_brightness_is_on_the_stars_anchor() {
+        let g0 = luminance(vec3f(0.02, 0.03, 0.06)) * GLOW_SCALE;
+        assert!((mag_arcsec2_to_radiance(21.89) / g0 - 1.0).abs() < 0.01, "{} vs {g0}", mag_arcsec2_to_radiance(21.89));
+        assert!((mag_arcsec2_to_radiance(20.0) / mag_arcsec2_to_radiance(22.5) - 10.0).abs() < 1.0e-3);
+        assert!((cd_m2_per_engine_unit() / 6303.0 - 1.0).abs() < 0.005, "{}", cd_m2_per_engine_unit());
     }
 }

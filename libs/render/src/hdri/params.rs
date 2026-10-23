@@ -86,6 +86,43 @@ pub const CASTER_BLOOM_THRESHOLD_EV_RANGE: (f32, f32) = (-10.0, 20.0);
 pub const CASTER_BLOOM_STRENGTH_RANGE: (f32, f32) = (0.0, 1.0);
 /// What clamp() keeps of `CasterParams::bloom_length_deg`, in degrees.
 pub const CASTER_BLOOM_LENGTH_RANGE: (f32, f32) = (0.0, 45.0);
+/// What clamp() keeps of `MilkyWayParams::strength` (1: the real sky's band). The inspector's sliders and the
+/// assistant's schema read the night's ranges from here (D17).
+pub const MILKY_WAY_STRENGTH_RANGE: (f32, f32) = (0.0, 4.0);
+/// What clamp() keeps of `MilkyWayParams::tilt_deg`, degrees.
+pub const MILKY_WAY_TILT_RANGE: (f32, f32) = (-90.0, 90.0);
+/// What clamp() keeps of `MilkyWayParams::core` (1 real).
+pub const MILKY_WAY_CORE_RANGE: (f32, f32) = (0.0, 4.0);
+/// What clamp() keeps of `MilkyWayParams::dust` (1 real).
+pub const MILKY_WAY_DUST_RANGE: (f32, f32) = (0.0, 2.0);
+/// What clamp() keeps of `NebulaParams::amount`.
+pub const NEBULA_AMOUNT_RANGE: (f32, f32) = (0.0, 1.0);
+/// What clamp() keeps of `NebulaParams::size` (x).
+pub const NEBULA_SIZE_RANGE: (f32, f32) = (0.25, 4.0);
+/// What clamp() keeps of `NebulaParams::brightness` (x).
+pub const NEBULA_BRIGHTNESS_RANGE: (f32, f32) = (0.0, 10.0);
+/// What clamp() keeps of `NebulaParams::realism`.
+pub const NEBULA_REALISM_RANGE: (f32, f32) = (0.0, 1.0);
+/// What clamp() keeps of `AuroraParams::strength` (the green line's brightest column / 50 kR: IBC I to IV).
+pub const AURORA_STRENGTH_RANGE: (f32, f32) = (0.02, 20.0);
+/// What clamp() keeps of each line of `AuroraParams::mix`.
+pub const AURORA_MIX_RANGE: (f32, f32) = (0.0, 2.0);
+/// What clamp() keeps of `AuroraParams::height_deg`, degrees.
+pub const AURORA_HEIGHT_RANGE: (f32, f32) = (1.0, 75.0);
+/// What clamp() keeps of `AuroraParams::width_deg`, degrees.
+pub const AURORA_WIDTH_RANGE: (f32, f32) = (10.0, 180.0);
+/// What clamp() keeps of `AuroraParams::folds`.
+pub const AURORA_FOLDS_RANGE: (f32, f32) = (0.0, 1.0);
+/// What clamp() keeps of `AuroraParams::rays`.
+pub const AURORA_RAYS_RANGE: (f32, f32) = (0.0, 1.0);
+/// Accepted values of `AuroraParams::color`; the first is the fallback.
+pub const AURORA_COLOR_NAMES: &[&str] = &["classic", "red tops", "storm", "custom"];
+/// The colour presets' line amounts (green 557.7 nm, red 630.0 nm, nitrogen: 427.8 nm plus the first positive
+/// bands), each x 50 kR on the brightest lines of sight at Strength 1: classic, red tops, storm (plan hdri-7 §4, refs
+/// §5.1; Task 4 pins their colours by height). Classic's red and nitrogen are small enough that it is green wherever
+/// it shows at 5 % of its peak (with 0.06 and 0.2 its nitrogen fringe at 103.75 km and its red top at 186 to 189 km
+/// outshone the green).
+pub const AURORA_PRESET_MIX: [[f32; 3]; 3] = [[1.0, 0.04, 0.1], [1.0, 0.5, 0.2], [2.0, 0.4, 2.0]];
 
 /// clamp()'s rule for one number: NaN is `fallback`, anything else
 /// (infinities too) is held into `lo..=hi`.
@@ -140,6 +177,9 @@ clamped_copy!(
     SunDiscParams,
     CloudParams,
     NightParams,
+    MilkyWayParams,
+    NebulaParams,
+    AuroraParams,
     VolumetricParams,
     WeatherParams,
     StudioParams,
@@ -488,6 +528,96 @@ pub struct NightParams {
     pub glow_color: [f32; 3],
     /// 0..=10.
     pub glow_strength: f32,
+    /// Plan hdri-7 §2: the Milky Way. None (presets from before it) or off draws nothing.
+    pub milky_way: Option<MilkyWayParams>,
+    /// Plan hdri-7 §3: the nebulas. None or off draws nothing.
+    pub nebulas: Option<NebulaParams>,
+    /// Plan hdri-7 §4: the aurora. None or off draws nothing.
+    pub aurora: Option<AuroraParams>,
+}
+
+/// Plan hdri-7 §2: the Milky Way's band. None, or Some with `on` false, draws nothing: the map is the base's.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct MilkyWayParams {
+    /// Drawn when true. A block an edit made while off keeps its settings (the inspector's grey rows).
+    pub on: bool,
+    /// The band's brightness, 0..=4: 1 is the real sky's (the core region about 20.3 mag/arcsec², 4.4x the default glow).
+    pub strength: f32,
+    /// Turns the whole night sphere (stars, band, nebulas) about the celestial pole, degrees, wrapped to 0..360: a
+    /// season. 116 puts the galactic centre on the meridian at 22 h (a late-July evening).
+    pub turn_deg: f32,
+    /// Tilts the whole night sphere about the observer's east-west line, degrees, -90..=90 (0: the latitude's own
+    /// sky; positive raises the north).
+    pub tilt_deg: f32,
+    /// The bulge round the galactic centre, 0..=4, 1 real.
+    pub core: f32,
+    /// The dust lanes' optical depth, 0..=2, 1 real (the Great Rift about 1 to 1.5 mag deep).
+    pub dust: f32,
+}
+
+/// Plan hdri-7 §3: glowing gas clouds, mostly along the Milky Way (anywhere when it is off). None or off draws nothing.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct NebulaParams {
+    pub on: bool,
+    /// How many of the seed's twelve candidates show, 0..=1; each fades in over its own twelfth.
+    pub amount: f32,
+    /// Their angular size, 0.25..=4 (x; 1: about 3 to 15 degrees across).
+    pub size: f32,
+    /// x the brightness the chosen Realism gives, 0..=10.
+    pub brightness: f32,
+    /// 0 space-art (astrophotography's colours, filaments, bright cores) .. 1 naked-eye real (faint, nearly grey, soft).
+    pub realism: f32,
+    /// Their layout (placement, shapes, knots), kept across Realism, Amount, Size and Brightness. Not clamped.
+    pub seed: u32,
+}
+
+/// Plan hdri-7 §4: curtains of light 100 to 300 km up, as folded, rayed arcs. None or off draws nothing.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct AuroraParams {
+    pub on: bool,
+    /// The green line's brightest column / 50 kR, 0.02..=20 (IBC I to IV; 1: 50 kR).
+    pub strength: f32,
+    /// The line mix, one of AURORA_COLOR_NAMES. Read through `color()`.
+    pub color: String,
+    /// The custom mix (read when `color` is "custom"): green 557.7, red 630.0, nitrogen (427.8 nm + N2 1PG), each
+    /// x 50 kR at Strength 1, 0..=2.
+    pub mix: [f32; 3],
+    /// Azimuth of the arc's middle, degrees clockwise from north, wrapped to 0..360.
+    pub direction_deg: f32,
+    /// Elevation of the lower border at the arc's middle, degrees, 1..=75.
+    pub height_deg: f32,
+    /// The arc's span round the sky, degrees of azimuth, 10..=180.
+    pub width_deg: f32,
+    /// 0 one calm smooth arc .. 1 deep folds and a second and third arc.
+    pub folds: f32,
+    /// 0 no rays .. 1 strong rays reaching high.
+    pub rays: f32,
+    /// The folds' and rays' layout. Not clamped.
+    pub seed: u32,
+}
+
+/// Typed view of `AuroraParams::color` (never serialised).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuroraColor {
+    Classic,
+    RedTops,
+    Storm,
+    Custom,
+}
+
+impl AuroraColor {
+    /// In AURORA_COLOR_NAMES' order.
+    pub const ALL: [AuroraColor; 4] = [AuroraColor::Classic, AuroraColor::RedTops, AuroraColor::Storm, AuroraColor::Custom];
+
+    /// The string stored in `AuroraParams::color`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuroraColor::Classic => "classic",
+            AuroraColor::RedTops => "red tops",
+            AuroraColor::Storm => "storm",
+            AuroraColor::Custom => "custom",
+        }
+    }
 }
 
 /// The studio base layer: a vertical gradient backdrop.
@@ -1430,6 +1560,38 @@ impl Default for NightParams {
             moon_brightness: 1.0,
             glow_color: [0.02, 0.03, 0.06],
             glow_strength: 1.0,
+            milky_way: None,
+            nebulas: None,
+            aurora: None,
+        }
+    }
+}
+
+impl Default for MilkyWayParams {
+    fn default() -> Self {
+        MilkyWayParams { on: true, strength: 1.0, turn_deg: 116.0, tilt_deg: 0.0, core: 1.0, dust: 1.0 }
+    }
+}
+
+impl Default for NebulaParams {
+    fn default() -> Self {
+        NebulaParams { on: true, amount: 0.5, size: 1.0, brightness: 1.0, realism: 0.0, seed: 7 }
+    }
+}
+
+impl Default for AuroraParams {
+    fn default() -> Self {
+        AuroraParams {
+            on: true,
+            strength: 1.0,
+            color: "classic".to_string(),
+            mix: AURORA_PRESET_MIX[0],
+            direction_deg: 0.0,
+            height_deg: 15.0,
+            width_deg: 100.0,
+            folds: 0.4,
+            rays: 0.5,
+            seed: 7,
         }
     }
 }
@@ -1693,6 +1855,89 @@ impl NightParams {
         f.range(prefix, "moon_brightness", &mut self.moon_brightness, 0.0, 10.0, d.moon_brightness);
         f.color(prefix, "glow_color", &mut self.glow_color, 1.0, d.glow_color);
         f.range(prefix, "glow_strength", &mut self.glow_strength, 0.0, 10.0, d.glow_strength);
+        if let Some(b) = self.milky_way.as_mut() {
+            b.clamp_fields(&join_path(prefix, "milky_way"), f);
+        }
+        if let Some(b) = self.nebulas.as_mut() {
+            b.clamp_fields(&join_path(prefix, "nebulas"), f);
+        }
+        if let Some(b) = self.aurora.as_mut() {
+            b.clamp_fields(&join_path(prefix, "aurora"), f);
+        }
+    }
+
+    /// The Milky Way's block when it draws: Some and on.
+    pub fn milky_way_drawn(&self) -> Option<&MilkyWayParams> {
+        self.milky_way.as_ref().filter(|b| b.on)
+    }
+
+    /// The nebulas' block when it draws: Some and on.
+    pub fn nebulas_drawn(&self) -> Option<&NebulaParams> {
+        self.nebulas.as_ref().filter(|b| b.on)
+    }
+
+    /// The aurora's block when it draws: Some and on.
+    pub fn aurora_drawn(&self) -> Option<&AuroraParams> {
+        self.aurora.as_ref().filter(|b| b.on)
+    }
+}
+
+impl MilkyWayParams {
+    fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
+        let d = MilkyWayParams::default();
+        f.range(prefix, "strength", &mut self.strength, MILKY_WAY_STRENGTH_RANGE.0, MILKY_WAY_STRENGTH_RANGE.1, d.strength);
+        f.wrap360(prefix, "turn_deg", &mut self.turn_deg, d.turn_deg);
+        f.range(prefix, "tilt_deg", &mut self.tilt_deg, MILKY_WAY_TILT_RANGE.0, MILKY_WAY_TILT_RANGE.1, d.tilt_deg);
+        f.range(prefix, "core", &mut self.core, MILKY_WAY_CORE_RANGE.0, MILKY_WAY_CORE_RANGE.1, d.core);
+        f.range(prefix, "dust", &mut self.dust, MILKY_WAY_DUST_RANGE.0, MILKY_WAY_DUST_RANGE.1, d.dust);
+    }
+}
+
+impl NebulaParams {
+    fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
+        let d = NebulaParams::default();
+        f.range(prefix, "amount", &mut self.amount, NEBULA_AMOUNT_RANGE.0, NEBULA_AMOUNT_RANGE.1, d.amount);
+        f.range(prefix, "size", &mut self.size, NEBULA_SIZE_RANGE.0, NEBULA_SIZE_RANGE.1, d.size);
+        f.range(prefix, "brightness", &mut self.brightness, NEBULA_BRIGHTNESS_RANGE.0, NEBULA_BRIGHTNESS_RANGE.1, d.brightness);
+        f.range(prefix, "realism", &mut self.realism, NEBULA_REALISM_RANGE.0, NEBULA_REALISM_RANGE.1, d.realism);
+    }
+}
+
+impl AuroraParams {
+    /// `color` as clamp() holds it (`is_choice`: case and space forgiving); anything else is Classic.
+    pub fn color(&self) -> AuroraColor {
+        if is_choice(&self.color, "red tops") {
+            AuroraColor::RedTops
+        } else if is_choice(&self.color, "storm") {
+            AuroraColor::Storm
+        } else if is_choice(&self.color, "custom") {
+            AuroraColor::Custom
+        } else {
+            AuroraColor::Classic
+        }
+    }
+
+    /// The line amounts the layer draws (green, red, nitrogen): the preset's, or `mix` for Custom.
+    pub fn line_mix(&self) -> [f32; 3] {
+        match self.color() {
+            AuroraColor::Classic => AURORA_PRESET_MIX[0],
+            AuroraColor::RedTops => AURORA_PRESET_MIX[1],
+            AuroraColor::Storm => AURORA_PRESET_MIX[2],
+            AuroraColor::Custom => self.mix,
+        }
+    }
+
+    fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
+        let d = AuroraParams::default();
+        f.range(prefix, "strength", &mut self.strength, AURORA_STRENGTH_RANGE.0, AURORA_STRENGTH_RANGE.1, d.strength);
+        f.choice(prefix, "color", &mut self.color, AURORA_COLOR_NAMES);
+        // `color` holds each channel to 0..=hi and reports the field once; the lines' floor is 0 as AURORA_MIX_RANGE says.
+        f.color(prefix, "mix", &mut self.mix, AURORA_MIX_RANGE.1, d.mix);
+        f.wrap360(prefix, "direction_deg", &mut self.direction_deg, d.direction_deg);
+        f.range(prefix, "height_deg", &mut self.height_deg, AURORA_HEIGHT_RANGE.0, AURORA_HEIGHT_RANGE.1, d.height_deg);
+        f.range(prefix, "width_deg", &mut self.width_deg, AURORA_WIDTH_RANGE.0, AURORA_WIDTH_RANGE.1, d.width_deg);
+        f.range(prefix, "folds", &mut self.folds, AURORA_FOLDS_RANGE.0, AURORA_FOLDS_RANGE.1, d.folds);
+        f.range(prefix, "rays", &mut self.rays, AURORA_RAYS_RANGE.0, AURORA_RAYS_RANGE.1, d.rays);
     }
 }
 
@@ -2027,6 +2272,9 @@ fn template_for(schema: &str) -> Option<JsonValue> {
         "base_image" => json_tree(&BaseImageParams::default()).ok(),
         "sky.volumetric" => json_tree(&VolumetricParams::default()).ok(),
         "sky.weather" => json_tree(&WeatherParams::default()).ok(),
+        "sky.night.milky_way" => json_tree(&MilkyWayParams::default()).ok(),
+        "sky.night.nebulas" => json_tree(&NebulaParams::default()).ok(),
+        "sky.night.aurora" => json_tree(&AuroraParams::default()).ok(),
         _ => None,
     }
 }
@@ -2042,6 +2290,7 @@ fn integer_range(schema: &str) -> Option<(f64, f64)> {
         "lights[].imperfections.seed" => Some((0.0, u32::MAX as f64)),
         "sky.volumetric.steps" => Some((0.0, u32::MAX as f64)),
         "sky.weather.seed" => Some((0.0, u32::MAX as f64)),
+        "sky.night.nebulas.seed" | "sky.night.aurora.seed" => Some((0.0, u32::MAX as f64)),
         _ => None,
     }
 }
@@ -2055,6 +2304,7 @@ fn fixed_length(schema: &str) -> Option<usize> {
         "sky.atmosphere.ground_color" | "sky.night.glow_color" | "studio.top" | "studio.horizon" | "studio.floor" => Some(3),
         "lights[].rgb" | "lights[].stroke.end_rgb" | "lights[].caster.tint" => Some(3),
         "lights[].aim.barn_doors" => Some(4),
+        "sky.night.aurora.mix" => Some(3),
         "lights[].polygon.points[]" | "lights[].stroke.points[]" => Some(2),
         _ => None,
     }
@@ -2695,6 +2945,7 @@ mod tests {
     #[test]
     fn a_list_of_the_wrong_length_is_refused_naming_its_field() {
         let mut full = HdriParams::default();
+        full.sky.night.aurora = Some(AuroraParams::default());
         full.lights.push(LightParams {
             rgb: Some([0.5, 0.4, 0.3]),
             polygon: Some(PolygonParams { points: vec![[0.0, 1.0], [-1.0, -1.0], [1.0, -1.0]], ..Default::default() }),
@@ -3456,6 +3707,11 @@ mod layer_param_tests {
             // loads without one, and one saved now writes no such key.
             assert!(p.skyline.is_none() && loaded.skyline.is_none(), "{name}");
             assert!(!old.contains("\"skyline\"") && !p.to_json().contains("\"skyline\""), "{name}");
+            // Plan hdri-7: the night's blocks are Options after every older field: none loads, none is written.
+            assert!(p.sky.night.milky_way.is_none() && p.sky.night.nebulas.is_none() && p.sky.night.aurora.is_none(), "{name}");
+            for key in ["\"milky_way\"", "\"nebulas\"", "\"aurora\""] {
+                assert!(!old.contains(key) && !p.to_json().contains(key), "{name}: {key}");
+            }
         }
         // A skyline block round-trips, its settings included.
         let mut p = every_older_block();
@@ -3772,6 +4028,163 @@ mod weather_param_tests {
         assert_eq!(report, ["sky.weather.seed"]);
         let (off, _) = seeded.merge_json(r#"{"sky": {"weather": null}}"#).unwrap();
         assert_eq!(off.sky.weather, None);
+    }
+}
+
+#[cfg(test)]
+mod night_param_tests {
+    use super::*;
+
+    /// Plan hdri-7 §1: the three blocks are Options after every older field; a block's defaults sit inside its
+    /// ranges, clamp() holds every field and reports it once (a seed is not clamped), and the blocks round-trip.
+    #[test]
+    fn the_night_blocks_clamp_and_round_trip() {
+        let mut p = HdriParams::default();
+        assert!(p.sky.night.milky_way.is_none() && p.sky.night.nebulas.is_none() && p.sky.night.aurora.is_none());
+        p.sky.night.milky_way = Some(MilkyWayParams::default());
+        p.sky.night.nebulas = Some(NebulaParams::default());
+        p.sky.night.aurora = Some(AuroraParams::default());
+        assert!(p.clamp().is_empty(), "the defaults are inside their own ranges");
+        assert_eq!(HdriParams::from_json(&p.to_json()), Ok(p.clone()));
+        p.sky.night.milky_way = Some(MilkyWayParams { on: true, strength: f32::INFINITY, turn_deg: 370.0, tilt_deg: f32::NAN, core: -1.0, dust: 3.0 });
+        p.sky.night.nebulas = Some(NebulaParams { on: true, amount: 2.0, size: 0.0, brightness: f32::NEG_INFINITY, realism: f32::NAN, seed: u32::MAX });
+        p.sky.night.aurora = Some(AuroraParams {
+            on: true,
+            strength: 0.0,
+            color: " Red Tops ".to_string(),
+            mix: [f32::NAN, 3.0, -1.0],
+            direction_deg: -90.0,
+            height_deg: 90.0,
+            width_deg: 5.0,
+            folds: 2.0,
+            rays: f32::NAN,
+            seed: 0,
+        });
+        let changed = p.clamp();
+        assert_eq!(
+            changed,
+            [
+                "sky.night.milky_way.strength", "sky.night.milky_way.turn_deg", "sky.night.milky_way.tilt_deg", "sky.night.milky_way.core",
+                "sky.night.milky_way.dust", "sky.night.nebulas.amount", "sky.night.nebulas.size", "sky.night.nebulas.brightness",
+                "sky.night.nebulas.realism", "sky.night.aurora.strength", "sky.night.aurora.color", "sky.night.aurora.mix",
+                "sky.night.aurora.direction_deg", "sky.night.aurora.height_deg", "sky.night.aurora.width_deg", "sky.night.aurora.folds",
+                "sky.night.aurora.rays",
+            ]
+        );
+        let mw = p.sky.night.milky_way.clone().unwrap();
+        assert_eq!((mw.strength, mw.turn_deg, mw.tilt_deg, mw.core, mw.dust), (4.0, 10.0, 0.0, 0.0, 2.0));
+        let neb = p.sky.night.nebulas.clone().unwrap();
+        assert_eq!((neb.amount, neb.size, neb.brightness, neb.realism, neb.seed), (1.0, 0.25, 0.0, 0.0, u32::MAX));
+        let aur = p.sky.night.aurora.clone().unwrap();
+        assert_eq!(
+            (aur.strength, aur.color.as_str(), aur.mix, aur.direction_deg, aur.height_deg, aur.width_deg, aur.folds, aur.rays),
+            (0.02, "red tops", [AURORA_PRESET_MIX[0][0], 2.0, 0.0], 270.0, 75.0, 10.0, 1.0, 0.5)
+        );
+        assert!(p.clamp().is_empty(), "clamping twice changes nothing");
+        assert_eq!(HdriParams::from_json(&p.to_json()), Ok(p.clone()));
+    }
+
+    /// Every range the inspector and the assistant state is what clamp() keeps (D17); the two azimuths wrap.
+    #[test]
+    fn the_night_ranges_are_what_clamp_keeps() {
+        fn full() -> HdriParams {
+            let mut p = HdriParams::default();
+            p.sky.night.milky_way = Some(MilkyWayParams::default());
+            p.sky.night.nebulas = Some(NebulaParams::default());
+            p.sky.night.aurora = Some(AuroraParams::default());
+            p
+        }
+        type At = fn(&mut HdriParams) -> &mut f32;
+        let fields: [(&str, (f32, f32), At); 15] = [
+            ("milky_way.strength", MILKY_WAY_STRENGTH_RANGE, |p| &mut p.sky.night.milky_way.as_mut().unwrap().strength),
+            ("milky_way.tilt_deg", MILKY_WAY_TILT_RANGE, |p| &mut p.sky.night.milky_way.as_mut().unwrap().tilt_deg),
+            ("milky_way.core", MILKY_WAY_CORE_RANGE, |p| &mut p.sky.night.milky_way.as_mut().unwrap().core),
+            ("milky_way.dust", MILKY_WAY_DUST_RANGE, |p| &mut p.sky.night.milky_way.as_mut().unwrap().dust),
+            ("nebulas.amount", NEBULA_AMOUNT_RANGE, |p| &mut p.sky.night.nebulas.as_mut().unwrap().amount),
+            ("nebulas.size", NEBULA_SIZE_RANGE, |p| &mut p.sky.night.nebulas.as_mut().unwrap().size),
+            ("nebulas.brightness", NEBULA_BRIGHTNESS_RANGE, |p| &mut p.sky.night.nebulas.as_mut().unwrap().brightness),
+            ("nebulas.realism", NEBULA_REALISM_RANGE, |p| &mut p.sky.night.nebulas.as_mut().unwrap().realism),
+            ("aurora.strength", AURORA_STRENGTH_RANGE, |p| &mut p.sky.night.aurora.as_mut().unwrap().strength),
+            ("aurora.mix[0]", AURORA_MIX_RANGE, |p| &mut p.sky.night.aurora.as_mut().unwrap().mix[0]),
+            ("aurora.mix[2]", AURORA_MIX_RANGE, |p| &mut p.sky.night.aurora.as_mut().unwrap().mix[2]),
+            ("aurora.height_deg", AURORA_HEIGHT_RANGE, |p| &mut p.sky.night.aurora.as_mut().unwrap().height_deg),
+            ("aurora.width_deg", AURORA_WIDTH_RANGE, |p| &mut p.sky.night.aurora.as_mut().unwrap().width_deg),
+            ("aurora.folds", AURORA_FOLDS_RANGE, |p| &mut p.sky.night.aurora.as_mut().unwrap().folds),
+            ("aurora.rays", AURORA_RAYS_RANGE, |p| &mut p.sky.night.aurora.as_mut().unwrap().rays),
+        ];
+        for (name, (lo, hi), at) in fields {
+            for (given, want) in [(-1.0e9f32, lo), (1.0e9, hi)] {
+                let mut p = full();
+                *at(&mut p) = given;
+                p.clamp();
+                assert_eq!(*at(&mut p), want, "{name}: {given}");
+            }
+        }
+        let mut p = full();
+        p.sky.night.milky_way.as_mut().unwrap().turn_deg = 360.0;
+        p.sky.night.aurora.as_mut().unwrap().direction_deg = -10.0;
+        p.clamp();
+        assert_eq!((p.sky.night.milky_way.unwrap().turn_deg, p.sky.night.aurora.unwrap().direction_deg), (0.0, 350.0));
+    }
+
+    /// A partial patch on an absent block (the assistant's set_settings) is completed from the block's defaults, a
+    /// fractional seed is rounded, a mix of another length is refused naming it, and null clears the block.
+    #[test]
+    fn a_partial_night_patch_is_completed_and_rounds_its_seed() {
+        let (merged, report) = HdriParams::default().merge_json(r#"{"sky": {"night": {"aurora": {"strength": 0.5, "seed": 3.6}}}}"#).unwrap();
+        assert_eq!(merged.sky.night.aurora, Some(AuroraParams { strength: 0.5, seed: 4, ..AuroraParams::default() }));
+        assert_eq!(report, ["sky.night.aurora.seed"], "3.6 was rounded to a whole seed");
+        let (merged, _) = merged.merge_json(r#"{"sky": {"night": {"nebulas": {"realism": 1}, "milky_way": {"dust": 0.5}}}}"#).unwrap();
+        assert_eq!(merged.sky.night.nebulas, Some(NebulaParams { realism: 1.0, ..NebulaParams::default() }));
+        assert_eq!(merged.sky.night.milky_way, Some(MilkyWayParams { dust: 0.5, ..MilkyWayParams::default() }));
+        let err = merged.merge_json(r#"{"sky": {"night": {"aurora": {"mix": [1, 2]}}}}"#).unwrap_err();
+        assert!(err.starts_with("sky.night.aurora.mix must be a list of 3 numbers"), "{err}");
+        let (cleared, _) = merged.merge_json(r#"{"sky": {"night": {"aurora": null}}}"#).unwrap();
+        assert_eq!(cleared.sky.night.aurora, None);
+    }
+
+    /// The aurora's colour is a choice string with a typed accessor: every name round-trips, loose spellings read,
+    /// anything else is the first; the line mix is the preset's or the custom one.
+    #[test]
+    fn every_aurora_colour_round_trips_through_its_accessor() {
+        assert_eq!(AURORA_COLOR_NAMES, &["classic", "red tops", "storm", "custom"]);
+        for (i, name) in AURORA_COLOR_NAMES.iter().enumerate() {
+            let mut p = HdriParams::default();
+            p.sky.night.aurora = Some(AuroraParams { color: name.to_string(), ..AuroraParams::default() });
+            assert!(p.clamp().is_empty(), "{name}");
+            let a = p.sky.night.aurora.unwrap();
+            assert_eq!((a.color(), a.color().as_str()), (AuroraColor::ALL[i], *name));
+        }
+        assert_eq!(AuroraParams { color: " STORM ".to_string(), ..AuroraParams::default() }.color(), AuroraColor::Storm);
+        assert_eq!(AuroraParams { color: "pink".to_string(), ..AuroraParams::default() }.color(), AuroraColor::Classic);
+        // Every variant has its name listed: the match stops compiling when a variant is added.
+        for c in AuroraColor::ALL {
+            match c {
+                AuroraColor::Classic | AuroraColor::RedTops | AuroraColor::Storm | AuroraColor::Custom => assert!(AURORA_COLOR_NAMES.contains(&c.as_str())),
+            }
+        }
+        let custom = AuroraParams { color: "custom".to_string(), mix: [0.3, 0.4, 0.5], ..AuroraParams::default() };
+        assert_eq!(custom.line_mix(), [0.3, 0.4, 0.5]);
+        assert_eq!(AuroraParams { mix: [0.3, 0.4, 0.5], ..AuroraParams::default() }.line_mix(), AURORA_PRESET_MIX[0], "classic ignores the mix");
+        assert_eq!(AuroraParams { color: "red tops".into(), ..AuroraParams::default() }.line_mix(), AURORA_PRESET_MIX[1]);
+        assert_eq!(AuroraParams { color: "storm".into(), ..AuroraParams::default() }.line_mix(), AURORA_PRESET_MIX[2]);
+        assert_eq!(AuroraParams::default().mix, AURORA_PRESET_MIX[0]);
+    }
+
+    /// A block draws when it is there and on; a block that exists draws by default (a template, `full()`).
+    #[test]
+    fn a_night_block_draws_when_it_is_there_and_on() {
+        let mut n = NightParams::default();
+        assert!(n.milky_way_drawn().is_none() && n.nebulas_drawn().is_none() && n.aurora_drawn().is_none());
+        n.milky_way = Some(MilkyWayParams { on: false, ..MilkyWayParams::default() });
+        n.nebulas = Some(NebulaParams { on: false, ..NebulaParams::default() });
+        n.aurora = Some(AuroraParams { on: false, ..AuroraParams::default() });
+        assert!(n.milky_way_drawn().is_none() && n.nebulas_drawn().is_none() && n.aurora_drawn().is_none(), "off draws nothing");
+        n.milky_way.as_mut().unwrap().on = true;
+        n.nebulas.as_mut().unwrap().on = true;
+        n.aurora.as_mut().unwrap().on = true;
+        assert!(n.milky_way_drawn().is_some() && n.nebulas_drawn().is_some() && n.aurora_drawn().is_some());
+        assert!(MilkyWayParams::default().on && NebulaParams::default().on && AuroraParams::default().on);
     }
 }
 
@@ -4121,6 +4534,9 @@ mod reader_tests {
             moon_brightness: f32::NAN,
             glow_color: [f32::NAN, 0.5, -1.0],
             glow_strength: f32::INFINITY,
+            milky_way: None,
+            nebulas: None,
+            aurora: None,
         };
         raw.studio = StudioParams { top: [f32::NAN, 20.0, -1.0], horizon: [0.5, f32::INFINITY, 0.2], floor: [0.1; 3], horizon_softness: f32::NAN };
         let mut clamped = raw.clone();
