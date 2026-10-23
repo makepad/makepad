@@ -113,7 +113,7 @@ fn rehome(u: &Unit, addr: u64, seen: &mut std::collections::HashMap<u64, u64>, f
     // fresh, zeroed block: the warm run read a length of 0). An object whose kind cannot tell
     // is scanned word by word, as before.
     let pw = u.ptr_bytes() as usize;
-    let words: Vec<usize> = match crate::syms::pointer_offsets(u, start) {
+    let words: Vec<usize> = match crate::syms::pointer_offsets(u, start, &bytes) {
         Some(offs) => offs.into_iter().map(|o| o as usize).filter(|&o| o + pw <= bytes.len()).collect(),
         None => (0..bytes.len() / pw).map(|i| i * pw).collect(),
     };
@@ -1166,6 +1166,14 @@ fn end(id: DomainId, st: DomainState) {
     if matches!(state(id), Some(DomainState::Compiling(_) | DomainState::Running)) {
         set_state(id, st);
     }
+}
+
+/// The app domain whose block is `base` (None: the compile domain, or none).
+pub(crate) fn id_of_base(base: u64) -> Option<DomainId> {
+    if base == 0 {
+        return None;
+    }
+    domains().iter().find(|d| d.info.base == base && d.info.id != 0).map(|d| d.info.id)
 }
 
 /// The id of the app domain whose block is the calling thread's (None: the compile domain, or a

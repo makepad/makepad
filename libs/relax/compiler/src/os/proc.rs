@@ -224,7 +224,28 @@ mod imp {
     pub use super::unix::{os_args_bytes, create_private, ensure_private_dir, exit, last_error, lookup, set_last_error};
     use super::unix::{dlopen, dlsym};
 
+    #[cfg(target_env = "gnu")]
+    extern "C" {
+        fn dlvsym(handle: *mut u8, name: *const u8, version: *const u8) -> *mut u8;
+    }
+
     pub unsafe fn find(name: *const u8) -> *mut u8 {
+        // `name@VERSION` (a `#[link_name]` the way an assembler or linker spells a versioned reference):
+        // the symbol of that version
+        #[cfg(target_env = "gnu")]
+        {
+            let s = std::ffi::CStr::from_ptr(name as *const _).to_bytes();
+            if let Some(at) = s.iter().position(|&b| b == b'@') {
+                if s.get(at + 1) != Some(&b'@') {
+                    let (base, ver) = (&s[..at], &s[at + 1..]);
+                    let mut b = base.to_vec();
+                    b.push(0);
+                    let mut v = ver.to_vec();
+                    v.push(0);
+                    return dlvsym(std::ptr::null_mut(), b.as_ptr(), v.as_ptr());
+                }
+            }
+        }
         dlsym(std::ptr::null_mut(), name)
     }
 

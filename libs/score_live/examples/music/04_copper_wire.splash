@@ -1,0 +1,264 @@
+// Copper Wire: acid techno at 132 in A minor with a phrygian B flat.
+//
+// Form (96 bars): intro 16 (punchy analog kick, hats and rims, the acid line dark
+// and closed) · acid 24 (the clap, the sub, congas; the line's filter
+// half open, a new pattern every 8 bars) · build 8 (a snare roll that
+// doubles, a riser, the line brighter, the kick out for the last bar) ·
+// peak 24 (the line wide open, a square-wave second acid line answering
+// it, chord stabs Am7 Fmaj7 Dm9 Em7 in a call-and-response with the line,
+// the ride, a crash every 8) · break 8 (no kick: the line alone in its
+// echo over an Am9 to Bbmaj7 pad) · final 8 (everything) · outro 8 (the
+// line closes again, the drums thin, a last stab).
+// The line: three 16-step patterns of notes, accents and slides (a slide
+// is a note held into the next, which the mono 303-style voice glides),
+// each repeating for 8 bars with one step mutated every other bar.
+use mod.score.*
+
+let clock = Clock{bpm: 132 sig: [4 4] seed: 303 params: {sweep: 1 swell: 0}}
+
+let kit = Drums{kit: @analog_hybrid tune: {kick: -2} gain: {hat: 0.75 ohat: 0.7 ride: 0.6 clap: 1.3 snare: 1.1 conga: 1.1}}
+let acid_dark = Shader{lib: "acid" mono: true cutoff: 260 env_mod: 0.45 res: 0.78 decay: 0.22 drive: 2.2}
+let acid_mid = Shader{lib: "acid" mono: true cutoff: 420 env_mod: 0.6 res: 0.8 decay: 0.26 drive: 2.6}
+let acid_open = Shader{lib: "acid" mono: true cutoff: 700 env_mod: 0.72 res: 0.84 decay: 0.3 drive: 3}
+let acid_sq = Shader{lib: "acid" mono: true square: 1 cutoff: 900 env_mod: 0.5 res: 0.7 decay: 0.2 drive: 1.8 gain: 0.4}
+let stab = Shader{lib: "analog_poly" cutoff: 1400 env_amt: 3500 decay: 0.25 res: 1.6}
+let padsyn = Synth{preset: @warm_pad attack: 2 release: 3}
+let sub = Synth{recipe: "sine freq=440 a=0.003 d=0.2 s=0.7 r=0.06 gain=0.6"}
+let air = Synth{recipe: "noise=white bp=300>9000 glide=7.2 q=1.5 a=7.1 d=0.02 s=0 r=0.02 gain=0.35"}
+let swell = Synth{recipe: "noise=pink bp=2500 q=0.7 a=1.8 d=0.02 s=0 r=0.02 gain=0.4"}
+
+// ---- the line -------------------------------------------------------------------
+
+// Semitones above A1, accents, slides.
+let pats = [
+    [0 0 12 0 0 1 0 13 0 0 12 0 3 0 1 0],
+    [0 12 0 0 7 0 12 1 0 0 12 13 0 3 0 12],
+    [0 0 1 0 12 0 0 3 0 12 0 1 0 0 15 12]
+]
+let accents = [[1 0 0 1 0 0 1 0 0 0 1 0 0 1 0 0], [1 0 1 0 0 1 0 0 1 0 0 1 0 0 1 0], [1 0 0 0 1 0 0 1 0 1 0 0 1 0 0 1]]
+let slides = [[0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0], [0 1 0 0 1 0 0 0 0 1 0 0 0 1 0 0], [0 0 0 1 0 0 1 0 0 0 1 0 0 0 1 0]]
+
+/// Play bar `i` of the line: pattern by the 8-bar block, a mutated step on
+/// odd bars, rests never on accents; `root` transposes.
+let line_bar = fn(i, root) {
+    let p = floor(i / 8) % 3
+    let moved = irand(0, 15)
+    for s in 0..16 {
+        let a = accents[p][s] == 1
+        let sl = slides[p][s] == 1
+        let n = pats[p][s] + if i % 2 == 1 && s == moved && a == false { 12 } else { 0 }
+        if a || sl || one_in(7) == false {
+            play(note(root) + n, {dur: if sl { 0.32 } else { 0.14 } amp: if a { 0.95 } else { 0.6 }})
+        }
+        sleep(0.25)
+    }
+}
+
+let line_dark = Loop{play: acid_dark beats: 4 amp: 0.36 sends: {throw: 0.15} code: fn(i) { line_bar(i, @a1) }}
+let line_mid = Loop{play: acid_mid beats: 4 amp: 0.33 sends: {throw: 0.2} code: fn(i) { line_bar(i, @a1) }}
+let line_open = Loop{play: acid_open beats: 4 amp: 0.3 sends: {throw: 0.2} code: fn(i) { line_bar(i, @a1) }}
+
+/// The second line answers on odd bars: a high square-wave figure that
+/// slides down onto the chord's tone.
+let answer = Loop{play: acid_sq beats: 8 amp: 0.3 pan: 0.25 sends: {throw: 0.3 plate: 0.15}
+    code: fn(i) {
+        let tones = [@e3 @c3 @d3 @b2]
+        let t = note(tones[i % 4])
+        sleep(4.5)
+        play(t + 12, {dur: 0.3 amp: 0.95})
+        sleep(0.25)
+        play(t + 7, {dur: 0.3 amp: 0.6})
+        sleep(0.25)
+        play(t + 12, {dur: 0.14 amp: 0.6})
+        sleep(0.5)
+        play(t + 3, {dur: 0.6 amp: 0.9})
+        sleep(0.75)
+        play(t, {dur: 1.0 amp: 0.6})
+        sleep(8 - beat())
+    }
+}
+
+// ---- harmony --------------------------------------------------------------------
+
+let stab_chords = [[@g3 @c4 @e4 @a4], [@a3 @c4 @e4 @f4], [@a3 @c4 @e4 @f4], [@g3 @b3 @d4 @e4]]
+
+/// The stabs: two per bar, on the and-of-one and the and-of-three, the
+/// chord changing every two bars (Am7 Fmaj7 Dm9 Em7).
+let stabs = Loop{play: stab beats: 8 amp: 0.22 pan: -0.15 sends: {plate: 0.25 throw: 0.12}
+    code: fn(i) {
+        let c = stab_chords[i % 4]
+        let bass_note = [@a2 @f2 @d2 @e2][i % 4]
+        let cell = if i % 2 == 0 { [0.5 2.5 4.5 6.75] } else { [0.5 1.75 4.5 6.5 7.25] }
+        for t in cell {
+            sleep(t - beat())
+            play([note(bass_note) c[0] c[1] c[2] c[3]], {dur: 0.25 amp: rand(0.7, 0.95)})
+        }
+        sleep(8 - beat())
+    }
+}
+
+let pad = Loop{play: padsyn beats: 16 amp: 0.3 sends: {plate: 0.35}
+    code: fn(i) {
+        play([@a3 @c4 @e4 @g4 @b4], {dur: 7.6})
+        sleep(8)
+        play([@bb3 @d4 @f4 @a4], {dur: 7.8})
+        sleep(8)
+    }
+}
+
+let bass = Loop{play: sub beats: 4 amp: 0.4
+    code: fn(i) {
+        let r = [@a1 @a1 @f1 @f1 @d1 @d1 @e1 @e1][i % 8]
+        for b in 0..4 {
+            sleep(0.5)
+            play(if b == 3 && i % 2 == 1 { note(r) + 12 } else { note(r) }, {dur: 0.35})
+            sleep(0.5)
+        }
+    }
+}
+
+// ---- drums ----------------------------------------------------------------------
+
+let kick = Loop{play: kit beats: 4 amp: 0.95 sends: {smash: 0.3}
+    code: fn(i) {
+        for b in 0..4 {
+            let out = i == 47 || (i == 39 && b == 3) || (i == 87 && b >= 2) || (i == 95 && b >= 1)
+            if out == false { hit(@kick, {amp: 1.0}) }
+            sleep(1)
+        }
+    }
+}
+
+/// Sixteenth hats with a velocity cell redrawn every 8 bars, open hats on
+/// the offbeat from bar 9, doubled to sixteenth opens in the build.
+let hats = Loop{play: kit beats: 4 amp: 0.6
+    code: fn(i) {
+        let cells = [[0.35 0.2 0.6 0.25], [0.4 0.25 0.55 0.3 0.4 0.2 0.6 0.3], [0.3 0.2 0.5 0.2 0.35 0.25]]
+        let v = cells[floor(i / 8) % 3]
+        for s in 0..16 {
+            if s % 4 == 2 && i >= 8 { hit(@ohat, {amp: 0.55 pan: 0.2}) }
+            else { hit(@hat, {amp: at(v, s) * rand(0.9, 1.1) pan: -0.2}) }
+            sleep(0.25)
+        }
+    }
+}
+
+let claps = Loop{play: kit beats: 4 amp: 0.8 sends: {room: 0.3 smash: 0.35}
+    code: fn(i) {
+        sleep(1)
+        hit(@clap, {amp: 0.95})
+        sleep(2)
+        hit(@clap, {amp: 0.95})
+        if i % 8 == 7 {
+            for s in 0..4 { sleep(0.25) hit(@clap, {amp: 0.3 + s * 0.15}) }
+        } else { sleep(1) }
+    }
+}
+
+let ride = Loop{play: kit beats: 4 amp: 0.45 sends: {room: 0.15}
+    code: fn(i) {
+        for s in 0..8 {
+            hit(@ride, {amp: if s % 2 == 1 { 0.8 } else { 0.5 } pan: 0.35})
+            sleep(0.5)
+        }
+    }
+}
+
+let rims = Loop{play: kit beats: 4 amp: 0.4 sends: {room: 0.25}
+    code: fn(i) {
+        let e = euclid(5, 16, floor(i / 4) % 4)
+        let c = euclid(3, 8, floor(i / 8) % 2)
+        for s in 0..16 {
+            if e[s] { hit(@rim, {amp: rand(0.5, 0.8) pan: 0.45}) }
+            if s % 2 == 0 && c[s / 2] && i >= 16 { hit(@conga, {amp: rand(0.5, 0.75) pan: -0.4}) }
+            sleep(0.25)
+        }
+    }
+}
+
+/// The build: a snare roll that doubles its rate and rises.
+let roll = Loop{play: kit beats: 4 amp: 0.35 sends: {room: 0.3}
+    code: fn(i) {
+        let k = i % 8
+        let n = if k < 4 { 4 } else { if k < 6 { 8 } else { 16 } }
+        for s in 0..n {
+            hit(@snare, {amp: 0.3 + (k * n + s) * 0.006 + k * 0.06})
+            sleep(4 / n)
+        }
+    }
+}
+
+let crash = Loop{play: kit beats: 4 amp: 0.5 sends: {room: 0.3}
+    code: fn(i) {
+        if i == 16 || i == 48 || i == 56 || i == 64 || i == 80 || i == 88 { hit(@crash, {amp: 0.9}) }
+        sleep(4)
+    }
+}
+
+let riser = Loop{play: air beats: 4 amp: 0.32 sends: {room: 0.4}
+    code: fn(i) {
+        if i == 44 || i == 76 { play(@a4, {dur: 15.8}) }
+        sleep(4)
+    }
+}
+let reverse = Loop{play: swell beats: 4 amp: 0.3 sends: {room: 0.4}
+    code: fn(i) {
+        if i == 15 || i == 39 || i == 71 || i == 79 { sleep(2) play(@c5, {dur: 2}) }
+        sleep(4 - beat())
+    }
+}
+
+/// The last bar: one kick, one stab, left to ring.
+let ending = Loop{play: stab beats: 4 amp: 0.3 sends: {plate: 0.5}
+    code: fn(i) {
+        if i == 95 { play([@a2 @g3 @c4 @e4 @a4], {dur: 2 amp: 0.9}) }
+        sleep(4)
+    }
+}
+
+// ---- mix and master -------------------------------------------------------------------
+// Returns: a room for claps, rims and effects, a plate for the stabs, a
+// dotted-eighth delay throw for the lines (swelling in the break).
+let room = Reverb{room: 0.35 mix: 1 damp: 7000}
+let plate = Reverb{room: 0.5 mix: 1 damp: 7000}
+let throw = Delay{time: 0.75 feedback: 0.45 mix: 1 spread: 1}
+let throw_level = Bus{in: [throw] gain: {param: @swell from: 0.8 to: 1.8 ramp: 8}}
+let returns = Highpass{in: [room plate throw_level] cutoff: 250}
+
+// Drums: bus glue, parallel smash from sends, tape.
+let drum_bus = Comp{in: [kick hats claps ride rims roll crash] threshold: -16 ratio: 3 makeup: 2}
+let drum_tape = Drive{in: [drum_bus] amount: 0.15 mix: 0.35 tone: 11000}
+let smash = Comp{threshold: -34 ratio: 12 makeup: 11}
+// The acid lines: a drive on their bus, ducked by the kick.
+let acid_bus = Comp{in: [line_dark line_mid line_open answer] threshold: -18 ratio: 3 makeup: 2}
+let acid_drive = Drive{in: [acid_bus] amount: 0.25 mix: 0.3 tone: 9000}
+let acid_duck = Duck{in: [acid_drive] key: kick depth: 5 release: 0.16}
+let pump = Duck{in: [bass] key: kick depth: 6 release: 0.16}
+// Stabs and pad: carved, ducked, wide.
+let chords_hp = Highpass{in: [stabs pad ending] cutoff: 200}
+let chords_duck = Duck{in: [chords_hp] key: kick depth: 4 release: 0.2}
+let chords_wide = Chorus{in: [chords_duck] rate: 0.4 depth: 5 mix: 0.35}
+/// The music bus's filter: closes into the break, opens into the final.
+let sweep = Lowpass{in: [acid_duck chords_wide] cutoff: {param: @sweep from: 400 to: 18000 ramp: 16}}
+
+/// The master: gentle glue over everything (the master limiter follows).
+let glue = Comp{in: [riser reverse returns drum_tape smash pump sweep] threshold: -12 ratio: 1.8 attack: 20 release: 150 knee: 6 makeup: 1}
+/// The master chain: a tonal trim (rumble out, a little low and air, a dip
+/// in the low mids), the bass kept mono under 140 Hz with a touch of width
+/// above, a fast peak compressor, and a limiter that sets the loudness.
+let master_eq = Eq{in: [glue] b1: [@highpass 28] b2: [@lowshelf 90 1] b3: [@peak, 350, -1.5, 0.9] b4: [@highshelf 10000 1.5]}
+let master_width = Width{in: [master_eq] width: 1.1 bass_mono: 140}
+let master_peak = Comp{in: [master_width] threshold: -10 ratio: 5 attack: 1 release: 80 knee: 4 makeup: 0}
+let master_limit = Limiter{in: [master_peak] ceiling: -1.5 gain: 1.99}
+/// Above 16 kHz out: the limiter\'s clipped edges would overshoot between samples.
+let master_lp = Lowpass{in: [master_limit] cutoff: 16000 res: 0.5}
+
+let intro = Section{bars: 16 loops: [kick hats rims line_dark reverse]}
+let acidic = Section{bars: 24 loops: [kick hats claps rims line_mid bass crash reverse]}
+let build = Section{bars: 8 loops: [hats line_mid roll riser kick]}
+let peak = Section{bars: 24 loops: [kick hats claps ride rims line_open answer bass stabs crash reverse]}
+let breakdown = Section{bars: 8 set: {sweep: 0 swell: 1} loops: [line_mid hats pad riser reverse]}
+let final = Section{bars: 8 set: {sweep: 1 swell: 0} loops: [kick hats claps ride rims line_open answer bass stabs pad crash]}
+let outro = Section{bars: 8 loops: [kick hats rims line_dark ending] next: @stop}
+
+Score{label: "Copper Wire" clock kit acid_dark acid_mid acid_open acid_sq stab padsyn sub air swell line_dark line_mid line_open answer stabs pad bass kick hats claps ride rims roll crash riser reverse ending room plate throw throw_level returns drum_bus drum_tape smash acid_bus acid_drive acid_duck pump chords_hp chords_duck chords_wide sweep glue master_eq master_width master_peak master_limit master_lp intro acidic build peak breakdown final outro ceiling: -1 master: 1.0 arrange: [intro acidic build peak breakdown final outro]}

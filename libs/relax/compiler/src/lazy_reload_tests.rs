@@ -522,6 +522,8 @@ fn d3_disjoint_check_lowered_from_the_verdict() {
     if case == "strict" {
         assert!(matches!(u.verdict_state(id), crate::jit::Verdict::Failed(_)), "strict: NLL rejects the pair");
         assert!(u.disjoint_checks(id).is_none());
+        // SAFE1 (JITSAFE 11/12): first-run code the checker rejected never reaches O3
+        assert!(!u.o3_allowed(id), "a rejected body is not O3-eligible");
     } else {
         assert!(u.verdict_clean(id), "relaxed: accepted with a run-time check");
         let checks = u.disjoint_checks(id).expect("the verdict asks for the check");

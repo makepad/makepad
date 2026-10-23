@@ -209,14 +209,14 @@ pub unsafe fn dealloc(p: *mut u8) -> bool {
         release(&heap.arena, p);
         true
     } else {
-        web_dealloc_c(p)
+        false
     }
 }
 pub unsafe fn realloc_owned(p: *mut u8, size: usize) -> Option<*mut u8> {
     if let Some(a) = compiler::domain_here() {
         if a.owns(p) { return Some(reallocate(a, p, size)); }
     }
-    let Some(heap) = owner(p) else { return web_realloc_c(p, size) };
+    let Some(heap) = owner(p) else { return None };
     Some(reallocate(&heap.arena, p, size))
 }
 unsafe fn reallocate(heap: &Arena, p: *mut u8, size: usize) -> *mut u8 {
@@ -263,7 +263,7 @@ pub unsafe fn dealloc_layout(p: *mut u8, l: Layout) -> bool {
     // linear memory): no call into the owner lookup
     let address = p as usize;
     if address < LOW.load(Ordering::Acquire) || address >= HIGH.load(Ordering::Acquire) {
-        return web_dealloc_layout(p, l);
+        return false;
     }
     dealloc_other(p, l)
 }
@@ -274,7 +274,7 @@ unsafe fn dealloc_other(p: *mut u8, l: Layout) -> bool {
     if let Some(h) = owner(p) {
         h.arena.dealloc(p, l);
         true
-    } else { web_dealloc_layout(p, l) }
+    } else { false }
 }
 pub unsafe extern "C" fn program_dealloc(p: *mut u8, size: usize, align: usize) {
     compiler::domain_free(p, Layout::from_size_align_unchecked(size, align), dealloc_shared)
@@ -302,21 +302,10 @@ pub unsafe fn realloc_layout(p: *mut u8, l: Layout, size: usize) -> Option<*mut 
     if let Some(a) = compiler::domain_here() {
         if a.owns(p) { return Some(resize_layout(a, p, l, size)); }
     }
-    let Some(h) = owner(p) else { return web_realloc_layout(p, l, size) };
+    let Some(h) = owner(p) else { return None };
     Some(resize_layout(&h.arena, p, l, size))
 }
 
-// The web target's linear memory (web.rs): native code may free or grow the program's blocks.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-use super::web::{dealloc_c as web_dealloc_c, dealloc_layout as web_dealloc_layout, realloc_c as web_realloc_c, realloc_layout as web_realloc_layout};
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-unsafe fn web_dealloc_c(_: *mut u8) -> bool { false }
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-unsafe fn web_realloc_c(_: *mut u8, _: usize) -> Option<*mut u8> { None }
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-unsafe fn web_dealloc_layout(_: *mut u8, _: Layout) -> bool { false }
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-unsafe fn web_realloc_layout(_: *mut u8, _: Layout, _: usize) -> Option<*mut u8> { None }
 pub unsafe extern "C" fn program_resize(p: *mut u8, old: usize, align: usize, size: usize) -> *mut u8 {
     let l = Layout::from_size_align_unchecked(old, align);
     realloc_layout(p, l, size).unwrap_or_else(|| System.realloc(p, l, size))
@@ -433,10 +422,6 @@ pub unsafe extern "C" fn program_pressure_relief(zone: *const u8, goal: usize) -
 /// The same targets are used by heap inspection with sampling on or off.
 pub fn symbol(name: &[u8]) -> Option<usize> {
     compiler::bind_program_tls();
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    if let Some(a) = super::web::symbol(name) {
-        return Some(a);
-    }
     Some(match name {
         b"relax_alloc" => program_alloc as *const () as usize,
         b"relax_alloc_zeroed" => program_alloc_zeroed as *const () as usize,

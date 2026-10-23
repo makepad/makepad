@@ -44,6 +44,7 @@ pub enum BarModule {
     SystemUpdate,
     Tray(usize),
     Bluetooth,
+    Gamepad,
     Network,
     /// The AI hub panel's button.
     Hub,
@@ -779,6 +780,7 @@ impl ShellBar {
             },
             data.bluetooth.is_some(),
         ));
+        v.push((BarModule::Gamepad, Ico::Gamepad, true));
         v.push((BarModule::Hub, Ico::Chip, true));
         v.push((
             BarModule::Network,
@@ -1128,6 +1130,7 @@ impl ShellBar {
                 (Some(v), _) => format!("Volume {}%", v),
                 (None, _) => "Audio unavailable".into(),
             },
+            BarModule::Gamepad => "Controllers & device batteries".into(),
             BarModule::Hub => if data.hub_active { "AI hub: working".into() } else { "AI hub".into() },
             BarModule::Monitor => "Display".into(),
             BarModule::Power => match data.battery {

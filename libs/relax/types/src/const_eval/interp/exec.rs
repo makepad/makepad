@@ -31,7 +31,10 @@ impl Interp<'_> {
         match s {
             StatementKind::Assign(place, rv) => {
                 let dest = self.eval_place(place)?;
-                self.rvalue(dest, rv)
+                self.rvalue(dest, rv)?;
+                // const_eval machine.rs enforce_validity: an assignment of an uninhabited type is validated (and fails)
+                if self.layout(dest.ty)?.uninhabited { self.validate_assigned(dest)?; }
+                Ok(())
             }
             StatementKind::SetDiscriminant { place, variant_index } => { let p = self.eval_place(place)?; self.write_discriminant(p, variant_index.0) }
             StatementKind::StorageLive(l) => {

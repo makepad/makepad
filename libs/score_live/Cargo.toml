@@ -1,0 +1,25 @@
+[package]
+name = "makepad-score-live"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Scores: live-coded music as one Splash document that is a flow graph, loop code and an arrangement; the composer that runs loop code ahead of the clock, source-preserving edits, offline render, analysis and the AI tools"
+
+[lib]
+name = "makepad_score_live"
+
+[dependencies]
+makepad-score-player = { path = "../score_player" }
+makepad-audio-synth = { path = "../audio_synth" }
+makepad-script = { path = "../../platform/script" }
+makepad-flow = { path = "../flow", default-features = false, features = ["live"] }
+makepad-audio-engine = { path = "../audio_engine" }
+makepad-midi-file = { path = "../midi_file" }
+# The AI tools' arguments and answers (`tools`).
+makepad-strict-json = { path = "../strict_json" }
+makepad-score-tools = { path = "tools" }
+# The palette tool reads the GM SoundFont's preset list (`score_palette presets`).
+makepad-soundfont = { path = "../soundfont" }
+# The General MIDI SoundFont is described for the installer (`gm_font::GM_SOUNDFONT`);
+# no downloader comes along, so the web build stays free of the hub.
+makepad-model-install = { path = "../model_install", default-features = false }

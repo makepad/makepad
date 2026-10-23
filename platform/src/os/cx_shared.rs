@@ -984,6 +984,18 @@ impl Cx {
         pos: crate::makepad_math::DVec2,
     ) -> bool {
         match msg {
+            StudioToApp::WindowFocus { window_id, focused } => {
+                let window = self.windows.id_iter().find(|w| w.id() == window_id && self.windows[*w].is_created);
+                if let Some(window) = window {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if focused { self.hal.focused = Some(window); }
+                    self.call_event_handler(&if focused {
+                        Event::WindowGotFocus(window)
+                    } else {
+                        Event::WindowLostFocus(window)
+                    });
+                }
+            }
             StudioToApp::MouseDown(e) => {
                 // Synthetic input must take the same activation path as a
                 // native click. In particular, an unfocused macOS window

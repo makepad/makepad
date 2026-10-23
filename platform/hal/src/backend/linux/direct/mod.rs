@@ -140,6 +140,8 @@ pub(super) struct App {
     window: Option<Key>,
     recipient: Option<Key>,
     input: Option<raw_input::RawInput>,
+    // Relative samples accumulate into the latest position until the next display frame.
+    pending_move: Option<RawEvent>,
     terminal: Option<terminal::DirectTerminal>,
     generation: u64,
     active: bool,
@@ -172,7 +174,7 @@ impl App {
         eprintln!("[hal-direct] Ctrl+Alt+Backspace exits; Ctrl+Alt+F1..F12 switches VT");
         // Input devices open once a display is driven (`dispatch`): a shell that gets no
         // display must not take the keyboard and pointer from whoever has them.
-        Ok(Self { _owner: owner, state, window: None, recipient: None, input: None,
+        Ok(Self { _owner: owner, state, window: None, recipient: None, input: None, pending_move: None,
             terminal, generation: 0, active: true, releasing: false, stopping: false, clipboard: Default::default(), selection: Default::default() })
     }
     fn publish(&mut self) {
@@ -261,6 +263,7 @@ impl App {
         self.state.shared.push(key, |q, _| q.direct_displays(Id::NONE, 0, &empty));
     }
     fn close(&mut self) {
+        self.pending_move = None;
         if let Some(key) = self.window.take() {
             *lock(&self.state.window) = None;
             self.state.ready.store(0, Ordering::Release);
@@ -276,7 +279,22 @@ impl App {
         let Some(key) = self.recipient else { return; };
         let mut delivered = EventQueue::default();
         delivered.set_time(crate::clock_ns());
-        events.drain_with(|event, payload| {
+        let had_move = self.pending_move.is_some();
+        events.drain_with(|mut event, payload| {
+            if event.tag == event_tag::MouseMove {
+                if let Some(previous) = self.pending_move.take() {
+                    if previous.window == event.window && previous.b == event.b {
+                        event.a[2] += previous.a[2];
+                        event.a[3] += previous.a[3];
+                    } else {
+                        delivered.push(previous);
+                    }
+                }
+                self.pending_move = Some(event);
+                return;
+            }
+            // Buttons, modifiers and scroll retain their position and event order.
+            if let Some(latest) = self.pending_move.take() { delivered.push(latest); }
             if event.tag == event_tag::KeyDown {
                 if let Some(crate::events::HalEvent::KeyDown { key: code, repeat, mods, .. }) = event.decode(payload) {
                     let code = KeyCode::from_index(code);
@@ -301,6 +319,7 @@ impl App {
             else { delivered.push(event); }
         });
         if !delivered.is_empty() { self.state.shared.push(key, |q,_| q.append(&mut delivered)); }
+        if self.pending_move.is_some() && !had_move { self.state.post(Command::Request); }
     }
 }
 
@@ -391,6 +410,7 @@ impl Shell for App {
             Op::CloseSession(sid) => {
                 if self.window.is_some_and(|k| k.0 == sid) { self.close(); }
                 else if self.recipient.is_some_and(|k| k.0 == sid) {
+                    self.pending_move = None;
                     self.recipient = self.window;
                     self.publish();
                     self.publish_input();
@@ -400,6 +420,7 @@ impl Shell for App {
             Op::Lend { host, session, alias } => {
                 if self.window == Some((crate::session::HOST,host)) {
                     if let Some(previous) = self.recipient.filter(|key| *key != (session, alias)) { self.revoke_inventory(previous); }
+                    self.pending_move = None;
                     self.recipient = Some((session,alias)); self.publish(); self.publish_input();
                 }
             }
@@ -416,6 +437,7 @@ impl Shell for App {
         if signals & 1 != 0 && self.active {
             self.active = false; self.releasing = true;
             if let Some(input) = &mut self.input { input.suspend(); }
+            self.pending_move = None;
             self.state.released.store(false, Ordering::Release);
             self.state.post(Command::Pause);
             if let Some(key) = self.recipient { self.state.shared.push(key, |q,id| { q.focus(id,false); q.lifecycle(lifecycle::PAUSE); }); }
@@ -433,16 +455,24 @@ impl Shell for App {
         let generation = self.state.generation.load(Ordering::Acquire);
         if generation != self.generation { self.publish(); }
         else if timings_changed { self.publish_timings(); }
-        if self.active {
-            let next = self.state.ready.swap(0, Ordering::AcqRel);
-            if next != 0 { if let Some(key) = self.recipient { self.state.shared.push(key, |q,id| q.frame_ready(id,next)); } }
-        }
         if self.input.is_none() && self.active && self.state.acquired.load(Ordering::Acquire) {
             eprintln!("[hal-direct] a display is driven; opening input devices");
             self.input = Some(raw_input::RawInput::new(0.0, 0.0, self.state.dpi));
             self.publish();
         }
-        if self.active { self.input(); }
+        if self.active {
+            self.input();
+            let next = self.state.ready.swap(0, Ordering::AcqRel);
+            if next != 0 {
+                if let Some(key) = self.recipient {
+                    let latest = self.pending_move.take();
+                    self.state.shared.push(key, |q,id| {
+                        if let Some(latest) = latest { q.push(latest); }
+                        q.frame_ready(id,next);
+                    });
+                }
+            }
+        }
         Ok(())
     }
     fn wait(&mut self, wake: i32) -> Result<(), String> {

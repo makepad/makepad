@@ -295,6 +295,8 @@ script_mod! {
             wifi +: {svg: crate_resource("self:resources/icons/wifi.svg")}
             wifi_off +: {svg: crate_resource("self:resources/icons/wifi-off.svg")}
             monitor +: {svg: crate_resource("self:resources/icons/monitor.svg")}
+            gamepad +: {svg: crate_resource("self:resources/icons/gamepad.svg")}
+            mouse +: {svg: crate_resource("self:resources/icons/mouse.svg")}
             battery +: {svg: crate_resource("self:resources/icons/battery.svg")}
             power +: {svg: crate_resource("self:resources/icons/power.svg")}
             calendar +: {svg: crate_resource("self:resources/icons/calendar.svg")}
@@ -392,6 +394,10 @@ pub struct ShellIcons {
     #[live]
     pub battery: DrawSvg,
     #[live]
+    pub gamepad: DrawSvg,
+    #[live]
+    pub mouse: DrawSvg,
+    #[live]
     pub power: DrawSvg,
     #[live]
     pub calendar: DrawSvg,
@@ -475,6 +481,8 @@ pub enum Ico {
     WifiOff,
     Monitor,
     Battery,
+    Gamepad,
+    Mouse,
     Power,
     Calendar,
     Keyboard,
@@ -529,6 +537,8 @@ impl ShellIcons {
             Ico::Wifi => &mut self.wifi,
             Ico::WifiOff => &mut self.wifi_off,
             Ico::Monitor => &mut self.monitor,
+            Ico::Gamepad => &mut self.gamepad,
+            Ico::Mouse => &mut self.mouse,
             Ico::Battery => &mut self.battery,
             Ico::Power => &mut self.power,
             Ico::Calendar => &mut self.calendar,

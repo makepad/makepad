@@ -1,17 +1,20 @@
-// node host.js <module.wasm>: runs run of a wasm32 build of web_std.rs; relax_web_print writes to stdout.
+// The rustc reference and Relax export use only the page's console import.
 const fs = require('fs');
+const assert = require('node:assert/strict');
 const m = new WebAssembly.Module(fs.readFileSync(process.argv[2]));
-let mem = null;
-const env = {
-    relax_web_print: (ptr, len) => {
-        process.stdout.write(Buffer.from(new Uint8Array(mem.buffer, ptr, len)));
-    },
-};
-const imports = { env };
 for (const i of WebAssembly.Module.imports(m)) {
-    if (i.module === 'env' && i.name === 'relax_web_print') continue;
-    (imports[i.module] ??= {})[i.name] = () => { throw new Error('import ' + i.module + '.' + i.name); };
+    assert.equal(i.module, 'env'); assert.equal(i.name, 'js_console_log');
 }
-const x = new WebAssembly.Instance(m, imports).exports;
-mem = x.memory;
-x.run();
+function instance() {
+    let x;
+    x = new WebAssembly.Instance(m, {env: {js_console_log: (p,n) => process.stdout.write(Buffer.from(new Uint8Array(x.memory.buffer,Number(p),Number(n))))}}).exports;
+    return x;
+}
+if (process.argv[3] === 'probes') {
+    for (let n=0; n<13; n++) {
+        const x=instance();
+        assert.throws(() => x.panic_probe(n), WebAssembly.RuntimeError);
+    }
+} else {
+    const x=instance(); (x.t0 || x.run)();
+}

@@ -231,8 +231,8 @@ impl Cx {
             return;
         }
         self.hal_init_session(info);
-        // controllers connect and report values from here on (they ring the pump, no polling)
-        #[cfg(any(target_vendor = "apple", target_os = "windows"))]
+        // Controllers wake the pump. Linux hosted apps own an evdev reader too.
+        #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
         self.hal.frames.w.game_out(0, makepad_hal::media::game_op::ENABLE, 0, 0, 0, 0, &[]);
         let display_clock = info.flags & info_flags::DISPLAY_CLOCK != 0;
         // a batch renderer beats as the GPU completes frames, not 60 times a second

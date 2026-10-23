@@ -166,6 +166,10 @@ pub struct MpRunView {
     /// files keeps the keyboard so its arrows go on dialing.
     #[rust(true)]
     takes_key_focus: bool,
+    #[rust(true)]
+    host_focused: bool,
+    #[rust]
+    sent_focus: Option<bool>,
     /// Newest stdout/stderr line from the child, shown while it starts.
     #[rust]
     status_line: String,
@@ -312,6 +316,7 @@ impl MpRunView {
     /// What a changed target resets in the tile (the protocol state reset
     /// itself in `HostedApp::set_target`).
     fn target_changed(&mut self, cx: &mut Cx, had_target: bool) {
+        self.sent_focus = None;
         self.remote_cursor = MouseCursor::Default;
         self.is_hovered = false;
         self.ime_pos = None;
@@ -402,6 +407,7 @@ impl MpRunView {
     /// CreateWindow arrived: the child's stdin loop is live, share the
     /// swapchain from now on.
     pub fn app_ready(&mut self, cx: &mut Cx, client: ClientId, window_id: usize) {
+        self.sent_focus = None;
         let had_target = self.hosted.client().is_some();
         if self.hosted.app_ready(cx, client, window_id) {
             self.target_changed(cx, had_target);
@@ -439,6 +445,17 @@ impl MpRunView {
         }
         cx.set_key_focus(self.area);
         true
+    }
+
+    fn sync_focus(&mut self, cx: &Cx) {
+        let Some(target) = self.hosted.target() else { return; };
+        let focused = self.host_focused && self.takes_key_focus && self.area.is_valid(cx) && cx.has_key_focus(self.area);
+        if self.sent_focus != Some(focused) {
+            self.sent_focus = Some(focused);
+            self.hosted.send(vec![makepad_studio_protocol::StudioToApp::WindowFocus {
+                window_id: target.window_id, focused,
+            }]);
+        }
     }
 
     /// Give the keyboard back if this tile holds it -- the AI pane hiding
@@ -659,6 +676,7 @@ impl Widget for MpRunView {
         }
         self.draw_app.draw_abs(cx, rect);
         self.area = self.draw_app.area();
+        self.sync_focus(cx);
         // On a phone ShowTextIME raises the soft keyboard: only while the
         // child has a focused text field, never for the tile's focus alone.
         let wants_ime = !crate::host::device_phone() || self.child_ime.is_some();
@@ -680,11 +698,18 @@ impl Widget for MpRunView {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        match event {
+            Event::WindowGotFocus(_) => self.host_focused = true,
+            Event::WindowLostFocus(_) => self.host_focused = false,
+            _ => {}
+        }
         self.hosted.handle_event(cx, event);
         self.flush(cx);
         // Input handed to the host wakes the beat if it was asleep (the
         // input path ends in `flush`).
         self.handle_input(cx, event, scope);
+        self.sync_focus(cx);
+        self.flush(cx);
     }
 }
 

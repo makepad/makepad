@@ -197,6 +197,14 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
             continue;
         }
         if is_root_bin {
+            // rustc_session output.rs validate_crate_name: non-empty, alphanumeric or `_` only
+            // (one error per offending character; the first fatal stops before any input is read)
+            if tname.is_empty() {
+                return Err("crate name must not be empty".to_string());
+            }
+            if let Some(c) = tname.chars().find(|c| !(c.is_alphanumeric() || *c == '_')) {
+                return Err(format!("invalid character '{c}' in crate name: `{tname}`"));
+            }
             root_bins.push((crates.len(), u.name.clone(), pkg_dir.clone()));
         }
         if is_root_bin || (root == usize::MAX && roots.contains(&ui)) {

@@ -550,6 +550,8 @@ pub enum StudioToApp {
     /// Files dropped on the window by the host (APPENDED LAST): delivered as `Event::Drag`
     /// (so a widget can light its drop target) then `Event::Drop`, `Event::DragEnd`.
     DropFiles(RemoteDrop),
+    /// Activation of one hosted window. Appended to preserve existing wire tags.
+    WindowFocus { window_id: usize, focused: bool },
 }
 
 /// A batch of host messages. On the wire every message is framed with its

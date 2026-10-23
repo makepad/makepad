@@ -25,11 +25,19 @@ pub(crate) fn symbols(u: &Unit) -> &HashMap<String, u64> {
     })
 }
 
+/// A `sym` operand: a fn or static of the program (its address), or a foreign item, which is
+/// found by its link name when the blocks are placed -- as a linker would, so it can name a
+/// label another block (or the same one) defines.
+enum SymTarget {
+    Addr(u64),
+    Foreign(String),
+}
+
 /// One crate's blocks, assembled.
 struct Crate {
     out: rasm::Output,
     /// sym operand k -> its address
-    syms: Vec<u64>,
+    syms: Vec<SymTarget>,
 }
 
 fn place_all(u: &Unit) -> Result<HashMap<String, u64>, String> {
@@ -39,7 +47,7 @@ fn place_all(u: &Unit) -> Result<HashMap<String, u64>, String> {
     }
     let arch = Arch::host();
     // per crate: the blocks' pieces in order, operands renumbered
-    let mut crates: Vec<(u32, Vec<Piece>, Vec<Arg>, Vec<u64>, bool)> = Vec::new();
+    let mut crates: Vec<(u32, Vec<Piece>, Vec<Arg>, Vec<SymTarget>, bool)> = Vec::new();
     for &(file, iid, module) in &prog.global_asms {
         let krate = prog.mods[module as usize].krate;
         let f = &prog.files[file as usize];
@@ -145,10 +153,13 @@ fn place_all(u: &Unit) -> Result<HashMap<String, u64>, String> {
     for (ci, c) in assembled.iter().enumerate() {
         let local: HashMap<&str, u64> = c.out.defs.iter().map(|d| (d.name.as_str(), bases[ci][d.section as usize] + d.offset as u64)).collect();
         let resolve = |name: &str| -> Result<u64, String> {
+            let mut name = name;
             if let Some(k) = name.strip_prefix("\u{1}sym") {
-                return Ok(c.syms[k.parse::<usize>().unwrap()]);
-            }
-            if let Some(&a) = local.get(name) {
+                match &c.syms[k.parse::<usize>().unwrap()] {
+                    SymTarget::Addr(a) => return Ok(*a),
+                    SymTarget::Foreign(link) => name = link,
+                }
+            } else if let Some(&a) = local.get(name) {
                 return Ok(a);
             }
             // from here on the C name (Mach-O symbols carry a leading underscore)
@@ -264,15 +275,12 @@ fn exported_fns(u: &Unit) -> HashMap<String, DefId> {
 
 /// A fn item's callable address (its slot; compiled on its first call).
 fn fn_addr(u: &Unit, d: DefId) -> Result<u64, String> {
-    if u.prog.def(d).kind == DefKind::ForeignFn {
-        return u.foreign_addr(d).ok_or_else(|| format!("`{}` has no address on this host", u.prog.name(d)));
-    }
     let instance = crate::instance::Instance::resolve_for_fn_ptr(&u.tcx, &u.prog, d, &[]).map_err(|_| format!("`{}`: a generic fn cannot be a global_asm! symbol", u.prog.def_path(d)))?;
     Ok(u.entry(u.instance_fn_id(instance)))
 }
 
 /// A `sym` operand's address: a fn (its slot), a static (its memory), a foreign item.
-fn sym_addr(u: &Unit, file: u32, module: u32, x: ExprId) -> Result<u64, String> {
+fn sym_addr(u: &Unit, file: u32, module: u32, x: ExprId) -> Result<SymTarget, String> {
     let prog = &u.prog;
     let f = &prog.files[file as usize];
     let ExprKind::Path(p) = &f.ast.expr(x).kind else { return Err("global_asm!: a `sym` operand must be a path".to_string()) };
@@ -284,9 +292,9 @@ fn sym_addr(u: &Unit, file: u32, module: u32, x: ExprId) -> Result<u64, String> 
     };
     let d = d.ok_or_else(|| format!("global_asm!: cannot find `{}`", String::from_utf8_lossy(f.bytes(f.ast.expr(x).lo, f.ast.expr(x).hi))))?;
     match prog.def(d).kind {
-        DefKind::Fn | DefKind::ForeignFn => fn_addr(u, d),
-        DefKind::ForeignStatic => u.foreign_addr(d).ok_or_else(|| format!("`{}` has no address on this host", prog.name(d))),
-        DefKind::Static => Ok(u.static_addr_shared(d)),
+        DefKind::ForeignFn | DefKind::ForeignStatic => Ok(SymTarget::Foreign(u.link_name(d))),
+        DefKind::Fn => fn_addr(u, d).map(SymTarget::Addr),
+        DefKind::Static => Ok(SymTarget::Addr(u.static_addr_shared(d))),
         _ => Err("global_asm!: a `sym` operand must name a function or a static".to_string()),
     }
 }

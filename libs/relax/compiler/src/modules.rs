@@ -796,7 +796,7 @@ unsafe fn load_sandboxed(up: *mut Unit, idx: u32, name: &str, path: &str, deps: 
     }
     let mem: u64 = runtime.module_mem_mb << 20;
     let fuel: i64 = runtime.module_fuel;
-    let arena = match crate::sandbox::new_arena(idx, mem, fuel) {
+    let arena = match crate::sandbox::new_arena(idx, name, mem, fuel) {
         Ok(a) => a,
         Err(e) => return Err(fail(up, &defs, vec![e])),
     };
@@ -938,7 +938,7 @@ pub extern "C" fn __relax_module_stream(h: u64, src: *const u8, slen: usize, kep
         crate::reload::Rung::Restart => 2,
         crate::reload::Rung::Refuse => 1,
         crate::reload::Rung::Patch if o.group == 0 => 1,
-        crate::reload::Rung::Patch => { crate::sandbox::maybe_recycle(up); 0 }
+        crate::reload::Rung::Patch => 0,
     }
 }
 
@@ -1082,10 +1082,7 @@ pub extern "C" fn __relax_module_replace(h: u64, src: *const u8, slen: usize) ->
     };
     let error = || o.lines.join("\n");
     match o.rung {
-        crate::reload::Rung::Patch => {
-            crate::sandbox::maybe_recycle(up);
-            0
-        }
+        crate::reload::Rung::Patch => 0,
         crate::reload::Rung::Refuse => {
             set_error(error());
             1
@@ -1101,7 +1098,6 @@ pub extern "C" fn __relax_module_replace(h: u64, src: *const u8, slen: usize) ->
 /// fn pointers still in it). Later uses of the handle fail.
 pub extern "C" fn __relax_module_unload(h: u64) {
     crate::reload::forget_module_stream(jit::current_unit(), h);
-    let mut krate: Option<u32> = None;
     let module_crate;
     let mut defs = {
         let mut ms = MODULES.lock().unwrap_or_else(|e| e.into_inner());
@@ -1112,7 +1108,6 @@ pub extern "C" fn __relax_module_unload(h: u64) {
                 m.gen += 1;
                 if let Some(a) = m.arena.take() {
                     crate::sandbox::free_arena(&a);
-                    krate = Some(m.krate);
                 }
                 std::mem::take(&mut m.defs)
             }
@@ -1134,11 +1129,7 @@ pub extern "C" fn __relax_module_unload(h: u64) {
                 u.prog.reclaim_caches();
             }
         }
-        if let Some(k) = krate {
-            unsafe { crate::sandbox::retire_crate(up, k) };
-        }
     });
-    crate::sandbox::maybe_recycle(up);
 }
 
 /// Copies this thread's last module error into `buf` (up to `cap` bytes); returns its length.
@@ -1153,21 +1144,19 @@ pub extern "C" fn __relax_module_error(buf: *mut u8, cap: usize) -> usize {
     })
 }
 
-/// A wrapper enters module `idx`'s arena (0; the state before goes to `out`), or finds it
-/// unloaded (1).
-pub extern "C" fn __relax_sb_enter(idx: u32, out: *mut [i64; 4]) -> u32 {
+/// A wrapper enters module `idx`'s arena: 0, or 1 (the module was unloaded), or 2 (every
+/// per-thread segment of the module is in use).
+pub extern "C" fn __relax_sb_enter(idx: u32) -> u32 {
     match crate::sandbox::enter_module(idx) {
-        Some(prev) => {
-            unsafe { *out = prev.0 };
-            0
-        }
-        None => 1,
+        Ok(()) => 0,
+        Err(crate::sandbox::EnterError::Unloaded) => 1,
+        Err(crate::sandbox::EnterError::Busy) => 2,
     }
 }
 
 /// A wrapper leaves: the state before its entry comes back.
-pub extern "C" fn __relax_sb_leave(prev: *const [i64; 4]) {
-    crate::sandbox::leave(crate::sandbox::Saved(unsafe { *prev }));
+pub extern "C" fn __relax_sb_leave() {
+    crate::sandbox::leave();
 }
 
 pub extern "C" fn __relax_sb_alloca(size: usize, align: usize) -> usize {
@@ -1286,25 +1275,12 @@ pub fn guard_reset(m: GuardMark) {
     });
 }
 
-/// Sandbox statistics for tests and memory reports: [recycles, code bytes in the active space,
-/// dead code bytes pending, image ro bytes, image rw bytes, arenas live]. `recycle` != 0 runs a
-/// recycle now (blocking).
-pub extern "C" fn __relax_sb_stats(out: *mut [u64; 6], recycle: u32) -> u32 {
-    let mut ok = 1;
-    if recycle != 0 {
-        let up = jit::current_unit();
-        ok = match unsafe { crate::sandbox::recycle(up) } {
-            Ok(_) => 1,
-            Err(e) => {
-                set_error(e);
-                0
-            }
-        };
-    }
-    let (r, used, dead) = crate::sandbox::code_stats();
+/// Sandbox statistics for tests and memory reports: [twin code bytes installed (append-only:
+/// every version stays), image ro bytes, image rw bytes, arenas live, unloaded modules' windows
+/// (reserved, inaccessible, never reused)].
+pub extern "C" fn __relax_sb_stats(out: *mut [u64; 5]) {
     let (ro, rw, n) = crate::sandbox::stats();
-    unsafe { *out = [r as u64, used, dead, ro as u64, rw as u64, n as u64] };
-    ok
+    unsafe { *out = [crate::sandbox::twin_code_bytes(), ro as u64, rw as u64, n as u64, crate::sandbox::dead_arenas() as u64] };
 }
 
 /// The `__relax_module_*` entries by name (jit::loader_symbol).

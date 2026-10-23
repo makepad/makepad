@@ -13,6 +13,8 @@ fn registry() -> Result<Hosts, String> {
 
 /// `makepad hub [--listen <addr>]`: the router `makepad inspect <host>:...` starts on demand. It exits
 /// 60 s after its last client; with `--listen` (paired devices dial this address) it keeps running.
+/// The address must be a LAN (private) or loopback one: 0.0.0.0 and public addresses are refused
+/// (carrier::tcp::lan_bind_addr).
 pub fn hub(args: &[String]) -> i32 {
     #[cfg(unix)]
     {

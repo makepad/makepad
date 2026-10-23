@@ -2595,7 +2595,12 @@ impl WmDesk {
         // The title fills that surface without an independently inset edge.
         self.chrome.radius=0.0;
         self.chrome.bevel=0.0;
-        self.chrome.color=lerp_color(alpha(if t.dark && t.target.supports_dark() {rgb(48,48,51)}else{rgb(237,237,240)},opacity),alpha(if focus>0.5 {rgb(10,36,106)}else{rgb(128,128,128)},opacity),classic as f64);
+        let mac_focus = focus.clamp(0.0, 1.0);
+        let modern_title = if t.target == DesktopStyle::Macos {
+            if t.dark {lerp_color(rgb(40,40,42),rgb(48,48,51),mac_focus)}
+            else {lerp_color(rgb(246,246,246),rgb(237,237,240),mac_focus)}
+        } else if t.dark && t.target.supports_dark() {rgb(48,48,51)}else{rgb(237,237,240)};
+        self.chrome.color=lerp_color(alpha(modern_title,opacity),alpha(if focus>0.5 {rgb(10,36,106)}else{rgb(128,128,128)},opacity),classic as f64);
         self.chrome.color=lerp_color(self.chrome.color,alpha(if focus>0.5 {rgb(0,0,0)}else{rgb(85,85,85)},opacity),next as f64);
         let title_fill=rect(title.pos.x,title.pos.y,title.size.x,(h-2.0*classic as f64).max(1.0));
         self.chrome.draw_abs(cx,title_fill);
@@ -2621,7 +2626,7 @@ impl WmDesk {
             }
         }
         self.title_hits.push((client,title,ChromeHit::Title));
-        let ink=alpha(if retro>0.5 || (t.dark && t.target.supports_dark()) {rgb(255,255,255)}else{rgb(30,30,34)},opacity);
+        let ink=alpha(if t.target == DesktopStyle::Macos {lerp_color(rgb(152,152,158),if t.dark {rgb(229,229,231)}else{rgb(36,36,38)},mac_focus)}else if retro>0.5 || (t.dark && t.target.supports_dark()) {rgb(255,255,255)}else{rgb(30,30,34)},opacity);
         let text=self.titles.get(&client).cloned().unwrap_or_default();
         let inset=if t.target==DesktopStyle::Macos {86.0}else if t.target==DesktopStyle::Windows {38.0}else{28.0};
         if t.target != DesktopStyle::Macos && t.target != DesktopStyle::NextStep {
@@ -2652,6 +2657,8 @@ impl WmDesk {
             self.chrome.radius=(mac*14.0) as f32;
             self.chrome.bevel=retro;
             self.chrome.pressed=if pressed {retro}else{0.0};
+            let group_hover = self.chrome_hover.is_some_and(|(c,h)| c==client && matches!(h,ChromeHit::Close|ChromeHit::Minimize|ChromeHit::Maximize));
+            let color = lerp_color(if t.dark {rgb(85,85,88)}else{rgb(181,181,181)}, color, if group_hover {1.0}else{mac_focus});
             self.chrome.color=lerp_color(alpha(rgb(212,208,200),opacity*classic),alpha(color,opacity),mac);
             if next>0.01 {self.chrome.color=alpha(if pressed {rgb(128,128,128)}else{rgb(170,170,170)},opacity);}
             if modern && hovered {
@@ -2663,7 +2670,6 @@ impl WmDesk {
             }
             let face=if mac>0.99 {rect(button.pos.x+2.0,button.pos.y+(button.size.y-14.0)*0.5,14.0,14.0)}else{button};
             use crate::desktop::MacCaption;
-            let group_hover = self.chrome_hover.is_some_and(|(c,h)| c==client && matches!(h,ChromeHit::Close|ChromeHit::Minimize|ChromeHit::Maximize));
             self.chrome.caption = if mac>0.99 && group_hover {match hit {
                 ChromeHit::Close => MacCaption::Close,
                 ChromeHit::Minimize => MacCaption::Minimize,

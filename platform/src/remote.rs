@@ -147,6 +147,7 @@ mod imp {
         });
         match r.key {
             "status" => route_status(p),
+            "gamepads" => reply_to_answer(ask(Cmd::Gamepads, ACTIVITY_WAIT_SECS)),
             "activity" => reply_to_answer(ask(Cmd::Activity, ACTIVITY_WAIT_SECS)),
             "mouse" => route_mouse(p, None),
             "click" => route_mouse(p, Some("click")),
@@ -1885,6 +1886,20 @@ mod imp {
         let user_seq = cx.remote_activity.user_seq();
         let _origin = super::remote_input_scope(cx);
         match request.cmd {
+            Cmd::Gamepads(tx) => {
+                use crate::game_input::CxGameInputApi;
+                use crate::makepad_micro_serde::SerJson;
+                let infos = cx.game_input_infos();
+                let states = cx.game_input_states();
+                let devices: Vec<_> = states.iter().enumerate().map(|(index, state)| {
+                    let info = infos.get(index);
+                    let remote: makepad_studio_protocol::RemoteGameInput = state.into();
+                    format!("{{\"id\":{},\"name\":{},\"state\":{}}}",
+                        info.map(|i| i.id.0).unwrap_or(index as u64),
+                        json_str(info.map(|i| i.name.as_str()).unwrap_or("Controller")), remote.serialize_json())
+                }).collect();
+                let _ = tx.send(Reply::Text(format!("{{\"gamepads\":[{}]}}", devices.join(","))));
+            }
             Cmd::Activity(tx) => {
                 let _ = tx.send(Reply::Text(activity::json(cx)));
             }

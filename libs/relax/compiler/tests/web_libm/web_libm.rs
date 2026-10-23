@@ -3,8 +3,8 @@
 // Every distinct function in Relax core::libm (48 declarations, 46 names).
 #![allow(dead_code, unexpected_cfgs)]
 use std::fmt::Write;
-extern "C" { fn relax_web_print(ptr: *const u8, len: usize); }
-fn out(s: &str) { unsafe { relax_web_print(s.as_ptr(), s.len()) } }
+extern "C" { fn js_console_log(ptr: *const u8, len: usize); }
+fn out(s: &str) { unsafe { js_console_log(s.as_ptr(), s.len()) } }
 macro_rules! say {
     ($($t:tt)*) => {{ let mut s = String::new(); let _ = writeln!(s, $($t)*); out(&s); }};
 }
@@ -89,7 +89,7 @@ fn body() {
             say!("pow {} {} {:x}", i, j, math::pow(x, y).to_bits());
             say!("hypot {} {} {:x}", i, j, math::hypot(x, y).to_bits());
             say!("atan2 {} {} {:x}", i, j, math::atan2(x, y).to_bits());
-            say!("fmod {} {} {:x}", i, j, math::fmod(x, y).to_bits());
+            say!("fmod {} {} {:x}", i, j, (x % y).to_bits());
             for (k, z) in [0.0, -0.0, 1.0, -1.0, f64::from_bits(1), f64::INFINITY, f64::NAN].iter().copied().enumerate() {
                 say!("fma {} {} {} {:x}", i, j, k, math::fma(x, y, std::hint::black_box(z)).to_bits());
             }
@@ -124,7 +124,7 @@ fn body() {
             say!("powf {} {} {:x}", i, j, math::powf(x, y).to_bits());
             say!("hypotf {} {} {:x}", i, j, math::hypotf(x, y).to_bits());
             say!("atan2f {} {} {:x}", i, j, math::atan2f(x, y).to_bits());
-            say!("fmodf {} {} {:x}", i, j, math::fmodf(x, y).to_bits());
+            say!("fmodf {} {} {:x}", i, j, (x % y).to_bits());
             for (k, z) in [0.0, -0.0, 1.0, -1.0, f32::from_bits(1), f32::INFINITY, f32::NAN].iter().copied().enumerate() {
                 say!("fmaf {} {} {} {:x}", i, j, k, math::fmaf(x, y, std::hint::black_box(z)).to_bits());
             }

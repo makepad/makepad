@@ -24,6 +24,7 @@ pub struct LocalKey<T: 'static> {
 
 /// The lazily created runtime key of a thread-local that needs one (lazy initialisation or
 /// drop glue): its `get` is what `LocalKey`'s fn calls. One per key (a `static` in that fn).
+#[cfg(not(all(target_family = "wasm", not(target_feature = "atomics"))))]
 pub struct LazyKey<T: 'static> {
     key: AtomicUsize, // runtime key + 1; 0 = not created yet
     _t: core::marker::PhantomData<*const T>,
@@ -31,6 +32,39 @@ pub struct LazyKey<T: 'static> {
 
 // the key word is shared by all threads; the values are each thread's own
 unsafe impl<T: 'static> Sync for LazyKey<T> {}
+
+/// On a target without threads TLS is ordinary static storage and is never
+/// destroyed at thread exit, including values with drop glue (rustc no_threads).
+#[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
+pub struct EagerStorage<T> { pub value: T }
+#[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
+unsafe impl<T> Sync for EagerStorage<T> {}
+
+#[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
+pub struct LazyKey<T: 'static> {
+    value: core::cell::UnsafeCell<core::mem::MaybeUninit<T>>,
+    state: Cell<u8>, // initial, alive, destroying
+}
+#[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
+impl<T: 'static> LazyKey<T> {
+    pub const fn new() -> Self {
+        Self { value: core::cell::UnsafeCell::new(core::mem::MaybeUninit::uninit()), state: Cell::new(0) }
+    }
+    pub fn get(&'static self, init: fn() -> T) -> Option<*const T> {
+        if self.state.get() != 1 {
+            let value = init();
+            if self.state.get() == 1 {
+                self.state.set(2);
+                unsafe { core::ptr::drop_in_place(self.value.get() as *mut T); }
+                self.state.set(0);
+            }
+            if self.state.get() == 2 { panic!("Attempted to initialize thread-local while it is being dropped"); }
+            unsafe { self.value.get().write(core::mem::MaybeUninit::new(value)); }
+            self.state.set(1);
+        }
+        Some(self.value.get() as *const T)
+    }
+}
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 #[non_exhaustive]
@@ -113,6 +147,7 @@ fn key_value(key: sys::Key) -> usize {
     sys::key_get(key) as usize
 }
 
+#[cfg(not(all(target_family = "wasm", not(target_feature = "atomics"))))]
 impl<T: 'static> LazyKey<T> {
     pub const fn new() -> LazyKey<T> {
         LazyKey { key: AtomicUsize::new(0), _t: core::marker::PhantomData }

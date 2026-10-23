@@ -65,9 +65,14 @@ pub const fn panic_fmt(args: fmt::Arguments<'_>) -> ! {
     panic_at(args, Location::caller())
 }
 
+#[cfg_attr(relax_web, relax(keep_reachable))]
 pub const fn panic_at(args: fmt::Arguments<'_>, loc: &Location<'_>) -> ! {
     unsafe {
         let depth = depth_step(1);
+        #[cfg(relax_web)]
+        if depth > 1 {
+            crate::intrinsics_rt::abort();
+        }
         if depth > 2 {
             crate::intrinsics_rt::abort();
         }
@@ -76,6 +81,12 @@ pub const fn panic_at(args: fmt::Arguments<'_>, loc: &Location<'_>) -> ! {
                 h(&PanicInfo::new(args, loc));
             }
         }
+        // wasm panic=abort: the installed hook formats and logs in program code;
+        // there is no unwind payload or second host report after the hook.
+        #[cfg(relax_web)]
+        crate::intrinsics_rt::abort();
+        #[cfg(not(relax_web))]
+        {
         let mut sb = StackBuf { buf: [0; 4096], len: 0 };
         let _ = fmt::write(&mut sb, args);
         depth_step(-1);
@@ -88,6 +99,7 @@ pub const fn panic_at(args: fmt::Arguments<'_>, loc: &Location<'_>) -> ! {
             loc.line(),
             loc.column(),
         )
+        }
     }
 }
 

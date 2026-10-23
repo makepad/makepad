@@ -538,7 +538,7 @@ struct Context {
     /// Frames handed to the outputs whose present has not completed on the pacing output yet,
     /// with the callback that reports it (oldest first).
     presenting:VecDeque<(u64,super::Presented)>,
-    sequence:u64, demand:bool, awaiting:bool,
+    sequence:u64, demand:bool, awaiting:bool, credit_due:u64,
 }
 impl Context {
     fn new(compositor:Arc<Device>) -> Result<Self,String> {
@@ -549,7 +549,7 @@ impl Context {
         let order = wide_desktop::parse_display_order(&std::env::var("MAKEPAD_DISPLAY_ORDER").unwrap_or_default());
         Ok(Self { devices:HashMap::from([(compositor.physical,compositor.clone())]),compositor,physical,
             cards:HashMap::new(),outputs:Vec::new(),failed:Vec::new(),working:HashMap::new(),mirror:None,pacing:Default::default(),connectors:Vec::new(),filter:DrmFilter::from_env(),
-            modes,mode,order,primary:None,size:[0,0],active:true,window:None,current:None,frames:VecDeque::new(),presenting:VecDeque::new(),sequence:0,demand:false,awaiting:false })
+            modes,mode,order,primary:None,size:[0,0],active:true,window:None,current:None,frames:VecDeque::new(),presenting:VecDeque::new(),sequence:0,demand:false,awaiting:false,credit_due:0 })
     }
     /// The HAL replaced its lost GPU device. The outputs' swapchains, surfaces, copy jobs and
     /// peers lived on the old device and are dropped; the cards keep DRM master and their
@@ -931,8 +931,16 @@ impl Context {
                     let period = 1_000_000_000_000u64 / u64::from(output.mode.refresh_mhz.max(1));
                     let now = crate::clock_ns(); let phase = output.last_present;
                     let next = if phase == 0 { now + period } else { phase + ((now.saturating_sub(phase) / period) + 1) * period };
-                    state.ready.store(next,Ordering::Release); state.shared.signal();
-                    self.demand = false; self.awaiting = true;
+                    // Empty animation beats and pointer reports can request again before
+                    // a rendered frame reaches this worker. Keep those requests on the
+                    // display clock instead of granting credit at the input report rate.
+                    if now >= self.credit_due {
+                        self.credit_due = if self.credit_due == 0 { next } else {
+                            self.credit_due + ((now - self.credit_due) / period + 1) * period
+                        };
+                        state.ready.store(next,Ordering::Release); state.shared.signal();
+                        self.demand = false; self.awaiting = true;
+                    }
                 }
             }
         }
@@ -1016,7 +1024,10 @@ pub(super) fn run(state:Arc<State>,device:Arc<Device>) {
                 rescan = true; false
             }
         };
-        let deadline = if busy { now + Duration::from_micros(500) } else if rescan && context.active { now + Duration::from_millis(1) } else { next_scan };
+        let mut deadline = if busy { now + Duration::from_micros(500) } else if rescan && context.active { now + Duration::from_millis(1) } else { next_scan };
+        if context.active && context.demand && !context.awaiting && context.frames.is_empty() && context.queued() && context.pacing_index().is_some() {
+            deadline = deadline.min(Instant::now() + Duration::from_nanos(context.credit_due.saturating_sub(crate::clock_ns())));
+        }
         let mut fds:Vec<_> = watch.iter().map(|w| io::PollFd { fd:w.fd(),events:io::READ,revents:0 }).collect();
         if let Err(e) = io::wait(state.reader.as_raw_fd(),&mut fds,Some(deadline)) { eprintln!("[hal-direct] wait: {e}"); }
     }

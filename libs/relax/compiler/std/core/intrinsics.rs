@@ -128,6 +128,10 @@ pub mod intrinsics_simd {
 /// Memory, pointers and type information.
 pub mod intrinsics_mem {
     extern "relax-intrinsic" {
+        /// A linear-memory offset as a program pointer (the trace host may map
+        /// wasm64 memory at a nonzero native base; the exported module uses zero).
+        #[cfg(relax_web)]
+        pub fn web_memory_ptr(offset: usize) -> *mut u8;
         pub fn size_of<T>() -> usize;
         pub fn align_of<T>() -> usize;
         /// Size/alignment from a (possibly fat) raw pointer, as in rustc's intrinsics.

@@ -288,6 +288,9 @@ impl ShellPanel {
                 self.dragging = None;
                 self.close_display_lists();
             }
+            Hit::InvertScroll => {
+                self.system_action(cx, ControlAction::InvertScroll(!self.invert_scroll));
+            }
             Hit::Gpu(row) => {
                 let choice = self.gpu_targets.get(row).cloned();
                 self.close_gpu_lists();
@@ -603,6 +606,7 @@ impl ShellPanel {
     fn pointer_settings_height(&self) -> f64 {
         let notice = if self.system_notice.is_empty() { 0.0 } else { NOTICE_H };
         HERO_H + POINTER_SEP_H + PICKER_ROW_H
+            + PICKER_ROW_H
             + POINTER_SEP_H + HEADER_H + SLIDER_H + ENDS_H
             + POINTER_SEP_H + HEADER_H + SLIDER_H + ENDS_H
             + POINTER_CAPTION_H
@@ -1148,6 +1152,10 @@ impl ShellPanel {
                 self.d.label(cx, ends, false, tok.font.caption, dim, HAlign::Right, "Fast");
             }
         }
+        let (row, rest) = cut_top(rest, PICKER_ROW_H);
+        self.d.label(cx, row, false, tok.font.body, fg, HAlign::Left, "Invert scroll");
+        self.d.toggle_switch(cx, dvec2(row.pos.x + row.size.x - 48.0, row.pos.y + 4.0), &tok, self.invert_scroll, fg);
+        self.hits.push((Hit::InvertScroll, row));
         let (caption, rest) = cut_top(rest, POINTER_CAPTION_H);
         self.d.label_elided(cx, caption, false, tok.font.caption, dim, HAlign::Left,
             "Lift and reposition to keep moving");

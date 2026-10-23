@@ -592,6 +592,39 @@ pub(crate) fn own_slot(u: &Unit, id: u32, targets: &[u32]) -> bool {
 /// `versions <fn|file:line>`: every code version of the fn's slots (installed, replaced, retired:
 /// tier, origin, address, patch generation, cache key), which thread runs in which, and the
 /// slots whose code holds an inlined copy of it (with their versions and threads).
+/// `code [n=<top>]`: JIT code growth. Code is append-only (no version is ever freed), so this is
+/// where growth shows: bytes and installs by source, then the fns with the most versions.
+pub fn cmd_code(req: &Req, out: &mut Out) {
+    use std::sync::atomic::Ordering;
+    let n = req.num("n", 10) as usize;
+    let total: u64 = crate::jit::CODE_GROWTH.iter().map(|c| c.load(Ordering::Relaxed)).sum();
+    let mut by = Vec::new();
+    for k in 0..crate::jit::GROW_NAMES.len() {
+        by.push(format!("{} {:.2} MB / {} installs", crate::jit::GROW_NAMES[k], crate::jit::CODE_GROWTH[k].load(Ordering::Relaxed) as f64 / 1048576.0, crate::jit::CODE_INSTALLS[k].load(Ordering::Relaxed)));
+    }
+    out.line(&format!("code installed {:.2} MB (append-only, never freed): {}", total as f64 / 1048576.0, by.join(", ")));
+    let up = crate::jit::current_unit();
+    if up.is_null() {
+        return;
+    }
+    let r = crate::owner::call_within(crate::owner::Class::Job, 10_000, move || {
+        let u = unsafe { &*up };
+        let mut v: Vec<(u32, u32, &str)> = u.fns.iter().filter(|f| f.version > 1).map(|f| (f.version, f.code_len, &*f.name)).collect();
+        v.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+        v.iter().take(n).map(|(ver, len, name)| format!("  {} versions  {} B now  {}", ver, len, name)).collect::<Vec<_>>()
+    });
+    match r {
+        Some(lines) if lines.is_empty() => out.line("no fn has more than one version"),
+        Some(lines) => {
+            out.line(&format!("top fns by versions:"));
+            for l in lines {
+                out.line(&l);
+            }
+        }
+        None => out.line("(top fns: the owner is busy; counts above are current)"),
+    }
+}
+
 pub fn cmd_versions(req: &Req, out: &mut Out) {
     let Some(q) = req.pos.first().cloned() else {
         out.err("usage: versions <fn|file:line>");

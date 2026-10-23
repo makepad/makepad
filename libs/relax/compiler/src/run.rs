@@ -1748,7 +1748,7 @@ pub fn progress() -> (String, u32, u32) {
 /// The C-ABI fns carrying `#[no_mangle]` (symbol = the fn's name) or `#[export_name = ".."]` whose
 /// symbol starts with one of `prefixes`. A symbol defined twice is an error: the host would bind
 /// one of the two silently.
-fn exported_fns(prog: &crate::program::Program, prefixes: &[String]) -> Result<Vec<(String, DefId)>, String> {
+pub(crate) fn exported_fns(prog: &crate::program::Program, prefixes: &[String]) -> Result<Vec<(String, DefId)>, String> {
     let mut out: Vec<(String, DefId)> = Vec::new();
     for (di, d) in prog.defs.iter().enumerate() {
         if d.kind != DefKind::Fn {
@@ -2253,10 +2253,9 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
     let _k = crate::zone_alloc::kept();
     { let _k = crate::zone_alloc::kept();
     // named: inspect lists it as makepad run's, not the program's
-    let _ = std::thread::Builder::new().name("run-monitor".into()).spawn(move || {
-    // a panic here ended every later settle, swap and trim of the run without a word (the
-    // compiler's panic hook can be the silent one at that moment): it is said, with its payload
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+    // a panic here ended every later settle, swap and trim of the run without a word: the loop
+    // runs under the lifeline (reported with its position, restarted with fresh round state)
+    crate::lifeline::spawn("run-monitor".into(), crate::lifeline::OnPanic::Restart, None, move || {
         let runtime = &runtime;
         let options = &options;
         // A measurement harness requests an allocator snapshot at its own landmark
@@ -2294,6 +2293,7 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
         let mut swap_said_at = Instant::now();
         loop {
             std::thread::sleep(std::time::Duration::from_millis(100));
+            crate::lifeline::beat();
             if let Some(file) = present.as_mut() {
                 use std::io::{Read, Write};
                 let _ = file.read_to_end(&mut present_bytes);
@@ -2593,11 +2593,6 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
                 report("fns", &n.to_string());
             }
         }
-    }));
-    if let Err(e) = r {
-        let what = e.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| e.downcast_ref::<String>().cloned()).unwrap_or_default();
-        eprintln!("makepad-run: the run monitor ended by a panic: {what} (no more settles, zone swaps or trims in this run)");
-    }
     });
     }
 }
@@ -2696,6 +2691,10 @@ fn finish_run(why: &'static str, code: Option<i32>) {
     // exit worker while it waits for it
     EXIT_CALLER_HOLDS.store(crate::owner::is_owner(), Ordering::SeqCst);
     jit::begin_exit();
+    // a JIT thread that panicked during the run is said once more at its end (inspect threads has the rows)
+    if let Some(l) = crate::lifeline::summary() {
+        eprintln!("makepad-run: {}", l);
+    }
     if exit.request.try_send((why, code)).is_err() { return; }
     // 100 ms for the cleanup, counted from the end of the cache write; the write itself only
     // has a hang guard (a store on a stalled disk must not keep the process forever)
@@ -2887,12 +2886,14 @@ fn quit_mark() {
     let _ = std::thread::Builder::new().name("run-quit-write".to_string()).spawn(|| { let _z = crate::zone_alloc::compiler_thread();
         let _mem = crate::memstat::tag(crate::memstat::Tag::CacheStore);
         let t = Instant::now();
-        // the owner thread is busy while the app's shutdown compiles: retry for a bounded time
+        // the owner thread is busy while the app's shutdown compiles: retried until it is written
+        // (no time cap: the session's final code must reach the cache; the exit ends this thread)
         let mut r = None;
-        while t.elapsed().as_millis() < 4000 {
+        loop {
             r = mid_flush(true, true).or(r);
             if r.is_some() && (COLLECTED_CURRENT.load(Ordering::Relaxed) || MID_COLLECTED_TRIED.load(Ordering::Relaxed)) { break; }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            // written, the collected program still waiting for the front-end lock: retried less often
+            std::thread::sleep(std::time::Duration::from_millis(if r.is_some() { 100 } else { 10 }));
         }
         // the generations the write replaced go now: the exit summary may never run (a harness
         // kills the app, a framework ends the process)

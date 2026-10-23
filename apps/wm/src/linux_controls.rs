@@ -99,6 +99,7 @@ pub enum ControlAction {
     /// Pointer speed in hundredths (100 = 1.00×). Applied on every update;
     /// `touchpad` selects the device (`false` mouse, `true` touchpad).
     PointerSpeed { touchpad: bool, value: u32 },
+    InvertScroll(bool),
     /// "Restart desktop now", confirmed: restart the WM so the session
     /// script applies the saved render-on GPU (apps close).
     RestartDesktop,
@@ -107,6 +108,9 @@ pub enum ControlAction {
 
 #[derive(Default)]
 pub struct LinuxControls {
+    pub(crate) invert_scroll: bool,
+    invert_scroll_loaded: bool,
+    invert_scroll_save: Option<bool>,
     controller: Option<SystemController>,
     attempted: bool,
     waiting: VecDeque<SystemCommand>,
@@ -643,6 +647,14 @@ impl App {
                 self.redraw_all(cx);
                 return;
             }
+            ControlAction::InvertScroll(on) => {
+                self.linux_controls.invert_scroll = on;
+                self.linux_controls.invert_scroll_loaded = true;
+                self.linux_controls.invert_scroll_save = Some(on);
+                self.poll_linux_controls(cx);
+                self.redraw_all(cx);
+                return;
+            }
             ControlAction::PointerSpeed { touchpad, value } => {
                 // Applied here whatever the worker's state: the person sees
                 // it at once, and only the saving can fail.
@@ -676,6 +688,7 @@ impl App {
                 | ControlAction::DisplayPacing(_)
                 | ControlAction::RestartDesktop
                 | ControlAction::GpuChoice(_)
+                | ControlAction::InvertScroll(_)
                 | ControlAction::PointerSpeed { .. } => {}
                 ControlAction::Command(command) => {
                     if state.waiting.len() < 32 {
@@ -735,6 +748,12 @@ impl App {
                         }
                     }
                 }
+                if let Some(on) = state.invert_scroll_save.take() {
+                    if controller.send(SystemCommand::SaveInvertScroll(on)).is_err() {
+                        state.invert_scroll_save = Some(on);
+                        log!("wm: scroll setting save queued for retry");
+                    }
+                }
                 while let Some(command) = state.waiting.pop_front() {
                     if let Err(command) = controller.send(command) {
                         state.waiting.push_front(command);
@@ -746,7 +765,8 @@ impl App {
                 let unsaved = state.dpi_save.take().is_some()
                     | state.layout_save.take().is_some()
                     | state.pointer_save[0].take().is_some()
-                    | state.pointer_save[1].take().is_some();
+                    | state.pointer_save[1].take().is_some()
+                    | state.invert_scroll_save.take().is_some();
                 state.layout_save_seq = None;
                 if state.restart_requested && !state.restart_quit_called {
                     // The worker is gone: no `Applied` can ever land, so the
@@ -836,6 +856,11 @@ impl App {
             && !state.layout_user_set
             && (!state.layout_restore_done || !state.source_loaded_applied);
         if let Some(snapshot) = snapshot.as_ref().filter(|s| s.input_settings_loaded) {
+            if !state.invert_scroll_loaded {
+                state.invert_scroll = snapshot.invert_scroll;
+                state.invert_scroll_loaded = true;
+                changed = true;
+            }
             for i in 0..2 {
                 if !state.pointer_loaded_applied[i] {
                     if state.pointer_user_set[i] {
@@ -955,6 +980,10 @@ impl App {
                 panel.restart_waiting = state.restart_requested;
                 changed = true;
             }
+            if panel.invert_scroll != state.invert_scroll {
+                panel.invert_scroll = state.invert_scroll;
+                changed = true;
+            }
             if let Some(snapshot) = snapshot {
                 let audio = &snapshot.audio;
                 self.bar_sample.volume = audio.default_output().map(|d| d.percent);
@@ -963,6 +992,7 @@ impl App {
                     percent,
                     charging: snapshot.power.status == BatteryStatus::Charging,
                 });
+                panel.data.game_controllers.clone_from(&snapshot.game_controllers);
                 panel.data.volume = self.bar_sample.volume;
                 panel.data.muted = self.bar_sample.muted;
                 panel.data.input_volume = audio.default_input().map(|d| d.percent);

@@ -194,8 +194,8 @@ impl CfgSet {
         CfgSet { session: sess.clone(), set }
     }
     /// A web target as the trace host runs it: `rustc --print cfg --target wasm32-unknown-unknown`
-    /// (1.98; wasm64-unknown-unknown for `PtrWidth::W64`), plus `atomics` of makepad's threaded web
-    /// build (cargo makepad wasm's default: `+atomics,+bulk-memory,+mutable-globals`). std/core/alloc
+    /// (1.98; wasm64-unknown-unknown for `PtrWidth::W64`). The explicit threaded profile adds
+    /// `atomics` (cargo makepad wasm's default). std/core/alloc
     /// are read with this set too (lib.rs `std_cfg`, plus `relax_web`): Relax std's web layer is
     /// rustc's wasm32-unknown-unknown std.
     pub fn web(sess: &std::sync::Arc<crate::Session>, w: crate::options::PtrWidth, features: &[String]) -> CfgSet {
@@ -209,8 +209,11 @@ impl CfgSet {
             "target_feature=bulk-memory", "target_feature=multivalue", "target_feature=mutable-globals",
             "target_feature=nontrapping-fptoint", "target_feature=reference-types", "target_feature=sign-ext",
             "target_has_atomic=8", "target_has_atomic=16", "target_has_atomic=32", "target_has_atomic=64",
-            "target_has_atomic=ptr", "target_feature=atomics",
+            "target_has_atomic=ptr",
         ].iter().map(|s| s.to_string()).collect();
+        if sess.options.web_threads == crate::options::WebThreads::On {
+            set.push("target_feature=atomics".into());
+        }
         for f in features {
             set.push(format!("feature={}", f));
         }

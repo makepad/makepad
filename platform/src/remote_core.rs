@@ -323,6 +323,7 @@ pub struct QueuedCmd {
 
 pub enum Cmd {
     Activity(Sender<Reply>),
+    Gamepads(Sender<Reply>),
     Input {
         window: Option<usize>,
         inputs: Vec<Input>,
@@ -712,6 +713,7 @@ pub fn err(msg: &str) -> Answer {
 /// `grab`, `gseq`, `gq` and `tweak grab` are client side: they open the `frames` service.
 pub const COMMANDS: &[Command] = &[
     Command { words: "status", args: "[w=ID]", answers: "{\"app\",\"pid\",\"w\":[{\"i\":id,\"t\":title,\"sz\":[w,h],\"px\":[w,h],\"dpi\",\"pos\":[x,y]}],\"activity\"}", service: "ui", risk: CmdRisk::Read, params: "\"w\":{\"type\":\"integer\",\"description\":\"window id (status lists them)\"}", required: &[], positional: &[] },
+    Command { words: "gamepads", args: "", answers: "connected controllers and their current input states", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
     Command { words: "activity", args: "", answers: "native user activity: user_active, user_seq, idle_ms, quiet_ms, held, last_input, window (also in status)", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
     Command { words: "grab", args: "[w=ID] [scale=1] [out=FILE]", answers: "client side (frames service): the window as a PNG file; prints {\"png\":path,\"w\",\"sz\",\"capture_ms\",\"encode_ms\",\"capture_kind\"}", service: "ui", risk: CmdRisk::Read, params: "\"w\":{\"type\":\"integer\"},\"scale\":{\"type\":\"number\"},\"out\":{\"type\":\"string\"}", required: &[], positional: &[] },
     Command { words: "gseq", args: "[n=8] [every_ms=50] [scale=1] [w=ID] [out=DIR]", answers: "client side (frames service): n frames, a separate present per deadline; n=1..64, every_ms>=8, span<=60s", service: "ui", risk: CmdRisk::Read, params: "\"n\":{\"type\":\"integer\"},\"every_ms\":{\"type\":\"integer\"},\"scale\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"},\"out\":{\"type\":\"string\"}", required: &[], positional: &[] },
@@ -1836,6 +1838,7 @@ mod tests {
     fn every_former_route_resolves_to_a_command() {
         let routes = [
             ("status", 1),
+            ("gamepads", 1),
             ("activity", 1),
             ("mouse", 1),
             ("click", 1),
@@ -1852,6 +1855,10 @@ mod tests {
             ("cap resume", 2),
             ("cap start", 2),
             ("cap stop", 2),
+            ("input record", 2),
+            ("input replay", 2),
+            ("input stop", 2),
+            ("input status", 2),
             ("close", 1),
             ("resize", 1),
             ("window", 1),
@@ -1869,6 +1876,7 @@ mod tests {
             ("shader const", 2),
             ("quit", 1),
             ("log", 1),
+            ("net", 1),
             ("midi", 1),
             ("cursor", 1),
         ];

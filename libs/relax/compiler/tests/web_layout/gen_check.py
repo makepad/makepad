@@ -4,7 +4,7 @@
 import sys
 
 rows = [l.rstrip('\n') for l in open(sys.argv[1]) if l.strip()]
-out = ['#![allow(dead_code, unused_macros)]', 'include!("corpus.rs");', 'fn main() {}']
+out = ['#![allow(dead_code, unused_macros)]', 'include!("corpus.rs");', 'fn main() { run(); }']
 for n, row in enumerate(rows):
     ty, size, align, offs = row.split('|')
     tag = ty.replace('\\', '\\\\').replace('"', '\\"')
@@ -14,5 +14,9 @@ for n, row in enumerate(rows):
         for fo in offs.split(','):
             f, o = fo.split('=')
             out.append(f'const _: () = assert!(std::mem::offset_of!({ty}, {f}) == {o}, "row {n}: offset of {tag}.{f} is not {o}");')
+assertions = out[3:]
+out += ['#[no_mangle]', 'pub extern "C" fn run() {']
+out += [s.removeprefix('const _: () = ') for s in assertions]
+out += ['}']
 open(sys.argv[2], 'w').write('\n'.join(out) + '\n')
-print(f'{len(rows)} rows, {len(out) - 3} assertions')
+print(f'{len(rows)} rows, {len(assertions)} assertions')

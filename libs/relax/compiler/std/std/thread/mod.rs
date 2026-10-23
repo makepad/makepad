@@ -21,6 +21,8 @@ use crate::sys;
 mod local;
 
 pub use self::local::{AccessError, LazyKey, LocalKey};
+#[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
+pub use self::local::EagerStorage;
 
 pub type Result<T> = core::result::Result<T, Box<dyn Any + Send + 'static>>;
 

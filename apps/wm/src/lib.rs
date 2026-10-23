@@ -4628,6 +4628,11 @@ impl App {
                     if up { "Connected".to_string() } else { "Not connected".to_string() }
                 });
                 p.data.bluetooth = self.bar_sample.bluetooth;
+                #[cfg(not(target_os = "linux"))]
+                {
+                    p.data.game_controllers.controllers = cx.game_input_infos().into_iter().map(|info|
+                        shell::game_controllers::Controller { name: info.name, battery: None }).collect();
+                }
             }
         }
         #[cfg(target_os = "linux")]
@@ -6473,6 +6478,26 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        #[cfg(target_os = "linux")]
+        if let Event::Scroll(scroll) = event {
+            if self.linux_controls.invert_scroll && scroll.is_mouse {
+                let mut reversed = scroll.clone();
+                reversed.scroll = -reversed.scroll;
+                let reversed = Event::Scroll(reversed);
+                self.handle_wm_event(cx, &reversed);
+                if let Event::Scroll(reversed) = reversed {
+                    scroll.handled_x.set(reversed.handled_x.get());
+                    scroll.handled_y.set(reversed.handled_y.get());
+                }
+                return;
+            }
+        }
+        self.handle_wm_event(cx, event);
+    }
+}
+
+impl App {
+    fn handle_wm_event(&mut self, cx: &mut Cx, event: &Event) {
         #[cfg(not(target_arch = "wasm32"))]
         if self.state.is_some() {
             self.domain_event(cx, event);

@@ -4,9 +4,13 @@ D=$(cd "$(dirname "$0")" && pwd)
 # Instruction counts are identical with tiering disabled and after a low-threshold tier-up.
 BASE_BUDGET=""
 for TIER in 0 1; do
-OUT=$(MAKEPAD_RUN_O3=$TIER MAKEPAD_RUN_O3_CALLS=100 MAKEPAD_RUN_O3_TRACE=1 "$1" test "$D/budget.rs" 2>&1)
+# (stdout and stderr apart: an O3 trace line on stderr can land inside an `out` line of stdout)
+SO=$(mktemp); SE=$(mktemp)
+MAKEPAD_RUN_O3=$TIER MAKEPAD_RUN_O3_CALLS=100 MAKEPAD_RUN_O3_TRACE=1 "$1" test "$D/budget.rs" >"$SO" 2>"$SE"
 STATUS=$?
-GOT=$(echo "$OUT" | grep '^out ')
+GOT=$(grep '^out ' "$SO")
+OUT="$(cat "$SO" "$SE")"
+rm -f "$SO" "$SE"
 if [ "$STATUS" != 0 ] || ! echo "$GOT" | grep -q '^out owned string results: true$'; then
     echo "modules budget (tier1=$TIER): FAIL"; echo "$OUT" | tail -50; exit 1
 fi
@@ -57,10 +61,29 @@ if [ "$GOT" = "$(cat "$D/expect-scale.out")" ]; then echo "modules scale: PASS (
 OUT=$(MAKEPAD_RUN_SANDBOX_NOCHECK=1 "$1" test "$D/contain.rs" 2>&1)
 GOT=$(echo "$OUT" | grep '^out ')
 if [ "$GOT" = "$(cat "$D/expect-contain.out")" ]; then echo "modules contain: PASS"; else echo "modules contain: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -8; exit 1; fi
-# This case compiles/edits 400 modules; its harness deadline includes compilation.
-OUT=$(MAKEPAD_RUN_WATCHDOG_MS=120000 "$1" test "$D/recycle.rs" 2>&1)
+# Append-only module code (MEMRECLAIM): 400 load/edit/unload cycles keep a live module stable;
+# prints the twin code growth per hot patch. Its harness deadline includes compilation.
+OUT=$(MAKEPAD_RUN_WATCHDOG_MS=120000 "$1" test "$D/growth.rs" 2>&1)
 GOT=$(echo "$OUT" | grep '^out ')
-if [ "$GOT" = "$(cat "$D/expect-recycle.out")" ]; then echo "modules recycle: PASS ($(echo "$OUT" | grep -o 'recycle: .*'))"; else echo "modules recycle: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -8; exit 1; fi
+if [ "$GOT" = "$(cat "$D/expect-growth.out")" ]; then echo "modules growth: PASS ($(echo "$OUT" | grep -o 'growth: .*'))"; else echo "modules growth: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -8; exit 1; fi
+# Module unload: the window is never reused; a stale access into it ends the process, named (SAFE2 F2).
+OUT=$("$1" test "$D/unload_inside.rs" 2>&1)
+GOT=$(echo "$OUT" | grep '^out ')
+if [ "$GOT" = "$(cat "$D/expect-unload-inside.out")" ]; then echo "modules unload: PASS"; else echo "modules unload: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -12; exit 1; fi
+for CASE in parked host; do
+OUT=$(SAFE2_UNLOAD_CRASH=$CASE "$1" test "$D/unload_inside.rs" 2>&1)
+STATUS=$?
+if [ "$STATUS" != 0 ] && ! echo "$OUT" | grep -q '^out ' && echo "$OUT" | grep -q 'stale access into the unloaded module `parker`'; then echo "modules stale access ($CASE) ends the process: PASS"; else echo "modules stale access ($CASE): FAIL (status $STATUS)"; echo "$OUT" | grep -v '^  report' | tail -12; exit 1; fi
+done
+python3 "$D/stale_park.py" "$1" || exit 1
+# Module code handed to the host as a value is refused at the host API boundary (SAFE2 F3).
+OUT=$("$1" test "$D/escape_fn.rs" 2>&1)
+GOT=$(echo "$OUT" | grep '^out ')
+if [ "$GOT" = $'out escaping fn values refused: true\nout plain data to host API: true' ]; then echo "modules escape fn: PASS"; else echo "modules escape fn: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -12; exit 1; fi
+# Shadow stacks, result slots and fuel per thread and entry (SAFE2 F4).
+OUT=$(MAKEPAD_RUN_MODULE_FUEL=2000000 "$1" test "$D/shadow_threads.rs" 2>&1)
+GOT=$(echo "$OUT" | grep '^out ')
+if [ "$GOT" = "$(cat "$D/expect-shadow-threads.out")" ]; then echo "modules shadow threads: PASS"; else echo "modules shadow threads: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -12; exit 1; fi
 OUT=$(MAKEPAD_RUN_MODULE_FUEL=1000000 "$1" test "$D/fuel.rs" 2>&1)
 GOT=$(echo "$OUT" | grep '^out ')
 if [ "$GOT" = "$(cat "$D/expect-fuel.out")" ]; then echo "modules fuel: PASS"; else echo "modules fuel: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -6; exit 1; fi

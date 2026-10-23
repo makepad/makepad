@@ -3,8 +3,10 @@
 //! domain zero on the process heap and selects an arena only for hosted program allocations.
 
 use crate::fmt;
+#[cfg(relax_web)]
+use crate::web_allocator as sys;
 
-#[cfg(not(relax_check))]
+#[cfg(all(not(relax_check), not(relax_web)))]
 mod sys {
     extern "C" {
         pub fn relax_alloc(size: usize, align: usize) -> *mut u8;

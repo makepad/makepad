@@ -17,6 +17,12 @@ pub use intrinsic_decls::{intrinsics, intrinsics_atomic, intrinsics_int, intrins
 
 pub mod libm;
 
+#[cfg(relax_web)]
+#[path = "../std/sys/dlmalloc/mod.rs"]
+pub(crate) mod web_allocator;
+#[cfg(relax_web)]
+pub mod web_runtime;
+
 // ---- language support
 pub mod any;
 pub mod arch;

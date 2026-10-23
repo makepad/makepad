@@ -1,0 +1,20 @@
+# The audio engine: the node types of an audio graph, the schedule a
+# revision is prepared into and one render pass over it. Deck-free and
+# widget-free, so a game can run a score's graph without Stage's decks,
+# asset streams or media decoders (live_audio adds those on top).
+[package]
+name = "makepad-audio-engine"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "The audio engine of a flow graph: node types, prepared schedules and the render pass, nested players (the Score node), without decks"
+
+[lib]
+name = "makepad_audio_engine"
+path = "src/lib.rs"
+
+[dependencies]
+makepad-flow = { path = "../flow", default-features = false, features = ["live"] }
+makepad-audio-dsp = { path = "../audio_dsp" }
+makepad-score-player = { path = "../score_player" }
+makepad-audio-synth = { path = "../audio_synth" }

@@ -1,0 +1,58 @@
+// Tidal Glass: an ambient piece at 72. Long pads, a bell motif drawn once
+// and repeated with small changes, a sub drone and a big hall.
+use mod.score.*
+
+let clock = Clock{bpm: 72 sig: [4 4] seed: 11}
+
+let pad = Synth{preset: @warm_pad cutoff: 1600 attack: 2.5 release: 4}
+let glass = Synth{preset: @glass_pad}
+let bell = Synth{preset: @bell}
+let sub = Synth{preset: @sub}
+
+/// Four chords, a bar each twice over: Am9, Fmaj7, Cadd9, G6 (G, B, D, E).
+let chords = Loop{play: pad beats: 32 amp: 0.45
+    code: fn(i) {
+        let roots = [@a2 @f2 @c3 @g2]
+        let kinds = [@m9 @maj7 @add9 @maj6]
+        for c in 0..4 {
+            play(chord(roots[c], kinds[c]), {dur: 7.6})
+            sleep(8)
+        }
+    }
+}
+
+/// The same eight bell notes every cycle; each cycle one note may move.
+let motif = Loop{play: bell beats: 16 amp: 0.32 pan: 0.3
+    code: fn(i) {
+        let notes = [@e5 @c5 @a4 @g4 @e5 @d5 @c5 @a4]
+        for n in 0..8 {
+            if one_in(5) == false { play(tick(notes), {dur: 1.5}) }
+            sleep(choose([1.5 2 2.5]))
+        }
+    }
+}
+
+let shimmer = Loop{play: glass beats: 16 amp: 0.22 pan: -0.3
+    code: fn(i) {
+        sleep(4)
+        play(choose([@a4 @e5 @c5]), {dur: 8})
+        sleep(12)
+    }
+}
+
+let drone = Loop{play: sub beats: 16 amp: 0.4
+    code: fn(i) {
+        play(@a1, {dur: 15.5})
+        sleep(16)
+    }
+}
+
+let lift = Highpass{in: [chords shimmer] cutoff: 180}
+let echo = Delay{in: [motif] time: 1.5 feedback: 0.55 mix: 0.35 spread: 1}
+let hall = Reverb{in: [lift echo] room: 0.92 mix: 0.5 damp: 5000}
+
+let rise = Section{bars: 8 loops: [chords drone]}
+let bloom = Section{bars: 16 loops: [chords drone motif shimmer]}
+let fade = Section{bars: 8 loops: [chords shimmer]}
+
+Score{label: "Tidal Glass" clock pad glass bell sub chords motif shimmer drone lift echo hall rise bloom fade arrange: [rise bloom fade]}

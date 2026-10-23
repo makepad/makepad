@@ -695,7 +695,53 @@ impl<'a> Lcx<'a> {
 
     // ------------------------------------------------------------ emission
 
+    fn web_helper(&self, module: &str, name: &str) -> Callee {
+        let def = self.u.core_path(&[module, name]).expect("web std lowering helper");
+        Callee::Fn(self.u.fn_id(FnKey::Inst(def, Vec::new())))
+    }
+
     fn emit(&mut self, i: Inst) {
+        // Web runtime helpers are program code, before capture and native tracing.
+        // Keeping this at RIR construction also covers compiler-generated checks.
+        let i = if self.u.web_target {
+            match i {
+                Inst::Call(Callee::Host(s), mut args, rets) => {
+                    let name = match self.u.syms.kind(s.id) { Some(crate::syms::SymKind::Rt(n)) => n, _ => "" };
+                    match name {
+                        "str_eq" | "divrem128" | "wide_f32" | "wide_f64" => Inst::Call(self.web_helper("web_runtime", name), args, rets),
+                        "fmod" | "fmodf" => Inst::Call(self.web_helper("libm", name), args, rets),
+                        "panic_site" | "panic_bounds" => {
+                            let site_reg = args.pop().expect("panic site argument");
+                            let site_id = self.f.blocks.iter().flat_map(|b| &b.insts).find_map(|i| match i {
+                                Inst::Addr(r, s) if *r == site_reg => match self.u.syms.kind(s.id) { Some(crate::syms::SymKind::Site(n)) => Some(n), _ => None },
+                                _ => None,
+                            }).expect("web panic site must be a compile-time site");
+                            let (file, pos, msg) = {
+                                let sites = self.u.sites.lock().unwrap_or_else(|e| e.into_inner());
+                                let site = &sites[site_id as usize];
+                                (site.file, site.pos, site.msg.clone())
+                            };
+                            let (line, col) = self.u.prog.files[file as usize].line_col(pos);
+                            if name == "panic_site" {
+                                let sym = self.u.lit_sym(msg.as_bytes());
+                                args.push(self.sym_val(sym));
+                                args.push(self.iconst(msg.len() as i64));
+                            }
+                            let mut file = self.u.prog.file_paths[file as usize].as_bytes().to_vec();
+                            file.push(0);
+                            let sym = self.u.lit_sym(&file);
+                            args.push(self.sym_val(sym));
+                            args.push(self.iconst(file.len() as i64));
+                            args.push(self.iconst(line as i64));
+                            args.push(self.iconst(col as i64));
+                            Inst::Call(self.web_helper("web_runtime", name), args, rets)
+                        }
+                        _ => Inst::Call(Callee::Host(s), args, rets),
+                    }
+                }
+                i => i,
+            }
+        } else { i };
         // a call that may unwind while something needs dropping: an Invoke whose unwind edge
         // runs the drops (rustc MIR: the call terminator's `unwind: Cleanup(bb)`)
         let pad = match &i {
@@ -7079,7 +7125,8 @@ impl<'a> Lcx<'a> {
         let p = self.f.vreg(Cls::I);
         let def = self.u.prog.def(d);
         let ast = &self.u.prog.files[def.file as usize].ast;
-        if crate::lang_items::has_attr(&self.u.prog, def.file, ast.list(ast.item(def.item).attrs), "thread_local") {
+        let no_threads = self.u.web_target && !self.u.prog.crates[def.krate as usize].cfg.set.iter().any(|s| s == "target_feature=atomics");
+        if !no_threads && crate::lang_items::has_attr(&self.u.prog, def.file, ast.list(ast.item(def.item).attrs), "thread_local") {
             let Some(pl) = self.u.thread_local_place_shared(d) else {
                 self.err(self.pos, format!("could not evaluate static {} -- see its own error", self.u.prog.def_path(d)));
                 self.emit(Inst::Iconst(p, 0));
@@ -8389,7 +8436,18 @@ impl<'a> Lcx<'a> {
                         let lo0 = self.f.vreg(Cls::I);
                         self.emit(Inst::Conv(Conv::FToInt(true, IntTy { bits: 64, signed: false }), lo0, r));
                         let (lo, hi) = match neg {
-                            None => (lo0, hi0),
+                            None => {
+                                // At 2^128 the saturated high limb converts back to
+                                // 2^64, so the subtraction above gives zero, not the
+                                // required all-ones low limb. Saturate both limbs
+                                // explicitly; this also handles positive infinity.
+                                let limit = fk(self, 340282366920938463463374607431768211456.0);
+                                let big = self.f.vreg(Cls::I);
+                                self.emit(Inst::FCmp(Cond::Ge, true, big, x, limit));
+                                let zero = self.iconst(0);
+                                let mask = self.ibin(IOp::Sub, false, zero, big);
+                                (self.ibin(IOp::Or, false, lo0, mask), self.ibin(IOp::Or, false, hi0, mask))
+                            }
                             Some(n) => {
                                 // positives above i128::MAX saturate: hi >= 2^63 -> MAX
                                 let big = self.f.vreg(Cls::I);
@@ -9565,7 +9623,9 @@ impl<'a> Lcx<'a> {
         }
         // SPEC-V: unverified code may break the borrow rules; the callee's `noalias` code must not
         // see such arguments
-        let to_twin = self.plain_calls && matches!(callee, Callee::Fn(_) | Callee::Indirect(_)) && self.alias_prone(&args);
+        // SPEC=0 disables ahead compilation, not SPEC-V. Web has one body per slot,
+        // including function pointers and vtables, so it never selects native twins.
+        let to_twin = !self.u.web_target && self.plain_calls && matches!(callee, Callee::Fn(_) | Callee::Indirect(_)) && self.alias_prone(&args);
         // C ABI calls: every aggregate goes by pointer to a private copy, an aggregate
         // result through a result slot; the backend does the C placement (CSig)
         let csig = match &callee {
@@ -11121,6 +11181,16 @@ impl<'a> Lcx<'a> {
                 Some(Val::L(vec![d]))
             }
             "str_as_bytes" => Some(Val::L(a)),
+            "web_memory_ptr" => {
+                if self.pb() == 4 || crate::web::BASE == 0 {
+                    Some(Val::L(a))
+                } else {
+                    let base = self.u.syms.intern(crate::syms::SymKind::Rt("web_memory_base"), crate::web::BASE);
+                    let base = self.sym_val(base);
+                    let ptr = self.ibin(IOp::Add, false, base, a[0]);
+                    Some(Val::L(vec![ptr]))
+                }
+            }
             "slice_len" => Some(Val::L(vec![a[1]])),
             "unreachable" => {
                 self.term(Term::Unreachable);
@@ -11128,6 +11198,12 @@ impl<'a> Lcx<'a> {
                 Some(self.unit())
             }
             "panic_impl" | "abort" => {
+                if self.u.web_target {
+                    // core::panicking has already formatted the message and run the hook.
+                    self.term(Term::Unreachable);
+                    self.dead();
+                    return Some(self.unit());
+                }
                 // intrinsics_rt::panic_impl(msg, len, file, file_len, line, col) -> !: the
                 // runtime's report + unwind (live) / abort (AOT); abort reports "abort"
                 let args = if name == "abort" {
@@ -14515,6 +14591,7 @@ fn arithmetic_overflow_message(op: BinOp) -> &'static str {
 /// before any lowering has run.
 pub(crate) fn intern_lazy_rt(u: &mut Unit, name: &str) -> Option<relax_backend::rir::Sym> {
     let (kind, addr) = match name {
+        "web_memory_base" => ("web_memory_base", crate::web::BASE),
         "ext_free" => { let f: rt_fn_ty!(fn(u64)) = rt_ext_free; ("ext_free", f as usize as u64) }
         "ext_get" => { let f: rt_fn_ty!(fn(u64, u64, u64) -> u64) = rt_ext_get; ("ext_get", f as usize as u64) }
         "divrem128" => { let f: rt_fn_ty!(fn(u64, u64, u64, u64, u64) -> WideRet) = rt_divrem128; ("divrem128", f as usize as u64) }

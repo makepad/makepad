@@ -33,6 +33,19 @@ impl Interp<'_> {
         }
     }
 
+    /// step.rs: validate_operand of an assigned place of an uninhabited layout.
+    pub(super) fn validate_assigned(&mut self, place: MPlace) -> R<()> {
+        let saved = self.validating;
+        self.validating = true;
+        let r = self.validate(place, String::new(), 0, &mut std::collections::HashSet::new());
+        self.validating = saved;
+        match r {
+            Err(Stop::Item(m)) => Err(Stop::Item(format!("E0080: constructing invalid value of type {}: {m}", self.ty_str(place.ty)))),
+            Err(Stop::Ub(_)) => unsupported("validity read"),
+            r => r,
+        }
+    }
+
     fn ty_str(&self, t: TyId) -> String { crate::typeck::ty_to_string(false, self.prog, self.tcx, t) }
 
     fn invalid<T>(&self, path: &str, what: String) -> R<T> {
@@ -129,7 +142,9 @@ impl Interp<'_> {
                 if adt.is_box() { return unsupported("box validity"); }
                 if adt.valid_start.is_some() || adt.valid_end.is_some() { return unsupported("scalar valid range"); }
                 let lay = self.layout(p.ty)?;
-                if lay.uninhabited { return self.invalid(&path, format!("a value of uninhabited type `{}`", self.ty_str(p.ty))); }
+                // validity.rs visit_value: the layout's uninhabited check comes after the walk of the fields, so
+                // a struct wrapping an uninhabited field reports the field (a variant-less enum has none)
+                if lay.uninhabited && adt.variants.is_empty() { return self.invalid(&path, format!("a value of uninhabited type `{}`", self.ty_str(p.ty))); }
                 let args: Vec<TyId> = tys.list(args).to_vec();
                 let (vi, offs) = if adt.is_enum {
                     let vi = match self.read_variant(p) {
@@ -149,6 +164,7 @@ impl Interp<'_> {
                     let packed = if adt.repr_packed > 0 { Some(p.packed.map_or(adt.repr_packed as u64, |q| q.min(adt.repr_packed as u64))) } else { p.packed };
                     self.validate(MPlace { ptr: Ptr { off: p.ptr.off + o as u64, ..p.ptr }, meta: None, ty: t, variant: None, packed }, seg, depth, visited)?;
                 }
+                if lay.uninhabited { return self.invalid(&path, format!("a value of uninhabited type `{}`", self.ty_str(p.ty))); }
                 Ok(())
             }
             _ => unsupported("validity of this type"),

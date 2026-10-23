@@ -10,7 +10,7 @@ use crate::types::fold::{TypeFolder, super_fold_ty};
 use crate::consts::IsRigid;
 impl Tcx {
     /// Does `t` mention `needle` (a type, structurally)?
-    fn mentions_ty(&self, t: TyId, needle: TyId) -> bool {
+    pub(super) fn mentions_ty(&self, t: TyId, needle: TyId) -> bool {
         struct Finder { needle: TyId, found: bool }
         impl TypeFolder for Finder {
             fn fold_ty(&mut self, tys: &Types, t: TyId, depth: u32) -> TyId {

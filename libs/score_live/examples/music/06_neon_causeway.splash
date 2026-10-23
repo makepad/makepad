@@ -1,0 +1,336 @@
+// Neon Causeway: synthwave at 100 in A minor, the last chorus lifted to B
+// minor.
+//
+// Form (68 bars): intro 8 (the arpeggio's filter opens, a pad, a bell) ·
+// verse 16 (drums with a big gated snare, octave-eighths bass, a soft
+// analog lead sings the verse melody, strings) · pre-chorus 4 (Dm7 Em7
+// Fmaj7 G, toms, a riser) · chorus 16 (the supersaw hook, a bell counter-line
+// above it, claps, the arpeggio an octave up) · bridge 8 (halftime; the
+// piano and a choir on "ah" over Dm9 Am/C Bbmaj7 C, then F#7 to turn the
+// key) · last chorus 12 (a whole step up in B minor, the hook doubled an
+// octave down, the choir) · outro 4 (the arpeggio and pad, a B minor
+// chord to close).
+// Harmony: verse Am9 Fmaj7 Cadd9 G/B (the bass walks down A F C B); chorus
+// F G Am Am/G, F G C E7 (the E7 a secondary dominant back to Am).
+// The hook: a rising third and sixth (A C E, up to C6) falling back by
+// step; the verse melody is its slower, lower relative.
+use mod.score.*
+
+let clock = Clock{bpm: 100 sig: [4 4] seed: 1986 params: {sweep: 1 swell: 0}}
+
+let kit = Drums{kit: @analog_hybrid
+    recipes: {snare: "tri freq=210>150 glide=0.05 a=0.001 d=0.14 gain=0.5; noise=white bp=3500 q=0.8 a=0.001 d=0.12 gain=0.35; noise=white hp=700 a=0.002 hold=0.19 d=0.025 s=0 gain=0.3"}
+    tune: {kick: -1 tom_lo: -3 tom_mid: -3 tom_hi: -3}
+    gain: {snare: 1.2 hat: 0.7 clap: 1.1}}
+let arpsyn = Synth{recipe: "saw freq=440 detune=5 a=0.001 d=0.16 s=0.15 r=0.08 gain=0.24 ladder=2600>900 glide=0.12 q=3; square freq=880 a=0.001 d=0.08 s=0 r=0.05 gain=0.05"}
+let bassyn = Synth{recipe: "saw freq=440 detune=4 a=0.002 d=0.18 s=0.5 r=0.06 gain=0.3 ladder=700>350 glide=0.12 q=2 drive=0.8; sine freq=440 a=0.002 d=0.2 s=0.8 r=0.06 gain=0.35"}
+let padsyn = Synth{preset: @pad attack: 0.9 release: 1.8}
+let strings = Synth{preset: @strings attack: 0.6 release: 1.4}
+let hook_syn = Shader{lib: "supersaw" cutoff: 5000 attack: 0.02 release: 0.45 gain: 0.3}
+let verse_syn = Shader{lib: "analog_poly" cutoff: 1400 env_amt: 2000 res: 1.3}
+let bell = Shader{lib: "modal_bell" t60: 1.8 stiffness: 0.25}
+let piano = Instrument{kind: @piano}
+let choir = Voice{profile: @soprano choir: 6 parts: 3 vibrato: 0.2 breath: 0.3}
+let air = Synth{recipe: "noise=white bp=500>8000 glide=9.4 q=1.4 a=9.3 d=0.02 s=0 r=0.02 gain=0.3"}
+let swell = Synth{recipe: "noise=pink bp=2500 q=0.7 a=2.3 d=0.02 s=0 r=0.02 gain=0.4"}
+
+// ---- harmony --------------------------------------------------------------------
+
+// Per bar: the bass and the voicing.
+let verse_b = [@a1 @f1 @c2 @b1]
+let verse_v = [[@g3 @b3 @c4 @e4], [@a3 @c4 @e4 @f4], [@g3 @c4 @d4 @e4], [@g3 @b3 @d4 @e4]]
+let pre_b = [@d2 @e2 @f2 @g2]
+let pre_v = [[@a3 @c4 @d4 @f4], [@b3 @d4 @e4 @g4], [@a3 @c4 @e4 @f4], [@b3 @d4 @f4 @g4]]
+let chorus_b = [@f1 @g1 @a1 @g1 @f1 @g1 @c2 @e2]
+let chorus_v = [[@a3 @c4 @f4], [@b3 @d4 @g4], [@c4 @e4 @a4], [@c4 @e4 @a4], [@a3 @c4 @f4], [@b3 @d4 @g4], [@c4 @e4 @g4], [@b3 @d4 @gs4]]
+let bridge_b = [@d2 @d2 @c2 @c2 @bb1 @bb1 @c2 @fs1]
+let bridge_v = [[@f3 @a3 @c4 @e4], [@f3 @a3 @c4 @e4], [@e3 @a3 @c4 @e4], [@e3 @a3 @c4 @e4], [@f3 @a3 @d4 @e4], [@f3 @a3 @d4 @e4], [@e3 @g3 @c4 @e4], [@e3 @as3 @cs4 @e4]]
+
+/// Which part of the song bar `b` is in, and where in it.
+let part_of = fn(b) {
+    if b < 8 { [0 b] }
+    else { if b < 24 { [0 b - 8] }
+    else { if b < 28 { [1 b - 24] }
+    else { if b < 44 { [2 b - 28] }
+    else { if b < 52 { [3 b - 44] }
+    else { if b < 64 { [2 b - 52] } else { [4 b - 64] } } } } } }
+}
+let lift_of = fn(b) { if b >= 52 { 2 } else { 0 } }
+let bass_of = fn(b) {
+    let p = part_of(b)
+    let k = p[1]
+    let n = if p[0] == 0 { verse_b[k % 4] } else { if p[0] == 1 { pre_b[k] } else { if p[0] == 2 { chorus_b[k % 8] } else { if p[0] == 3 { bridge_b[k] } else { @a1 } } } }
+    note(n) + lift_of(b)
+}
+let voicing_of = fn(b) {
+    let p = part_of(b)
+    let k = p[1]
+    let v = if p[0] == 0 { verse_v[k % 4] } else { if p[0] == 1 { pre_v[k] } else { if p[0] == 2 { chorus_v[k % 8] } else { if p[0] == 3 { bridge_v[k] } else { [@a3 @c4 @e4] } } } }
+    let out = []
+    for n in v { out.push(note(n) + lift_of(b)) }
+    out
+}
+
+let phrase = fn(ns, ds, tr, amp, leg) {
+    let k = 0
+    for d in ds {
+        let r = rand(0, 0.02)
+        sleep(r)
+        let n = ns[k]
+        if n != @r { play(note(n) + tr, {dur: d * leg amp: amp * if d >= 1 { 1.0 } else { rand(0.82, 0.92) }}) }
+        sleep(d - r)
+        k = k + 1
+    }
+}
+
+// ---- melodies ------------------------------------------------------------------------
+
+let verse_mel = [
+    [[@e4 @a4 @c5 @b4 @a4 @g4 @a4], [1 1 1.5 0.5 1 1 2]],
+    [[@c5 @b4 @a4 @e4 @g4 @r], [1 0.5 0.5 2 2 2]],
+    [[@e4 @a4 @c5 @d5 @e5 @d5 @c5], [1 1 1.5 0.5 1 1 2]],
+    [[@d5 @c5 @b4 @g4 @b4 @r], [1 0.5 0.5 2 2 2]]
+]
+let hook = [
+    [[@a4 @c5 @e5 @c6 @b5 @a5], [0.5 0.5 1 2 2 2]],
+    [[@g5 @a5 @b5 @e5 @r], [0.5 0.5 1 4 2]],
+    [[@a4 @c5 @e5 @c6 @b5 @a5], [0.5 0.5 1 2 2 2]],
+    [[@g5 @e5 @g5 @b5 @a5 @r], [0.5 0.5 1 2 3 1]]
+]
+
+/// The verse melody, two bars a line, 16 bars.
+let verse_lead = Loop{play: verse_syn beats: 8 amp: 0.55 pan: -0.05 sends: {hall: 0.2 throw: 0.15}
+    code: fn(i) {
+        let line = verse_mel[i % 4]
+        phrase(line[0], line[1], 0, if i >= 8 { 0.9 } else { 0.8 }, 0.95)
+        sleep(8 - beat())
+    }
+}
+/// The hook, two bars a line; the last chorus doubles it an octave down.
+let hook_lead = Loop{play: hook_syn beats: 8 amp: 0.6 sends: {hall: 0.25 throw: 0.2}
+    code: fn(i) {
+        let line = hook[i % 2 + if floor(i / 2) % 2 == 1 { 2 } else { 0 }]
+        phrase(line[0], line[1], lift_of(i * 2), 0.9, 0.95)
+        sleep(8 - beat())
+    }
+}
+let hook_low = Loop{play: hook_syn beats: 8 amp: 0.4 sends: {hall: 0.2}
+    code: fn(i) {
+        let line = hook[i % 2 + if floor(i / 2) % 2 == 1 { 2 } else { 0 }]
+        phrase(line[0], line[1], lift_of(i * 2) - 12, 0.8, 0.95)
+        sleep(8 - beat())
+    }
+}
+/// The bell's counter-line: eighths of chord tones above the hook, rising
+/// when the hook falls.
+let counter = Loop{play: bell beats: 4 amp: 0.3 pan: 0.35 sends: {hall: 0.3 throw: 0.2}
+    code: fn(i) {
+        let v = voicing_of(i)
+        let order = [2 1 0 1 2 1 2 0]
+        sleep(2)
+        for s in 0..4 {
+            play(v[order[s + (i % 2) * 4] % v.len()] + 24, {dur: 0.4 amp: if s == 0 { 0.8 } else { 0.55 }})
+            sleep(0.5)
+        }
+    }
+}
+
+// ---- arpeggio, pads, bass ----------------------------------------------------------
+
+/// The sixteenth arpeggio: the voicing up and back, an octave higher in the
+/// choruses; the filter opens over the intro and closes over the outro.
+let arp = Loop{play: arpsyn beats: 4 amp: 1.1 pan: 0.2 sends: {throw: 0.15}
+    code: fn(i) {
+        let v = voicing_of(i)
+        let up = if part_of(i)[0] == 2 { 12 } else { 0 }
+        let open = if i < 8 { 500 + i * 250 } else { if i >= 64 { 2400 - (i - 64) * 450 } else { 2600 } }
+        let order = [0 1 2 3 2 1 2 3 0 1 2 3 2 3 1 2]
+        if i == 67 {
+            play([@b3 @d4 @fs4], {dur: 3 amp: 0.5 cutoff: 900})
+            sleep(4)
+        } else {
+            for s in 0..16 {
+                play(v[order[s] % v.len()] + up, {dur: 0.2 amp: if s % 4 == 0 { 1.0 } else { rand(0.6, 0.8) } cutoff: open + rand(0, 300)})
+                sleep(0.25)
+            }
+        }
+    }
+}
+
+let pad = Loop{play: padsyn beats: 4 amp: 0.28 sends: {hall: 0.3}
+    code: fn(i) {
+        if i < 67 { play(voicing_of(i), {dur: 3.9 amp: rand(0.9, 1.0)}) }
+        if i == 67 { play([@b3 @d4 @fs4 @b4], {dur: 8}) }
+        sleep(4)
+    }
+}
+let strings_pad = Loop{play: strings beats: 4 amp: 0.3 pan: -0.3 sends: {hall: 0.3}
+    code: fn(i) {
+        let v = voicing_of(i)
+        play([v[0] + 12 v[v.len() - 1] + 12], {dur: 3.9 amp: 0.8})
+        sleep(4)
+    }
+}
+
+/// Octave eighths, accents on the downbeats, a run into each fourth bar.
+let bass = Loop{play: bassyn beats: 4 amp: 1.0
+    code: fn(i) {
+        let r = bass_of(i)
+        let n = bass_of(i + 1)
+        if i < 4 || i >= 66 {
+            if i >= 4 && i < 8 { play(r, {dur: 3.8 amp: 0.7 cutoff: 500}) }
+            if i == 66 { play(@b1, {dur: 7 amp: 0.7 cutoff: 500}) }
+            sleep(4)
+        } else {
+            if part_of(i)[0] == 3 {
+                play(r, {dur: 1.8 amp: 0.9})
+                sleep(2.5)
+                play(r + 12, {dur: 0.4 amp: 0.6})
+                sleep(0.5)
+                play(r, {dur: 0.9 amp: 0.7})
+                sleep(1)
+            } else {
+                for s in 0..8 {
+                    let run = i % 4 == 3 && s >= 6
+                    let x = if run { if s == 6 { r + 7 } else { if n > r { n - 1 } else { n + 1 } } } else { if s % 2 == 1 { r + 12 } else { r } }
+                    play(x, {dur: 0.4 amp: if s % 4 == 0 { 1.0 } else { rand(0.7, 0.85) }})
+                    sleep(0.5)
+                }
+            }
+        }
+    }
+}
+
+// ---- the bridge ------------------------------------------------------------------------
+
+let piano_bridge = Loop{play: piano beats: 4 amp: 0.8 sends: {hall: 0.3}
+    code: fn(i) {
+        let v = voicing_of(i)
+        play(bass_of(i) + 12, {dur: 3.8 amp: 0.5})
+        for n in v { sleep(0.04) play(n + 12, {dur: 3.5 amp: 0.42}) }
+        sleep(2 - beat())
+        phrase([v[v.len() - 1] + 12 v[1] + 12 v[2] + 12], [1 0.5 0.5], 0, 0.45, 1.0)
+    }
+}
+let ah = Loop{play: choir beats: 4 amp: 1.5 sends: {hall: 0.4}
+    code: fn(i) {
+        let v = voicing_of(i)
+        sing([[v[1] + 12 v[2] + 12 v[3 % v.len()] + 12]], "ah", {dur: 3.8 vel: 0.6})
+        sleep(4)
+    }
+}
+
+// ---- drums ---------------------------------------------------------------------------
+
+let drums = Loop{play: kit beats: 4 amp: 0.55 sends: {plate: 0.3 smash: 0.3}
+    code: fn(i) {
+        let half = part_of(i)[0] == 3
+        let chorus = part_of(i)[0] == 2
+        for s in 0..16 {
+            if half {
+                if s == 0 || s == 10 { hit(@kick, {amp: 0.9}) }
+                if s == 8 { hit(@snare, {amp: 0.95}) }
+            } else {
+                if s % 4 == 0 { hit(@kick, {amp: if s == 0 { 1.0 } else { 0.92 }}) }
+                if s == 4 || s == 12 { hit(@snare, {amp: rand(0.92, 1.0)}) if chorus { hit(@clap, {amp: 0.7}) } }
+            }
+            // Tom runs into each section and each eighth bar.
+            let fill = i == 23 || i == 27 || i == 43 || i == 51 || i == 63 || (i % 8 == 7 && i > 8)
+            if fill && s >= 12 { hit(if s < 14 { @tom_hi } else { if s == 14 { @tom_mid } else { @tom_lo } }, {amp: 0.7 + (s - 12) * 0.08}) }
+            sleep(0.25)
+        }
+    }
+}
+
+let hats = Loop{play: kit beats: 4 amp: 0.45
+    code: fn(i) {
+        let sixteenths = part_of(i)[0] == 2
+        for s in 0..16 {
+            if s % 2 == 0 { hit(@hat, {amp: if s % 4 == 2 { rand(0.7, 0.8) } else { rand(0.4, 0.5) } pan: -0.3}) }
+            else { if sixteenths { hit(@hat, {amp: rand(0.2, 0.3) pan: -0.3}) } }
+            if s == 14 && i % 2 == 1 { hit(@ohat, {amp: 0.5 pan: -0.3}) }
+            sleep(0.25)
+        }
+    }
+}
+
+let crash = Loop{play: kit beats: 4 amp: 0.5 sends: {plate: 0.3}
+    code: fn(i) {
+        if i == 8 || i == 28 || i == 36 || i == 52 || i == 60 { hit(@crash, {amp: 0.9}) }
+        sleep(4)
+    }
+}
+
+let riser = Loop{play: air beats: 4 amp: 0.3 sends: {hall: 0.5}
+    code: fn(i) {
+        if i == 24 || i == 48 { play(@a4, {dur: 15.6}) }
+        sleep(4)
+    }
+}
+let reverse = Loop{play: swell beats: 4 amp: 0.3 sends: {hall: 0.5}
+    code: fn(i) {
+        if i == 7 || i == 27 || i == 43 || i == 51 { sleep(1.6) play(@c5, {dur: 2.4}) }
+        sleep(4 - beat())
+    }
+}
+
+let intro_bell = Loop{play: bell beats: 16 amp: 0.3 pan: -0.3 sends: {hall: 0.4 throw: 0.3}
+    code: fn(i) {
+        sleep(2)
+        phrase([@e6 @c6 @a5 @r @g5 @a5], [1 1 2 4 2 6], 0, 0.6, 1.0)
+    }
+}
+
+// ---- mix and master -------------------------------------------------------------------
+// Returns: the big gated-snare plate, a hall for leads, pads and the choir
+// (it swells into the bridge and the last chorus), a dotted-eighth throw.
+let plate = Reverb{room: 0.6 mix: 1 damp: 7000}
+let hall = Reverb{room: 0.78 mix: 1 damp: 7000}
+let throw = Delay{time: 0.75 feedback: 0.42 mix: 1 spread: 1}
+let hall_level = Bus{in: [hall] gain: {param: @swell from: 0.8 to: 1.6 ramp: 8}}
+let returns = Highpass{in: [plate hall_level throw] cutoff: 250}
+
+// Drums: glued, taped, a parallel smash.
+let drum_bus = Comp{in: [drums hats crash] threshold: -16 ratio: 3 makeup: 2}
+let drum_tape = Drive{in: [drum_bus] amount: 0.15 mix: 0.35 tone: 11000}
+let smash = Comp{threshold: -34 ratio: 12 makeup: 10}
+// Bass: mono, compressed, ducked.
+let bass_comp = Comp{in: [bass] threshold: -18 ratio: 3 makeup: 1}
+let push = Duck{in: [bass_comp] key: drums depth: 3 release: 0.15}
+// Pads: carved, pumped, wide.
+let padhp = Highpass{in: [pad strings_pad] cutoff: 220}
+let pad_lp = Eq{in: [padhp] b1: [@peak, 500, -3, 1] b2: [@highshelf, 9000, -2]}
+let pump = Duck{in: [pad_lp] key: drums depth: 4 release: 0.2}
+let wide = Chorus{in: [pump] rate: 0.4 depth: 5 mix: 0.45}
+// Leads and arpeggio: high-passed, the hook compressed and widened.
+let lift = Highpass{in: [arp hook_lead hook_low verse_lead counter intro_bell] cutoff: 180}
+let lead_comp = Comp{in: [lift] threshold: -18 ratio: 2.5 makeup: 2}
+let lead_wide = Chorus{in: [lead_comp] rate: 0.6 depth: 3 mix: 0.25}
+/// The music bus's filter: closes into the bridge, opens into the last
+/// chorus.
+let sweep = Lowpass{in: [wide lead_wide] cutoff: {param: @sweep from: 600 to: 18000 ramp: 16}}
+let music_tape = Drive{in: [sweep] amount: 0.12 mix: 0.3 tone: 12000}
+let bridge_hp = Highpass{in: [piano_bridge ah] cutoff: 120}
+let vox_comp = Comp{in: [bridge_hp] threshold: -20 ratio: 2.5 makeup: 2}
+
+/// The master: gentle glue over everything (the master limiter follows).
+let glue = Comp{in: [riser reverse returns drum_tape smash push music_tape vox_comp] threshold: -12 ratio: 1.8 attack: 20 release: 150 knee: 6 makeup: 1}
+/// The master chain: a tonal trim (rumble out, a little low and air, a dip
+/// in the low mids), the bass kept mono under 140 Hz with a touch of width
+/// above, a fast peak compressor, and a limiter that sets the loudness.
+let master_eq = Eq{in: [glue] b1: [@highpass 28] b2: [@lowshelf 90 1] b3: [@peak, 350, -1.5, 0.9] b4: [@highshelf 10000 1.5]}
+let master_width = Width{in: [master_eq] width: 1.1 bass_mono: 140}
+let master_peak = Comp{in: [master_width] threshold: -10 ratio: 5 attack: 1 release: 80 knee: 4 makeup: 0}
+let master_limit = Limiter{in: [master_peak] ceiling: -1.5 gain: 1.72}
+/// Above 16 kHz out: the limiter\'s clipped edges would overshoot between samples.
+let master_lp = Lowpass{in: [master_limit] cutoff: 16000 res: 0.5}
+
+let intro = Section{bars: 8 loops: [arp pad bass intro_bell reverse]}
+let verse = Section{bars: 16 loops: [arp pad strings_pad bass drums hats verse_lead crash reverse]}
+let pre = Section{bars: 4 loops: [arp pad strings_pad bass drums hats riser reverse]}
+let chorus = Section{bars: 16 loops: [arp pad strings_pad bass drums hats hook_lead counter crash reverse]}
+let bridge = Section{bars: 8 set: {sweep: 0 swell: 1} loops: [pad bass drums piano_bridge ah riser reverse]}
+let last = Section{bars: 12 set: {sweep: 1 swell: 0.5} loops: [arp pad strings_pad bass drums hats hook_lead hook_low counter ah crash]}
+let outro = Section{bars: 4 set: {swell: 1} loops: [arp pad bass] next: @stop}
+
+Score{label: "Neon Causeway" clock kit arpsyn bassyn padsyn strings hook_syn verse_syn bell piano choir air swell verse_lead hook_lead hook_low counter arp pad strings_pad bass piano_bridge ah drums hats crash riser reverse intro_bell plate hall throw hall_level returns drum_bus drum_tape smash bass_comp push padhp pad_lp pump wide lift lead_comp lead_wide sweep music_tape bridge_hp vox_comp glue master_eq master_width master_peak master_limit master_lp intro verse pre chorus bridge last outro ceiling: -1 master: 1.0 arrange: [intro verse pre chorus bridge last outro]}

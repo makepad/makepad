@@ -1,0 +1,18 @@
+# Visual editors for a value written in code: a colour picker (a plane, hue and
+# alpha strips, HDR intensity, the file's palette with how often each colour
+# is used, and whether an edit is this place's or every place's). The host
+# says what the value is and maps the pickers' previews and commits onto its
+# own live and written paths.
+[package]
+name = "makepad-value-pickers"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Colour picker and the panel kit of a document's editor panel"
+
+[lib]
+name = "makepad_value_pickers"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false, features = ["color"] }
+makepad-look = { path = "../look" }

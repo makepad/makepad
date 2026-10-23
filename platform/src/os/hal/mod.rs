@@ -167,7 +167,7 @@ pub struct HalClient {
     pub(crate) audio_ctx: [Vec<Option<media::AudioCtx>>; 2],
     /// entries the HAL has replaced: freed once the batch that replaced them is submitted
     pub(crate) retired_ctx: Vec<media::AudioCtx>,
-    #[cfg(any(target_vendor = "apple", target_os = "windows"))]
+    #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
     pub(crate) game: media::GameClient,
     pub(crate) camera: camera::CameraClient,
     /// videos the app's own decoder plays, and the ones the HAL's native player plays
@@ -225,7 +225,7 @@ impl Default for HalClient {
             midi_senders: Vec::new(),
             audio_ctx: [Vec::new(), Vec::new()],
             retired_ctx: Vec::new(),
-            #[cfg(any(target_vendor = "apple", target_os = "windows"))]
+            #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
             game: Default::default(),
             camera: Default::default(),
             software_videos: HashMap::new(),

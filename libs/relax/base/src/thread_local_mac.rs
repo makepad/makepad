@@ -120,7 +120,13 @@ pub fn expand(toks: &[(T, &[u8], u32)], edition: u16) -> Result<TokBuf, String> 
             let mut plain = TokBuf::new(edition);
             tg!(&mut plain; #[thread_local] static __RELAX_TLS_VAL : #append(&ty) = __RELAX_TLS_INIT ;);
             tg!(&mut plain; #std() :: option :: Option :: Some ( & raw const __RELAX_TLS_VAL ));
+            let mut single = TokBuf::new(edition);
+            tg!(&mut single; static __RELAX_TLS_VAL : #std() :: thread :: EagerStorage < #append(&ty) > = #std() :: thread :: EagerStorage { value : __RELAX_TLS_INIT } ;);
+            tg!(&mut single; #std() :: option :: Option :: Some ( & raw const __RELAX_TLS_VAL . value ));
             tg!(&mut body; fn __relax_tls_get () -> #append(&ret) {
+                #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
+                { #append(&single) }
+                #[cfg(not(all(target_family = "wasm", not(target_feature = "atomics"))))]
                 if #std() :: mem :: needs_drop :: < #append(&ty) > () { #append(&keyed) } else { #append(&plain) }
             });
         } else {

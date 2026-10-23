@@ -493,6 +493,20 @@ impl Store {
         Some((e.kind, p))
     }
 
+    /// `get_at`, with the payload's checksum verified over the mapped bytes the caller then uses:
+    /// for payloads that become executable code or are linked as data (code entries, the startup
+    /// manifest and its image). A mismatch is a miss: never executed.
+    pub fn get_checked_at(&self, i: usize, key: u128) -> Option<(u32, &[u8])> {
+        let (kind, p) = self.get_at(i, key)?;
+        (sum64(p) == self.index[i].sum).then_some((kind, p))
+    }
+
+    /// `get` with the payload checksum verified (`get_checked_at`).
+    pub fn get_checked(&self, key: u128) -> Option<(u32, &[u8])> {
+        let i = self.index.binary_search_by(|e| { let k = e.key; k.cmp(&key) }).ok()?;
+        self.get_checked_at(i, key)
+    }
+
     /// Whether index entry `i`'s payload matches its checksum.
     pub fn verify_at(&self, i: usize) -> bool {
         let Some(e) = self.index.get(i) else { return false };
@@ -1180,6 +1194,26 @@ mod tests {
         // a commit with nothing new changes nothing
         run.commit().unwrap();
         assert_eq!(Store::open(&run.path).unwrap().generation, st.generation);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_corrupt_payload_is_a_checked_miss() {
+        let d = tmpdir("checked");
+        let p = d.join("core-00112233445566aa.rcs");
+        append(&p, vec![NewEntry { key: 7, kind: 1, payload: b"code bytes that run".to_vec() }], false).unwrap();
+        let off = {
+            let s = Store::open(&p).unwrap();
+            assert_eq!(s.get_checked(7).unwrap().1, b"code bytes that run");
+            s.index[0].off as usize
+        };
+        // one flipped payload byte: the header and index checksums still pass
+        let mut b = std::fs::read(&p).unwrap();
+        b[off + 3] ^= 0x40;
+        std::fs::write(&p, &b).unwrap();
+        let s = Store::open(&p).unwrap();
+        assert!(s.get(7).is_some(), "the unchecked read still finds it");
+        assert!(s.get_checked(7).is_none(), "a corrupt payload must never be linked");
         let _ = std::fs::remove_dir_all(&d);
     }
 

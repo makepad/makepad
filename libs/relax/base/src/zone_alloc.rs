@@ -61,15 +61,6 @@ mod compiler {
     const WEB_AT: usize = 0;
     include!("zone_alloc/arena.rs");
 }
-/// The web target's linear memory (web.rs): the compiler arena's allocator over one fixed range.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-#[allow(dead_code)]
-mod web_arena {
-    pub const COMPILER: bool = true;
-    pub const LABEL: &std::ffi::CStr = c"makepad-run-web-memory";
-    const WEB_AT: usize = super::web::BASE + super::web::ARENA_OFFSET;
-    include!("zone_alloc/arena.rs");
-}
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod web;
 

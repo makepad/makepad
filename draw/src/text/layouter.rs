@@ -202,8 +202,14 @@ impl RecordedFont {
 /// glyphs of which font files a program draws ([`record_all_glyphs`]).
 static RECORD_ALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-fn recorded_all() -> &'static std::sync::Mutex<std::collections::BTreeMap<u64, std::collections::BTreeSet<GlyphId>>> {
-    static ALL: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeMap<u64, std::collections::BTreeSet<GlyphId>>>> = std::sync::OnceLock::new();
+#[derive(Default)]
+struct GlyphRecord {
+    drawn: std::collections::BTreeMap<u64, std::collections::BTreeSet<GlyphId>>,
+    chars: std::collections::BTreeMap<u64, std::collections::BTreeSet<char>>,
+}
+
+fn recorded_all() -> &'static std::sync::Mutex<GlyphRecord> {
+    static ALL: std::sync::OnceLock<std::sync::Mutex<GlyphRecord>> = std::sync::OnceLock::new();
     ALL.get_or_init(Default::default)
 }
 
@@ -221,7 +227,7 @@ pub fn record_all_glyphs(on: bool) {
 /// The glyphs recorded since [`record_all_glyphs`] or the last call: per
 /// font file hash, the glyph ids laid out.
 pub fn take_all_recorded_glyphs() -> Vec<(u64, std::collections::BTreeSet<GlyphId>)> {
-    std::mem::take(&mut *recorded_all().lock().unwrap_or_else(std::sync::PoisonError::into_inner)).into_iter().collect()
+    std::mem::take(&mut recorded_all().lock().unwrap_or_else(std::sync::PoisonError::into_inner).drawn).into_iter().collect()
 }
 
 /// The trace host's switch (`makepad-web-trace`): record every layout's
@@ -238,11 +244,25 @@ pub extern "C" fn wasm_record_glyphs(on: u32) {
 #[no_mangle]
 pub extern "C" fn wasm_take_recorded_glyphs() -> u32 {
     let fonts = take_all_recorded_glyphs();
+    glyph_record_words(fonts.into_iter().map(|(hash, glyphs)| (hash, glyphs.into_iter().map(|g| g as u64).collect())).collect())
+}
+
+/// Source characters, separate from drawn glyphs: the subsetter needs the cmap inputs of
+/// substitutions and normalization, but they are not evidence that a glyph was drawn.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn wasm_take_recorded_glyph_chars() -> u32 {
+    let fonts = std::mem::take(&mut recorded_all().lock().unwrap_or_else(std::sync::PoisonError::into_inner).chars);
+    glyph_record_words(fonts.into_iter().map(|(hash, chars)| (hash, chars.into_iter().map(|c| c as u64).collect())).collect())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn glyph_record_words(fonts: Vec<(u64, Vec<u64>)>) -> u32 {
     let mut words = vec![0u64, fonts.len() as u64];
     for (hash, glyphs) in fonts {
         words.push(hash);
         words.push(glyphs.len() as u64);
-        words.extend(glyphs.iter().map(|&id| id as u64));
+        words.extend(glyphs);
     }
     words[0] = words.len() as u64;
     Box::leak(words.into_boxed_slice()).as_ptr() as usize as u32
@@ -295,10 +315,24 @@ impl Layouter {
 
     fn note_glyphs(&mut self, text: &LaidoutText) {
         if RECORD_ALL.load(std::sync::atomic::Ordering::Relaxed) {
+            // Hashing font files and collecting text never holds the cross-thread lock.
+            let mut record = GlyphRecord::default();
+            for row in &text.rows {
+                let mut fonts = std::collections::HashSet::new();
+                for glyph in &row.glyphs {
+                    let hash = *self.font_hashes.entry(glyph.font.id()).or_insert_with(|| fnv64(glyph.font.data().as_slice()));
+                    record.drawn.entry(hash).or_default().insert(glyph.id);
+                    if fonts.insert(hash) {
+                        record.chars.entry(hash).or_default().extend(row.text.chars());
+                    }
+                }
+            }
             let mut all = recorded_all().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            for glyph in text.rows.iter().flat_map(|row| row.glyphs.iter()) {
-                let hash = *self.font_hashes.entry(glyph.font.id()).or_insert_with(|| fnv64(glyph.font.data().as_slice()));
-                all.entry(hash).or_default().insert(glyph.id);
+            for (hash, glyphs) in record.drawn {
+                all.drawn.entry(hash).or_default().extend(glyphs);
+            }
+            for (hash, chars) in record.chars {
+                all.chars.entry(hash).or_default().extend(chars);
             }
         }
         let Some(map) = &mut self.recorded_glyphs else { return };
@@ -404,7 +438,7 @@ impl Layouter {
 
     pub fn get_or_layout(&mut self, params: impl LayoutParams) -> Rc<LaidoutText> {
         let result = self.get_or_layout_uncounted(params);
-        if self.recorded_glyphs.is_some() {
+        if self.recorded_glyphs.is_some() || RECORD_ALL.load(std::sync::atomic::Ordering::Relaxed) {
             self.note_glyphs(&result);
         }
         result

@@ -984,8 +984,8 @@ fn top_jit(p: &Profile, t0: u64, t1: u64, wname: &str, n: usize) -> Ans {
         out.note(e.text.clone());
     }
     if replaced > 0 {
-        let m: Vec<String> = moves.iter().take(5).map(|(w, k)| format!("{w} {k}")).collect();
-        out.note(format!("{} installs replaced code their slot had earlier in the recording: {}{}", replaced, m.join(", "), if moves.len() > 5 { format!(" (+{} kinds)", moves.len() - 5) } else { String::new() }));
+        let m: Vec<String> = moves.iter().take(10).map(|(w, k)| format!("{w} {k}")).collect();
+        out.note(format!("{} installs replaced code their slot had earlier in the recording: {}{}", replaced, m.join(", "), if moves.len() > 10 { format!(" (+{} kinds)", moves.len() - 10) } else { String::new() }));
     }
     // per-fn compile time only where the producer sent compile begin / end events
     let timed = v.iter().any(|x| x.1 .0 > 0);

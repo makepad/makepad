@@ -68,7 +68,7 @@ pub struct Fonts {
     /// SDF/MSDF atlas. 0 (the default, every platform): all text is slug.
     slug_min_dpxs_per_em: f32,
     #[cfg(target_arch = "wasm32")]
-    msdf_job_sender: FromUISender<QueuedMsdfJob>,
+    msdf_job_sender: Option<FromUISender<QueuedMsdfJob>>,
     #[cfg(target_arch = "wasm32")]
     msdf_result_receiver: ToUIReceiver<CompletedMsdfJob>,
     /// Upgrades the MSDF worker has sent (it raises the UI signal after each) and those
@@ -124,44 +124,31 @@ impl Fonts {
     #[cfg(target_arch = "wasm32")]
     pub fn new(cx: &mut Cx, settings: layouter::Settings) -> Self {
         let layouter = Layouter::new(settings);
-        let (atlas_size, msdfer_settings) = {
-            let rasterizer = layouter.rasterizer().borrow();
-            (rasterizer.color_atlas().size(), rasterizer.msdfer().settings())
-        };
-
-        let mut msdf_job_sender: FromUISender<QueuedMsdfJob> = Default::default();
+        let atlas_size = layouter.rasterizer().borrow().color_atlas().size();
         let msdf_result_receiver: ToUIReceiver<CompletedMsdfJob> = Default::default();
-        let worker_rx = msdf_job_sender
-            .receiver()
-            .expect("MSDF worker receiver is taken exactly once");
-        let worker_tx = msdf_result_receiver.sender();
         let msdf_sent = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let worker_sent = msdf_sent.clone();
-        if let Ok(task) = cx.spawn_worker(move || {
-            let mut msdfer = Msdfer::new(msdfer_settings);
-            while let Ok(job) = worker_rx.recv() {
-                let mut msdf = Image::<Bgra>::new(job.key.size);
-                msdfer.outline_to_msdf(
-                    &job.outline,
-                    job.dpxs_per_em,
-                    &mut msdf.subimage_mut(super::geom::Rect::from(job.key.size)),
-                );
-                // counted before the send: its UI signal must find the count raised
-                worker_sent.fetch_add(1, std::sync::atomic::Ordering::Release);
-                if worker_tx
-                    .send(CompletedMsdfJob {
-                        key: job.key,
-                        pixels: msdf.into_pixels(),
-                        epoch: job.epoch,
-                    })
-                    .is_err()
-                {
-                    break;
+        #[cfg(not(target_feature = "atomics"))]
+        let msdf_job_sender = None;
+        #[cfg(target_feature = "atomics")]
+        let msdf_job_sender = {
+            let mut sender: FromUISender<QueuedMsdfJob> = Default::default();
+            let worker_rx = sender.receiver().expect("MSDF worker receiver is taken exactly once");
+            let worker_tx = msdf_result_receiver.sender();
+            let worker_sent = msdf_sent.clone();
+            let msdfer_settings = layouter.rasterizer().borrow().msdfer().settings();
+            match cx.spawn_worker(move || {
+                let mut msdfer = Msdfer::new(msdfer_settings);
+                while let Ok(job) = worker_rx.recv() {
+                    let completed = render_msdf_job(&mut msdfer, job);
+                    // Count before the send so the UI signal sees the completed job.
+                    worker_sent.fetch_add(1, std::sync::atomic::Ordering::Release);
+                    if worker_tx.send(completed).is_err() { break; }
                 }
+            }) {
+                Ok(task) => { task.detach(); Some(sender) }
+                Err(_) => None,
             }
-        }) {
-            task.detach();
-        }
+        };
 
         Self {
             layouter,
@@ -507,11 +494,10 @@ impl Fonts {
         if self.slug_atlas.reset_if_needed() {
             return false;
         }
-        let completed = self.apply_completed_msdf_jobs();
+        let completed = self.apply_completed_msdf_jobs() + self.dispatch_msdf_jobs();
         if completed > 0 {
             cx.redraw_all();
         }
-        self.dispatch_msdf_jobs();
         let slug_changed = self.flush_slug_textures(cx);
         if slug_changed {
             cx.redraw_all();
@@ -583,17 +569,25 @@ impl Fonts {
     }
 
     #[cfg(target_arch = "wasm32")]
-    fn dispatch_msdf_jobs(&mut self) {
-        let jobs = self
-            .layouter
-            .rasterizer()
-            .borrow_mut()
-            .take_queued_msdf_jobs();
+    fn dispatch_msdf_jobs(&mut self) -> usize {
+        let jobs = self.layouter.rasterizer().borrow_mut().take_queued_msdf_jobs();
+        let mut fallback: Option<Msdfer> = None;
+        let mut completed = 0;
         for job in jobs {
-            if self.msdf_job_sender.send(job).is_ok() {
-                self.msdf_jobs_in_flight += 1;
-            }
+            let job = if let Some(sender) = &self.msdf_job_sender {
+                match sender.send(job) {
+                    Ok(()) => { self.msdf_jobs_in_flight += 1; continue; }
+                    Err(error) => { self.msdf_job_sender = None; error.0 }
+                }
+            } else { job };
+            // Without threads, finish the same raster work here. A failed worker
+            // send returns ownership of the job, so it can use this path too.
+            let msdfer = fallback.get_or_insert_with(|| Msdfer::new(self.layouter.rasterizer().borrow().msdfer().settings()));
+            let result = render_msdf_job(msdfer, job);
+            self.layouter.rasterizer().borrow_mut().apply_completed_msdf_job(result);
+            completed += 1;
         }
+        completed
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -619,6 +613,13 @@ impl Fonts {
         #[cfg(target_arch = "wasm32")]
         (self.msdf_sent.load(std::sync::atomic::Ordering::Acquire) > self.msdf_applied)
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn render_msdf_job(msdfer: &mut Msdfer, job: QueuedMsdfJob) -> CompletedMsdfJob {
+    let mut msdf = Image::<Bgra>::new(job.key.size);
+    msdfer.outline_to_msdf(&job.outline, job.dpxs_per_em, &mut msdf.subimage_mut(super::geom::Rect::from(job.key.size)));
+    CompletedMsdfJob { key: job.key, pixels: msdf.into_pixels(), epoch: job.epoch }
 }
 
 #[cfg(target_arch = "wasm32")]

@@ -791,14 +791,17 @@ export class WasmBridge {
 
         return WebAssembly.instantiate(module, { env }).then(async wasm => {
             set_wasm(wasm);
-            wasm._has_thread_support = env.memory !== undefined;
-            wasm._memory = env.memory ? env.memory : wasm.exports.memory;
+            wasm._memory = wasm.exports.memory || env.memory;
+            wasm._has_thread_support = typeof SharedArrayBuffer !== "undefined"
+                && wasm._memory.buffer instanceof SharedArrayBuffer;
             wasm._memory_max_pages = wasm._memory._makepad_maximum_pages || 16384;
             wasm._module = module;
             wasm._env = env;
             return wasm
         }, error => {
-            if (error.name == "LinkError") { // retry as multithreaded
+            if (error.name == "LinkError" && limits && limits.shared
+                && WebAssembly.Module.imports(module).some(i => i.kind === "memory")) {
+                // Only a module importing shared memory can require this retry.
                 let pages = null;
                 try {
                     env.memory = this.create_shared_memory(limits);
@@ -813,9 +816,10 @@ export class WasmBridge {
                 }
                 return WebAssembly.instantiate(module, { env }).then(async wasm => {
                     set_wasm(wasm);
-                    wasm._has_thread_support = true;
-                    wasm._memory = env.memory;
-                    wasm._memory_max_pages = env.memory._makepad_maximum_pages || 16384;
+                    wasm._memory = wasm.exports.memory || env.memory;
+                    wasm._has_thread_support = typeof SharedArrayBuffer !== "undefined"
+                        && wasm._memory.buffer instanceof SharedArrayBuffer;
+                    wasm._memory_max_pages = wasm._memory._makepad_maximum_pages || 16384;
                     wasm._module = module;
                     wasm._env = env;
                     return wasm

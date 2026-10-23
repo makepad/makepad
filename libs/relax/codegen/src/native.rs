@@ -82,6 +82,7 @@ fn compile_freq_inner(options: &relax_session::Options, f: &Func, env: &target::
     if let Some(c) = crate::web32::applies(env.syms) {
         let mut g = f.clone();
         crate::web32::transform(&mut g, &c, env.sym_class)?;
+        g.verify_after("web32::transform")?;
         return compile_native(options, &g, env, freq);
     }
     compile_native(options, f, env, freq)

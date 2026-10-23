@@ -18,6 +18,7 @@ pub mod capture_surface;
 /// Scratch quantum shared with the client. Larger negotiated periods are split, not limited.
 pub const AUDIO_BLOCK_FRAMES: usize = 1024;
 mod file_dialog;
+mod game_input;
 mod gst;
 pub mod gstreamer_sys;
 mod va_dmabuf_modifier;
@@ -258,6 +259,8 @@ struct SessionMedia {
     players: HashMap<u64, Playback>,
     serial: u64,
     camera_epoch: u64,
+    game: Option<game_input::GameInput>,
+    game_devices: Vec<game::GameDevice>,
 }
 impl SessionMedia {
     fn send(&mut self, sid: u32, lane: usize, request: Request) -> Result<(), String> {
@@ -281,6 +284,22 @@ pub struct Media {
 impl Media {
     pub(crate) fn command(&mut self, sink: &mut dyn Sink, s: &mut Session, cmd: &HalCmd) -> bool {
         match *cmd {
+            HalCmd::GameOut { op, .. } => {
+                let sm = self.sessions.entry(s.id).or_default();
+                match op {
+                    game_op::ENABLE => {
+                        if sm.game.is_none() {
+                            match game_input::GameInput::new(Signal::new(s.id)) {
+                                Ok(game) => sm.game = Some(game),
+                                Err(e) => eprintln!("[hal-gamepad] cannot start input worker: {e}"),
+                            }
+                        }
+                    }
+                    game_op::REPORT | game_op::PULSE | game_op::FORCE => s.stats.media_unsupported += 1,
+                    _ => s.bad(),
+                }
+                return true;
+            }
             HalCmd::Permission { op, kind, req } => {
                 if op != permission_op::CHECK && op != permission_op::REQUEST {
                     s.bad();
@@ -499,6 +518,15 @@ impl Media {
         let Some(sm) = self.sessions.get_mut(&s.id) else {
             return;
         };
+        if let Some(snapshot) = sm.game.as_ref().and_then(|g| g.take()) {
+            if sm.game_devices != snapshot.devices {
+                s.events.game_devices(&game::pack_devices(&snapshot.devices));
+                sm.game_devices.clone_from(&snapshot.devices);
+            }
+            for (device, state) in snapshot.devices.iter().zip(&snapshot.states) {
+                s.events.game_input(device.id, &game::pack_state(state));
+            }
+        }
         let mut messages = Vec::new();
         for service in sm.services.iter_mut().flatten() {
             service.flush();

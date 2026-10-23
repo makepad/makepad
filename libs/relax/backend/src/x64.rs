@@ -6196,6 +6196,8 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     // branch compares at the end of their block (fused into cmp + jcc)
     let brs = if env.opt_regs || f.full { regalloc::sink_branch_compares(options, f) } else { None };
     let f = brs.as_ref().unwrap_or(f);
+    // the backend-internal rewrites above run after the last pipeline verify
+    f.verify_after("x64 backend rewrites (legalize/pair256/switch/hoist/sink)")?;
     let mut cfg = reg_config(options);
     cfg.sym_class = env.sym_class;
     // rax: allocatable over the instructions that keep it (keeps_rax), last of the caller-saved
@@ -6207,6 +6209,9 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     let t_ra = crate::stats::pass_clock();
     let (split, al) = regalloc::allocate_split(options, f, &cfg, env.opt_regs || f.full, freq);
     let f = split.as_ref().unwrap_or(f);
+    if split.is_some() {
+        f.verify_after("split_loops")?;
+    }
     crate::remark::note_spills(f, &al);
     crate::stats::pass_time(11, t_ra);
     drop(_cost_ra);

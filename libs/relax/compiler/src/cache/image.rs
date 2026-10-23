@@ -227,7 +227,8 @@ impl Cache {
         let key = data.objs[o].key;
         let payload = match pend.get(&key) {
             Some(&i) => Some(&self.pending[i].1.payload[..]),
-            None => match self.get(key) {
+            // (checksummed: a corrupt stored entry must not enter a fresh image's checksum)
+            None => match self.get_checked(key) {
                 Some((KIND_DATA, p)) => Some(p),
                 _ => None,
             },
@@ -302,8 +303,10 @@ impl Cache {
         if let Some(&i) = pend.get(&k) {
             return Some(&self.pending[i].1.payload);
         }
-        match self.get(k) {
-            Some((KIND_CODE, p)) => Some(p),
+        // (checksummed: a corrupt stored entry must not enter a fresh image's checksum)
+        match self.get_checked(k) {
+            // (empty: a rejected body's entry, reject_verdict)
+            Some((KIND_CODE, p)) if !p.is_empty() => Some(p),
             _ => None,
         }
     }
@@ -972,14 +975,26 @@ fn parse_image(img: &'static [u8], store: std::sync::Arc<Store>, crate_ok: impl 
             continue;
         }
         let align = d.u64()?;
+        // an alignment from disk is a power of two no larger than a page (the layout below
+        // rounds by it): anything else is a corrupt image, a miss
+        if !data_align_ok(align) {
+            return None;
+        }
         let name = match d.u8()? {
             0 => None,
             _ => Some(d.bytes()?),
         };
         let bytes = d.bytes()?;
         let nr = d.u32()? as usize;
-        let rel = (d.p, d.p + nr.checked_mul(DREL_SIZE)?);
+        let rel = (d.p, d.p.checked_add(nr.checked_mul(DREL_SIZE)?)?);
         d.take(rel.1 - rel.0)?;
+        // every pointer word a data relocation writes lies inside its object
+        for at in (rel.0..rel.1).step_by(DREL_SIZE) {
+            let off = u32::from_le_bytes(d.b.get(at..at + 4)?.try_into().ok()?) as usize;
+            if !drel_in_object(off, bytes.len()) {
+                return None;
+            }
+        }
         data.push(ImgData { key, ok: true, align, name, bytes, rel });
     }
     let mut sym_obj = vec![NO_SLOT; tables[1].len()];
@@ -1088,6 +1103,16 @@ fn key_index(keys: &[&'static [u8]], sorted: &[u8], b: &[u8]) -> Option<usize> {
         }
     }
     None
+}
+
+/// A data object's alignment as an image may give it: a power of two, at most a page.
+fn data_align_ok(align: u64) -> bool {
+    align.is_power_of_two() && align <= 4096
+}
+
+/// A data relocation's pointer word [off, off + 8) lies inside an object of `len` bytes.
+fn drel_in_object(off: usize, len: usize) -> bool {
+    off.checked_add(8).is_some_and(|end| end <= len)
 }
 
 impl Img {
@@ -1257,10 +1282,12 @@ impl Linker {
                 continue;
             }
             let al = im.data[o].align.max(1);
-            let off = (total + al - 1) / al * al;
+            // (checked: a layout that overflows places nothing; parse_image bounded the alignment)
+            let Some(off) = total.checked_add(al - 1).map(|t| t / al * al) else { return };
             layout.push((o, off));
             // one byte more than the object (Unit::data): no object ends where the next begins
-            total = off + im.data[o].bytes.len() as u64 + 1;
+            let Some(t) = off.checked_add(im.data[o].bytes.len() as u64 + 1) else { return };
+            total = t;
             max_align = max_align.max(al);
         }
         if layout.is_empty() {
@@ -1281,6 +1308,10 @@ impl Linker {
             let mut rw = Vec::new();
             for ri in (im.data[o].rel.0..im.data[o].rel.1).step_by(DREL_SIZE) {
                 let (off, t, x, add) = im.drel_at(ri);
+                if !drel_in_object(off as usize, im.data[o].bytes.len()) {
+                    good = false;
+                    break;
+                }
                 if t == DATA_OBJ {
                     if (x as usize) >= n || addr[x as usize] == 0 {
                         good = false;
@@ -1864,4 +1895,17 @@ pub(crate) unsafe fn ids_report_unit(up: *mut Unit, by: &str) {
     let s = &c.stats;
     eprintln!("makepad-run cache: startup identities decoded: {} ({} in the background, {} in the prelink (keys naming a changed crate, {:.1} ms); {} duplicate, {} did not decode) in {:.1} ms, finished by {} (t={:.0} ms)",
         s.ids_decoded, s.ids_bg, s.ids_unsure, s.ids_unsure_ns as f64 / 1e6, s.ids_dup, s.ids_failed, s.ids_ns as f64 / 1e6, by, crate::clock::ms_since_start());
+}
+
+#[cfg(test)]
+mod bounds_tests {
+    use super::{data_align_ok, drel_in_object};
+
+    #[test]
+    fn image_alignment_and_data_relocations_are_bounded() {
+        assert!(data_align_ok(1) && data_align_ok(8) && data_align_ok(4096));
+        assert!(!data_align_ok(0) && !data_align_ok(3) && !data_align_ok(8192) && !data_align_ok(1 << 63));
+        assert!(drel_in_object(0, 8) && drel_in_object(8, 16));
+        assert!(!drel_in_object(1, 8) && !drel_in_object(9, 16) && !drel_in_object(usize::MAX - 3, usize::MAX));
+    }
 }

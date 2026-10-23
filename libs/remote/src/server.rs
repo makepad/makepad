@@ -19,6 +19,7 @@ use makepad_network::tls::{TlsIdentity, TlsServer, TlsStream};
 use makepad_network::tunnel::*;
 
 use crate::procs::{self, SpawnRecord};
+use makepad_remote::carrier::tcp::is_lan;
 
 /// Authentication failures from one address that trigger a ban.
 pub const MAX_FAILURES: usize = 5;
@@ -304,19 +305,6 @@ impl Limiter {
 }
 
 // --- LAN scope --------------------------------------------------------------
-
-pub fn is_lan(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
-        IpAddr::V6(v6) => {
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return is_lan(IpAddr::V4(v4));
-            }
-            let first = v6.segments()[0];
-            v6.is_loopback() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
-        }
-    }
-}
 
 /// `lan`: the address of the interface that holds the default route (no
 /// packet is sent); it must be a private address. An explicit address must

@@ -573,7 +573,15 @@ pub fn forbid_in_publish(what: &'static str, slot: u32) {
             }
             std::panic::resume_unwind(Box::new(PublishBail { what, slots: if slot == u32::MAX { Vec::new() } else { vec![slot] } }))
         }
-        _ => panic!("makepad: {} inside a publish to the compiler's owner (rule I-PUB: a publish is bounded and never runs a front, an initializer, JIT code or a wait)", what),
+        _ => {
+            // said here, before it unwinds: on the owner the panic hook is silent (a request's
+            // panic resumes in its requester, where no hook runs)
+            let at = std::panic::Location::caller();
+            eprintln!("makepad-run: BUG: {} inside a publish to the compiler's owner at {}:{} (rule I-PUB), slot {}", what, at.file(), at.line(), slot);
+            crate::inspect::flightrec::event("ipub.violation", what, slot as u64, at.line() as u64);
+            // (with the stack: where the publish was entered from)
+            panic!("makepad: {} inside a publish to the compiler's owner at {} (rule I-PUB: a publish is bounded and never runs a front, an initializer, JIT code or a wait)\n{}", what, at, std::backtrace::Backtrace::force_capture())
+        }
     }
 }
 
@@ -699,6 +707,11 @@ fn me() -> u64 {
 
 /// Is this the owner thread (or the only thread of a forked child)?
 #[inline]
+/// On the owner, inside a request it serves (its panics resume in the requester).
+pub fn serving_request() -> bool {
+    DEPTH.try_with(|d| d.get() > 0).unwrap_or(false)
+}
+
 pub fn is_owner() -> bool {
     IS_OWNER.try_with(|o| o.get()).unwrap_or(false)
 }
@@ -802,7 +815,9 @@ pub fn start() {
                 let _ = OWNER_THREAD.set(std::thread::current());
                 crate::jit::ensure_altstack();
                 let _ = crate::zone_alloc::kept_with(|| tx.send(()));
-                owner_loop();
+                // a panic outside a request (serve catches those) ends the process with a report:
+                // a dead owner would leave every requester waiting forever
+                crate::lifeline::run("run-owner", crate::lifeline::OnPanic::Fatal, || owner_loop());
             })
             .expect("makepad: cannot start the compiler's owner thread");
         let _ = rx.recv();
@@ -1278,11 +1293,17 @@ fn owner_loop() -> ! {
             }
         };
         serve(r);
+        crate::lifeline::beat();
         // between top-level requests: the vtables made for real-time trait-object types
+        // (a panic in either is printed by the panic hook: the owner is not serving a request)
         let frame = crate::jit::frame_enter(std::ptr::null());
-        let _ = std::panic::catch_unwind(crate::jit::realtime_drain);
+        if std::panic::catch_unwind(crate::jit::realtime_drain).is_err() {
+            eprintln!("makepad-run: the owner's real-time vtable drain panicked ({}); the owner goes on", crate::lifeline::panic_at());
+        }
         // ... and the constants background builds' fronts found unevaluated
-        let _ = std::panic::catch_unwind(crate::jit::const_drain);
+        if std::panic::catch_unwind(crate::jit::const_drain).is_err() {
+            eprintln!("makepad-run: the owner's constant drain panicked ({}); the owner goes on", crate::lifeline::panic_at());
+        }
         crate::jit::frame_leave(frame);
     }
 }

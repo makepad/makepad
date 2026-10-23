@@ -62,6 +62,15 @@
     "menu": "other"
   },
   {
+    "id": "synth",
+    "title": "Synth",
+    "package": "makepad-app-synth",
+    "binary": "makepad-app-synth",
+    "workspace": "makepad/apps/synth",
+    "features": [],
+    "menu": "other"
+  },
+  {
     "id": "code",
     "title": "Code",
     "package": "makepad-app-code",

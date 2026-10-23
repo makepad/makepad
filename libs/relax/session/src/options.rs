@@ -22,6 +22,10 @@ pub enum CheckTarget { Host, MacosArm64, LinuxX64, WindowsX64, AndroidArm64, Web
 /// the linear memory's window; 64: native pointers inside it).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PtrWidth { W32, W64 }
+/// Thread profile of a web target. The default wasm target and exported pages are
+/// single-threaded; cargo-makepad-style checks opt into atomics explicitly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebThreads { Off, On }
 impl PtrWidth {
     /// size_of::<usize>() (and of a thin pointer)
     pub fn bytes(self) -> u32 {
@@ -285,6 +289,8 @@ pub struct Options {
     pub borrowck_all: BorrowckAll,
     /// `MAKEPAD_RUN_CHECK_TARGET`; default `CheckTarget::Host`.
     pub check_target: CheckTarget,
+    /// `MAKEPAD_RUN_WEB_THREADS=1` selects atomics; the default is rustc's unthreaded wasm cfg.
+    pub web_threads: WebThreads,
     /// `MAKEPAD_RUN_CTFE`; default `Ctfe::On`.
     pub ctfe: Ctfe,
     /// Set by `makepad check` only: loops count their iterations while a constant is evaluated,
@@ -394,6 +400,7 @@ impl Default for Options {
             borrowck: Borrowck::Full,
             borrowck_all: BorrowckAll::Default,
             check_target: CheckTarget::Host,
+            web_threads: WebThreads::Off,
             ctfe: Ctfe::On,
             const_fuel: false,
             freq_mode: Frequency::Blend,
@@ -511,6 +518,7 @@ impl Options {
             borrowck: { let os = get("MAKEPAD_RUN_BORROWCK"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("off") => Borrowck::Off, Some("moves") => Borrowck::Moves, _ => Borrowck::Full } },
             borrowck_all: { let os = get("MAKEPAD_RUN_BORROWCK_ALL"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("nongeneric") => BorrowckAll::Nongeneric, None => BorrowckAll::Default, Some("std") => BorrowckAll::Std, _ => BorrowckAll::All } },
             check_target: { let os = get("MAKEPAD_RUN_CHECK_TARGET"); let v = os.and_then(|v| v.into_string().ok()); CheckTarget::from_triple(v.as_deref().unwrap_or("")).unwrap_or(CheckTarget::Host) },
+            web_threads: if get("MAKEPAD_RUN_WEB_THREADS").as_deref() == Some(std::ffi::OsStr::new("1")) { WebThreads::On } else { WebThreads::Off },
             const_fuel: false,
             ctfe: { let os = get("MAKEPAD_RUN_CTFE"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("0") => Ctfe::Off, Some("check") => Ctfe::Check, _ => Ctfe::On } },
             freq_mode: { let os = get("MAKEPAD_RUN_FREQ_MODE"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("sampled") => Frequency::Sampled, Some("static") => Frequency::Static, _ => Frequency::Blend } },
@@ -608,6 +616,7 @@ impl Options {
             borrowck,
             borrowck_all,
             check_target,
+            web_threads,
             ctfe,
             const_fuel,
             freq_mode,
@@ -770,6 +779,8 @@ impl Options {
         h.u8(*borrowck as u8);
         h.str("borrowck_all");
         h.u8(*borrowck_all as u8);
+        h.str("web_threads");
+        h.u8(if *web_threads == WebThreads::On { 1 } else { 0 });
         h.str("check_target");
         h.u8(match *check_target {
             CheckTarget::Host => 0,

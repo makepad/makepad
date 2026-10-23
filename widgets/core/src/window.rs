@@ -1,6 +1,6 @@
 use crate::gauss_stack::GaussStack;
 use crate::{
-    desktop_button::DesktopButtonWidgetExt,
+    desktop_button::{DesktopButtonWidgetExt, DesktopButtonWidgetRefExt},
     widget_hooks::WidgetHooks,
     gauss_view::{
         begin_window_gauss_frame, finish_window_gauss_frame, window_wants_gauss_capture,
@@ -304,7 +304,15 @@ script_mod! {
 
             flow: Right
 
-            draw_bg.color: theme.color_app_caption_bar
+            draw_bg +: {
+                color: theme.color_app_caption_bar
+                color_unfocused: uniform(vec4(-1.0))
+                window_focus: instance(1.0)
+                pixel: fn() {
+                    if self.color_unfocused.x < 0.0 { return Pal.premul(self.color) }
+                    return Pal.premul(self.color_unfocused.mix(self.color, self.window_focus))
+                }
+            }
             // Note: by default, the caption bar height is calculated at runtime
             // based on window chrome button geometry to ensure the buttons are vertically centered.
             // If you want to override this height with a fixed value, set the `caption_bar_height_override` on the Window itself.
@@ -319,7 +327,17 @@ script_mod! {
                 // Off by default: an app id makepad ships no artwork for falls back
                 // to a generic tile, so apps opt in with `caption_icon +: {visible: true}`.
                 caption_icon := AppIcon{visible: false width: 16 height: 16 margin: Inset{right: 6}}
-                label := Label {text: "Makepad"}
+                label := Label {
+                    text: "Makepad"
+                    draw_text +: {
+                        color_unfocused: uniform(vec4(-1.0))
+                        window_focus: instance(1.0)
+                        get_color: fn() {
+                            if self.color_unfocused.x < 0.0 { return self.color }
+                            return self.color_unfocused.mix(self.color, self.window_focus)
+                        }
+                    }
+                }
             }
             voice_wave := VoiceWave {}
             windows_buttons := View {
@@ -1265,6 +1283,7 @@ impl Window {
         let top = bar.pos.y + ((bar.size.y - size) * 0.5).max(0.0);
         let mut scope = Scope::empty();
         for (i, button) in [self.hosted_close.clone(), self.hosted_min.clone(), self.hosted_max.clone()].iter().enumerate() {
+            button.as_desktop_button().set_window_focus(cx, self.has_focus || !self.focus_known);
             let rect = Rect { pos: dvec2(bar.pos.x + left + i as f64 * pitch, top), size: dvec2(size, size) };
             let _ = button.draw_walk(cx, &mut scope, Walk::abs_rect(rect));
         }
@@ -1604,6 +1623,14 @@ impl Window {
         let will_redraw = cx.will_redraw(&mut self.main_draw_list, Walk::default());
         if !will_redraw {
             return Redrawing::no();
+        }
+
+        let focus = if self.has_focus || !self.focus_known { 1.0 } else { 0.0 };
+        if let Some(mut bar) = self.view(cx, ids!(caption_bar)).borrow_mut() {
+            bar.draw_bg.draw_vars.set_dyn_instance(cx, id!(window_focus), &[focus]);
+        }
+        if let Some(mut label) = self.label(cx, ids!(caption_bar.caption_label.label)).borrow_mut() {
+            label.draw_text.draw_vars.set_dyn_instance(cx, id!(window_focus), &[focus]);
         }
 
         cx.begin_pass(&self.pass.handle, None);
@@ -3101,6 +3128,7 @@ impl Widget for Window {
                     self.has_focus = true;
                     self.focus_known = true;
                     cx.unpark_key_focus(*window_id);
+                    self.redraw(cx);
                 }
 
                 *window_id != self.window.window_id()
@@ -3110,6 +3138,7 @@ impl Widget for Window {
                     self.has_focus = false;
                     self.focus_known = true;
                     cx.park_key_focus(*window_id);
+                    self.redraw(cx);
                 }
 
                 *window_id != self.window.window_id()

@@ -37,9 +37,12 @@ static mut STD_HOOK: Option<fn(&str, &core::panic::Location<'_>)> = None;
 /// What core::panicking calls before the runtime's own report/abort: records the payload
 /// catch_unwind / JoinHandle::join hand out, then runs std's hook if one was set.
 fn core_hook(info: &core::panic::PanicInfo<'_>) {
+    #[cfg(not(relax_web))]
+    {
     crate::panic::record_payload(info.message());
     if crate::panic::take_resuming() {
         return;
+    }
     }
     let hook = unsafe { STD_HOOK };
     if let (Some(h), Some(loc)) = (hook, info.location()) {

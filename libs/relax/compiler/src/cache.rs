@@ -305,7 +305,39 @@ pub mod warm_count {
     pub const KEY_CHANGED: usize = 12;
     pub const ENTRY_GONE: usize = 13;
     pub const NOT_RECORDED: usize = 14;
-    pub static N: [AtomicU64; 15] = [const { AtomicU64::new(0) }; 15];
+    /// this session's installed O3 code and its entry: queued for the record batches, or not
+    /// stored because it was unverified (SPEC-V), its frame too big, speculative / an inspect build
+    pub const O3_QUEUED: usize = 15;
+    pub const O3_UNVERIFIED: usize = 16;
+    pub const O3_FRAME: usize = 17;
+    pub const O3_SPEC: usize = 18;
+    /// ... and of the queued: written as the slot's entry, the same bytes as its entry already,
+    /// not encodable, dropped (a source changed or the slot was patched since the install)
+    pub const O3_WRITTEN: usize = 19;
+    pub const O3_SAME: usize = 20;
+    pub const O3_UNENCODABLE: usize = 21;
+    pub const O3_STALE: usize = 22;
+    /// O2 code written as the slot's entry
+    pub const O2_WRITTEN: usize = 23;
+    /// a warm session: fresh O3 installs by the tier of the slot's
+    /// entry in the stores this session opened (none, baseline, O1, O2, O3): what a tier-up rebuilt
+    /// over (an O3 entry means the earlier session's O3 code was there but not what the slot ran)
+    pub const RETIER_O3_OVER: usize = 24;
+    /// ... and fresh O2 builds (the O2 worker's) the same way
+    pub const RETIER_O2_OVER: usize = 29;
+    /// queued O3 records not stored: the slot was patched / an edit version / it has no key
+    pub const O3_DROPPED: usize = 34;
+    /// deferred records waiting for the record batches now (set by the batches and the installs)
+    pub const RECORDS_WAITING: usize = 35;
+    /// (diagnostic) why the last record drain stopped (1 stopped, 2 no unit, 3 cache out, 4 other unit, 5 ran) and its unit's backlog
+    pub const DRAIN_WHY: usize = 36;
+    pub const DRAIN_LEN: usize = 37;
+    /// SPEC-V: code records made from an unverified lowering (baseline, calls to twins), and
+    /// compiled slots below O3 whose verdict came clean after their code was built (their code
+    /// and entry stay the unverified lowering)
+    pub const REC_UNVERIFIED: usize = 38;
+    pub const SPECV_LATE: usize = 39;
+    pub static N: [AtomicU64; 40] = [const { AtomicU64::new(0) }; 40];
     #[inline]
     pub fn add(k: usize, n: u64) {
         N[k].fetch_add(n, Relaxed);
@@ -340,6 +372,17 @@ pub fn warm_summary() -> String {
         s.push_str(&format!("; startup image: {} slots placed, {} stale, {} failed, {} had code", k(g(IMG_PLACED)), k(g(IMG_STALE)), k(g(IMG_FAILED)), k(g(IMG_HAD_CODE))));
     }
     s.push_str(&format!("; {} code stores opened, {} crate stores rejected; {} entries recorded this session", g(STORES), g(STORES_REJECTED), k(g(RECORDED))));
+    let over = |b: usize| (0..5).map(|i| k(g(b + i))).collect::<Vec<_>>().join("/");
+    if (0..10).any(|i| g(RETIER_O3_OVER + i) > 0) {
+        s.push_str(&format!("; fresh builds over the stored entry (none/baseline/O1/O2/O3): O3 {}, O2 {}", over(RETIER_O3_OVER), over(RETIER_O2_OVER)));
+    }
+    if g(REC_UNVERIFIED) + g(SPECV_LATE) > 0 {
+        s.push_str(&format!("; SPEC-V: {} records of unverified lowerings, {} compiled slots below O3 verified after their build", k(g(REC_UNVERIFIED)), k(g(SPECV_LATE))));
+    }
+    if g(O3_QUEUED) + g(O3_UNVERIFIED) + g(O3_FRAME) + g(O3_SPEC) > 0 {
+        s.push_str(&format!("; O3 installs kept as entries: {} queued (written {}, same as stored {}, not encodable {}, stale {}, dropped {}; {} deferred records waiting, last drain {} with {}), not kept: unverified {}, frame too big {}, speculative/inspect {}; O2 entries written {}",
+            k(g(O3_QUEUED)), k(g(O3_WRITTEN)), k(g(O3_SAME)), k(g(O3_UNENCODABLE)), k(g(O3_STALE)), k(g(O3_DROPPED)), k(g(RECORDS_WAITING)), g(DRAIN_WHY), k(g(DRAIN_LEN)), k(g(O3_UNVERIFIED)), k(g(O3_FRAME)), k(g(O3_SPEC)), k(g(O2_WRITTEN))));
+    }
     if g(NO_ENTRY) > 0 && g(KEY_CHANGED) + g(ENTRY_GONE) + g(NOT_RECORDED) == 0 {
         s.push_str(" (why an entry is missing -- key changed, never recorded, not flushed -- needs a MAKEPAD_RUN_WARM_STRICT=1 cold run then warm run)");
     }
@@ -417,7 +460,7 @@ pub struct CacheCell(std::cell::UnsafeCell<Cache>);
 unsafe impl Sync for CacheCell {}
 impl CacheCell {
     pub fn new(cache: Cache) -> Self { Self(std::cell::UnsafeCell::new(cache)) }
-    fn get(&self) -> *mut Cache { self.0.get() }
+    pub(crate) fn get(&self) -> *mut Cache { self.0.get() }
 }
 impl std::ops::Deref for CacheCell {
     type Target = Cache;
@@ -507,6 +550,8 @@ pub struct Cache {
     code_stale: Vec<bool>,
     /// code keys whose entry this run rejected (a dependency's key changed): recorded again
     cert_rejected: HashSet<u128>,
+    /// code keys of bodies the borrow checker rejected this run (reject_verdict): never recorded
+    verdict_rejected: HashSet<u128>,
     /// per slot: the crates its key names (a certificate's fast path)
     slot_crates: HashMap<u32, Vec<u32>>,
     /// while a key is encoded: the definitions it names (their local bodies join the key)
@@ -790,6 +835,7 @@ impl Cache {
             code_path: Vec::new(),
             code_stale: Vec::new(),
             cert_rejected: HashSet::new(),
+            verdict_rejected: HashSet::new(),
             slot_crates: HashMap::new(),
             enc_defs: None,
             crate_by_ident,
@@ -1110,6 +1156,14 @@ impl Cache {
         n
     }
 
+    /// Warm-session diagnostics (`makepad inspect cache`): counts a fresh build of slot `id` (`base`: one of
+    /// warm_count's RETIER_*_OVER) by the tier of its entry in the opened stores.
+    pub(crate) fn note_retier_over(&mut self, u: &Unit, id: u32, base: usize) {
+        if !self.has_code_entries() { return; }
+        let rank = self.slot_key(u, id).and_then(|k| self.entry_tier(k)).map_or(0, |t| tier_rank(t) as usize + 1);
+        warm_count::add(base + rank, 1);
+    }
+
     fn index_at(&self, key: u128) -> Option<(u32, u32)> {
         self.index.get(&key).copied().or_else(|| self.mapped_index.as_ref()?.get(key))
     }
@@ -1127,11 +1181,45 @@ impl Cache {
         self.stores[p as usize].get_at(e as usize, key)
     }
 
+    /// `get` with the payload checksum verified (payloads linked as code or data).
+    fn get_checked(&self, key: u128) -> Option<(u32, &[u8])> {
+        let (p, e) = self.index_at(key)?;
+        self.stores[p as usize].get_checked_at(e as usize, key)
+    }
+
     /// The crate whose store file an entry keyed by `crates` goes to: the deepest in the
     /// dependency graph (it depends on the others when there is a chain: its version covers
     /// theirs), ties by crate index.
     fn dominant(&self, crates: &[u32]) -> u32 {
         crates.iter().copied().max_by_key(|&c| (self.depth.get(c as usize).copied().unwrap_or(0), c)).unwrap_or(0)
+    }
+
+    /// SPEC-V: slot `id`'s body failed the borrow checker. Its code stays out of the cache: a record
+    /// not yet written is dropped, later records of it are refused, and an entry that may be on disk
+    /// already is replaced by an empty one (newest wins; an empty code payload is a miss), so a
+    /// later run never links code the checker refused.
+    pub fn reject_verdict(&mut self, u: &Unit, id: u32) {
+        if self.mode == Mode::ReadOnly {
+            return;
+        }
+        let Some(key) = self.slot_key(u, id) else { return };
+        if !self.verdict_rejected.insert(key) {
+            return;
+        }
+        let before = self.pending.len();
+        let mut freed = 0;
+        self.pending.retain(|(_, e)| {
+            let drop = e.key == key && e.kind == KIND_CODE;
+            if drop { freed += e.payload.len() + 32; }
+            !drop
+        });
+        self.pending_bytes -= freed.min(self.pending_bytes);
+        let krate = self.key_crate.get(&key).copied().unwrap_or(0);
+        if self.verbose {
+            eprintln!("makepad-run cache: slot {} {} failed the borrow checker: its code entry is dropped ({} pending)", id, u.fns[id as usize].name, before - self.pending.len());
+        }
+        self.pending_keys.insert(key);
+        self.push_pending(krate, NewEntry { key, kind: KIND_CODE, payload: Vec::new() });
     }
 
     fn push_pending(&mut self, krate: u32, e: NewEntry) {
@@ -2340,6 +2428,7 @@ impl Cache {
     /// Records slot `id`'s freshly compiled O1 code (on the owner thread).
     /// `code` is the backend's output (relocated fields zeroed), `relocs` its relocations.
     pub fn record(&mut self, u: &Unit, id: u32, code: &[u8], relocs: &[RelocAt], pc_map: &[(u32, u64)]) {
+        if u.fns[id as usize].unverified.load(std::sync::atomic::Ordering::Relaxed) { warm_count::add(warm_count::REC_UNVERIFIED, 1); }
         self.record_entry(u, id, code, relocs, pc_map, None, false, None)
     }
 
@@ -2352,6 +2441,7 @@ impl Cache {
         if self.mode == Mode::ReadOnly || u.fns[id as usize].patch_gen != 0 || self.linked.contains(&id) {
             return None;
         }
+        if u.fns[id as usize].unverified.load(std::sync::atomic::Ordering::Relaxed) { warm_count::add(warm_count::REC_UNVERIFIED, 1); }
         let rir = u.fns[id as usize].rir.as_ref();
         Some(PendingRecord {
             id,
@@ -2391,6 +2481,7 @@ impl Cache {
         if !pending_current(u, p) {
             // a source changed (or the slot was patched) since the install: its key would name
             // the new text for old code. A lost entry is harmless; a stale one is not.
+            if p.o3.is_some() { warm_count::add(warm_count::O3_STALE, 1); }
             return;
         }
         let previous = std::mem::replace(&mut self.recording_pending, true);
@@ -2418,6 +2509,7 @@ impl Cache {
         let f = &u.fns[id as usize];
         if self.mode == Mode::ReadOnly || f.patch_gen != 0 || u.prog.is_edit_version(f.file) || (!replace && self.linked.contains(&id)) {
             trace_lookup(u, id, "norecord:mode/patch/linked");
+            if o3.is_some() { warm_count::add(warm_count::O3_DROPPED, 1); }
             return;
         }
         // a foreign fn's slot holds a jump to the C address (no relocation): never stored
@@ -2425,6 +2517,7 @@ impl Cache {
             return;
         }
         let Some(key) = self.slot_key(u, id) else {
+            if o3.is_some() { warm_count::add(warm_count::O3_DROPPED, 1); }
             self.stats.unencodable += 1;
             self.why("fn key");
             trace_lookup(u, id, "unstorable:fn key");
@@ -2432,6 +2525,11 @@ impl Cache {
             self.remember_outcome(u, id, None, "cold record-rejected:fn key");
             return;
         };
+        // a body the borrow checker rejected (reject_verdict): never stored
+        if self.verdict_rejected.contains(&key) {
+            trace_lookup(u, id, "norecord:verdict failed");
+            return;
+        }
         // the entry's store file (its data objects go there too)
         self.cur_crate = self.key_crate.get(&key).copied().unwrap_or(0);
         // an entry this run rejected (a slot its code took in changed) is replaced
@@ -2442,6 +2540,7 @@ impl Cache {
             return;
         }
         let Some(payload) = self.encode_entry(u, id, code, relocs, pc_map, o3, o2, pending) else {
+            if o3.is_some() { warm_count::add(warm_count::O3_UNENCODABLE, 1); }
             let w = self.last_why;
             trace_lookup(u, id, &format!("norecord:encode:{}", w));
             if o3.is_none() {
@@ -2453,6 +2552,7 @@ impl Cache {
         // the same code again (a hot slot rebuilt by every run): the entry and the startup
         // image that holds it stay as they are, nothing is appended
         if replace && existing && !self.pending_keys.contains(&key) && self.get(key).is_some_and(|(kind, p)| kind == KIND_CODE && p == &payload[..]) {
+            if o3.is_some() { warm_count::add(warm_count::O3_SAME, 1); }
             return;
         }
         self.pending_keys.insert(key);
@@ -2474,6 +2574,8 @@ impl Cache {
         self.push_pending(kc, NewEntry { key, kind: KIND_CODE, payload });
         self.stats.recorded += 1;
         warm_count::add(warm_count::RECORDED, 1);
+        if o3.is_some() { warm_count::add(warm_count::O3_WRITTEN, 1); }
+        if o2 { warm_count::add(warm_count::O2_WRITTEN, 1); }
         if o3.is_none() { self.remember_outcome(u, id, Some(key), "recorded"); }
     }
 
@@ -2800,7 +2902,8 @@ impl Cache {
         self.manifest_root = Some(root);
         let Some(key) = self.manifest_key(root) else { return };
         if let Some(pk) = self.stores.iter().find(|st| st.path == self.code_path[root as usize]).cloned() {
-            if let Some((KIND_MANIFEST, p)) = pk.get(key) {
+            // checksummed before use: its image section becomes executable code (prelink)
+            if let Some((KIND_MANIFEST, p)) = pk.get_checked(key) {
                 let mut d = D { b: p, p: 0 };
                 let mut out = Vec::new();
                 let mut keys = Vec::new();
@@ -6987,7 +7090,7 @@ impl Linker {
         }
         if !self.cache().linking_data.insert(key) { return None; }
         let _link = LinkGuard { cache: self.cache, key, data: true };
-        let (kind, payload) = { let c = self.cache(); let (k, p) = c.get(key)?; (k, p.to_vec()) };
+        let (kind, payload) = { let c = self.cache(); let (k, p) = c.get_checked(key)?; (k, p.to_vec()) };
         if kind != KIND_DATA {
             return None;
         }
@@ -7049,7 +7152,9 @@ impl Linker {
         // the pack stays alive by its Arc: the payload is read in place
         let at = self.cache().index_at(key);
         let pack = at.map(|(p, _)| self.cache().stores[p as usize].clone());
-        if let Some((KIND_CODE, payload)) = pack.as_ref().and_then(|pk| pk.get_at(at.map_or(0, |a| a.1) as usize, key)) {
+        // checksummed before it is linked into executable memory: a corrupt entry is a miss
+        // (an empty payload: a rejected body's entry, reject_verdict -- a miss)
+        if let Some((KIND_CODE, payload)) = pack.as_ref().and_then(|pk| pk.get_checked_at(at.map_or(0, |a| a.1) as usize, key)).filter(|(_, p)| !p.is_empty()) {
             // a slot its code took in changed: not this run's code (compiled and recorded anew)
             // (an undecodable payload is link_entry's failure, as before)
             if self.cert_valid(u, payload) == Some(false) {

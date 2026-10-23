@@ -1,3 +1,4 @@
+use makepad_relax::relax;
 use {
     self::super::{from_wasm::*, to_wasm::*, web_media::CxWebMedia},
     crate::{
@@ -1895,6 +1896,7 @@ pub unsafe extern "C" fn wasm_check_signal() -> u32 {
 }
 
 #[export_name = "wasm_init_panic_hook"]
+#[relax(keep_reachable)]
 pub unsafe extern "C" fn init_panic_hook() {
     pub fn panic_hook(info: &panic::PanicHookInfo) {
         #[cfg(target_arch = "wasm32")]

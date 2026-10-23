@@ -326,7 +326,7 @@ pub fn w32_fmt_pop() -> crate::jit::StrRet {
 }
 
 /// The host functions a wasm32 program may import, by name: the web runtime's, its embedder's
-/// page side (web.rs), the linear memory's allocator in the offset ABI, the memory functions and
+/// page side (web.rs), memory copy/fill in the offset ABI, and
 /// the Relax runtime keys. None: not available on the wasm32 target (never called with offsets).
 pub fn symbol(name: &[u8]) -> Option<usize> {
     if let Some(a) = crate::web::symbol(name) {
@@ -340,9 +340,6 @@ pub fn symbol(name: &[u8]) -> Option<usize> {
         b"__relax_key_delete" => crate::domain_threads::key_delete as *const () as usize,
         b"__relax_key_get" => crate::domain_threads::key_get as *const () as usize,
         b"__relax_key_set" => crate::domain_threads::key_set as *const () as usize,
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
-        _ => return crate::zone_alloc::web::symbol32(name),
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         _ => return None,
     })
 }

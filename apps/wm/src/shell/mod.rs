@@ -24,6 +24,7 @@ pub mod ai_pane;
 pub mod bar;
 pub mod file_picker;
 pub mod gallery;
+pub mod game_controllers;
 pub mod launcher;
 pub mod menu;
 pub mod notifications;

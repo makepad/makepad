@@ -8,8 +8,8 @@
 //!   thread-locals and stacks are in the window too); on wasm64 pointers are native and
 //!   `u32 as *mut T` (lower.rs `cast`) adds the window's base back.
 //! - `core::arch::wasm32::{memory_size, memory_grow}` (Relax std core/arch/wasm32.rs): the linear
-//!   memory's committed size in pages; it grows by itself (an allocator over the arena), so an
-//!   explicit grow only succeeds for 0 pages.
+//!   memory's high-water mark in pages. Program dlmalloc obtains zero-filled pages by
+//!   growing above that mark; no program allocation enters the host allocator.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -32,20 +32,21 @@ pub fn activate() -> Result<(), String> {
     Err("the web target runs on macOS and Linux only".to_string())
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-const PAGE: usize = 64 << 10;
-
 extern "C" fn relax_web_memory_size(_mem: u32) -> usize {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        crate::zone_alloc::web::stats().0.div_ceil(PAGE)
+        crate::zone_alloc::web::memory_size()
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     0
 }
 
 extern "C" fn relax_web_memory_grow(mem: u32, delta: usize) -> usize {
-    if delta == 0 { relax_web_memory_size(mem) } else { usize::MAX }
+    if mem != 0 { return usize::MAX; }
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    { crate::zone_alloc::web::memory_grow(delta) }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    { let _ = delta; usize::MAX }
 }
 
 /// A pointer argument of the program as a host address: an offset on wasm32 (web32.rs).
@@ -157,7 +158,7 @@ pub fn symbol(name: &[u8]) -> Option<usize> {
         b"relax_web_memory_grow" => Some(relax_web_memory_grow as *const () as usize),
         b"relax_web_atomic_wait32" => Some(relax_web_atomic_wait32 as *const () as usize),
         b"relax_web_atomic_notify" => Some(relax_web_atomic_notify as *const () as usize),
-        b"relax_web_print" => Some(relax_web_print as *const () as usize),
+        b"js_console_log" | b"relax_web_print" => Some(relax_web_print as *const () as usize),
         _ => None,
     }
 }

@@ -20,18 +20,18 @@ use makepad_hal::{media, HalEvent, Id};
 use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-#[cfg(any(target_vendor = "apple", target_os = "windows"))]
+#[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
 use crate::{
     event::game_input::{ForceTarget, GameInputConnectedEvent, GameInputForce, GameInputInfo, GameInputOutput, GameInputState, GamepadHapticCapabilities, GamepadHapticPulse, GamepadState, JoystickState, WheelState},
     game_input::CxGameInputApi,
     makepad_math::Vec2,
 };
-#[cfg(any(target_vendor = "apple", target_os = "windows"))]
+#[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
 use makepad_hal::media::{game, game_output};
 
 /// The controllers the HAL told the session about, in the HAL's order (the order
 /// `game_input_states` has), with their latest states.
-#[cfg(any(target_vendor = "apple", target_os = "windows"))]
+#[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
 #[derive(Default)]
 pub(crate) struct GameClient {
     infos: Vec<GameInputInfo>,
@@ -39,7 +39,7 @@ pub(crate) struct GameClient {
     devices: Vec<game::GameDevice>,
 }
 
-#[cfg(any(target_vendor = "apple", target_os = "windows"))]
+#[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
 fn cx_state(s: game::GameState) -> GameInputState {
     match s {
         game::GameState::Gamepad(p) => GameInputState::Gamepad(GamepadState {
@@ -464,7 +464,7 @@ impl Cx {
                 };
                 self.call_event_handler(&Event::PermissionResult(PermissionResult { permission: permission_of(kind), request_id: req as i32, status }));
             }
-            #[cfg(any(target_vendor = "apple", target_os = "windows"))]
+            #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
             HalEvent::GameDevices { devices } => {
                 let list = game::read_devices(devices);
                 let old: Vec<GameInputInfo> = std::mem::take(&mut self.hal.game.infos);
@@ -492,7 +492,7 @@ impl Cx {
                     self.call_event_handler(&Event::GameInputConnected(GameInputConnectedEvent::Connected(info)));
                 }
             }
-            #[cfg(any(target_vendor = "apple", target_os = "windows"))]
+            #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
             HalEvent::GameInput { device, state } => {
                 if let (Some(index), Some(state)) = (self.hal.game.infos.iter().position(|i| i.id.0 == device), game::read_state(state)) {
                     self.hal.game.states[index] = cx_state(state);
@@ -549,33 +549,33 @@ impl crate::screen_capture::MappedCapture for makepad_hal::backend::linux::media
     fn bgra(&self) -> bool { self.bgra() }
 }
 
-#[cfg(any(target_vendor = "apple", target_os = "windows"))]
+#[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
 impl CxGameInputApi for Cx {
     fn game_input_state(&mut self, index: usize) -> Option<&GameInputState> {
-        if self.in_makepad_studio {
+        if self.in_makepad_studio && !cfg!(target_os = "linux") {
             return self.game_input_remote.get(index);
         }
         self.hal.game.states.get(index)
     }
 
     fn game_input_state_mut(&mut self, index: usize) -> Option<&mut GameInputState> {
-        if self.in_makepad_studio {
+        if self.in_makepad_studio && !cfg!(target_os = "linux") {
             return self.game_input_remote.get_mut(index);
         }
         self.hal.game.states.get_mut(index)
     }
 
     fn game_input_states(&mut self) -> &[GameInputState] {
-        // Hosted by Studio: this process has no window, so the OS never gave it the controllers.
-        // Studio forwards them instead.
-        if self.in_makepad_studio {
+        // Apple/Windows hosted apps use forwarded input. Linux reads evdev in each
+        // process, including hosted apps; each app owns its focus/muting policy.
+        if self.in_makepad_studio && !cfg!(target_os = "linux") {
             return &self.game_input_remote;
         }
         &self.hal.game.states
     }
 
     fn game_input_states_mut(&mut self) -> &mut [GameInputState] {
-        if self.in_makepad_studio {
+        if self.in_makepad_studio && !cfg!(target_os = "linux") {
             return &mut self.game_input_remote;
         }
         &mut self.hal.game.states

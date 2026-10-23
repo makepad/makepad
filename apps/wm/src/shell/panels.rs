@@ -140,6 +140,7 @@ pub enum PanelKind {
     Monitor,
     Network,
     Bluetooth,
+    Gamepad,
     Hub,
 }
 
@@ -152,6 +153,7 @@ impl PanelKind {
             BarModule::Monitor => PanelKind::Monitor,
             BarModule::Network => PanelKind::Network,
             BarModule::Bluetooth => PanelKind::Bluetooth,
+            BarModule::Gamepad => PanelKind::Gamepad,
             BarModule::Hub => PanelKind::Hub,
             _ => return None,
         })
@@ -165,6 +167,7 @@ impl PanelKind {
             PanelKind::Monitor => BarModule::Monitor,
             PanelKind::Network => BarModule::Network,
             PanelKind::Bluetooth => BarModule::Bluetooth,
+            PanelKind::Gamepad => BarModule::Gamepad,
             PanelKind::Hub => BarModule::Hub,
         }
     }
@@ -192,6 +195,7 @@ pub struct PanelData {
     pub text_size: f64,
     pub network: Option<String>,
     pub bluetooth: Option<bool>,
+    pub game_controllers: super::game_controllers::Inventory,
     /// The month the calendar is showing.
     pub view: (i64, u32),
     pub today: (i64, u32, u32),
@@ -214,6 +218,7 @@ impl Default for PanelData {
             text_size: 12.0,
             network: None,
             bluetooth: None,
+            game_controllers: Default::default(),
             view: (y, m),
             today: (y, m, d),
             hub: Default::default(),
@@ -242,6 +247,7 @@ impl PanelData {
             text_size: 12.0,
             network: Some("Ethernet".into()),
             bluetooth: Some(true),
+            game_controllers: Default::default(),
             view: (y, m),
             today: (y, m, d),
             hub: Default::default(),
@@ -319,6 +325,8 @@ enum Hit {
     HubContext(bool),
     /// The WM's hub child: stop and start it again.
     HubRestart,
+    #[cfg(target_os = "linux")]
+    PairXbox(usize),
     /// Open or close the list of chat models.
     HubPickOpen,
     /// A chat model of that list (index into `hub_chat_models`).
@@ -380,6 +388,8 @@ enum Hit {
     /// Opens or closes the Display panel's Mouse & touchpad subview.
     #[cfg(target_os = "linux")]
     PointerSettings,
+    #[cfg(target_os = "linux")]
+    InvertScroll,
     /// Pointer speed slider: `false` mouse, `true` touchpad.
     #[cfg(target_os = "linux")]
     PointerSpeedSlider(bool),
@@ -479,6 +489,10 @@ pub struct ShellPanel {
     #[cfg(target_os = "linux")]
     #[rust]
     device_scroll: usize,
+    #[rust]
+    peripheral_scroll: usize,
+    #[rust]
+    peripheral_visible: usize,
     /// The main window's actual layout scale as the WM last read it off the
     /// platform (`window_geom.dpi_factor`) — never the saved value. Zero
     /// until the first read; the panel then shows the launch default.
@@ -564,6 +578,9 @@ pub struct ShellPanel {
     #[cfg(target_os = "linux")]
     #[rust]
     pointer_settings: bool,
+    #[cfg(target_os = "linux")]
+    #[rust]
+    pub invert_scroll: bool,
     /// A source the renderer was asked for and has not yet named as the
     /// primary, with when it was asked. The WM clears it on observation
     /// or reports it after a bounded wait.
@@ -697,6 +714,7 @@ impl ShellPanel {
     /// preview) goes now.
     fn left_panel(&mut self, was_open: Option<PanelKind>) {
         self.dragging = None;
+        self.peripheral_scroll = 0;
         #[cfg(target_os = "linux")]
         {
             self.device_picker = None;
@@ -851,6 +869,8 @@ impl ShellPanel {
             PanelKind::Monitor => self.monitor_height(),
             PanelKind::Network => self.network_height(),
             PanelKind::Bluetooth => 150.0,
+            PanelKind::Gamepad => 136.0 + 68.0 * (self.data.game_controllers.controllers.len()
+                + self.data.game_controllers.batteries.len() + self.data.game_controllers.receivers.len()) as f64,
             PanelKind::Hub => self.hub_height(),
         } + pad * 2.0;
         // The body is inset by the padding AND the popup border. The
@@ -903,6 +923,7 @@ impl ShellPanel {
                 );
             }
             PanelKind::Hub => self.draw_hub(cx, body),
+            PanelKind::Gamepad => self.draw_game_controllers(cx, body),
             PanelKind::Bluetooth => {
                 let (hero, rest) = cut_top(body, 40.0);
                 let on = self.data.bluetooth.unwrap_or(false);
@@ -921,6 +942,63 @@ impl ShellPanel {
                 self.unavailable(cx, rest, "Device pairing needs BlueZ.");
             }
         }
+    }
+
+    fn draw_game_controllers(&mut self, cx: &mut Cx2d, body: Rect) {
+        let tok = self.tokens;
+        let fg = tok.popups.text;
+        let inventory = self.data.game_controllers.clone();
+        let (hero, mut rest) = cut_top(body, 52.0);
+        let count = inventory.controllers.len() + inventory.batteries.len();
+        let status = if count == 0 { "No devices detected".into() } else { format!("{count} devices") };
+        self.d.panel_hero(cx, hero, &tok, fg, Ico::Gamepad, "Controllers & devices", &status, 0.0);
+        let rows = count + inventory.receivers.len();
+        // Fit whole rows to the current screen and scroll the rest, without limiting the inventory.
+        self.peripheral_visible = ((rest.size.y - 64.0).max(0.0) / 68.0) as usize;
+        self.peripheral_scroll = self.peripheral_scroll.min(rows.saturating_sub(self.peripheral_visible));
+        let visible = self.peripheral_scroll..self.peripheral_scroll + self.peripheral_visible;
+        for (index, controller) in inventory.controllers.iter().enumerate() {
+            if !visible.contains(&index) { continue; }
+            let (row, next) = cut_top(rest, 68.0); rest = next;
+            let detail = controller.battery.as_ref().map_or("Connected".into(), |b| format!("Battery: {b}"));
+            self.d.panel_hero(cx, row, &tok, fg, Ico::Gamepad, &controller.name, &detail, 0.0);
+        }
+        for (index, battery) in inventory.batteries.iter().enumerate() {
+            if !visible.contains(&(inventory.controllers.len() + index)) { continue; }
+            let (row, next) = cut_top(rest, 68.0); rest = next;
+            use super::game_controllers::DeviceKind;
+            let icon = match battery.kind {
+                DeviceKind::Keyboard => Ico::Keyboard,
+                DeviceKind::Mouse => Ico::Mouse,
+                DeviceKind::Headset => Ico::Headphone,
+                DeviceKind::Other => Ico::Battery,
+            };
+            self.d.panel_hero(cx, row, &tok, fg, icon, &battery.name, &battery.detail, 0.0);
+        }
+        #[cfg(target_os = "linux")]
+        for (index, receiver) in inventory.receivers.iter().enumerate() {
+            if !visible.contains(&(count + index)) { continue; }
+            let (row, next) = cut_top(rest, 68.0); rest = next;
+            let (label, button) = cut_top(row, 26.0);
+            self.d.label(cx, label, false, tok.font.body_small, fg, super::ui::HAlign::Left,
+                "Xbox wireless receiver");
+            let label = if receiver.pairing { "Pairing… hold the controller pair button" } else { "Pair Xbox controller" };
+            let hit = Hit::PairXbox(index);
+            let state = if self.hot == Some(hit) { CtrlState::Hover } else { CtrlState::Normal };
+            self.d.button(cx, button, &tok, state, Some(Ico::Gamepad), label, tok.font.body_small, fg, true);
+            self.hits.push((hit, button));
+        }
+        #[cfg(target_os = "linux")]
+        if !self.system_notice.is_empty() {
+            let (row, next) = cut_top(rest, 32.0); rest = next;
+            self.unavailable(cx, row, &self.system_notice.clone());
+        }
+        let (note, _) = cut_top(rest, 32.0);
+        self.unavailable(cx, note, if rows > self.peripheral_visible {
+            "Scroll for more devices."
+        } else if !inventory.receivers.is_empty() {
+            "Hold your controller’s pair button to connect."
+        } else { "Battery readings update automatically." });
     }
 
     // ------------------------------------------------------------- clock
@@ -2491,6 +2569,7 @@ impl ShellPanel {
     /// dropdown shows.
     pub fn wants_scroll(&self, p: Vec2d) -> bool {
         (self.open == Some(PanelKind::Audio) && self.device_picker.is_some() && contains(self.card, p))
+            || (self.open == Some(PanelKind::Gamepad) && contains(self.card, p))
             || (self.open == Some(PanelKind::Monitor) && self.gpu_picker && self.gpu_overflow && contains(self.card, p))
             || (self.open == Some(PanelKind::Network)
             && contains(self.card, p)
@@ -2609,7 +2688,7 @@ impl Widget for ShellPanel {
                         | Hit::ChooserItem(_) | Hit::TrialKeep | Hit::TrialRevert | Hit::PacePicker | Hit::PaceItem(_)
                         | Hit::RestartDesktop | Hit::RestartConfirm | Hit::RestartCancel
                         | Hit::GpuPicker
-                        | Hit::Gpu(_) | Hit::PointerSettings)) => self.system_press(cx, hit),
+                        | Hit::Gpu(_) | Hit::PointerSettings | Hit::InvertScroll)) => self.system_press(cx, hit),
                     #[cfg(target_os = "linux")]
                     Some(Hit::DpiScaleSlider) => self.dpi_drag_begin(cx, e.abs),
                     #[cfg(target_os = "linux")]
@@ -2640,6 +2719,13 @@ impl Widget for ShellPanel {
                         let next = if up { hub_context_up(hub) } else { hub.context_options.iter().rev().copied().find(|c| *c < now) };
                         if let Some(c) = next {
                             cx.widget_action(self.uid, ShellPanelAction::Hub(crate::hub_control::HubCommand::SetContext(c)));
+                        }
+                    }
+                    #[cfg(target_os = "linux")]
+                    Some(Hit::PairXbox(index)) => {
+                        if let Some(receiver) = self.data.game_controllers.receivers.get(index) {
+                            cx.widget_action(self.uid, ShellPanelAction::System(crate::linux_controls::ControlAction::Command(
+                                super::system_linux::SystemCommand::PairXbox(receiver.id.clone()))));
                         }
                     }
                     Some(Hit::HubRestart) => {
@@ -2690,7 +2776,12 @@ impl Widget for ShellPanel {
             #[cfg(target_os = "linux")]
             Event::Scroll(e) => {
                 if self.wants_scroll(e.abs) {
-                    if self.open == Some(PanelKind::Audio) { self.device_scroll_by(cx, e.scroll.y); }
+                    if self.open == Some(PanelKind::Gamepad) {
+                        if e.scroll.y > 0.0 { self.peripheral_scroll = self.peripheral_scroll.saturating_add(1); }
+                        else if e.scroll.y < 0.0 { self.peripheral_scroll = self.peripheral_scroll.saturating_sub(1); }
+                        self.redraw(cx);
+                    }
+                    else if self.open == Some(PanelKind::Audio) { self.device_scroll_by(cx, e.scroll.y); }
                     else if self.open == Some(PanelKind::Monitor) {
                         // The unfolded Render on list is the one thing that can overflow.
                         self.gpu_scroll_by(cx, e.scroll.y);
@@ -2710,6 +2801,14 @@ impl Widget for ShellPanel {
         match self.open {
             Some(PanelKind::Network) => self.wifi.summary(),
             Some(PanelKind::Audio | PanelKind::Monitor | PanelKind::Power) => self.system_summary(),
+            Some(PanelKind::Gamepad) => {
+                let inv = &self.data.game_controllers;
+                let mut text = String::from("Controllers & devices");
+                for c in &inv.controllers { text.push_str(&format!("\n{}: {}", c.name, c.battery.as_deref().unwrap_or("Connected"))); }
+                for b in &inv.batteries { text.push_str(&format!("\n{}: {}", b.name, b.detail)); }
+                for r in &inv.receivers { text.push_str(if r.pairing { "\nXbox receiver: Pairing" } else { "\nXbox receiver: Ready" }); }
+                text
+            }
             Some(kind) => format!("panel={:?}", kind).to_lowercase(),
             None => String::new(),
         }

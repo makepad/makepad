@@ -6,6 +6,10 @@ mod mpmc;
 mod mutex;
 mod once;
 mod poison;
+#[cfg(not(all(target_family = "wasm", not(target_feature = "atomics"))))]
+pub(crate) mod raw;
+#[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
+#[path = "no_threads.rs"]
 pub(crate) mod raw;
 mod reentrant_lock;
 mod rwlock;

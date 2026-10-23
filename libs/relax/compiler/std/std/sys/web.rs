@@ -1,7 +1,8 @@
 //! The web layer: rustc's std for wasm32-unknown-unknown / wasm64-unknown-unknown with
-//! `+atomics` (sys/pal/wasm + pal/unsupported + the unsupported halves of fs, process, env, net,
+//! (sys/pal/wasm + pal/unsupported + the unsupported halves of fs, process, env, net,
 //! pipe, stdio, time, thread; selected by `cfg(target_family = "wasm")`). A thread cannot be
-//! started by std; blocking is the futex over `memory.atomic.wait32` / `notify`; there is no
+//! started by std. With atomics, blocking uses `memory.atomic.wait32` / `notify`;
+//! without atomics, sync and TLS select rustc's no_threads implementations. There is no
 //! clock, no file system, no processes, no sockets; standard output is a sink. The sys API is
 //! posix.rs's / windows.rs's (the `portable` module, re-exported as `sys::*`); the thread-local
 //! keys are the Relax runtime's, as there.
@@ -29,6 +30,10 @@ pub fn now(_clock: clockid_t) -> super::time::Timespec {
 
 /// rustc's sys/thread/wasm.rs sleep: an atomic wait on a private word that nothing notifies, so
 /// only its timeout ends it.
+#[cfg(not(target_feature = "atomics"))]
+pub fn sleep(_dur: Duration) { panic!("can't sleep"); }
+
+#[cfg(target_feature = "atomics")]
 pub fn sleep(dur: Duration) {
     let mut nanos = dur.as_nanos();
     while nanos > 0 {
@@ -104,6 +109,10 @@ pub mod portable {
 
     /// The calling thread's id (nonzero, unique among live threads): a counter value kept in a
     /// thread-local key.
+    #[cfg(not(target_feature = "atomics"))]
+    pub fn current_thread() -> usize { 1 }
+
+    #[cfg(target_feature = "atomics")]
     pub fn current_thread() -> usize {
         let mut k = ID_KEY.load(Ordering::Acquire);
         if k == 0 {

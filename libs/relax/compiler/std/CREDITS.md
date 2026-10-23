@@ -16,3 +16,7 @@
   library/compiler-builtins/libm (https://github.com/rust-lang/compiler-builtins), the math library rustc's
   wasm32-unknown-unknown std uses; the musl / FreeBSD msun / Sun Microsystems notices stay in each file and
   `core/libm/LICENSE.txt` is the upstream licence (MIT). Native targets keep the platform C math library.
+
+- `std/sys/dlmalloc/` is the web-only port of dlmalloc 0.2.13
+  (https://github.com/alexcrichton/dlmalloc-rs), Copyright Alex Crichton, MIT OR Apache-2.0.
+  Crate SHA256: `9f5b01c17f85ee988d832c40e549a64bd89ab2c9f8d8a613bdf5122ae507e294`.

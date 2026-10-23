@@ -1174,6 +1174,24 @@ pub(crate) fn remove_for_test(group: u32) -> Result<usize, String> {
 
 static PAUSED: AtomicBool = AtomicBool::new(false);
 
+/// Pauses the program's threads (as `pause`; a stale access, stale.rs). Returns how many are held.
+pub fn pause_program() -> usize {
+    if PAUSED.swap(true, SeqCst) {
+        return 0;
+    }
+    let n = pause_imp::pause(&program_thread);
+    super::mem::mark("pause");
+    n
+}
+
+/// Ends a pause (as `resume`).
+pub fn resume_program() -> usize {
+    PAUSED.store(false, SeqCst);
+    let n = pause_imp::resume();
+    super::mem::mark("resume");
+    n
+}
+
 /// True when the thread is stopped for inspection: parked at a breakpoint or a panic, or a
 /// program thread while the program is paused (a thread not yet held by the pause sweep, at most
 /// 5 ms, may still move: the script stack read is then best effort).

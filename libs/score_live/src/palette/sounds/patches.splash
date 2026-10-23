@@ -1,0 +1,295 @@
+// The synth patch library: each patch a set of recipe layers, written directly or as a point of a
+// voice architecture (synths.splash). `Synth{preset: @name}` plays one; family, roles, tags
+// and about are what instrument_search reads; mono is the patch's default.
+
+let patches = {
+    acid: {family: @bass roles: "bass" tags: "acid squelchy resonant 80s 90s acid_house techno rave" mono: false volume: 2.88
+        about: "resonant squelchy mono saw bass through a screaming ladder filter"
+        layers: [
+        {osc: @saw freq: 440 a: 0.002 d: 0.2 s: 0.35 r: 0.06 gain: 0.45 ladder: 700 q: 7 drive: 1.6}
+        ]}
+    sub: {family: @bass roles: "bass" tags: "sub deep clean modern edm trap dnb dubstep" mono: false volume: 0.51
+        about: "a clean sine sub with a hint of upper harmonic"
+        layers: [
+        {osc: @sine freq: 440 a: 0.004 d: 0.3 s: 0.85 r: 0.08 gain: 0.7}
+        {osc: @tri freq: 880 a: 0.004 d: 0.2 s: 0.3 r: 0.05 gain: 0.06}
+        ]}
+    reese: {family: @bass roles: "bass" tags: "reese detuned dark dnb jungle neurofunk 90s growl" mono: false volume: 0.83
+        about: "two detuned saws beating under a low-pass, a sine an octave down"
+        layers: [
+        {osc: @saw freq: 440 detune: 14 a: 0.01 d: 0.4 s: 0.8 r: 0.12 gain: 0.28 lp: 900 q: 1.5}
+        {osc: @saw freq: 440 detune: -14 a: 0.01 d: 0.4 s: 0.8 r: 0.12 gain: 0.28 lp: 900 q: 1.5}
+        {osc: @sine freq: 220 a: 0.01 d: 0.3 s: 0.9 r: 0.1 gain: 0.3}
+        ]}
+    fm_bass: {family: @bass roles: "bass" tags: "fm 80s synthpop italo hi_nrg punchy bright" mono: false volume: 1.01
+        about: "a punchy FM bass with a pick transient"
+        layers: [
+        {fm: 1 osc: @sine freq: 440 index: 4.5 index_to: 0.8 glide: 0.25 a: 0.001 d: 0.3 s: 0.5 r: 0.08 gain: 0.48}
+        {osc: @sine freq: 220 a: 0.002 d: 0.3 s: 0.7 r: 0.08 gain: 0.24}
+        {osc: @saw freq: 440 a: 0.001 d: 0.07 s: 0 r: 0.03 gain: 0.07 lp: 3500 cutoff_to: 600}
+        ]}
+    picked_bass: {family: @bass roles: "bass" tags: "plucked string electric_like funk new_wave" mono: false volume: 1.70
+        about: "a plucked-string bass with a sine body"
+        layers: [
+        {pluck: 0.25 freq: 440 a: 0.001 d: 1.2 s: 0 r: 0.1 gain: 0.55 lp: 1800}
+        {osc: @sine freq: 440 a: 0.002 d: 0.5 s: 0.4 r: 0.1 gain: 0.3}
+        ]}
+    boom_bass: {family: @bass roles: "bass" tags: "sub boom long trap hip_hop electro booming" mono: false volume: 0.72
+        about: "a long booming sine bass with drive and a pitched click"
+        layers: [
+        {osc: @sine freq: 440 a: 0.002 d: 1.4 s: 0.25 r: 0.25 gain: 0.75 drive: 1.2}
+        {osc: @sine freq: 880 to: 440 glide: 0.03 d: 0.03 gain: 0.2}
+        ]}
+    saw_lead: {family: @lead roles: "lead" tags: "saw lead 80s synthpop trance edm bright buzzy" mono: false volume: 1.27
+        about: "two detuned saws through a ladder with vibrato, a square octave on top"
+        layers: [
+        {osc: @saw freq: 440 detune: 9 a: 0.004 d: 0.4 s: 0.75 r: 0.18 gain: 0.17 ladder: 7500 cutoff_to: 3800 glide: 0.35 q: 2 drive: 1.2 vib: 5.5 vib_depth: 0.08}
+        {osc: @saw freq: 440 detune: -9 a: 0.004 d: 0.4 s: 0.75 r: 0.18 gain: 0.17 ladder: 7500 cutoff_to: 3800 glide: 0.35 q: 2 drive: 1.2}
+        {osc: @square freq: 880 detune: 3 a: 0.004 d: 0.3 s: 0.6 r: 0.15 gain: 0.045 lp: 7000}
+        {noise: @pink hp: 3500 a: 0.002 d: 0.06 s: 0 r: 0.03 gain: 0.03}
+        ]}
+    square_lead: {family: @lead roles: "lead" tags: "square hollow 80s synthpop chiptune lead bright" mono: false volume: 0.74
+        about: "a hollow square lead with vibrato and a bright octave"
+        layers: [
+        {osc: @square freq: 440 a: 0.004 d: 0.25 s: 0.75 r: 0.12 gain: 0.2 lp: 6500 cutoff_to: 4200 glide: 0.3 q: 1.4 vib: 5 vib_depth: 0.1}
+        {osc: @square freq: 880 detune: 5 a: 0.004 d: 0.2 s: 0.6 r: 0.12 gain: 0.06 lp: 7000}
+        {osc: @saw freq: 440 detune: -6 a: 0.004 d: 0.3 s: 0.6 r: 0.12 gain: 0.06 lp: 5000}
+        ]}
+    supersaw: {family: @lead roles: "lead chords pad" tags: "supersaw trance edm 90s 2010s big wide bright" mono: false volume: 1.04
+        about: "six detuned saws spread across the stereo field"
+        layers: [
+        {osc: @saw freq: 440 detune: 5 a: 0.01 d: 0.5 s: 0.8 r: 0.35 gain: 0.11 lp: 8000}
+        {osc: @saw freq: 440 detune: -5 a: 0.01 d: 0.5 s: 0.8 r: 0.35 gain: 0.11 lp: 8000}
+        {osc: @saw freq: 440 detune: 12 a: 0.01 d: 0.5 s: 0.8 r: 0.35 gain: 0.1 lp: 8000 pan: 0.4}
+        {osc: @saw freq: 440 detune: -12 a: 0.01 d: 0.5 s: 0.8 r: 0.35 gain: 0.1 lp: 8000 pan: -0.4}
+        {osc: @saw freq: 440 detune: 22 a: 0.01 d: 0.5 s: 0.8 r: 0.35 gain: 0.08 lp: 8000 pan: 0.7}
+        {osc: @saw freq: 440 detune: -22 a: 0.01 d: 0.5 s: 0.8 r: 0.35 gain: 0.08 lp: 8000 pan: -0.7}
+        ]}
+    pluck: {family: @pluck roles: "arp chords lead" tags: "pluck house edm tropical bright short" mono: false volume: 2.26
+        about: "a plucked string with a filtered saw pick"
+        layers: [
+        {pluck: 0.35 freq: 440 a: 0.001 d: 1.6 s: 0 r: 0.2 gain: 0.45}
+        {osc: @saw freq: 440 detune: 6 a: 0.001 d: 0.16 s: 0 r: 0.06 gain: 0.13 lp: 9000 cutoff_to: 1200 q: 1.5}
+        {osc: @square freq: 880 a: 0.001 d: 0.06 s: 0 r: 0.03 gain: 0.04 lp: 8000}
+        ]}
+    stab: {family: @pluck roles: "chords hits" tags: "stab chord house rave 90s short punchy" mono: false volume: 2.09
+        about: "a short filtered saw chord stab"
+        layers: [
+        {osc: @saw freq: 440 detune: 10 a: 0.002 d: 0.3 s: 0 r: 0.14 gain: 0.2 lp: 8000 cutoff_to: 1400 glide: 0.25 q: 2}
+        {osc: @saw freq: 440 detune: -10 a: 0.002 d: 0.3 s: 0 r: 0.14 gain: 0.2 lp: 8000 cutoff_to: 1400 glide: 0.25 q: 2}
+        {osc: @saw freq: 880 detune: 4 a: 0.002 d: 0.2 s: 0 r: 0.1 gain: 0.07 lp: 9000 cutoff_to: 2000 glide: 0.2}
+        {osc: @square freq: 220 d: 0.25 gain: 0.06 lp: 2000}
+        ]}
+    pad: {family: @pad roles: "pad chords" tags: "pad analog warm 80s lush slow" mono: false volume: 1.07
+        about: "a slow detuned saw pad opening its filter"
+        layers: [
+        {osc: @saw freq: 440 detune: 9 a: 0.5 d: 1.0 s: 0.8 r: 1.4 gain: 0.14 lp: 1800 cutoff_to: 4800 glide: 2.5 q: 1.2 vib: 4 vib_depth: 0.05}
+        {osc: @saw freq: 440 detune: -9 a: 0.55 d: 1.0 s: 0.8 r: 1.4 gain: 0.14 lp: 1800 cutoff_to: 4800 glide: 2.5 q: 1.2}
+        {osc: @tri freq: 880 a: 0.6 d: 1.0 s: 0.6 r: 1.4 gain: 0.07}
+        {noise: @pink bp: 6500 q: 0.7 a: 0.9 d: 1.0 s: 0.6 r: 1.5 gain: 0.012}
+        ]}
+    warm_pad: {family: @pad roles: "pad chords" tags: "pad warm soft lush analog ambient" mono: false volume: 0.86
+        about: "a very slow warm saw pad with a sine sub"
+        layers: [
+        {osc: @saw freq: 440 detune: 6 a: 0.9 d: 1.5 s: 0.8 r: 2.4 gain: 0.13 lp: 1500 cutoff_to: 3000 glide: 3 q: 0.9}
+        {osc: @saw freq: 440 detune: -6 a: 0.9 d: 1.5 s: 0.8 r: 2.4 gain: 0.13 lp: 1500 cutoff_to: 3000 glide: 3 q: 0.9}
+        {osc: @sine freq: 220 a: 1.0 d: 1.5 s: 0.9 r: 2.4 gain: 0.13}
+        {osc: @tri freq: 880 detune: 4 a: 1.1 d: 1.5 s: 0.7 r: 2.4 gain: 0.05}
+        {noise: @pink bp: 5000 q: 0.7 a: 1.2 d: 1.5 s: 0.5 r: 2.4 gain: 0.01}
+        ]}
+    glass_pad: {family: @pad roles: "pad chords" tags: "pad fm glassy bell ambient 80s cold" mono: false volume: 0.69
+        about: "a glassy FM pad"
+        layers: [
+        {fm: 2 osc: @sine freq: 440 index: 1.2 index_to: 0.4 glide: 3 a: 1.0 d: 2 s: 0.7 r: 2.5 gain: 0.2}
+        {osc: @sine freq: 1320 detune: 4 a: 1.4 d: 2 s: 0.4 r: 2.5 gain: 0.05}
+        {osc: @tri freq: 440 detune: -5 a: 1.2 d: 2 s: 0.8 r: 2.5 gain: 0.1}
+        ]}
+    strings: {family: @strings roles: "pad chords" tags: "synth_strings string_machine 70s 80s disco lush" mono: false volume: 1.10
+        about: "an ensemble string-machine of detuned saws"
+        layers: [
+        {osc: @saw freq: 440 detune: 8 a: 0.35 d: 0.8 s: 0.85 r: 0.8 gain: 0.14 lp: 5200 vib: 5 vib_depth: 0.06}
+        {osc: @saw freq: 440 detune: -8 a: 0.38 d: 0.8 s: 0.85 r: 0.8 gain: 0.14 lp: 5000 vib: 4.6 vib_depth: 0.06}
+        {osc: @saw freq: 440 detune: 2 a: 0.4 d: 0.8 s: 0.85 r: 0.8 gain: 0.1 bp: 1400 q: 1}
+        ]}
+    pizzicato: {family: @pluck roles: "arp lead" tags: "pizzicato plucked short playful" mono: false volume: 4.00
+        about: "a short plucked pizzicato"
+        layers: [
+        {pluck: 0.55 freq: 440 a: 0.001 d: 0.5 s: 0 r: 0.12 gain: 0.5 lp: 3500}
+        {osc: @tri freq: 440 a: 0.001 d: 0.2 s: 0 r: 0.1 gain: 0.12}
+        ]}
+    brass: {family: @brass roles: "chords hits lead" tags: "synth_brass 80s stab bright punchy" mono: false volume: 0.97
+        about: "a swelling analog brass of detuned saws through a ladder"
+        layers: [
+        {osc: @saw freq: 440 a: 0.035 d: 0.3 s: 0.75 r: 0.16 gain: 0.24 ladder: 900 cutoff_to: 4800 glide: 0.12 q: 1.5 drive: 1.2 vib: 5 vib_depth: 0.06}
+        {osc: @saw freq: 440 detune: 7 a: 0.045 d: 0.3 s: 0.7 r: 0.16 gain: 0.15 ladder: 800 cutoff_to: 4000 glide: 0.13 q: 1}
+        {osc: @saw freq: 440 detune: -7 a: 0.05 d: 0.3 s: 0.7 r: 0.16 gain: 0.12 ladder: 700 cutoff_to: 3600 glide: 0.14 q: 1}
+        {noise: @pink bp: 2500 q: 1 a: 0.02 d: 0.08 s: 0 gain: 0.02}
+        ]}
+    flute: {family: @lead roles: "lead" tags: "flute breathy soft simple sine" mono: false volume: 0.65
+        about: "a breathy sine flute"
+        layers: [
+        {osc: @sine freq: 440 a: 0.06 d: 0.2 s: 0.85 r: 0.15 gain: 0.35 vib: 5 vib_depth: 0.1}
+        {noise: @pink bp: 2000 q: 2 a: 0.04 d: 0.2 s: 0.3 r: 0.1 gain: 0.05}
+        ]}
+    choir: {family: @choir roles: "pad chords" tags: "choir vocal formant airy synth_voice 80s" mono: false volume: 2.92
+        about: "formant-filtered saws as a synth choir"
+        layers: [
+        {osc: @saw freq: 440 detune: 5 a: 0.25 d: 0.5 s: 0.8 r: 0.6 gain: 0.17 bp: 800 q: 2 vib: 5 vib_depth: 0.1}
+        {osc: @saw freq: 440 detune: -5 a: 0.25 d: 0.5 s: 0.8 r: 0.6 gain: 0.13 bp: 1200 q: 3}
+        {osc: @saw freq: 440 a: 0.25 d: 0.5 s: 0.8 r: 0.6 gain: 0.08 bp: 2600 q: 4}
+        ]}
+    keys: {family: @keys roles: "chords" tags: "synth_piano keys bright percussive" mono: false volume: 1.23
+        about: "a simple synthesized piano"
+        layers: [
+        {osc: @tri freq: 440 a: 0.001 d: 1.4 s: 0.1 r: 0.35 gain: 0.3 lp: 8000 cutoff_to: 2200}
+        {osc: @sine freq: 880 a: 0.001 d: 0.6 s: 0 r: 0.3 gain: 0.1}
+        {osc: @saw freq: 440 a: 0.001 d: 0.25 s: 0 r: 0.2 gain: 0.05 lp: 6000 cutoff_to: 1500}
+        {noise: @pink bp: 3200 q: 2 d: 0.012 gain: 0.05}
+        ]}
+    epiano: {family: @keys roles: "chords" tags: "electric_piano fm tine 80s ballad soul warm" mono: false volume: 0.84
+        about: "an FM electric piano with a tine"
+        layers: [
+        {fm: 1 osc: @sine freq: 440 index: 3 index_to: 0.4 glide: 1.0 a: 0.002 d: 2.0 s: 0.2 r: 0.45 gain: 0.28}
+        {fm: 14 osc: @sine freq: 440 index: 1.6 index_to: 0 glide: 0.12 d: 0.18 gain: 0.07}
+        {osc: @sine freq: 880 a: 0.002 d: 1.2 s: 0.1 r: 0.4 gain: 0.06}
+        {osc: @sine freq: 1760 a: 0.001 d: 0.35 gain: 0.025}
+        ]}
+    organ: {family: @organ roles: "chords" tags: "organ drawbar house gospel 60s warm" mono: false volume: 0.75
+        about: "a drawbar organ of sines with a key click"
+        layers: [
+        {osc: @sine freq: 440 a: 0.005 d: 0.05 s: 1 r: 0.06 gain: 0.18}
+        {osc: @sine freq: 880 a: 0.005 d: 0.05 s: 1 r: 0.06 gain: 0.12}
+        {osc: @sine freq: 1320 a: 0.005 d: 0.05 s: 1 r: 0.06 gain: 0.08}
+        {osc: @sine freq: 220 a: 0.005 d: 0.05 s: 1 r: 0.06 gain: 0.12}
+        {noise: @white bp: 3000 d: 0.01 gain: 0.03}
+        ]}
+    clav: {family: @keys roles: "chords" tags: "clav funk 70s percussive stabby bright" mono: false volume: 4.00
+        about: "a funky pulse clav"
+        layers: [
+        {osc: @pulse width: 0.2 freq: 440 a: 0.001 d: 0.4 s: 0.1 r: 0.06 gain: 0.22 bp: 2800 cutoff_to: 1200 q: 2}
+        {osc: @square freq: 880 a: 0.001 d: 0.1 s: 0 r: 0.05 gain: 0.06 hp: 1500}
+        {noise: @white hp: 4000 d: 0.008 gain: 0.03}
+        ]}
+    bell: {family: @bell roles: "lead hits" tags: "bell fm metallic bright 80s" mono: false volume: 0.53
+        about: "an FM bell"
+        layers: [
+        {fm: 3.5 osc: @sine freq: 440 index: 3 index_to: 0.1 glide: 1.5 a: 0.001 d: 2.5 r: 0.8 gain: 0.3}
+        {osc: @sine freq: 1760 d: 0.8 gain: 0.05}
+        ]}
+    mallet: {family: @bell roles: "lead arp" tags: "mallet marimba wooden soft percussive" mono: false volume: 0.93
+        about: "a soft FM mallet"
+        layers: [
+        {osc: @sine freq: 440 a: 0.001 d: 0.7 s: 0 r: 0.2 gain: 0.42}
+        {fm: 4 osc: @sine freq: 440 index: 1.5 index_to: 0 glide: 0.08 d: 0.1 gain: 0.1}
+        {osc: @sine freq: 1760 d: 0.07 gain: 0.06}
+        ]}
+    kalimba: {family: @bell roles: "lead arp" tags: "kalimba thumb_piano soft plucked lofi" mono: false volume: 1.10
+        about: "a soft kalimba"
+        layers: [
+        {osc: @sine freq: 440 a: 0.001 d: 0.6 gain: 0.4}
+        {osc: @sine freq: 1760 d: 0.08 gain: 0.1}
+        {noise: @pink bp: 2000 q: 3 d: 0.01 gain: 0.05}
+        ]}
+    chip: {family: @lead roles: "lead arp bass" tags: "chiptune 8bit square game retro" mono: false volume: 1.29
+        about: "a pulse-wave chip voice"
+        layers: [
+        {osc: @pulse width: 0.25 freq: 440 a: 0.001 d: 0.1 s: 0.6 r: 0.05 gain: 0.18 lp: 9000}
+        ]}
+    arp: {family: @pluck roles: "arp" tags: "arp sequence 80s synthwave filter bright" mono: false volume: 4.00
+        about: "a short filtered saw for arpeggios"
+        layers: [
+        {osc: @saw freq: 440 detune: 5 a: 0.001 d: 0.2 s: 0.2 r: 0.1 gain: 0.22 ladder: 5500 cutoff_to: 1100 glide: 0.18 q: 3}
+        {osc: @square freq: 880 a: 0.001 d: 0.1 s: 0 r: 0.05 gain: 0.05 lp: 7000}
+        {osc: @saw freq: 440 detune: -7 a: 0.001 d: 0.15 s: 0.1 r: 0.08 gain: 0.08 lp: 4000 cutoff_to: 900}
+        ]}
+    analog_bass: {family: @bass roles: "bass" tags: "analog mono 80s synthpop new_wave electro punchy round" mono: true volume: 1.35
+        about: "a round mono analog bass: saw and square with a sub, a fast filter pluck"
+        layers: analog(Analog{wave: @saw wave2: @square detune: 4 osc2: 0.6 sub: 0.5 cutoff: 500 env: 2500 fdecay: 0.12 res: 1.5 a: 0.002 d: 0.3 s: 0.6 r: 0.08 level: 0.3})}
+    rubber_bass: {family: @bass roles: "bass" tags: "analog rubbery funk house 80s 90s resonant bouncy" mono: true volume: 2.04
+        about: "a bouncy resonant ladder bass with a quick envelope"
+        layers: analog(Analog{wave: @saw wave2: @saw detune: 3 osc2: 0.5 sub: 0.4 filter: @ladder cutoff: 350 env: 2200 fdecay: 0.09 res: 4 a: 0.001 d: 0.25 s: 0.4 r: 0.06 drive: 1 level: 0.34})}
+    octave_bass: {family: @bass roles: "bass" tags: "disco italo hi_nrg 70s 80s octave bright driving" mono: false volume: 2.75
+        about: "a bright plucky bass for octave-bouncing disco lines"
+        layers: analog(Analog{wave: @saw wave2: @pulse width: 0.3 detune: 6 osc2: 0.6 sub: 0.2 cutoff: 700 env: 3500 fdecay: 0.1 res: 1.6 a: 0.001 d: 0.18 s: 0.3 r: 0.06 level: 0.3})}
+    pwm_bass: {family: @bass roles: "bass" tags: "pwm analog 80s warm moving synthpop" mono: true volume: 0.67
+        about: "a warm pulse bass with a slowly moving pulse width"
+        layers: analog(Analog{wave: @pulse wave2: @pulse width: 0.35 pwm: 0.6 pwm_depth: 0.15 detune: 5 osc2: 0.7 sub: 0.4 cutoff: 900 env: 1500 fdecay: 0.25 res: 1 a: 0.003 d: 0.4 s: 0.7 r: 0.1 level: 0.28})}
+    wobble: {family: @bass roles: "bass" tags: "dubstep wobble growl edm 2010s aggressive" mono: true volume: 1.84
+        about: "a growling FM bass whose brightness swings on each note"
+        layers: fm(Fm{ratio: 0.5 index: 7 index_to: 1.5 idecay: 0.25 ratio2: 1.01 index2: 3 decay2: 0.4 level2: 0.5 partial: 0 a: 0.003 d: 0.6 s: 0.7 r: 0.1 drive: 3 level: 0.3})}
+    dark_sub: {family: @bass roles: "bass" tags: "sub deep dark dub techno minimal clean" mono: true volume: 0.58
+        about: "a deep dark sub: sine and a filtered triangle"
+        layers: analog(Analog{wave: @sine wave2: @tri detune: 0 osc2: 0.3 sub: 0 cutoff: 300 env: 200 fdecay: 0.1 res: 0.7 a: 0.004 d: 0.4 s: 0.9 r: 0.1 level: 0.55})}
+    pwm_lead: {family: @lead roles: "lead" tags: "pwm analog 80s synthpop synthwave warm singing" mono: true volume: 0.61
+        about: "a singing pulse-width lead with vibrato"
+        layers: analog(Analog{wave: @pulse wave2: @pulse width: 0.4 pwm: 4.5 pwm_depth: 0.2 detune: 8 osc2: 0.7 sub: 0 cutoff: 2600 env: 2400 fdecay: 0.3 res: 1.2 a: 0.01 d: 0.4 s: 0.8 r: 0.2 vib: 5.5 vib_depth: 0.08 level: 0.2})}
+    fifths_lead: {family: @lead roles: "lead" tags: "fifths 90s rave big detuned bright" mono: false volume: 1.06
+        about: "saws a fifth apart through a bright filter, for rave hooks"
+        layers: [
+        {osc: @saw freq: 440 detune: 5 cutoff: 6000 cutoff_to: 3000 filter: @lowpass glide: 0.3 q: 1.2 a: 0.003 d: 0.4 s: 0.7 r: 0.15 gain: 0.18}
+        {osc: @saw freq: 659.26 detune: -5 cutoff: 6000 cutoff_to: 3000 filter: @lowpass glide: 0.3 q: 1.2 a: 0.003 d: 0.4 s: 0.7 r: 0.15 gain: 0.14}
+        {osc: @square freq: 220 lp: 2000 a: 0.003 d: 0.4 s: 0.7 r: 0.15 gain: 0.06}
+        ]}
+    hoover: {family: @lead roles: "lead chords" tags: "hoover rave 90s hardcore jungle gabber dark detuned aggressive" mono: true volume: 0.78
+        about: "a dark detuned pulse stack with a downward pitch bend, the 90s rave lead"
+        layers: [
+        {osc: @pulse width: 0.25 freq: 466 to: 440 glide: 0.12 detune: -22 pwm: 1.5 pwm_depth: 0.15 lp: 3500 q: 1 a: 0.01 d: 0.5 s: 0.8 r: 0.25 gain: 0.13 pan: -0.5}
+        {osc: @pulse width: 0.25 freq: 466 to: 440 glide: 0.12 detune: 22 pwm: 1.7 pwm_depth: 0.15 lp: 3500 q: 1 a: 0.01 d: 0.5 s: 0.8 r: 0.25 gain: 0.13 pan: 0.5}
+        {osc: @saw freq: 233 to: 220 glide: 0.12 detune: -9 lp: 2500 a: 0.01 d: 0.5 s: 0.8 r: 0.25 gain: 0.12}
+        {osc: @saw freq: 233 to: 220 glide: 0.12 detune: 9 lp: 2500 a: 0.01 d: 0.5 s: 0.8 r: 0.25 gain: 0.12}
+        ]}
+    whistle_lead: {family: @lead roles: "lead" tags: "sine whistle pure soft g_funk 90s smooth" mono: true volume: 0.53
+        about: "a pure portamento-style sine whistle with vibrato"
+        layers: [
+        {osc: @sine freq: 440 a: 0.03 d: 0.3 s: 0.9 r: 0.2 vib: 5.5 vib_depth: 0.18 gain: 0.4}
+        {osc: @tri freq: 880 a: 0.03 d: 0.3 s: 0.5 r: 0.2 gain: 0.04}
+        ]}
+    trance_lead: {family: @lead roles: "lead" tags: "trance supersaw 90s 2000s euphoric big bright" mono: false volume: 1.05
+        about: "a bright supersaw lead with a fast filter blip"
+        layers: supersaw(Supersaw{spread: 18 width: 0.6 cutoff: 6500 env: 4000 fdecay: 0.15 res: 1 body: 0.3 a: 0.003 d: 0.4 s: 0.8 r: 0.25 level: 0.1})}
+    trance_pad: {family: @pad roles: "pad chords" tags: "trance supersaw pad wide lush euphoric" mono: false volume: 1.12
+        about: "a wide slow supersaw pad"
+        layers: supersaw(Supersaw{spread: 28 width: 1 cutoff: 4500 env: 0 res: 0.7 body: 0.2 a: 0.6 d: 1 s: 0.85 r: 1.5 level: 0.08})}
+    pwm_pad: {family: @pad roles: "pad chords" tags: "pwm analog 80s warm lush slow synthwave" mono: false volume: 0.71
+        about: "a lush slow pulse-width pad"
+        layers: analog(Analog{wave: @pulse wave2: @pulse width: 0.45 pwm: 0.7 pwm_depth: 0.2 detune: 10 osc2: 0.9 sub: 0.1 cutoff: 2200 env: 0 res: 0.8 a: 0.7 d: 1 s: 0.85 r: 1.6 vib: 4 vib_depth: 0.04 level: 0.12})}
+    dark_drone: {family: @pad roles: "pad texture" tags: "dark drone ambient cinematic cold minimal" mono: false volume: 0.85
+        about: "a dark slow drone of filtered saws and noise"
+        layers: analog(Analog{wave: @saw wave2: @saw detune: 14 osc2: 0.9 sub: 0.4 noise: 0.15 cutoff: 600 env: 400 fdecay: 3 res: 1.8 a: 1.5 d: 2 s: 0.9 r: 2.5 level: 0.15})}
+    house_organ: {family: @organ roles: "chords bass" tags: "house organ 90s stab percussive" mono: false volume: 2.00
+        about: "the 90s house organ stab: percussive drawbars with a click"
+        layers: organ(Organ{bars: [0.8 1.0 0.2 0.7 0.5] click: 0.3 vib: 0 vib_depth: 0 a: 0.002 d: 0.25 s: 0.2 r: 0.08 level: 0.18})}
+    chord_stab: {family: @pluck roles: "chords hits" tags: "house deep_house chord stab 90s dub_techno short" mono: false volume: 1.8
+        about: "a short dark chord stab for deep house and dub techno"
+        layers: analog(Analog{wave: @saw wave2: @saw detune: 9 osc2: 0.9 sub: 0 cutoff: 600 env: 2400 fdecay: 0.14 res: 1.6 a: 0.002 d: 0.22 s: 0 r: 0.12 level: 0.2})}
+    fm_epiano: {family: @keys roles: "chords" tags: "electric_piano fm 80s ballad city_pop glassy tine" mono: false volume: 1.10
+        about: "a glassy 80s FM electric piano"
+        layers: fm(Fm{ratio: 1 index: 2.2 index_to: 0.3 idecay: 1.2 ratio2: 14 index2: 2.2 decay2: 0.12 level2: 0.35 partial: 0.1 a: 0.002 d: 2.2 s: 0.15 r: 0.5 level: 0.28})}
+    fm_bell: {family: @bell roles: "lead hits" tags: "bell fm metallic glassy chime 80s ambient" mono: false volume: 0.59
+        about: "a long inharmonic FM bell"
+        layers: fm(Fm{ratio: 3.5 index: 4 index_to: 0.2 idecay: 2.5 ratio2: 7.1 index2: 1.2 decay2: 0.6 level2: 0.3 partial: 0 a: 0.001 d: 3 s: 0 r: 1 level: 0.26})}
+    fm_mallet: {family: @bell roles: "lead arp" tags: "mallet marimba fm wooden soft percussive" mono: false volume: 0.91
+        about: "a woody FM mallet"
+        layers: fm(Fm{ratio: 4 index: 2 index_to: 0 idecay: 0.08 ratio2: 10 index2: 0.6 decay2: 0.03 level2: 0.3 partial: 0 a: 0.001 d: 0.6 s: 0 r: 0.2 level: 0.4})}
+    synth_pluck: {family: @pluck roles: "arp chords" tags: "pluck analog edm tropical synthwave bright short" mono: false volume: 4.00
+        about: "a bright analog pluck with a fast filter envelope"
+        layers: analog(Analog{wave: @saw wave2: @square detune: 7 osc2: 0.5 sub: 0 cutoff: 500 env: 6000 fdecay: 0.15 res: 1.3 a: 0.001 d: 0.3 s: 0 r: 0.15 level: 0.22})}
+    string_pluck: {family: @pluck roles: "arp lead" tags: "pluck string physical guitar_like harp soft" mono: false volume: 1.68
+        about: "a physical plucked string, warm and short"
+        layers: pluck(Pluck{damping: 0.25 decay: 1.4 pick: 0.15 bright: 4000 body: 0.25 level: 0.5})}
+    poly_brass: {family: @brass roles: "chords hits" tags: "synth_brass analog 80s synthpop stab swell bright" mono: false volume: 1.14
+        about: "a poly analog brass with a swelling filter"
+        layers: analog(Analog{wave: @saw wave2: @saw detune: 9 osc2: 0.9 sub: 0 filter: @ladder cutoff: 1200 env: 3500 fdecay: 0.25 res: 1 a: 0.04 d: 0.3 s: 0.75 r: 0.18 drive: 1 level: 0.2})}
+    string_machine: {family: @strings roles: "pad chords" tags: "string_machine synth_strings 70s disco ensemble lush" mono: false volume: 0.80
+        about: "a 70s string machine: bright detuned saws with chorus-like spread"
+        layers: supersaw(Supersaw{spread: 14 width: 0.7 cutoff: 5000 env: 0 res: 0.7 body: 0 a: 0.25 d: 0.8 s: 0.9 r: 0.8 vib: 5 vib_depth: 0.05 level: 0.09})}
+    laser: {family: @fx roles: "fx hits" tags: "fx laser zap sci_fi retro game" mono: false volume: 1.97
+        about: "a falling laser zap"
+        layers: [{osc: @square freq: 3520 to: 220 glide: 0.18 lp: 6000 a: 0.001 d: 0.2 s: 0 r: 0.05 gain: 0.2}]}
+    riser: {family: @fx roles: "fx texture" tags: "fx riser noise build transition edm" mono: false volume: 2.92
+        about: "a long rising filtered noise sweep (hold it for the build's length)"
+        layers: [
+        {noise: @white bp: 300 cutoff_to: 9000 glide: 8 q: 2 a: 4 d: 6 s: 1 r: 0.3 gain: 0.3}
+        {osc: @saw freq: 220 to: 880 glide: 8 lp: 3000 a: 4 d: 6 s: 1 r: 0.3 gain: 0.05}
+        ]}
+}

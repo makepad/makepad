@@ -1,6 +1,6 @@
-// Sandbox code recycling (hotreload.md §12.5): 400 load/edit/unload cycles of AI-written-style
-// effects; dead module code is rebuilt away (recycles), live modules keep working across
-// recycles, and code memory stays bounded. Prints code/image/RSS numbers.
+// Append-only module code (MEMRECLAIM): JIT code is never freed or reused, twins' included. 400
+// load/edit/unload cycles of effect modules keep a long-lived module stable, and the twin code
+// growth per hot patch and per loaded module is printed (sandbox_stats()[0]: twin bytes installed).
 fn rss_kb() -> u64 {
     std::fs::read_to_string("/proc/self/status").ok().and_then(|s| s.lines().find(|l| l.starts_with("VmRSS:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse().ok())).unwrap_or(0)
 }
@@ -10,17 +10,27 @@ fn src(k: u32, scale: u32) -> String {
 }
 
 #[test]
-fn recycle() {
+fn growth() {
     use std::relax::Module;
-    // a long-lived module, used across every recycle
     let keep = Module::load_source("keep", "keep.rs", &src(1000, 1), &[]).unwrap();
     let kf: fn(f32) -> f32 = keep.get("frame").unwrap();
     let want = kf(0.5);
     for _ in 0..10000 { assert_eq!(kf(0.5), want); }
     std::thread::sleep(std::time::Duration::from_millis(800));
     let r0 = rss_kb();
-    let s0 = std::relax::sandbox_stats(false).unwrap();
+    // hot patches of one live module
+    let m = Module::load_source("patched", "patched.rs", &src(1, 2), &[]).unwrap();
+    let f: fn(f32) -> f32 = m.get("frame").unwrap();
+    let _ = f(0.25);
+    let p0 = std::relax::sandbox_stats()[0];
     let mut ok = true;
+    for k in 0..200u32 {
+        m.replace(&src(1, 3 + k)).unwrap();
+        ok &= f(0.25).is_finite();
+    }
+    let per_patch = (std::relax::sandbox_stats()[0] - p0) / 200;
+    // load / call / edit / unload cycles
+    let l0 = std::relax::sandbox_stats()[0];
     for k in 0..400u32 {
         let m = Module::load_source(&format!("fx{}", k), &format!("fx{}.rs", k), &src(k, 2), &[]).unwrap();
         let f: fn(f32) -> f32 = m.get("frame").unwrap();
@@ -31,16 +41,10 @@ fn recycle() {
         m.unload();
         ok &= kf(0.5) == want;
     }
-    // force one more so the numbers below are after a recycle
-    let _ = std::relax::sandbox_stats(true);
-    // Recycling replaces O3 code with freshly compiled confined code and must
-    // rearm counters against the new space, never a stale count-stub target.
-    for _ in 0..10000 { assert_eq!(kf(0.5), want); }
-    std::thread::sleep(std::time::Duration::from_millis(800));
-    let s1 = std::relax::sandbox_stats(false).unwrap();
-    ok &= kf(0.5) == want;
-    eprintln!("recycle: before {:?} after {:?}; rss {} -> {} MB", s0, s1, r0 / 1024, rss_kb() / 1024);
+    let per_cycle = (std::relax::sandbox_stats()[0] - l0) / 400;
+    for _ in 0..10000 { ok &= kf(0.5) == want; }
+    eprintln!("growth: {} twin code bytes per hot patch, {} per load+patch+unload cycle; twin code {} KB; rss {} -> {} MB", per_patch, per_cycle, std::relax::sandbox_stats()[0] / 1024, r0 / 1024, rss_kb() / 1024);
     println!("out edits applied and keep stable: {}", ok);
-    println!("out recycled: {}", s1[0] > s0[0]);
-    println!("out code bounded: {}", s1[1] < 32 << 20);
+    println!("out code grows: {}", per_patch > 0 && per_cycle > 0);
+    m.unload();
 }

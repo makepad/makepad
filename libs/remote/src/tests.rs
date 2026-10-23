@@ -333,6 +333,19 @@ fn unix_end_to_end_with_discovery_and_reconnect() {
 }
 
 #[test]
+fn paired_listeners_bind_lan_or_loopback_only() {
+    // `makepad hub --listen`: the wildcard and public addresses are refused (JITSAFE fix 20)
+    use crate::carrier::tcp::lan_bind_addr;
+    for bad in ["0.0.0.0:7000", "[::]:7000", "8.8.8.8:7000", "[2001:4860::8888]:7000"] {
+        let e = lan_bind_addr(bad).expect_err(bad);
+        assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "{bad}");
+    }
+    for ok in ["127.0.0.1:0", "10.0.0.5:7000", "192.168.1.2:7000", "[::1]:0", "[fd00::1]:7000"] {
+        lan_bind_addr(ok).expect(ok);
+    }
+}
+
+#[test]
 fn tcp_loopback_with_tls_and_key_proof() {
     use makepad_network::tls::TlsIdentity;
     use makepad_network::tunnel::{ClientCredentials, Psk};

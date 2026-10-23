@@ -1137,19 +1137,33 @@ pub fn stable_ty(u: &Unit, t: TyId) -> String {
     format!("{}#{:08x}", crate::typeck::ty_to_string(false, &u.prog, &u.tcx, t), crate::stable::type_hash(&u.prog, &u.tcx, t) as u32)
 }
 
-/// The pointer words of data object `idx` with their targets; None when the object cannot be
-/// described (mutable, opaque, a pointer whose target has no symbol): the disk cache then
-/// cannot store code that refers to it.
-/// The offsets of the pointer words of the data object starting at `start`, from what its
+/// The pointer offsets of the data object, promoted block or static at `start`, from what its
 /// bytes are (its type, its relocations, its word table) -- never from what the words happen to
 /// hold: a table of integers can hold a value that is an address in this run. None when the
 /// object is not one, or its kind cannot tell (a union, a word table shorter than the object).
-pub(crate) fn pointer_offsets(u: &Unit, start: u64) -> Option<Vec<u32>> {
-    let (len, kind) = {
+/// `image` is the value being relocated: an enum's active variant must come from
+/// that image, not from the potentially mutated live object in the trace host.
+pub(crate) fn pointer_offsets(u: &Unit, start: u64, image: &[u8]) -> Option<Vec<u32>> {
+    let described = {
         let d = u.syms.data.lock().unwrap_or_else(|e| e.into_inner());
-        let &i = d.by_start.get(&start)?;
-        let o = &d.objs[i as usize];
-        (o.len, o.kind.clone())
+        d.by_start.get(&start).map(|&i| {
+            let o = &d.objs[i as usize];
+            (o.len, o.kind.clone())
+        })
+    };
+    let (len, kind) = match described {
+        Some(info) => info,
+        None => {
+            let promoted = u.syms.rw_starts.lock().unwrap_or_else(|e| e.into_inner()).get(&start).copied();
+            let (len, ty) = match promoted {
+                Some(info) => info,
+                None => {
+                    let &(def, len) = u.static_spans.get(&start)?;
+                    (len, u.tcx.const_ty(&u.prog, def)?)
+                }
+            };
+            (len, DataKind::Typed(ty))
+        }
     };
     match kind {
         DataKind::Bytes => Some(Vec::new()),
@@ -1159,8 +1173,9 @@ pub(crate) fn pointer_offsets(u: &Unit, start: u64) -> Option<Vec<u32>> {
             ((w.len() as u64) >= len / pw).then(|| w.iter().enumerate().filter(|(_, x)| x.is_some()).map(|(i, _)| (i as u64 * pw) as u32).collect())
         }
         DataKind::Typed(t) => {
+            if u.layout_of(t).size as usize > image.len() { return None; }
             let mut words = Vec::new();
-            walk(u, t, start, 0, &mut words, 0, &mut Vec::new())?;
+            walk(u, t, image.as_ptr() as u64, 0, &mut words, 0, &mut Vec::new())?;
             Some(words.into_iter().map(|(o, _)| o).collect())
         }
     }

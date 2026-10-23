@@ -32,12 +32,16 @@ jobs=${DIFF_JOBS:-4}
 # build kept installed, MAKEPAD_RUN_PGO_HOLD=1 -- the PGO counted code itself)
 difftiers=${DIFF_TIERS:-o1 base o3}
 sleepms=${DIFF_SLEEP_MS:-250}
+# DIFF_VERIFY (default 1): every tier run verifies the RIR after each pass and after the rewrites
+# past the pipeline (instrument, web32, backend rewrites, split_loops); a broken function is an
+# ICE naming the pass, so the program's output differs (JITSAFE 19). DIFF_VERIFY=0: off.
+verify=; [ "${DIFF_VERIFY:-1}" = 0 ] || verify=MAKEPAD_RUN_VERIFY_PASSES=1
 work=$(mktemp -d "${TMPDIR:-/tmp}/diff_fast.XXXXXX") || exit 2
 mkdir -p "$cache"
 progs=${DIFF_PROGRAMS:-$(cd "$here/diff" && ls *.rs | sed 's/\.rs$//')}
 known=${DIFF_KNOWN:-$(cd "$here/known" && ls *.rs | sed 's/\.rs$//')}
 rv=$(rustc -V)
-export M here root cache work sleepms rv
+export M here root cache work sleepms rv verify
 # one job: native build (cached) + native run, or a tier run. $1 = program, $2 = native|base|o3
 job() {
     p=$1; k=$2; src=$here/diff/$p.rs; [ -f "$src" ] || src=$here/known/$p.rs; out=$work/$p.$k
@@ -63,7 +67,7 @@ job() {
         counted) tier="MAKEPAD_RUN_O3=1 MAKEPAD_RUN_PGO_HOLD=1"; ms=$sleepms ;;
         *) tier="MAKEPAD_RUN_O3=1 MAKEPAD_RUN_GUARDS=${DIFF_GUARDS:-1} MAKEPAD_RUN_GUARDS_READY=16 MAKEPAD_RUN_GUARDS_FAILS=64"; ms=$sleepms ;;
         esac
-        env $tier MAKEPAD_RUN_O3_CALLS=1 DIFF_SLEEP_MS=$ms \
+        env $tier MAKEPAD_RUN_O3_CALLS=1 DIFF_SLEEP_MS=$ms $verify \
             MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_HOME="$d/home" TMPDIR="$d/tmp" \
             MAKEPAD_RUN_HOME="$d/runhome" MAKEPAD_RUN_CACHE_DIR="$d/cache" \
             nice -n 10 "$M" test "$src" > "$out.raw" 2> "$out.err"
@@ -86,7 +90,7 @@ pkgjob() {
         counted) tier="MAKEPAD_RUN_O3=1 MAKEPAD_RUN_PGO_HOLD=1"; ms=$sleepms ;;
         *) tier="MAKEPAD_RUN_O3=1 MAKEPAD_RUN_GUARDS=${DIFF_GUARDS:-1} MAKEPAD_RUN_GUARDS_READY=16 MAKEPAD_RUN_GUARDS_FAILS=64"; ms=$sleepms ;;
         esac
-        (cd "$root" && env $tier MAKEPAD_RUN_O3_CALLS=1 DIFF_SLEEP_MS=$ms MAKEPAD_HAL_BACKEND=headless \
+        (cd "$root" && env $tier MAKEPAD_RUN_O3_CALLS=1 DIFF_SLEEP_MS=$ms $verify MAKEPAD_HAL_BACKEND=headless \
             MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_HOME="$d/home" TMPDIR="$d/tmp" \
             MAKEPAD_RUN_HOME="$d/runhome" MAKEPAD_RUN_CACHE_DIR="$d/cache" \
             nice -n 10 "$M" run --quiet "$pkg" -- "$prog") > "$out.raw" 2> "$out.err"

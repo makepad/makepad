@@ -799,12 +799,18 @@ fn mono_check(up: *mut Unit, own: &[bool], root: u32) {
         def.kind == DefKind::Fn && def.krate == root && u.prog.name(d) == "main"
             && def.parent == u.prog.mods[u.prog.crates[root as usize].root_mod as usize].def
     });
-    let Some(main) = main else { return };
     let limit = u.prog.crates[root as usize].recursion_limit as usize;
     let _job = jit::compile_job();
     // (instance, the instance it was reached from): the chain of a reached instance is its DFS stack
-    let mut work: Vec<(u32, Option<u32>)> = vec![(crate::owner::call(crate::owner::Class::Program, || unsafe { (&mut *up).fn_id(FnKey::Inst(main, Vec::new())) }), None)];
+    // (collector.rs: a program starts at `main`; a library's roots are all its non-generic fns)
+    let roots: Vec<crate::program::DefId> = match main { Some(m) => vec![m], None => (0..u.prog.defs.len()).map(|i| crate::program::DefId(i as u32)).filter(|&d| {
+        let def = u.prog.def(d);
+        def.kind == DefKind::Fn && def.krate == root && u.prog.def(def.parent).kind != DefKind::Trait
+            && u.tcx.fn_sig(&u.prog, d).is_some_and(|s| s.n_generics == 0)
+    }).collect() };
+    let mut work: Vec<(u32, Option<u32>)> = roots.into_iter().rev().map(|d| (crate::owner::call(crate::owner::Class::Program, || unsafe { (&mut *up).fn_id(FnKey::Inst(d, Vec::new())) }), None)).collect();
     let mut parents: std::collections::HashMap<u32, Option<u32>> = std::collections::HashMap::new();
+    let mut deep_seen: std::collections::HashMap<crate::program::DefId, usize> = std::collections::HashMap::new();
     while let Some((id, parent)) = work.pop() {
         if parents.contains_key(&id) { continue; }
         parents.insert(id, parent);
@@ -832,13 +838,26 @@ fn mono_check(up: *mut Unit, own: &[bool], root: u32) {
             }
         }
         let callees = crate::owner::call(crate::owner::Class::Program, || unsafe {
-            if !mine { return Vec::new(); }
+            // collector.rs: a library instance is lowered by rustc too; Relax lowers it only when a type argument
+            // is too big to lay out (its body's layout query is then rustc's SizeOverflow, reported where it is
+            // evaluated), and follows none of its callees
+            let library_overflow = !mine && matches!(&(&*up).fns[id as usize].key, FnKey::Inst(_, args) if args.iter().any(|t| {
+                let uu = &*up;
+                uu.tcx.tys.depth(*t) <= 6 && std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| uu.size_overflows(*t))).unwrap_or(false)
+            }));
+            if !mine && !library_overflow { return Vec::new(); }
             // (a fn taking or returning a value of hundreds of MB is not lowered: its frame would
             // be allocated for real)
             // (instances over deeply nested types -- closures wrapped in closures -- cost more to
             // lower than a constants check is worth; one that recurses into itself is followed to the limit)
             if let FnKey::Inst(_, args) = &(&*up).fns[id as usize].key {
-                if same_def < 2 && args.iter().any(|t| (&*up).tcx.tys.depth(*t) > 6) { return Vec::new(); }
+                // (deep instances of one definition are followed up to the recursion limit's worth, so a recursion that
+                // nests its type argument deeper at every step (issue-22638) still reaches the limit)
+                if args.iter().any(|t| (&*up).tcx.tys.depth(*t) > 6) {
+                    let n = deep_seen.entry(def_of.unwrap()).or_insert(0usize);
+                    *n += 1;
+                    if *n > limit + 2 { return Vec::new(); }
+                }
             }
             if let FnKey::Inst(d, _) = &(&*up).fns[id as usize].key {
                 let uu = &*up;
@@ -876,9 +895,12 @@ fn mono_check(up: *mut Unit, own: &[bool], root: u32) {
             }
             // (rustc's SizeOverflow of a type the instance lays out: lowering's error, at its use)
             if let Ok(Err(msg)) = &built {
-                if msg.ends_with("are too big for the target architecture") { (&mut *up).errors.push(msg.clone()); }
+                if msg.ends_with("are too big for the target architecture") {
+                    // (a library instance's error is reported once by its lowering, with no location in the library's source)
+                    if !library_overflow { (&mut *up).errors.push(msg.clone()); }
+                }
             }
-            if !matches!(built, Ok(Ok(()))) { return Vec::new(); }
+                if !matches!(built, Ok(Ok(()))) || library_overflow { return Vec::new(); }
             let mut out = Vec::new();
             if let Some(f) = &(&*up).fns[id as usize].rir {
                 for b in &f.blocks {

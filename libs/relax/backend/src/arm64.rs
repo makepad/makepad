@@ -5350,6 +5350,8 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     // branch compares at the end of their block (fused into cmp + b.cond)
     let brs = if env.opt_regs || f.full { regalloc::sink_branch_compares(options, f) } else { None };
     let f = brs.as_ref().unwrap_or(f);
+    // the backend-internal rewrites above run after the last pipeline verify
+    f.verify_after("arm64 backend rewrites (legalize/switch/folds/hoist/share/sink)")?;
     // v0-v7 are allocatable outside the instructions that name them (arm64_clobbers), except
     // in an `extern "C"` body returning an aggregate in registers: its Ret loads the parts into
     // v0-v3 before the result moves (c_ret_parts)
@@ -5372,6 +5374,9 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     }
     let (split, mut al0) = regalloc::allocate_split(options, f, &cfg, env.opt_regs || f.full, freq);
     let f = split.as_ref().unwrap_or(f);
+    if split.is_some() {
+        f.verify_after("split_loops")?;
+    }
     crate::remark::note_spills(f, &al0);
     crate::stats::pass_time(11, t_ra);
     drop(_cost_ra);

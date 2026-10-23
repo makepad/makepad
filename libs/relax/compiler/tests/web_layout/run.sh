@@ -32,7 +32,7 @@ mkdir -p "$T/u"
 cat > "$T/u/units.json" <<J
 {"version":1,"roots":[0],"units":[{"pkg_id":"path+file://$T#web_layout@0.0.0","target":{"kind":["bin"],"name":"web_layout","src_path":"$T/check.rs","edition":"2021"},"mode":"build","features":[],"dependencies":[]}]}
 J
-MAKEPAD_RUN_CHECK_TARGET=$TRIPLE MAKEPAD_RUN_STD=$H/../../std MAKEPAD_RUN_CACHE_DIR=$T/tgt "$B" check --no-serve --units "$T/u/units.json" web_layout > "$T/relax.out" 2>"$T/relax.err"
+MAKEPAD_RUN_CHECK_TARGET=$TRIPLE MAKEPAD_RUN_STD=$H/../../std MAKEPAD_RUN_CACHE_DIR=$T/tgt "$B" check --no-serve --units "$T/u/units.json" web_layout --release > "$T/relax.out" 2>"$T/relax.err"
 rc=$?
 n=$(grep -c . "$T/table.txt")
 if [ $rc -eq 0 ] && ! grep -q "E[0-9]" "$T/relax.out"; then
@@ -43,3 +43,14 @@ else
   echo "web_layout $W: FAILED (exit $rc, $n rows; full log $T/relax.err)"
   exit 1
 fi
+# Execute the same rustc-derived assertions in the exported module as well.
+MAKEPAD_RUN_WASM_EXPORT=$T/relax.wasm MAKEPAD_RUN_SPEC=0 MAKEPAD_RUN_O1=always MAKEPAD_RUN_O3=0 MAKEPAD_RUN_CHECK_TARGET=$TRIPLE MAKEPAD_RUN_STD=$H/../../std MAKEPAD_RUN_CACHE_DIR=$T/tgt-export "$B" run --quiet --no-live --units "$T/u/units.json" web_layout --release > "$T/export.out" 2> "$T/export.err" || { tail -40 "$T/export.err"; exit 1; }
+node - "$T/relax.wasm" <<'JS' || exit 1
+const fs = require('fs');
+const module_ = new WebAssembly.Module(fs.readFileSync(process.argv[2]));
+if (WebAssembly.Module.imports(module_).length) throw new Error('unexpected imports');
+const x = new WebAssembly.Instance(module_, {}).exports;
+x.run();
+x.t0();
+JS
+echo "web_layout $W export: $n rows equal ($(cat "$T/gen.out"))"

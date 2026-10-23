@@ -61,6 +61,11 @@ struct V<'a> {
 /// Checks one typed body owner; returns its E0133 errors (lints go to the lint sink).
 pub fn check_body(prog: &Program, tcx: &Tcx, body: &Body) -> Vec<String> {
     if !lint::enabled() { return Vec::new(); }
+    check_body_errors(prog, tcx, body)
+}
+
+/// `check_body`'s errors without the lint switch (run mode: E0133 & co, lints stay off).
+fn check_body_errors(prog: &Program, tcx: &Tcx, body: &Body) -> Vec<String> {
     let d = prog.def(body.def);
     let pf = &prog.files[body.file as usize];
     let ast = &pf.ast;
@@ -569,6 +574,56 @@ impl V<'_> {
 }
 
 // ---------------------------------------------------------------- impls
+
+/// Run mode (`makepad run` / `test` / `live`, no lints): the unsafety errors of a type-checked body
+/// (E0133: unsafe operations outside `unsafe`). Without it a raw-pointer dereference ran from safe
+/// code. (One AST walk per built body; not memoized: a body's address does not name it across
+/// compiler generations.)
+pub fn run_body_errors(prog: &Program, tcx: &Tcx, body: &Body) -> Vec<String> {
+    check_body_errors(prog, tcx, body)
+}
+
+/// Run mode: the impl soundness errors of crate `krate`, once per crate and collect epoch -- E0197-
+/// E0200 (`unsafe impl` rules: a safe `impl Send` / `impl Sync` would let safe code race) and the
+/// well-formedness (wfcheck) of impls of unsafe or auto traits and of traits with supertraits
+/// (an impl whose supertrait bound does not hold). `makepad check` runs these as part of its
+/// item checks; `run` used to skip them.
+pub fn run_crate_impl_errors(prog: &Program, tcx: &Tcx, krate: u32) -> std::sync::Arc<Vec<String>> {
+    static MEMO: std::sync::Mutex<Option<std::collections::HashMap<(u32, u64), std::sync::Arc<Vec<String>>>>> = std::sync::Mutex::new(None);
+    let epoch = tcx.collect_epoch.load(std::sync::atomic::Ordering::SeqCst);
+    if let Some(e) = MEMO.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&(krate, epoch))) {
+        return e.clone();
+    }
+    // a body type-checked while these checks run (a constant a well-formedness check evaluates)
+    // does not start them again: that would ask for the query in progress (a false E0391)
+    thread_local! { static ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+    if ACTIVE.with(|a| a.replace(true)) {
+        return std::sync::Arc::new(Vec::new());
+    }
+    struct Reset;
+    impl Drop for Reset { fn drop(&mut self) { ACTIVE.with(|a| a.set(false)); } }
+    let _reset = Reset;
+    let mut out = Vec::new();
+    for i in 0..prog.defs.len() {
+        let d = DefId(i as u32);
+        let def = prog.def(d);
+        if def.krate != krate || def.kind != DefKind::Impl { continue; }
+        out.extend(check_impl(prog, tcx, d));
+        let Some(&td) = tcx.impl_trait.get(&d) else { continue };
+        let tdef = prog.def(td);
+        let tast = &prog.files[tdef.file as usize].ast;
+        let ItemKind::Trait(tr) = tast.item(tdef.item).kind else { continue };
+        let t = tast.row(tr);
+        if t.unsafe_ || t.auto || !tast.list(t.supers).is_empty() {
+            out.extend(crate::wfcheck::obligations::check_def(prog, tcx, d));
+        }
+    }
+    // (the memo outlives compiler generations: its contents are made in the kept heap)
+    let _k = crate::zone_alloc::kept();
+    let out = std::sync::Arc::new(out.clone());
+    MEMO.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert((krate, epoch), out.clone());
+    out
+}
 
 /// rustc_hir_analysis coherence/unsafety.rs (E0199, E0200), E0197 (inherent impls) and
 /// ast_validation's E0198 (negative impls) for impl `d`.

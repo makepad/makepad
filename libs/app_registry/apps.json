@@ -30,6 +30,11 @@
     "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false
   },
   {
+    "id": "synth", "label": "Synth", "package": "makepad-app-synth",
+    "dir": "apps/synth", "bin": "makepad-app-synth", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false
+  },
+  {
     "id": "code", "label": "Code", "package": "makepad-app-code",
     "dir": "apps/code", "bin": "makepad-app-code", "manifest": null, "args": [],
     "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false
