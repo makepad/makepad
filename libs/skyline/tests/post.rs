@@ -1,5 +1,5 @@
-//! The post shaders (the final composite and its cut, the blur, the water by night and by day) compile for Metal, HLSL
-//! and GLSL ES (no GPU needed).
+//! The post shaders (the final composite and its cut, the blur, the water by night and by day, a band's choice of the
+//! water's distance) compile for Metal, HLSL and GLSL ES (no GPU needed).
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(dead_code)]
 pub use makepad_skyline::makepad_widgets;
@@ -19,7 +19,8 @@ fn post_shaders_compile_for_every_backend() {
         post::script_mod(vm);
         let broken = vm.eval(script! { use mod.draw.*; DrawQuad{ pixel: fn(){ return self.no_such_field } } });
         let shaders = [("final", vm.eval(script! { mod.draw.DrawSkyFinal })), ("final_cut", vm.eval(script! { mod.draw.DrawSkyFinalCut })), ("blur", vm.eval(script! { mod.draw.DrawSkyBlur })),
-            ("water", vm.eval(script! { mod.draw.DrawSkyWater })), ("water_day", vm.eval(script! { mod.draw.DrawSkyWaterDay })), ("broken", broken)];
+            ("water", vm.eval(script! { mod.draw.DrawSkyWater })), ("water_day", vm.eval(script! { mod.draw.DrawSkyWaterDay })),
+            ("water_dist", vm.eval(script! { mod.draw.DrawSkyWaterDist })), ("broken", broken)];
         for (name, shader) in shaders {
             let shader = shader.as_object().unwrap_or_else(|| panic!("{name}: no shader object"));
             for (backend, gles) in [(ShaderBackend::Metal, false), (ShaderBackend::Hlsl, false), (ShaderBackend::Glsl, true)] {

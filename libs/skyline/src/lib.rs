@@ -89,7 +89,8 @@ pub fn at_sea(p: &Params, d: f64) -> bool { sea_distance_m(p).map_or(true, |s| d
 /// The distance (m) the strip hands for its near ground rise and its front treeline (`Band::dist`; the shaders' literal
 /// 500). They stand where they stood at any Size, as a prop does, in front of what stands on the land behind them (the
 /// farms from 900 m, the power lines the treeline hides from 1 km); the treeline's tallest trees (Height 0.035 rad at the
-/// defaults) are then about 18 m tall.
+/// defaults) are then about 18 m tall. Over the land the ground below the horizon reads no farther than the rise, which
+/// hides what lies beyond it: the rows down to its foot, atan(EYE x Size / NEAR_RISE_M) down, read the rise.
 pub const NEAR_RISE_M: f64 = 500.0;
 /// The farthest distance (m) the strip hands for its ground, at the horizon: the city march's own far (`DrawSkyCity`'s
 /// 6e4; the shaders' literal 60000), inside the half float's range of the distance target.

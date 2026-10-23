@@ -2,7 +2,8 @@
 //! colour, then the display tone shoulder; an export keeps the raw HDR; over a host's wet ground it leaves the land below
 //! the horizon out, `DrawSkyFinalCut`). A stage that would do nothing is left out;
 //! the final samples the light target the chain ends in. The blur takes the reflections with the lights, as the page's.
-//! A band's distance (`SceneTarget::dist`) goes scene + mirror -> water (what the water mirrors) -> final, past the blur.
+//! A band's distance (`SceneTarget::dist`) goes scene + mirror -> water (what the water mirrors) -> the water's choice
+//! (`DrawSkyWaterDist`: what it mirrors where the texel shows mostly the mirror, else its own) -> final, past the blur.
 use crate::light::SkyLight;
 use crate::params::{Params, P};
 use crate::render::{bind_texture, SceneCtx, SceneTarget, ViewSpec};
@@ -91,7 +92,8 @@ script_mod! {
     // circle; calm water stretches lights into smears, ripple breaks them into streaks. Strength x Fresnel x depth fade.
     // By day it also mirrors the sky by Fresnel, and (DrawSkyWaterDay) the scene's colour. Its second output is the
     // distance (fb1, a band's): the scene's own, but where the water mirrors and the mirror run covers the point it
-    // mirrors, that point's distance (read as its light is), so a mirrored light is never nearer than the light itself.
+    // mirrors, that point's distance (read as its light is), so a mirrored light is never nearer than the light itself;
+    // DrawSkyWaterDist then keeps it only where the texel shows mostly the mirror.
     mod.draw.DrawSkyWater = mod.std.set_type_default() do #(DrawSkyWater::script_shader(vm)){
         ..mod.draw.DrawQuad,
         ..mod.draw.SkyScene,
@@ -179,10 +181,41 @@ script_mod! {
         }
     }
 
+    // A band's distance where the water ran (DrawSkyWater hands the distance of what it mirrors wherever the mirror covers
+    // that point): kept where the texel shows mostly the mirror, as most of it is water (the sea, a lake, a puddle over half
+    // of it, by `water_at` as the water reads it) or what it mirrors outshines the rest of it (the water's light over the
+    // scene's, against the scene's colour and own light there: a puddle's mirrored window). Else the texel shows its own
+    // ground, and keeps the scene's distance (the dry ground around a puddle, a soft shore). A pass of its own, so the
+    // water's shaders stay the pictures they were (any term the choice added to them moved texels of their colour, fxc).
+    mod.draw.DrawSkyWaterDist = mod.std.set_type_default() do #(DrawSkyWaterDist::script_shader(vm)){
+        ..mod.draw.DrawQuad,
+        ..mod.draw.SkyScene,
+        scene_color: texture_2d(float)
+        scene_light: texture_2d(float)
+        scene_dist: texture_2d(float)
+        water_light: texture_2d(float)
+        water_dist: texture_2d(float)
+        pixel: fn(){
+            let s = self.scene_dist.sample_nearest(self.pos); let wd = self.water_dist.sample_nearest(self.pos)
+            // (where the water handed the scene's own, nothing to choose)
+            if wd.x == s.x && wd.w == s.w { return s }
+            let pp = self.frag(); let vr = self.view_raw(); let v = self.pix_view(vr); let g = self.col_row(pp.x, 6.0); let al = 0.0 - v.y
+            if al <= 0.0 { return s }
+            let ws = self.water_at(g, v.x, al, v.z); var sea = ws.x
+            if self.host_ground > 0.5 { sea = sea * (1.0 - self.coast_at(vr.x) * self.day()) }
+            if max(max(sea, ws.y), ws.z) >= 0.5 { return wd }
+            let e = self.scene_light.sample_nearest(self.pos); let one = vec3(1.0, 1.0, 1.0)
+            if dot(self.water_light.sample_nearest(self.pos).xyz - e.xyz, one) >= dot(self.scene_color.sample_nearest(self.pos).xyz + e.xyz, one) { return wd }
+            return s
+        }
+        // its one target; SkyScene's other outputs are written too, so no backend leaves them undefined
+        fragment: fn(){ let d = self.pixel(); self.fb0 = d; self.fb1 = d; self.fb2 = d }
+    }
+
     mod.draw.SkyPostBase = #(Post::script_component(vm))
     mod.draw.SkyPost = mod.std.set_type_default() do mod.draw.SkyPostBase{
         draw_final: mod.draw.DrawSkyFinal{} draw_final_cut: mod.draw.DrawSkyFinalCut{} draw_blur: mod.draw.DrawSkyBlur{} draw_water: mod.draw.DrawSkyWater{}
-        draw_water_day: mod.draw.DrawSkyWaterDay{}
+        draw_water_day: mod.draw.DrawSkyWaterDay{} draw_water_dist: mod.draw.DrawSkyWaterDist{}
     }
 }
 
@@ -191,6 +224,7 @@ script_mod! {
 #[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyBlur { #[deref] pub draw_super: DrawQuad }
 #[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyWater { #[deref] pub draw_super: DrawQuad }
 #[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyWaterDay { #[deref] pub draw_super: DrawQuad }
+#[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyWaterDist { #[deref] pub draw_super: DrawQuad }
 
 /// The scene's targets as post sees them; `mirror`: the mirrored scene, when [`Post::wants_mirror`] asked for it.
 pub struct SceneOut<'a> { pub view: &'a ViewSpec, pub scene: &'a SceneTarget, pub mirror: Option<&'a SceneTarget> }
@@ -221,10 +255,12 @@ pub fn blur_sigma(p: &Params, v: &ViewSpec) -> f64 {
 #[derive(Script, ScriptHook)]
 pub struct Post {
     #[live] pub draw_final: DrawSkyFinal, #[live] pub draw_final_cut: DrawSkyFinalCut, #[live] pub draw_blur: DrawSkyBlur, #[live] pub draw_water: DrawSkyWater,
-    #[live] pub draw_water_day: DrawSkyWaterDay,
-    /// The water and blur targets; what the last picture ran: the water, the blur's sigma (px, 0 none); the scene's margin (px);
-    /// whether its final leaves a host's wet land out (`SkyLight::leaves_land`).
-    #[rust] pub water: Option<SceneTarget>, #[rust] pub blur: Option<SceneTarget>, #[rust] ran: (bool, f64), #[rust] margin: usize, #[rust] cut: bool,
+    #[live] pub draw_water_day: DrawSkyWaterDay, #[live] pub draw_water_dist: DrawSkyWaterDist,
+    /// The water and blur targets, and a band's choice of the water's distance (`DrawSkyWaterDist`); what the last picture
+    /// ran: the water, the blur's sigma (px, 0 none); the scene's margin (px); whether its final leaves a host's wet land out
+    /// (`SkyLight::leaves_land`); whether the water's distance was chosen.
+    #[rust] pub water: Option<SceneTarget>, #[rust] pub blur: Option<SceneTarget>, #[rust] pub water_dist: Option<SceneTarget>, #[rust] ran: (bool, f64),
+    #[rust] margin: usize, #[rust] cut: bool, #[rust] chose: bool,
 }
 
 impl Post {
@@ -264,7 +300,21 @@ impl Post {
             t.record(cx, v.w, v.h, |cx| d.draw_abs(cx, full));
             for child in [head, mirror.pass.draw_pass_id()] { cx.attach_child_pass(child, t.pass.draw_pass_id(), None); }
             (head, light) = (t.pass.draw_pass_id(), t.light.clone());
+            // a band's: where the texel shows mostly its own ground, not the mirror, the scene's own distance
+            if sc.dist {
+                let (water_light, water_dist) = (t.light.clone(), t.dist_in().clone());
+                let (c, d) = (self.water_dist.get_or_insert_with(|| SceneTarget::new(cx, "skyline_water_dist", false)), &mut self.draw_water_dist);
+                sc.set_uniforms(cx, &mut d.draw_vars);
+                for (name, tex) in [(live_id!(scene_color), &out.scene.color), (live_id!(scene_light), &out.scene.light), (live_id!(scene_dist), out.scene.dist_in()),
+                    (live_id!(water_light), &water_light), (live_id!(water_dist), &water_dist)] {
+                    bind_texture(cx, &mut d.draw_vars, name, tex);
+                }
+                c.record(cx, v.w, v.h, |cx| d.draw_abs(cx, full));
+                cx.attach_child_pass(head, c.pass.draw_pass_id(), None);
+                head = c.pass.draw_pass_id();
+            }
         }
+        self.chose = out.mirror.is_some() && sc.dist;
         let sigma = blur_sigma(sc.p, v);
         if sigma > 0.0 {
             let (t, d) = (self.blur.get_or_insert_with(|| SceneTarget::new(cx, "skyline_blur", false)), &mut self.draw_blur);
@@ -281,13 +331,17 @@ impl Post {
     }
 
     /// The final composite into `rect` of the current pass, every draw; it attaches the pass chain it samples to the
-    /// current pass (so it paints first and stays alive). Its second output, the distance, comes from the water when
-    /// it ran (it hands what it mirrors), else from the scene: the blur leaves it alone.
+    /// current pass (so it paints first and stays alive). Its second output, the distance, comes from the water's choice
+    /// when the water ran in a band (`DrawSkyWaterDist`), from the water when it ran in a view, else from the scene: the
+    /// blur leaves it alone.
     pub fn draw_final(&mut self, cx: &mut Cx2d, rect: Rect, out: &SceneOut, tone: bool) {
         let (water, sigma) = self.ran;
         let t = if sigma > 0.0 { self.blur.as_ref() } else if water { self.water.as_ref() } else { None };
-        let (pass, light) = t.map_or((&out.scene.pass, &out.scene.light), |t| (&t.pass, &t.light));
-        let dist = if water { self.water.as_ref().unwrap_or(out.scene) } else { out.scene }.dist_in();
+        let (mut pass, light) = t.map_or((&out.scene.pass, &out.scene.light), |t| (&t.pass, &t.light));
+        // the choice heads the chain over the water (the blur, when it ran, has it under itself)
+        let chosen = if self.chose { self.water_dist.as_ref() } else { None };
+        if let (Some(c), true) = (chosen, sigma <= 0.0) { pass = &c.pass; }
+        let dist = match chosen { Some(c) => &c.color, None => if water { self.water.as_ref().unwrap_or(out.scene) } else { out.scene }.dist_in() };
         cx.make_child_pass(pass);
         let d: &mut DrawQuad = if self.cut { &mut self.draw_final_cut } else { &mut self.draw_final };
         let vars = &mut d.draw_vars;

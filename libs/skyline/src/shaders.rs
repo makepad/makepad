@@ -306,11 +306,14 @@ script_mod! {
         }
         // the ground's distance (m): below the horizon the ground point the pixel sees, EYE x Size / tan(al) (al its
         // depression as `pixel` takes it, the column's off-centre factor applied), at most `FAR_M`; at and above it the
-        // near rise (`NEAR_RISE_M`)
+        // near rise (`NEAR_RISE_M`). Over the land the rise stands at its distance and hides the ground beyond, so the
+        // rows down to its foot (the depression of the ground at NEAR_RISE_M) show the rise: no farther than it, by the
+        // column's land share (the sea's columns keep their ground point, the shore's and the water's)
         ground_d: fn() -> float {
-            let pp = self.frag(); let al = 0.0 - self.ang_raw(pp.y) * self.col_row(pp.x, 6.0).z
+            let pp = self.frag(); let g = self.col_row(pp.x, 6.0); let al = 0.0 - self.ang_raw(pp.y) * g.z
             if al <= 0.0 { return 500.0 }
-            return min(self.lake_eye / tan(al), 60000.0)
+            let d = min(self.lake_eye / tan(al), 60000.0)
+            return d + (min(d, 500.0) - d) * g.x
         }
         fragment: fn(){ let c = self.pixel(); self.fb0 = c; self.fb1 = vec4(0.0, 0.0, 0.0, c.w); self.fb2 = self.at_dist(c.w, self.ground_d()) }
     }

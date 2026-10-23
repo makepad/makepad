@@ -1595,10 +1595,16 @@ fn without_props(p: &Params) -> Params {
 /// - an opaque city texel reads the march's depth there (`march_city`, the same view) within 20 %;
 /// - an opaque texel of range k alone reads 5000 x 6^((4 - k) / 4) m within 1 %; the near rise and the front treeline
 ///   NEAR_RISE_M;
-/// - an opaque texel of land at depression al reads EYE x Size / tan(al) within 5 % (also at Size 2);
+/// - an opaque texel of land at depression al reads min(EYE x Size / tan(al), NEAR_RISE_M) within 5 % (also at Size 2):
+///   the rows down to the near rise's foot read the rise, which hides the ground beyond it, so the distance does not step
+///   at the horizon;
 /// - with no ripple (the mirrored elevation is `mirrored_el`, in the same column) and no props, a sea texel that mirrors a
 ///   lit window (its light changes with Lit windows) reads at least the distance the band shows at the elevation it
-///   mirrors: a mirrored light is never handed a shorter distance than the light itself, though the water stands nearer.
+///   mirrors: a mirrored light is never handed a shorter distance than the light itself, though the water stands nearer;
+///   so does a sea texel that mirrors only dark things (no window lit), the open water showing the mirror;
+/// - over the strip's own wet ground (a fifth), a land texel whose reflection does not outshine the rest of it reads its
+///   ground's distance, as dry, and one whose mirrored windows outshine it reads at least the light's; the blur leaves
+///   the plane alone.
 #[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
 fn the_band_hands_each_texels_distance() {
     use makepad_skyline::{props::kit::EYE, NEAR_RISE_M};
@@ -1659,27 +1665,30 @@ fn the_band_hands_each_texels_distance() {
             worst_near = worst_near.max(off(full.dist[i], NEAR_RISE_M));
         }
     }
-    // the ground over land, deeper than a pixel and a half
-    let ground = |p: &Params, b: &Band, clean: &dyn Fn(usize) -> bool| -> (usize, f64) {
+    // the ground over land, every row below the horizon: the ground point the pixel sees, but no farther than the near
+    // rise, which stands on the land at NEAR_RISE_M and hides the ground beyond it, so the rows down to its foot show the
+    // rise (counted apart: the rows a pixel or two below the horizon, where the distance must not step)
+    let ground = |p: &Params, b: &Band, clean: &dyn Fn(usize) -> bool| -> (usize, usize, f64) {
         let (z, m) = (Zones::new(p), terrain::margin(p, 1.0, b.w));
         let cols = terrain::columns(&z, p, 0.0, 1.0, b.w, m);
-        let (px, eye) = (std::f64::consts::TAU / b.w as f64, EYE * p[P::Size]);
-        let (mut n, mut worst) = (0usize, 0.0f64);
+        let eye = EYE * p[P::Size];
+        let (mut n, mut n_foot, mut worst) = (0usize, 0usize, 0.0f64);
         for x in 0..b.w {
             if cols[(x + m) * terrain::ROWS + 6][0] < 0.999 { continue; }
             for y in 0..b.h {
                 let (al, i) = (-row_el(p, b, y), y * b.w + x);
-                if al < 1.5 * px || !clean(i) { continue; }
+                if al <= 0.0 || !clean(i) { continue; }
                 n += 1;
-                worst = worst.max((b.dist[i] as f64 / (eye / al.tan()).min(makepad_skyline::FAR_M) - 1.0).abs());
+                if eye / al.tan() > NEAR_RISE_M { n_foot += 1; }
+                worst = worst.max((b.dist[i] as f64 / (eye / al.tan()).min(NEAR_RISE_M) - 1.0).abs());
             }
         }
-        (n, worst)
+        (n, n_foot, worst)
     };
-    let (n_ground, worst_ground) = ground(&p, &full, &clean);
+    let (n_ground, n_foot, worst_ground) = ground(&p, &full, &clean);
     let two = sized(&bare, 2.0);
     let b2 = render_band(&two, 1024);
-    let (n_ground2, worst_ground2) = ground(&two, &b2, &|i| b2.texels[i][3] >= 0.999);
+    let (n_ground2, n_foot2, worst_ground2) = ground(&two, &b2, &|i| b2.texels[i][3] >= 0.999);
     // the sea's reflections of the lit windows: the city across the open sea (its sector over the widest run of sea
     // columns), no ripple and no props
     let zs = Zones::new(&bare);
@@ -1695,6 +1704,7 @@ fn the_band_hands_each_texels_distance() {
     let (sea, unlit) = (render_band(&calm, w), render_band(&dark, w));
     let (zc, edge) = (Zones::new(&calm), makepad_skyline::sea_edge_rad(&calm));
     let (mut n_sea, mut nearer_water, mut worst_sea) = (0usize, 0usize, f64::MAX);
+    let (mut n_dark, mut worst_dark) = (0usize, f64::MAX);
     for y in 0..sea.h {
         let al = -row_el(&calm, &sea, y);
         if al < 1.5 * px || al > edge - 1.5 * px { continue; }
@@ -1703,7 +1713,15 @@ fn the_band_hands_each_texels_distance() {
         let rows = (yf(el + amp).floor().max(0.0) as usize)..=((yf(el - amp).floor() as usize + 1).min(sea.h - 1));
         for x in 0..w {
             let i = y * w + x;
-            if zc.land((x as f64 + 0.5) / w as f64) >= 0.05 || lum(&sea.texels[i]) - lum(&unlit.texels[i]) < 1e-3 { continue; }
+            if zc.land((x as f64 + 0.5) / w as f64) >= 0.05 { continue; }
+            // the open sea shows the mirror though what it mirrors is dark (no window lit): where the band is opaque at
+            // every elevation it can mirror, it reads at least the nearest of those
+            if rows.clone().all(|r| unlit.texels[r * w + x][3] >= 0.999) {
+                let least = rows.clone().map(|r| unlit.dist[r * w + x] as f64).fold(f64::MAX, f64::min);
+                n_dark += 1;
+                worst_dark = worst_dark.min(unlit.dist[i] as f64 / least);
+            }
+            if lum(&sea.texels[i]) - lum(&unlit.texels[i]) < 1e-3 { continue; }
             // the nearest the band shows at the elevations this texel can mirror
             let Some(light) = rows.clone().map(|r| r * w + x).filter(|&j| sea.texels[j][3] > 0.0).map(|j| sea.dist[j] as f64).reduce(f64::min) else { continue };
             n_sea += 1;
@@ -1711,17 +1729,62 @@ fn the_band_hands_each_texels_distance() {
             if EYE / al.tan() < 0.9 * light { nearer_water += 1; }
         }
     }
+    // standing water on the land (the strip's own wet ground, a fifth of each texel; no props, no ripple): a texel whose
+    // reflection does not outshine the rest of it (its light no more than the dry band's there) shows its ground and
+    // reads the ground's distance, as dry; one whose mirrored windows outshine the rest of it by twice (the band's light
+    // over the band's with no window lit) reads at least the distance of what it mirrors, as the sea's do
+    let mut wp = bare.clone();
+    wp.set(P::PrRipple as usize, 0.0);
+    let mut wp_dark = wp.clone();
+    wp_dark.set(P::WinD as usize, 0.0);
+    let wet = SkyLight { wet: 0.2, ..SkyLight::example() };
+    let (wl, wd, dry) = (render_band_lit(&wp, w, &wet), render_band_lit(&wp_dark, w, &wet), render_band(&wp, w));
+    let sum = |t: &[f32; 4]| t[0] + t[1] + t[2];
+    let eye = EYE * wp[P::Size];
+    let (mut n_pud, mut worst_pud, mut n_pud_lit, mut worst_pud_lit) = (0usize, 0.0f64, 0usize, f64::MAX);
+    for y in 0..wl.h {
+        let al = -row_el(&wp, &wl, y);
+        if al <= 0.0 { continue; }
+        let (el, amp) = (mirrored_el(al), 0.004 * makepad_skyline::rng::smooth(0.0, 0.012, al) * makepad_skyline::rng::smooth(0.5, 1.4, (al + 0.004) / (22.0 * px)));
+        let yf = |e: f64| wp[P::Horizon] * wl.h as f64 - e / px - 0.5;
+        let rows = (yf(el + amp).floor().max(0.0) as usize)..=((yf(el - amp).floor() as usize + 1).min(wl.h - 1));
+        for x in 0..w {
+            let i = y * w + x;
+            if col(x, 6)[0] < 0.999 || wl.texels[i][3] < 0.999 || wl.texels[i] == dry.texels[i] { continue; }
+            if sum(&wl.texels[i]) <= sum(&dry.texels[i]) {
+                n_pud += 1;
+                worst_pud = worst_pud.max(off(wl.dist[i], (eye / al.tan()).min(NEAR_RISE_M)));
+            } else if sum(&wl.texels[i]) - sum(&wd.texels[i]) >= 2.0 * sum(&wd.texels[i]) {
+                let Some(light) = rows.clone().map(|r| r * w + x).filter(|&j| wl.texels[j][3] > 0.0).map(|j| wl.dist[j] as f64).reduce(f64::min) else { continue };
+                n_pud_lit += 1;
+                worst_pud_lit = worst_pud_lit.min(wl.dist[i] as f64 / light);
+            }
+        }
+    }
     println!("{clear} transparent texels; the city: {n_city} texels, worst {:.2} % off the march's depth", 100.0 * worst_city);
     for (k, n, worst) in &ranges { println!("range {k}: {n} texels, worst {:.3} % off {:.0} m", 100.0 * worst, 5000.0 * 6f64.powf((4.0 - *k as f64) / 4.0)); }
     println!("the near rise and the treeline: {n_near} texels, worst {:.3} % off {NEAR_RISE_M} m", 100.0 * worst_near);
-    println!("the ground: {n_ground} texels, worst {:.3} % off EYE / tan(al); at Size 2 {n_ground2} texels, worst {:.3} %", 100.0 * worst_ground, 100.0 * worst_ground2);
+    println!("the ground: {n_ground} texels ({n_foot} above the rise's foot), worst {:.3} % off min(EYE / tan(al), {NEAR_RISE_M} m); at Size 2 {n_ground2} texels ({n_foot2}), worst {:.3} %", 100.0 * worst_ground, 100.0 * worst_ground2);
     println!("the sea's mirrored windows (the city at {:.3} over {} sea columns): {n_sea} texels ({nearer_water} where the water stands nearer than the light), the least distance over the light's x{worst_sea:.4}", calm[P::CtC], best.1);
     assert!(clear > 1000, "the premise: sky ({clear} texels)");
     assert!(n_city > 200 && worst_city <= 0.2, "the city: {n_city} texels, worst {worst_city}");
     assert!(ranges.iter().filter(|r| r.1 >= 20).count() >= 4, "the premise: four ranges show alone {ranges:?}");
     for (k, n, worst) in &ranges { assert!(*n < 20 || *worst <= 0.01, "range {k}: {n} texels, worst {worst}"); }
     assert!(n_near > 100 && worst_near <= 0.01, "the near rise and treeline: {n_near} texels, worst {worst_near}");
-    assert!(n_ground > 1000 && worst_ground <= 0.05, "the ground: {n_ground} texels, worst {worst_ground}");
-    assert!(n_ground2 > 1000 && worst_ground2 <= 0.05, "the ground at Size 2: {n_ground2} texels, worst {worst_ground2}");
+    assert!(n_ground > 1000 && n_foot > 1000 && worst_ground <= 0.05, "the ground: {n_ground} texels ({n_foot} above the rise's foot), worst {worst_ground}");
+    assert!(n_ground2 > 1000 && n_foot2 > 1000 && worst_ground2 <= 0.05, "the ground at Size 2: {n_ground2} texels ({n_foot2} above the rise's foot), worst {worst_ground2}");
     assert!(nearer_water > 20 && worst_sea >= 0.99, "the sea: {n_sea} texels mirror windows ({nearer_water} with the water nearer), the least x{worst_sea}");
+    println!("the sea's dark reflections (no window lit): {n_dark} texels, the least distance over what they mirror x{worst_dark:.4}");
+    // the blur (Sharpness 0: sigma 0.6 px at 4096) takes the light, never the distance: the choice reaches the band past it
+    let mut soft = wp.clone();
+    soft.set(P::Sharp as usize, 0.0);
+    let blurred = render_band_lit(&soft, w, &wet);
+    // (to a half float's step, but for a few texels at the choice's threshold: the blur's margin widens the scene the band
+    // is drawn in, which moves its arithmetic by an ulp; a blurred plane would move thousands, every edge of every layer)
+    let moved = wl.dist.iter().zip(&blurred.dist).filter(|(a, b)| (*a - *b).abs() > 0.005 * a.max(**b).max(1.0)).count();
+    assert!(blurred.texels != wl.texels && moved <= 20, "the blur moved {moved} texels' distance (or blurred nothing)");
+    println!("the puddles: {n_pud} texels show their ground, worst {:.3} % off its distance; {n_pud_lit} mirror windows that outshine them, the least distance over the light's x{worst_pud_lit:.4}", 100.0 * worst_pud);
+    assert!(n_dark > 1000 && worst_dark >= 0.99, "the sea's dark reflections: {n_dark} texels, the least x{worst_dark}");
+    assert!(n_pud > 1000 && worst_pud <= 0.05, "the puddles that show their ground: {n_pud} texels, worst {worst_pud}");
+    assert!(n_pud_lit > 20 && worst_pud_lit >= 0.99, "the puddles that mirror windows: {n_pud_lit} texels, the least x{worst_pud_lit}");
 }
