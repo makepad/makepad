@@ -858,7 +858,7 @@ fn request<R>(site: &'static std::panic::Location<'static>, class: Class, quick:
     // a front reader that must not wait (lowering ahead) gives the work back first; a back
     // end's finish is never refused (its slots stay in flight until it is served)
     if !class.is_finish() {
-        crate::jit::lower_ahead_needs_unit();
+        crate::jit::lower_ahead_needs_unit_at(site);
         crate::preempt::point();
     }
     start();

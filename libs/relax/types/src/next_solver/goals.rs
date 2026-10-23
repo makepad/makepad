@@ -16,7 +16,7 @@ impl EvalCtxt<'_, '_> {
             PredicateKind::Subtype(p) => self.compute_subtype_goal(env, p.a, p.b),
             PredicateKind::Coerce(p) => self.compute_subtype_goal(env, p.a, p.b),
             PredicateKind::Clause(ClauseKind::RegionOutlives(a, b)) => {
-                self.delegate.inner.borrow_mut().unwrap_region_constraints().make_subregion(&self.delegate.tcx.tys, b, a, true);
+                self.delegate.inner.borrow_mut().unwrap_region_constraints().make_subregion(&self.delegate.tcx.tys, crate::infer::region_constraints::SubregionOrigin::RelateRegionParamBound(self.delegate.origin_span.get()), b, a, true);
                 self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
             }
             PredicateKind::Clause(ClauseKind::TypeOutlives(ty, region)) => {

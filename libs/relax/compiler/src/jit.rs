@@ -1029,9 +1029,12 @@ unsafe fn install_prelinked_slot(up: *mut Unit, s: crate::cache::PrelinkedSlot, 
         let tier = if tier1 { " [O3]" } else if s.base { " [B]" } else if s.o2 { " [O2]" } else { " [O1]" };
         perf_map(s.at, s.len as usize, &format!("{}{}", perf_name(u, s.id), tier));
     }
-    // an instance or a closure (image slots are never foreign fns: their code is not stored):
-    // its call counter, armed with the others of the block (arm_counters)
-    if s.kind <= 1 {
+    // an instance, a closure or an unverified-mode twin (image slots are never foreign fns: their
+    // code is not stored): its call counter, armed with the others of the block (arm_counters), as
+    // arm_counter arms them. (A twin left out had no count stub and tier state 0, so neither its
+    // calls nor its loop counters could tier it up: a warm launch whose image held the previous
+    // run's unverified callers ran their twins' baseline code for the whole session, MICKEYGAP.)
+    if matches!(s.kind, 0 | 1 | 4) {
         arm.push((s.id, s.at));
     } else {
         u.frequency_profiles.remove(&s.id);
@@ -4686,6 +4689,9 @@ impl Unit {
                 LOWER_AHEAD_IDS.with(|x| x.borrow_mut().consts.push((d, args, a)));
                 return Some(a);
             }
+            if ahead_trace() {
+                eprintln!("ahead-lower: constant {} not evaluated yet", self.prog.def_path(d));
+            }
         }
         owner::call(owner::Class::Job, || unsafe { (&mut *self.self_ptr.0).const_addr(d, args) })
     }
@@ -4941,10 +4947,34 @@ impl Unit {
         }
     }
 
+    /// relax_types::const_eval::interp for a non-generic constant, static or anonymous constant of a
+    /// validated crate; false when it reported an error.
+    fn check_initializer(&mut self, d: DefId) -> bool {
+        use relax_types::const_eval::interp::{check_item, Outcome};
+        let def = self.prog.def(d);
+        if !self.prog.crates[def.krate as usize].validate || !matches!(def.kind, DefKind::Const | DefKind::Static | DefKind::AnonConst) { return true; }
+        match check_item(&self.prog, &self.tcx, d) {
+            Outcome::Error(span, msg) => {
+                let e = if msg.starts_with('E') { self.prog.record_error(span.file, span.lo, "typeck", msg) } else { self.prog.record_uncoded_error(span.file, span.lo, "typeck", msg) };
+                self.errors.push(e);
+                false
+            }
+            Outcome::Unsupported(why) => {
+                if std::env::var_os("MAKEPAD_RUN_INTERP_TRACE").is_some() { eprintln!("interp: {}: unsupported: {why}", self.prog.def_path(d)); }
+                true
+            }
+            Outcome::Ok => true,
+        }
+    }
+
     /// Runs the initializer of const/static `d` into `buf`.
     fn run_init(&mut self, d: DefId, args: Vec<TyId>, buf: u64) -> Option<u64> {
         owner::pure_note(owner::PURE_BG_EVAL);
         owner::forbid_in_publish("initializer", u32::MAX);
+        // `makepad check`: the check-mode interpreter first (rustc's CTFE undefined-behaviour,
+        // mutable-global and final-value checks; diagnostics only). An evaluation it rejects is not
+        // run here, as rustc stops at the error.
+        if self.prog.session.options.const_fuel && args.is_empty() && !self.check_initializer(d) { return None; }
         let _census_context = self.exec_context(false);
         let options = &self.prog.session.clone().options;
         // Initializers outside the CTFE subset already have cached executable
@@ -13728,6 +13758,9 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
     // candidates a round left out (their build needed fronts): tried once more after those fronts,
     // then left out of this snapshot (every round walks the whole frontier again)
     let left_out: std::cell::RefCell<HashMap<u32, u8>> = Default::default();
+    // a candidate's front could not be made off the owner: the take's later rounds leave the
+    // candidates that need fronts out of the snapshot instead of bailing (FRONTS_DONE)
+    let fronts_done = std::cell::Cell::new(false);
     // (instrument) what the last take of a split did with it: 1 gave back, 2 prepared, 3 skipped
     let split_out: std::cell::RefCell<HashMap<u32, u8>> = Default::default();
     let owner_fallback = |c: u32, upgrade: bool, split: bool| {
@@ -13753,6 +13786,15 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
     // a take (rule I-PUB): what needs a front the snapshot cannot hand back as `fronts` bails it
     // (the root's own front: fronted here once more; else the build is dropped)
     let taken = owner::publish_or_bail(|| {
+    // (the take runs on the owner: FRONTS_DONE is set there for this take only)
+    struct FrontsDone;
+    impl Drop for FrontsDone {
+        fn drop(&mut self) {
+            let _ = FRONTS_DONE.try_with(|f| f.set(false));
+        }
+    }
+    FRONTS_DONE.with(|f| f.set(fronts_done.get()));
+    let _fronts_done = FrontsDone;
     let r = (|| {
     let s0 = cpu_ns();
         trace_tier1_phase(id, "snapshot");
@@ -14145,10 +14187,17 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
             s
         }
         // the root's own front (its RIR was dropped since) or its O1 inline candidates': fronted
-        // here, all of them, and taken again (a slot needed again: lowering ahead refused it)
-        Err(b) if rounds < O3_TAKE_ROUNDS && !b.slots.is_empty() && b.slots.iter().all(|s| !fronted.contains(s)) && b.slots.iter().fold(true, |ok, &s| {
-            fronted.insert(s);
-            prefront_slot(&front, s) && ok
+        // here, all of them, and taken again. A candidate whose front cannot be made here (or that
+        // is needed again after it: lowering ahead refused it) is left out of the snapshot; only
+        // the root's own front failing drops the build. (Dropping the root for a candidate kept
+        // warm-image code -- every body without its checked body -- at baseline: MICKEYGAP.)
+        Err(b) if rounds < O3_TAKE_ROUNDS && !b.slots.is_empty() && b.slots.iter().fold(true, |ok, &s| {
+            let made = fronted.insert(s) && prefront_slot(&front, s);
+            if !made && s != id {
+                // from the next round on, a candidate needing a front is left out (bail_for_fronts)
+                fronts_done.set(true);
+            }
+            ok && (made || s != id)
         }) => {
             continue;
         }
@@ -17022,22 +17071,50 @@ fn prefront_slot(front: &FrontShared, id: u32) -> bool {
 fn prefront_closure(front: &FrontShared, id: u32) -> bool {
     let Some(key @ FnKey::Closure(cfile, _, parent)) = front.slot_keys.get(&id) else { return false };
     let up = front.unit.load(Ordering::Relaxed);
-    let Some(body) = owner::publish(|| unsafe { (&*up).body_of(parent, cfile).cloned() }) else {
-        PREFRONT_FAIL[AF_NO_PARENT as usize].fetch_add(1, Ordering::Relaxed);
-        return false;
-    };
+    let kept = owner::publish(|| unsafe { (&*up).body_of(parent, cfile).cloned() });
     if LOWERING_AHEAD.try_with(|a| a.get()).unwrap_or(true) {
         return false;
     }
     let _r = front_read("lower_ahead");
     let u = unsafe { &*up };
+    // the parent's checked body is gone (dropped once its own code was complete, or its code came
+    // from the disk cache): made again here, as lower_ahead_as makes an instance's. The closures of
+    // a parent built long ago are what turns hot later (a benchmark's or a frame's callback): their
+    // O3 builds bailed on this for the whole run and the closure ran baseline code
+    let body = match kept {
+        Some(b) => b,
+        None => {
+            let Some(FnKey::Inst(d, args)) = front.slot_keys.get(&parent) else {
+                PREFRONT_FAIL[AF_NO_PARENT as usize].fetch_add(1, Ordering::Relaxed);
+                return false;
+            };
+            let _preemptible = crate::preempt::Preemptible::on();
+            let _ = crate::program::take_missing();
+            let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::typeck::try_codegen_body(&u.prog, &u.tcx, d, &args)));
+            let missing = !crate::program::take_missing().is_empty();
+            match made {
+                Ok(Some(b)) if !missing && b.file == cfile => b,
+                Err(p) if !p.is::<crate::preempt::NeedsUnit>() && !crate::preempt::is_cancelled(&*p) => std::panic::resume_unwind(p),
+                _ => {
+                    PREFRONT_FAIL[AF_NO_PARENT as usize].fetch_add(1, Ordering::Relaxed);
+                    return false;
+                }
+            }
+        }
+    };
     let epoch = u.tcx.collect_epoch.load(Ordering::SeqCst);
     if !front.alive.load(Ordering::SeqCst) || !body.errors.is_empty() || !statics_ready(u, &body) {
+        if ahead_trace() {
+            eprintln!("ahead-lower of closure #{} not tried: alive {} body errors {} statics ready {}", id, front.alive.load(Ordering::SeqCst), body.errors.len(), statics_ready(u, &body));
+        }
         return false;
     }
     {
         let mut pending = front.lowered.lock().unwrap_or_else(|e| e.into_inner());
         if pending.contains_key(&id) {
+            if ahead_trace() {
+                eprintln!("ahead-lower of closure #{}: already {}", id, if pending.get(&id).is_some_and(|x| x.is_some()) { "lowered" } else { "pending/failed" });
+            }
             return pending.get(&id).is_some_and(|x| x.is_some());
         }
         pending.insert(id, None);
@@ -17061,7 +17138,11 @@ fn prefront_closure(front: &FrontShared, id: u32) -> bool {
             PREFRONT_FAIL[AF_NEEDS_UNIT as usize].fetch_add(1, Ordering::Relaxed);
             None
         }
-        _ => {
+        other => {
+            if ahead_trace() {
+                let why = match &other { Ok(Err(e)) => e.clone(), _ => "a callee or constant the lowering named is missing".to_string() };
+                eprintln!("ahead-lower of closure #{} made nothing: {}", id, why);
+            }
             PREFRONT_FAIL[AF_OTHER as usize].fetch_add(1, Ordering::Relaxed);
             None
         }
@@ -17139,6 +17220,12 @@ fn bail_for_fronts(mut needs: Vec<u32>) {
     if !owner::bailing() {
         return;
     }
+    // the take's thread made what it could: candidates that still need a front stay out of the
+    // snapshot (not inlined: called), the root's build goes on (rule I-PURE)
+    if FRONTS_DONE.with(|f| f.get()) {
+        let _ = owner::take_needs();
+        return;
+    }
     for s in owner::take_needs() {
         if !needs.contains(&s) {
             needs.push(s);
@@ -17153,6 +17240,9 @@ fn bail_for_fronts(mut needs: Vec<u32>) {
 const NEEDS_FRONT: &str = "makepad-run: needs a front off the owner";
 
 thread_local! {
+    /// (inside an O3 build's take, on the owner) the build's thread could not make a candidate's
+    /// front: candidates that need fronts are left out instead of bailing the take
+    static FRONTS_DONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// collect_fronts nesting: a preparation inside one fails as not built when it needs a front
     static COLLECTING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     /// prepare_rir_from's own lowering (build_rir_inner) runs: a front it needs inside a take is
@@ -17659,8 +17749,17 @@ pub(crate) fn lower_ahead_fn_key(id: u32) -> Option<FnKey> {
 /// NeedsUnit is a cancellation: a constant evaluation it crosses (the solver normalizing an
 /// array length) is not cached as that constant's failure.
 #[inline]
+#[track_caller]
 pub(crate) fn lower_ahead_needs_unit() {
+    lower_ahead_needs_unit_at(std::panic::Location::caller());
+}
+
+/// lower_ahead_needs_unit for the site that asked (an owner request's caller)
+pub(crate) fn lower_ahead_needs_unit_at(site: &'static std::panic::Location<'static>) {
     if LOWERING_AHEAD.try_with(|a| a.get()).unwrap_or(false) {
+        if ahead_trace() {
+            eprintln!("ahead-lower needs the unit at {}", site);
+        }
         std::panic::resume_unwind(Box::new(crate::preempt::NeedsUnit));
     }
 }
@@ -17774,7 +17873,7 @@ fn lower_ahead_as(u: &Unit, into: u32, base: u32, d: DefId, args: &[TyId], epoch
                 owner::pure_note(owner::PURE_AHEAD_BAIL);
                 Err(AF_NEEDS_UNIT)
             } else {
-                if std::env::var_os("MAKEPAD_RUN_AHEAD_TRACE").is_some() {
+                if ahead_trace() {
                     eprintln!("ahead-lower panic: {}", u.prog.def_path(d));
                 }
                 Err(AF_OTHER)
@@ -17876,12 +17975,20 @@ fn take_lowered_ahead(u: &mut Unit, id: u32) -> Option<relax_backend::rir::Func>
     }
     // a closure lowered off the owner (prefront_closure): from the body its parent has now, and
     // the closure identity the disk cache's links agree with
+    // (a parent whose body was gone: prefront_closure made it again for this epoch -- the epoch is
+    // checked above -- and it is the parent's body from now on)
     if let FnKey::Closure(cfile, ce, parent) = u.fns[id as usize].key {
-        let same = lowered.body.as_ref().is_some_and(|b| u.body_of(parent, cfile).is_some_and(|p| std::sync::Arc::ptr_eq(p, b)));
+        let Some(b) = lowered.body.take() else { return None };
+        let same = match u.body_of(parent, cfile) {
+            Some(p) => std::sync::Arc::ptr_eq(p, &b),
+            None => b.file == cfile && (parent as usize) < u.fns.len(),
+        };
         if !same || !crate::cache::closure_identity_ok(u, cfile, ce) {
             return None;
         }
-        lowered.body = None;
+        if u.body_of(parent, cfile).is_none() {
+            u.put_body(parent, b);
+        }
     }
     AHEAD_STATS[6].fetch_add(1, Ordering::Relaxed);
     if let FnKey::Inst(d, args) = &u.fns[id as usize].key {

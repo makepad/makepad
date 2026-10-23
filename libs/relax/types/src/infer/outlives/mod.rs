@@ -12,8 +12,6 @@ impl InferCtxt<'_> {
     /// outlives/mod.rs:43-96: consumes region storage; only resolution is legal afterward.
     pub fn resolve_regions_with_outlives_env(&self, prog: &Program, env: &env::OutlivesEnvironment) -> Vec<RegionResolutionError> {
         assert!(!self.in_snapshot());
-        let mut delegate = self;
-        let mut outlives = obligations::TypeOutlives::new(&mut delegate, self.tcx, prog, &env.region_bound_pairs, None, &env.known_type_outlives);
         loop {
             let obligations = std::mem::take(&mut self.inner.borrow_mut().region_obligations);
             if obligations.is_empty() { break; }
@@ -22,10 +20,12 @@ impl InferCtxt<'_> {
                 let mut resolver = super::resolve::DeepVariableResolver::new(self);
                 let ty = resolver.fold_ty(&self.tcx.tys, ty, 0);
                 let region = resolver.fold_region(&self.tcx.tys, region, 0);
-                outlives.type_must_outlive(ty, region, crate::borrowck::constraints::ConstraintCategory::Boring);
+                // obligations.rs register_type_outlives_constraint: SubregionOrigin::RelateParamBound(span, sup_type)
+                let mut delegate = obligations::LexicalOutlives { infcx: self, origin: super::region_constraints::SubregionOrigin::RelateParamBound(span, ty) };
+                obligations::TypeOutlives::new(&mut delegate, self.tcx, prog, &env.region_bound_pairs, None, &env.known_type_outlives)
+                    .type_must_outlive(ty, region, crate::borrowck::constraints::ConstraintCategory::Boring);
             }
         }
-        drop(outlives);
         let storage = self.inner.borrow_mut().region_constraint_storage.take().expect("regions already resolved");
         let mut constraints = Vec::new();
         for mut c in storage.constraints {

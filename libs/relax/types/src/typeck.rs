@@ -1746,7 +1746,10 @@ impl<'a> Fcx<'a> {
             }
             _ => {}
         }
-        if let Some(target) = self.unify_coercion(actual, expected, use_lub, false) {
+        // coercion.rs coerce_from_fn_pointer: a function pointer is unified with the leak check
+        // forced (`fn(&'x T)` is not a `for<'a> fn(&'a T)`: "one type is more general than the other")
+        let fn_pointer = matches!(ka, TyKind::FnPtr(..));
+        if let Some(target) = self.unify_coercion(actual, expected, use_lub, fn_pointer) {
             return Some(target);
         }
         None

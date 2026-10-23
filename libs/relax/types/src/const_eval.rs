@@ -133,3 +133,4 @@ pub fn evaluation_error() -> ErrorHandled {
 
 #[cfg(test)]
 mod tests;
+pub mod interp;

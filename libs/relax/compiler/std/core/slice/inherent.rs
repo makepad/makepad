@@ -372,7 +372,10 @@ impl<T> [T] {
     {
         self.is_sorted_by(|a, b| a <= b)
     }
-    pub fn is_sorted_by<F: FnMut(&T, &T) -> bool>(&self, compare: F) -> bool {
+    pub fn is_sorted_by<'a, F>(&'a self, compare: F) -> bool
+    where
+        F: FnMut(&'a T, &'a T) -> bool,
+    {
         let mut compare = compare;
         let mut i = 1;
         while i < self.len() {
@@ -383,7 +386,11 @@ impl<T> [T] {
         }
         true
     }
-    pub fn is_sorted_by_key<K: PartialOrd, F: FnMut(&T) -> K>(&self, f: F) -> bool {
+    pub fn is_sorted_by_key<'a, F, K>(&'a self, f: F) -> bool
+    where
+        F: FnMut(&'a T) -> K,
+        K: PartialOrd,
+    {
         let mut f = f;
         let mut i = 1;
         while i < self.len() {

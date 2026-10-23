@@ -64,7 +64,7 @@ impl<'tcx> TypeRelation<'tcx> for ResponseRelating<'_, 'tcx> {
     fn regions(&mut self, a: RegionId, b: RegionId) -> Result<RegionId, TypeError> {
         // Bound variables in response binders have already been matched by the
         // query; avoid passing identical bound regions to the region collector.
-        if a != b { self.infcx.inner.borrow_mut().unwrap_region_constraints().make_eqregion(&self.infcx.tcx.tys, a, b, true); }
+        if a != b { self.infcx.inner.borrow_mut().unwrap_region_constraints().make_eqregion(&self.infcx.tcx.tys, crate::infer::region_constraints::SubregionOrigin::RelateRegionParamBound(self.infcx.origin_span.get()), a, b, true); }
         Ok(a)
     }
     fn binders(&mut self, a: TyId, b: TyId) -> Result<TyId, TypeError> { relate_fn_sig(self, a, b) }
@@ -142,8 +142,8 @@ pub fn instantiate_and_apply_query_response(infcx: &InferCtxt<'_>, prog: &crate:
     relate_args(&mut relation, original, &response.var_values).expect("invalid canonical response");
     for (constraint, _) in response.external_constraints.region_constraints {
         match constraint {
-            RegionConstraint::RegionOutlives(a, b) => infcx.inner.borrow_mut().unwrap_region_constraints().make_subregion(&infcx.tcx.tys, b, a, false),
-            RegionConstraint::Eq(a, b) => infcx.inner.borrow_mut().unwrap_region_constraints().make_eqregion(&infcx.tcx.tys, a, b, false),
+            RegionConstraint::RegionOutlives(a, b) => infcx.inner.borrow_mut().unwrap_region_constraints().make_subregion(&infcx.tcx.tys, crate::infer::region_constraints::SubregionOrigin::RelateRegionParamBound(infcx.origin_span.get()), b, a, false),
+            RegionConstraint::Eq(a, b) => infcx.inner.borrow_mut().unwrap_region_constraints().make_eqregion(&infcx.tcx.tys, crate::infer::region_constraints::SubregionOrigin::RelateRegionParamBound(infcx.origin_span.get()), a, b, false),
             RegionConstraint::TypeOutlives(ty, region) => infcx.register_ty_outlives(ty, region),
         }
     }

@@ -99,6 +99,45 @@ pub fn reg_config() -> RegConfig {
         mem_operands: false,
         remat_cost: arm64_remat_cost,
         float_windows: true,
+        defers: arm64_defers,
+    }
+}
+
+/// RegConfig::defers: the pairs the block loop emits at the second instruction's position --
+/// a constant shift into the next add / sub / and / orr / eor (shifted_operand), a 64-bit multiply
+/// into the next add / sub or indexed access (mul_add), a byte / bit reverse into the next
+/// right shift by 32 / 48 (narrow_bswap), and `t = x & K; c = t ==/!= 0` before a branch on c (the
+/// tst). The first result is read only by the second. The emitter's own conditions (flags, bounds,
+/// operand locations) only narrow these shapes; the loop asks this before each deferral.
+fn arm64_defers(b: &Block, k: usize, uses: &[u32]) -> bool {
+    let n = b.insts.len();
+    if k + 1 >= n {
+        return false;
+    }
+    let once = |t: VReg| uses[t.0 as usize] == 1;
+    let next = &b.insts[k + 1];
+    match b.insts[k] {
+        Inst::IBinI(IOp::Shl | IOp::Shr, it, t, _, sh) if it.bits == 64 && (1..64).contains(&sh) && once(t) => match *next {
+            Inst::IBin(IOp::Add | IOp::Sub | IOp::And | IOp::Or | IOp::Xor, it, _, x, y) if it.bits == 64 && y == t && x != t => true,
+            Inst::IBin(IOp::Add | IOp::And | IOp::Or | IOp::Xor, it, _, x, y) if it.bits == 64 && x == t && y != t => true,
+            _ => false,
+        },
+        Inst::IBin(IOp::Mul, it, t, a, m) if it.bits == 64 && a != t && m != t && once(t) => mul_add_next(t, next),
+        Inst::IBinI(IOp::Mul, it, t, a, _) if it.bits == 64 && a != t && once(t) => mul_add_next(t, next),
+        Inst::IBit(BitOp::Bswap | BitOp::Rev, t, _) if once(t) => matches!(*next, Inst::IBinI(IOp::Shr, it, _, x, 32 | 48) if x == t && it.bits == 64 && !it.signed),
+        Inst::IBinI(IOp::And, _, t, x, _) if k + 2 == n && x != t && once(t) => matches!((next, &b.term), (Inst::ICmpI(Cond::Eq | Cond::Ne, _, c, t2, 0), Term::Branch(c2, _, _)) if *t2 == t && c == c2 && once(*c)),
+        _ => false,
+    }
+}
+
+/// mul_add's second instructions for a product t
+fn mul_add_next(t: VReg, next: &Inst) -> bool {
+    match *next {
+        Inst::LoadX(_, _, base, x, 0, _) => x == t && base != t,
+        Inst::StoreX(_, base, x, 0, _, src) => x == t && base != t && src != t,
+        Inst::IBin(IOp::Add, it, _, x, y) => it.bits == 64 && (x == t) != (y == t),
+        Inst::IBin(IOp::Sub, it, _, x, y) => it.bits == 64 && y == t && x != t,
+        _ => false,
     }
 }
 
@@ -1307,7 +1346,7 @@ impl<'a> Gen<'a> {
             let mut test_pair = false;
             if fused && n >= 2 {
                 if let (Inst::IBinI(IOp::And, it, t, x, k), Inst::ICmpI(Cond::Eq | Cond::Ne, _, _, t2, 0)) = (&b.insts[n - 2], &b.insts[n - 1]) {
-                    if t == t2 && *x != *t && self.al.uses[t.0 as usize] == 1 && (it.bits == 64 || (0..1i64 << 32).contains(k)) && bitmask_imm(*k as u64).is_some() {
+                    if t == t2 && *x != *t && self.al.uses[t.0 as usize] == 1 && (it.bits == 64 || (0..1i64 << 32).contains(k)) && bitmask_imm(*k as u64).is_some() && arm64_defers(b, n - 2, &self.al.uses) {
                         self.test_fuse = Some((*x, *k));
                         test_pair = true;
                     }
@@ -1412,7 +1451,7 @@ impl<'a> Gen<'a> {
                     // register operand form (`eor d, a, b, lsl #13`); a 64-bit byte swap whose only
                     // use shifts the low half back down: the 32-bit forms (u32 / u16
                     // from_be_bytes: rev w; rev16 w). Emitted with the next instruction (above).
-                    if self.shifted_operand(options, inst, &b.insts[ii + 1], false).is_some() || self.narrow_bswap(options, inst, &b.insts[ii + 1], false).is_some() || self.mul_add(options, inst, &b.insts[ii + 1], false).is_some() {
+                    if arm64_defers(b, ii, &self.al.uses) && (self.shifted_operand(options, inst, &b.insts[ii + 1], false).is_some() || self.narrow_bswap(options, inst, &b.insts[ii + 1], false).is_some() || self.mul_add(options, inst, &b.insts[ii + 1], false).is_some()) {
                         deferred = Some(ii);
                         continue;
                     }

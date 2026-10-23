@@ -73,10 +73,12 @@ impl<'tcx> TypeRelation<'tcx> for SolverRelating<'_, 'tcx> {
         let mut inner = self.infcx.inner.borrow_mut();
         let mut regions = inner.unwrap_region_constraints();
         let tys = &self.infcx.tcx.tys;
+        // (the solver delegate's sub_regions / equate_regions: RelateRegionParamBound(span))
+        let origin = crate::infer::region_constraints::SubregionOrigin::RelateRegionParamBound(self.infcx.origin_span.get());
         match self.ambient_variance {
-            V::Co => regions.make_subregion(tys, b, a, true),
-            V::Contra => regions.make_subregion(tys, a, b, true),
-            V::Inv => regions.make_eqregion(tys, a, b, true),
+            V::Co => regions.make_subregion(tys, origin, b, a, true),
+            V::Contra => regions.make_subregion(tys, origin, a, b, true),
+            V::Inv => regions.make_eqregion(tys, origin, a, b, true),
             V::Bi => {},
         }
         Ok(a)

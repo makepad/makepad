@@ -166,7 +166,7 @@ impl<'a> InferCtxt<'a> {
         self.next_nll_region_var_in_universe(origin, self.universe())
     }
     pub fn next_nll_region_var_in_universe(&self, origin: crate::borrowck::region_infer::NllRegionVariableOrigin, universe: UniverseIndex) -> RegionId {
-        self.inner.borrow_mut().unwrap_region_constraints().new_region_var_with_origin(&self.tcx.tys, universe, region_constraints::RegionVariableOrigin::Nll(origin))
+        self.inner.borrow_mut().unwrap_region_constraints().new_region_var_with_origin(&self.tcx.tys, universe, region_constraints::RegionVariableOrigin::Nll(origin), self.origin_span.get())
     }
     pub fn num_region_vars(&self) -> usize { self.inner.borrow_mut().unwrap_region_constraints().num_region_vars() }
     pub fn region_var_origin(&self, vid: u32) -> region_constraints::RegionVariableOrigin { self.inner.borrow_mut().unwrap_region_constraints().var_origin(vid) }
@@ -181,7 +181,7 @@ impl<'a> InferCtxt<'a> {
         self.inner.borrow_mut().unwrap_region_constraints().take_and_reset_data()
     }
     pub fn next_region_var_in_universe(&self, universe: UniverseIndex) -> RegionId {
-        self.inner.borrow_mut().unwrap_region_constraints().new_region_var(&self.tcx.tys, universe)
+        self.inner.borrow_mut().unwrap_region_constraints().new_region_var(&self.tcx.tys, universe, self.origin_span.get())
     }
 }
 

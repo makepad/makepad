@@ -23,7 +23,8 @@ fn rpitit_free_lifetime_outlives_requires_declared_bound() {
         let predicates = if positive { vec![Predicate::dummy(PredicateKind::Clause(ClauseKind::RegionOutlives(b, a)))] } else { vec![] };
         let errors = infcx.resolve_regions_with_outlives_env(&prog, &environment(&tcx, predicates));
         if positive { assert!(errors.is_empty(), "{errors:?}"); }
-        else { assert_eq!(errors, vec![RegionResolutionError::ConcreteFailure(a, b)]); }
+        // (a component of `&'b u32: 'a`: register_type_outlives_constraint's RelateParamBound origin)
+        else { assert_eq!(errors, vec![RegionResolutionError::ConcreteFailure(crate::infer::region_constraints::SubregionOrigin::RelateParamBound(0, ty), a, b)]); }
     }
 }
 #[test]
@@ -34,7 +35,7 @@ fn region_graph_resolves_nested_type_after_lower_bound_propagation() {
     let x = infcx.next_region_var(); let y = infcx.next_region_var();
     {
         let mut inner = infcx.inner.borrow_mut(); let mut c = inner.unwrap_region_constraints();
-        c.make_subregion(&tcx.tys, x, y, false); c.make_subregion(&tcx.tys, a, x, false); c.make_subregion(&tcx.tys, y, a, false);
+        c.make_subregion(&tcx.tys, crate::infer::region_constraints::SubregionOrigin::Misc, x, y, false); c.make_subregion(&tcx.tys, crate::infer::region_constraints::SubregionOrigin::Misc, a, x, false); c.make_subregion(&tcx.tys, crate::infer::region_constraints::SubregionOrigin::Misc, y, a, false);
     }
     let ty = tcx.tys.intern(TyKind::Ref(false, tcx.tys.bool_, y));
     assert!(infcx.resolve_regions_with_outlives_env(&prog, &environment(&tcx, vec![])).is_empty());
@@ -46,8 +47,8 @@ fn incompatible_upper_bound_is_rejected_even_without_type_obligation() {
     let infcx = InferCtxt::new(&tcx, TypingMode::PostAnalysis, Default::default());
     let a = tcx.tys.intern_region(RegionKind::ReEarlyParam(0)); let b = tcx.tys.intern_region(RegionKind::ReEarlyParam(1));
     let x = infcx.next_region_var();
-    { let mut inner = infcx.inner.borrow_mut(); let mut c = inner.unwrap_region_constraints(); c.make_subregion(&tcx.tys, a, x, false); c.make_subregion(&tcx.tys, x, b, false); }
-    assert_eq!(infcx.resolve_regions_with_outlives_env(&prog, &environment(&tcx, vec![])), vec![RegionResolutionError::SubSupConflict(0, a, b)]);
+    { let mut inner = infcx.inner.borrow_mut(); let mut c = inner.unwrap_region_constraints(); c.make_subregion(&tcx.tys, crate::infer::region_constraints::SubregionOrigin::Misc, a, x, false); c.make_subregion(&tcx.tys, crate::infer::region_constraints::SubregionOrigin::Misc, x, b, false); }
+    assert_eq!(infcx.resolve_regions_with_outlives_env(&prog, &environment(&tcx, vec![])), vec![RegionResolutionError::SubSupConflict(0, 0, crate::infer::region_constraints::SubregionOrigin::Misc, a, crate::infer::region_constraints::SubregionOrigin::Misc, b)]);
 }
 #[test]
 fn generic_outlives_uses_disjunction_and_higher_ranked_bounds() {

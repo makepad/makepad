@@ -306,16 +306,18 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
             // E0004 / E0005 and the pattern lints (rustc check_match: its errors stop the body
             // before borrowck); an internal failure of the analysis reports nothing
             let pats = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| relax_types::pattern_analysis::check_body(prog, tcx, &body)));
+            // (binding conflicts of `x @ pat` do not end the checks: borrowck runs after them)
+            let mut at_patterns = Vec::new();
             match pats {
-                Ok(e) if !e.is_empty() => return (e, Vec::new()),
-                Ok(_) => {}
+                Ok(r) if !r.errors.is_empty() => { let mut e = r.errors; e.extend(r.at_patterns); return (e, Vec::new()) }
+                Ok(r) => at_patterns = r.at_patterns,
                 Err(p) if p.is::<crate::preempt::NeedsLoad>() || crate::preempt::is_preempted(&*p) => std::panic::resume_unwind(p),
                 Err(_) => {
                     if std::env::var_os("MAKEPAD_RUN_CHECK_TRACE").is_some() { std::eprintln!("makepad check: pattern analysis failed in {}", prog.def_path(d)); }
                 }
             }
             if !crate::borrowck::enabled(options) {
-                return (Vec::new(), Vec::new());
+                return (at_patterns, Vec::new());
             }
             let v = crate::borrowck::check_body(&crate::tcx::EvalCx::new(prog, tcx, crate::tcx::TypingEnv::fully_monomorphized(prog), &crate::tcx::EvalState::new()), prog, tcx, &body);
             crate::borrowck::note_verdict(&v);
@@ -324,7 +326,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
             }
             let args: Vec<_> = if owner.kind == crate::borrowck::body::BodyKind::Function && !generic { Vec::new() } else { body.args.to_vec() };
             let diags = crate::borrowck::lazy::report_checked(prog, 0, tcx.collect_epoch.load(std::sync::atomic::Ordering::SeqCst), d, &args, v.errors, crate::borrowck::event::Origin::Check).iter().map(|e| e.error.to_diagnostic()).collect();
-            (Vec::new(), diags)
+            (at_patterns, diags)
             };
             let (mut errs, diags) = inner();
             errs.extend(gates);

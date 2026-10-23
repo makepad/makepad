@@ -84,14 +84,16 @@ impl<'a> TypeOutlives<'a> {
     }
 }
 
-/// obligations.rs:720.
-impl TypeOutlivesDelegate for &InferCtxt<'_> {
-    fn delayed_bug(&mut self, message: String) { self.errors.delayed_bug(self.cause, message); }
+/// obligations.rs:720 (`impl TypeOutlivesDelegate for &InferCtxt`): the constraints of one region
+/// obligation, all with that obligation's origin.
+pub struct LexicalOutlives<'a, 'b> { pub infcx: &'a InferCtxt<'b>, pub origin: crate::infer::region_constraints::SubregionOrigin }
+impl TypeOutlivesDelegate for LexicalOutlives<'_, '_> {
+    fn delayed_bug(&mut self, message: String) { self.infcx.errors.delayed_bug(self.infcx.cause, message); }
     fn push_sub_region_constraint(&mut self, a: RegionId, b: RegionId, _category: ConstraintCategory) {
         // We don't do leak check in lexical region resolution.
-        self.inner.borrow_mut().unwrap_region_constraints().make_subregion(&self.tcx.tys, a, b, false);
+        self.infcx.inner.borrow_mut().unwrap_region_constraints().make_subregion(&self.infcx.tcx.tys, self.origin, a, b, false);
     }
     fn push_verify(&mut self, ty: TyId, region: RegionId, bound: VerifyBound) {
-        self.inner.borrow_mut().unwrap_region_constraints().verify_generic_bound(Verify { ty, region, bound, span: self.origin_span.get() });
+        self.infcx.inner.borrow_mut().unwrap_region_constraints().verify_generic_bound(Verify { ty, region, bound, span: self.origin.span() });
     }
 }

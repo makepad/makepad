@@ -923,7 +923,36 @@ pub fn reg_config(options: &relax_session::Options) -> RegConfig {
         int_caller.push(RCX);
         int_caller.push(RDX);
     }
-    RegConfig { int_caller, int_callee: CALLEE_SAVED.to_vec(), flt_caller: flt, flt_callee: Vec::new(), slot_index_free: true, clobbers: Some(x64_clobbers), sym_class: 0, store_imm: |k| k == k as i32 as i64, fconst_remat: false, mem_operands: true, remat_cost: |_| 1, float_windows: false }
+    RegConfig { int_caller, int_callee: CALLEE_SAVED.to_vec(), flt_caller: flt, flt_callee: Vec::new(), slot_index_free: true, clobbers: Some(x64_clobbers), sym_class: 0, store_imm: |k| k == k as i32 as i64, fconst_remat: false, mem_operands: true, remat_cost: |_| 1, float_windows: false, defers: x64_defers }
+}
+
+/// RegConfig::defers: the instructions the block loop emits at the next one's position -- a
+/// compare whose one use is the next select (flags + cmov), a float load into the next AVX float op
+/// / fma / insert as its memory operand, and before a branch on c: `t = x & K; c = t ==/!= 0`
+/// (test), `t = load [p + o]; c = t cmp K` (cmp [p + o], K), `s = m >> t; c = s & 1` (bt). The
+/// first result is read only by the second. The emitter's own conditions only narrow these
+/// shapes; the loop asks this before each deferral.
+fn x64_defers(b: &Block, k: usize, uses: &[u32]) -> bool {
+    let n = b.insts.len();
+    if k + 1 >= n {
+        return false;
+    }
+    let once = |t: VReg| uses[t.0 as usize] == 1;
+    let next = &b.insts[k + 1];
+    let branch_on = |c: VReg| matches!(b.term, Term::Branch(c2, _, _) if c2 == c) && once(c) && k + 2 == n;
+    match b.insts[k] {
+        Inst::ICmp(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) if once(d) => matches!(*next, Inst::Sel(_, c, _, _) if c == d),
+        Inst::Load(Mem::F32 | Mem::F64, t, _, _) if once(t) => match *next {
+            Inst::FBin(_, _, _, x, y) => (x == t) != (y == t),
+            Inst::FMulAdd(_, _, _, _, a, b2, c) => b2 != t && (a == t) != (c == t),
+            Inst::VInsert(_, _, _, s2) => s2 == t,
+            _ => false,
+        },
+        Inst::IBinI(IOp::And, _, t, x, _) if x != t && once(t) => matches!(*next, Inst::ICmpI(Cond::Eq | Cond::Ne, _, c, t2, 0) if t2 == t && branch_on(c)),
+        Inst::Load(Mem::Int(..), t, base, _) if base != t && once(t) => matches!(*next, Inst::ICmpI(_, _, c, t2, _) if t2 == t && branch_on(c)),
+        Inst::IBin(IOp::Shr, it, s, m, t) if it.bits == 64 && !it.signed && m != s && t != s && once(s) => matches!(*next, Inst::IBinI(IOp::And, _, d, s2, 1) if s2 == s && branch_on(d)),
+        _ => false,
+    }
 }
 
 // ------------------------------------------------------------ code generation
@@ -1590,7 +1619,7 @@ impl<'a> Gen<'a> {
                     // negative imm32 is sign-extended by the 64-bit form, so only for 64-bit values
                     // (a narrower value's mask must not reach its upper bits)
                     let ok = (0..=u32::MAX as i64).contains(k) || (it.bits == 64 && (i32::MIN as i64..0).contains(k));
-                    if t == t2 && *x != *t && self.al.uses[t.0 as usize] == 1 && ok {
+                    if t == t2 && *x != *t && self.al.uses[t.0 as usize] == 1 && ok && x64_defers(b, n - 2, &self.al.uses) {
                         self.test_fuse = Some((*x, *k));
                     }
                 }
@@ -1599,7 +1628,7 @@ impl<'a> Gen<'a> {
             self.load_fuse = None;
             if fused && n >= 2 && self.test_fuse.is_none() {
                 if let (Inst::Load(Mem::Int(sz, sx), t, base, off), Inst::ICmpI(cond, signed, _, t2, k)) = (&b.insts[n - 2], &b.insts[n - 1]) {
-                    if t == t2 && base != t && self.al.uses[t.0 as usize] == 1 && load_cmp_fits(*sz, *sx, *cond, *signed, *k) {
+                    if t == t2 && base != t && self.al.uses[t.0 as usize] == 1 && load_cmp_fits(*sz, *sx, *cond, *signed, *k) && x64_defers(b, n - 2, &self.al.uses) {
                         self.load_fuse = Some((*base, *off, *sz, *k));
                     }
                 }
@@ -1608,7 +1637,7 @@ impl<'a> Gen<'a> {
             self.bt_fuse = None;
             if !fused && n >= 2 {
                 if let (Term::Branch(c, _, _), Inst::IBin(IOp::Shr, it, s, m, t), Inst::IBinI(IOp::And, _, d, s2, 1)) = (&b.term, &b.insts[n - 2], &b.insts[n - 1]) {
-                    if d == c && s == s2 && it.bits == 64 && !it.signed && m != s && t != s && self.al.uses[c.0 as usize] == 1 && self.al.uses[s.0 as usize] == 1 {
+                    if d == c && s == s2 && it.bits == 64 && !it.signed && m != s && t != s && self.al.uses[c.0 as usize] == 1 && self.al.uses[s.0 as usize] == 1 && x64_defers(b, n - 2, &self.al.uses) {
                         self.bt_fuse = Some((*m, *t));
                     }
                 }
@@ -1671,7 +1700,7 @@ impl<'a> Gen<'a> {
                             Inst::FCmp(..) => matches!(data, Cls::F32 | Cls::F64),
                             _ => false,
                         };
-                        if *sc == cd && self.al.uses[cd.0 as usize] == 1 && ok {
+                        if *sc == cd && self.al.uses[cd.0 as usize] == 1 && ok && x64_defers(b, ii, &self.al.uses) {
                             self.sel_cmp = Some(inst.clone());
                             continue;
                         }
@@ -1717,7 +1746,7 @@ impl<'a> Gen<'a> {
                             Inst::VInsert(_, _, _, s2) => !w && s2 == t,
                             _ => false,
                         };
-                        if ok {
+                        if ok && x64_defers(b, ii, &self.al.uses) {
                             self.mem_load = Some((*t, *base, *off));
                             continue;
                         }

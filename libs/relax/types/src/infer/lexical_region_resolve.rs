@@ -1,6 +1,6 @@
 // ported from N:rustc_infer/src/infer/lexical_region_resolve/mod.rs @8d1a764
 use super::free_regions::RegionRelations;
-use super::region_constraints::{Constraint, ConstraintKind, RegionVariableInfo};
+use super::region_constraints::{Constraint, ConstraintKind, RegionVariableInfo, SubregionOrigin};
 use super::outlives::verify::{Verify, VerifyBound};
 use crate::types::{RegionId, RegionKind, TyId, Types, UniverseIndex};
 use crate::types::fold::TypeFolder;
@@ -8,10 +8,14 @@ use std::collections::HashSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegionResolutionError {
-    ConcreteFailure(RegionId, RegionId),
+    /// `sub <= sup` between two concrete regions does not hold
+    ConcreteFailure(SubregionOrigin, RegionId, RegionId),
     GenericBoundFailure(TyId, RegionId, u32),
-    SubSupConflict(u32, RegionId, RegionId),
-    UpperBoundUniverseConflict(u32, UniverseIndex, RegionId),
+    /// variable `vid` (created at `var_span`) has a lower bound that is not below one of its upper
+    /// bounds: (vid, var_span, sub_origin, sub_r, sup_origin, sup_r)
+    SubSupConflict(u32, u32, SubregionOrigin, RegionId, SubregionOrigin, RegionId),
+    /// (vid, var_span, universe, sup_origin, sup_r)
+    UpperBoundUniverseConflict(u32, u32, UniverseIndex, SubregionOrigin, RegionId),
 }
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum VarValue { Empty(UniverseIndex), Value(RegionId), ErrorValue }
@@ -124,7 +128,7 @@ impl LexicalResolver<'_> {
     fn collect_errors(&self, values: &mut LexicalRegionResolutions, errors: &mut Vec<RegionResolutionError>) {
         for c in &self.constraints {
             match c.kind {
-                ConstraintKind::RegSubReg if !self.region_rels.sub_concrete_regions(c.sub, c.sup) => errors.push(RegionResolutionError::ConcreteFailure(c.sub, c.sup)),
+                ConstraintKind::RegSubReg if !self.region_rels.sub_concrete_regions(c.sub, c.sup) => errors.push(RegionResolutionError::ConcreteFailure(c.origin, c.sub, c.sup)),
                 ConstraintKind::VarSubReg => {
                     let vid = self.vid(c.sub);
                     if let VarValue::Value(r) = values.values[vid] {
@@ -156,7 +160,7 @@ impl LexicalResolver<'_> {
             }
         }
     }
-    fn collect_bounding_regions(&self, start: usize, incoming: bool, duplicates: &mut [Option<usize>]) -> (Vec<RegionId>, Vec<usize>, bool) {
+    fn collect_bounding_regions(&self, start: usize, incoming: bool, duplicates: &mut [Option<usize>]) -> (Vec<(RegionId, SubregionOrigin)>, Vec<usize>, bool) {
         let mut visited = HashSet::new(); let mut stack = vec![start]; let mut regions = Vec::new(); let mut vars = Vec::new(); let mut duplicate = false;
         visited.insert(start);
         while let Some(vid) = stack.pop() {
@@ -168,8 +172,8 @@ impl LexicalResolver<'_> {
                         let (a, b) = if incoming { (self.vid(c.sup), self.vid(c.sub)) } else { (self.vid(c.sub), self.vid(c.sup)) };
                         if a == vid && visited.insert(b) { stack.push(b); }
                     }
-                    ConstraintKind::RegSubVar if incoming && self.vid(c.sup) == vid => regions.push(c.sub),
-                    ConstraintKind::VarSubReg if !incoming && self.vid(c.sub) == vid => regions.push(c.sup),
+                    ConstraintKind::RegSubVar if incoming && self.vid(c.sup) == vid => regions.push((c.sub, c.origin)),
+                    ConstraintKind::VarSubReg if !incoming && self.vid(c.sub) == vid => regions.push((c.sup, c.origin)),
                     _ => {},
                 }
             }
@@ -184,21 +188,22 @@ impl LexicalResolver<'_> {
             let (mut upper, _, ud) = self.collect_bounding_regions(vid, false, &mut duplicates);
             if ld || ud { continue; }
             // lexical_region_resolve/mod.rs:715-723: stable diagnostic preference.
-            let key = |r: &RegionId| match self.region_rels.tys.region_kind(*r) { RegionKind::ReEarlyParam(_) => 0, RegionKind::ReLateParam(..) => 1, _ => 2 };
+            let key = |(r, _): &(RegionId, SubregionOrigin)| match self.region_rels.tys.region_kind(*r) { RegionKind::ReEarlyParam(_) => 0, RegionKind::ReLateParam(..) => 1, _ => 2 };
             lower.sort_by_key(key); upper.sort_by_key(key);
             let mut found = false;
-            'bounds: for &a in &lower {
+            let var_span = self.var_infos[vid].span;
+            'bounds: for &(a, a_origin) in &lower {
                 let effective = match self.region_rels.tys.region_kind(a) {
                     RegionKind::RePlaceholder { universe, .. } if !self.var_infos[vid].universe.can_name(universe) => self.region_rels.tys.intern_region(RegionKind::ReStatic), _ => a,
                 };
-                for &b in &upper { if !self.region_rels.sub_concrete_regions(effective, b) { errors.push(RegionResolutionError::SubSupConflict(vid as u32, a, b)); found = true; break 'bounds; } }
+                for &(b, b_origin) in &upper { if !self.region_rels.sub_concrete_regions(effective, b) { errors.push(RegionResolutionError::SubSupConflict(vid as u32, var_span, a_origin, a, b_origin, b)); found = true; break 'bounds; } }
             }
             if found { continue; }
             let mut min = self.var_infos[vid].universe;
             for v in vars { min = min.min(self.var_infos[v].universe); }
-            for b in upper {
+            for (b, b_origin) in upper {
                 if let RegionKind::RePlaceholder { universe, .. } = self.region_rels.tys.region_kind(b) {
-                    if !min.can_name(universe) { errors.push(RegionResolutionError::UpperBoundUniverseConflict(vid as u32, min, b)); found = true; break; }
+                    if !min.can_name(universe) { errors.push(RegionResolutionError::UpperBoundUniverseConflict(vid as u32, var_span, min, b_origin, b)); found = true; break; }
                 }
             }
             assert!(found || self.diagnostics.has_errors(), "error region without conflicting bounds");
@@ -226,7 +231,7 @@ mod tests {
                 var_infos: storage.var_infos.clone(), constraints: Vec::new(), verifys: Vec::new() };
             let values = LexicalRegionResolutions { values: vec![VarValue::ErrorValue] };
             // A locally accumulated region error does not count as a reported root error.
-            let mut errors = vec![RegionResolutionError::ConcreteFailure(RegionId::ERASED, RegionId::ERASED)];
+            let mut errors = vec![RegionResolutionError::ConcreteFailure(SubregionOrigin::Misc, RegionId::ERASED, RegionId::ERASED)];
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| resolver.collect_var_errors(&values, &mut errors)));
             assert_eq!(result.is_ok(), state == 2);
         }

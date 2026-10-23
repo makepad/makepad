@@ -80,9 +80,11 @@ impl Tcx {
         match *prog.impl_trait_in_trait_data.get(&def)? {
             ImplTraitInTraitData::Trait { fn_def_id, opaque_def_id } => {
                 let mut clauses = self.clauses_of(prog, fn_def_id);
+                // predicates_of.rs compute_bidirectional_outlives_predicates: each duplicated lifetime and
+                // the fn lifetime it stands for (map_opaque_lifetime_to_parent_lifetime) outlive each other
                 let data = self.opaque_generics(prog, opaque_def_id);
                 let offset = (data.parent.lifetimes.len() + data.parent.types_consts.len()) as u32;
-                for (index, &orig) in data.captured_lifetimes.iter().enumerate() {
+                for (index, &orig) in self.opaque_captured_parent_lifetimes(prog, opaque_def_id).iter().enumerate() {
                     if !matches!(self.tys.region_kind(orig), RegionKind::ReEarlyParam(_)) { continue; }
                     let dup = self.tys.intern_region(RegionKind::ReEarlyParam(offset + index as u32));
                     clauses.push(Predicate::dummy(PredicateKind::Clause(ClauseKind::RegionOutlives(orig, dup))));

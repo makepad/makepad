@@ -41,6 +41,12 @@ pub struct RegConfig {
     /// spill windows for float / vector values too (the emitter reads Alloc::windows in its float
     /// operand path and loads / recomputes them at a window's start: arm64)
     pub float_windows: bool,
+    /// whether the emitter may emit instruction k of a block together with the next one, at the
+    /// next one's position (arm64 shifted operands / madd / rev + shift, x64 compares into a cmov,
+    /// folded loads, test / bt into the branch): its operands are then read there and its one
+    /// result is never written. `uses[v]`: v's reads. The emitter asks it before every such
+    /// deferral, so it holds for each one (dead_spill_stores keeps the stores those reads need)
+    pub defers: fn(&Block, usize, &[u32]) -> bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1764,7 +1770,7 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
     let defstore = !crate::stats::opt_off(options, "-defstore");
     windows.extend(region_windows);
     let store_skip = if thorough && windows_on(options) && (!in_region.is_empty() || (defstore && !def_wins.is_empty())) && !crate::stats::opt_off(options, "-storeskip") {
-        dead_spill_stores(f, &reach, &tab, &block_start, &block_end, &loc, &in_region, &windows, if defstore { &def_wins } else { &[] })
+        dead_spill_stores(f, &reach, &tab, &block_start, &block_end, &loc, &in_region, &windows, if defstore { &def_wins } else { &[] }, &use_count, cfg.defers)
     } else {
         Default::default()
     };
@@ -2541,6 +2547,8 @@ fn dead_spill_stores(
     in_region: &std::collections::HashSet<(u32, u32)>,
     loads: &[(u32, u32, u32, u8)],
     def_wins: &[(u32, u32, u32, u8)],
+    uses: &[u32],
+    defers: fn(&Block, usize, &[u32]) -> bool,
 ) -> std::collections::HashSet<(u32, u32)> {
     let mut out = std::collections::HashSet::new();
     let nv = f.vregs.len();
@@ -2591,26 +2599,14 @@ fn dead_spill_stores(
     // the same position (an instruction reads its operands before its result goes home)
     let mut ev: Vec<Vec<(u32, bool, usize, u32)>> = vec![Vec::new(); nb];
     let simple = |i: &Inst| matches!(i, Inst::IBin(..) | Inst::IBinI(..) | Inst::ICmp(..) | Inst::ICmpI(..) | Inst::Load(..) | Inst::Store(..) | Inst::LoadX(..) | Inst::StoreX(..) | Inst::Conv(..) | Inst::Mov(..));
-    // An instruction whose one result only the next instruction reads may be emitted together with
-    // it, at the next instruction's position (arm64 shifted operands `add d, x, a, lsl k`, madd,
-    // rev + shift; x64 folded loads / compares): its operands are then read there -- from a window
-    // only if that window still holds them there, else from the slot -- and its own result may never
-    // be written (no write event: it kills no earlier store of a value sharing its slot). A region
-    // holds a value only up to its last use, so a deferred read past it reads the slot.
-    let mut nuses = vec![0u32; nv];
-    for (bi, b) in f.blocks.iter().enumerate() {
-        if reach[bi] {
-            let k0 = tab.first[bi] as usize;
-            for k in 0..=b.insts.len() {
-                for &u in tab.uses(k0 + k) {
-                    nuses[u as usize] += 1;
-                }
-            }
-        }
-    }
-    // (position, vreg) writes of deferrable results: their own store is judged, earlier ones stay live
+    // An instruction the emitter defers into the next one (RegConfig::defers) reads its operands at
+    // the next instruction's position -- from a window only if that window still holds them there,
+    // else from the slot -- and its own result is never written (no write event: it kills no earlier
+    // store of a value sharing its slot). A region holds a value only up to its last use, so a
+    // deferred read past it reads the slot. Instructions emitted at their own position (compare +
+    // select chains on arm64, a compare fused into the branch) read where they stand.
+    // (position, vreg) writes of deferred results: their own store is judged, earlier ones stay live
     let mut soft: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
-    let deferrable = |b: &Block, k0: usize, k: usize| -> bool { k + 1 < b.insts.len() && matches!(tab.defs(k0 + k), [t] if nuses[*t as usize] == 1 && tab.uses(k0 + k + 1).contains(t)) };
     for (bi, b) in f.blocks.iter().enumerate() {
         if !reach[bi] {
             continue;
@@ -2619,7 +2615,7 @@ fn dead_spill_stores(
         for k in 0..=b.insts.len() {
             let p = if k < b.insts.len() { block_start[bi] + 2 * k as u32 + 1 } else { block_end[bi] - 1 };
             let reg_read = k < b.insts.len() && simple(&b.insts[k]);
-            let deferred = k < b.insts.len() && deferrable(b, k0, k);
+            let deferred = k < b.insts.len() && defers(b, k, uses);
             for &u in tab.uses(k0 + k) {
                 if let Some(si) = slot_ix(u) {
                     // a no-op move between two values of one slot reads nothing
@@ -5753,45 +5749,74 @@ pub fn domain_base_blocks(f: &Func, sym_class: u64, reach: &[bool]) -> Vec<usize
 mod dead_store_tests {
     use super::*;
 
-    /// `v1 = load [base]; v2 = v1 << 3; v3 = x + v2; store [base + 8], v3` with v1 spilled and a def
-    /// window over v1's definition and its read: the shift (one result, read only by the add) may be
-    /// emitted with the add (arm64 `add v3, x, v1, lsl #3`), reading v1 at the add's position, past the
-    /// window -- from the slot. v1's store home must stay (the arm64 O3 miscompile of powi's `work` /
-    /// race_pack under more call-crossing spills). With v2 read twice the shift stands alone and the
-    /// window serves v1's only read: the store is dead.
-    fn skipped(v2_twice: bool) -> bool {
-        let w = IntTy { bits: 64, signed: false };
+    /// Whether v1's store home is dropped in `v1 = load [base]; insts...; store [base + 8], v4;
+    /// ret v4` (v1 = vreg 2, v2 = 3, v3 = 4, v4 = 5) with v1 and v2 spilled and a def window over
+    /// v1's definition and its read by the next instruction, under the backend's RegConfig::defers.
+    fn skipped(body: &dyn Fn(VReg, VReg, [VReg; 4]) -> Vec<Inst>, defers: fn(&Block, usize, &[u32]) -> bool) -> bool {
         let mut f = Func::new("dead_store".into(), 0);
         let (x, base) = (f.vreg(Cls::I), f.vreg(Cls::I));
         f.params = vec![x, base];
         f.rets = vec![Cls::I];
         let b = f.block();
-        let (v1, v2, v3, v4) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
-        let mut insts = vec![Inst::Load(Mem::Int(8, false), v1, base, 0), Inst::IBinI(IOp::Shl, w, v2, v1, 3), Inst::IBin(IOp::Add, w, v3, x, v2)];
-        insts.push(if v2_twice { Inst::IBin(IOp::Add, w, v4, v3, v2) } else { Inst::Mov(v4, v3) });
-        insts.push(Inst::Store(Mem::Int(8, false), base, 8, v4));
+        let vs = [f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I)];
+        let mut insts = vec![Inst::Load(Mem::Int(8, false), vs[0], base, 0)];
+        insts.extend(body(x, base, vs));
+        insts.push(Inst::Store(Mem::Int(8, false), base, 8, vs[3]));
         for i in insts {
             f.blocks[b as usize].insts.push(i);
             f.blocks[b as usize].pos.push(0);
         }
-        f.blocks[b as usize].term = Term::Ret(vec![v4]);
+        f.blocks[b as usize].term = Term::Ret(vec![vs[3]]);
         f.verify().unwrap();
         let reach = reachable(&f);
         let tab = OpTab::new(&f, &reach);
+        let mut uses = vec![0u32; f.vregs.len()];
+        for k in 0..=f.blocks[0].insts.len() {
+            for &u in tab.uses(k) {
+                uses[u as usize] += 1;
+            }
+        }
         let n = f.blocks[0].insts.len() as u32;
         let (block_start, block_end) = (vec![0u32], vec![2 * (n + 1)]);
         let mut loc = vec![Loc::Reg(1); f.vregs.len()];
-        loc[v1.0 as usize] = Loc::Stack(8);
-        loc[v2.0 as usize] = Loc::Stack(16);
+        loc[vs[0].0 as usize] = Loc::Stack(8);
+        loc[vs[1].0 as usize] = Loc::Stack(16);
         // v1: defined at position 2 (instruction 0), read at 3 (instruction 1)
-        let def_wins = [(v1.0, 2, 3, 9u8)];
-        let out = dead_spill_stores(&f, &reach, &tab, &block_start, &block_end, &loc, &Default::default(), &[], &def_wins);
-        out.contains(&(1, v1.0))
+        let def_wins = [(vs[0].0, 2, 3, 9u8)];
+        let out = dead_spill_stores(&f, &reach, &tab, &block_start, &block_end, &loc, &Default::default(), &[], &def_wins, &uses, defers);
+        out.contains(&(1, vs[0].0))
     }
 
+    const W: IntTy = IntTy { bits: 64, signed: false };
+
+    /// `v2 = v1 << 3; v3 = x + v2`: arm64 emits the shift with the add (`add v3, x, v1, lsl #3`),
+    /// reading v1 at the add's position, past the window -- from the slot: v1's store home must
+    /// stay (the arm64 O3 miscompile of powi's `work` / race_pack under more call-crossing spills).
+    /// With v2 read twice the shift stands alone and the window serves v1's only read.
     #[test]
     fn deferred_reads_keep_the_store() {
-        assert!(!skipped(false), "v1 is read from its slot when the shift is emitted with the add");
-        assert!(skipped(true), "a shift read by two instructions stands alone: the window serves v1");
+        let shift = |twice: bool| {
+            move |x: VReg, _: VReg, [v1, v2, v3, v4]: [VReg; 4]| {
+                vec![Inst::IBinI(IOp::Shl, W, v2, v1, 3), Inst::IBin(IOp::Add, W, v3, x, v2), if twice { Inst::IBin(IOp::Add, W, v4, v3, v2) } else { Inst::Mov(v4, v3) }]
+            }
+        };
+        let a64 = crate::arm64::reg_config().defers;
+        assert!(!skipped(&shift(false), a64), "v1 is read from its slot when the shift is emitted with the add");
+        assert!(skipped(&shift(true), a64), "a shift read by two instructions stands alone: the window serves v1");
+    }
+
+    /// Only the pairs the emitter fuses defer a read. `v2 = v1 < x; v3 = v2 ? x : base`: x64 emits
+    /// the compare with the select (cmp + cmov at the select's position: v1 from the slot, store
+    /// kept); arm64 emits it at its own position (cmp + csel chain) inside the window: no store.
+    /// `v2 = v1 + x; v3 = v2 ^ x` defers on neither (an add is never folded into the next op).
+    #[test]
+    fn only_fused_pairs_defer() {
+        let sel = |x: VReg, base: VReg, [v1, v2, v3, v4]: [VReg; 4]| vec![Inst::ICmp(Cond::Lt, false, v2, v1, x), Inst::Sel(v3, v2, x, base), Inst::Mov(v4, v3)];
+        let add = |x: VReg, _: VReg, [v1, v2, v3, v4]: [VReg; 4]| vec![Inst::IBin(IOp::Add, W, v2, v1, x), Inst::IBin(IOp::Xor, W, v3, v2, x), Inst::Mov(v4, v3)];
+        let a64 = crate::arm64::reg_config().defers;
+        let x64 = crate::x64::reg_config(&relax_session::Options::default()).defers;
+        assert!(!skipped(&sel, x64), "x64 reads the compare's operands at the cmov");
+        assert!(skipped(&sel, a64), "arm64 compares at the compare's own position");
+        assert!(skipped(&add, a64) && skipped(&add, x64), "an add feeding the next instruction is emitted where it stands");
     }
 }

@@ -220,7 +220,8 @@ impl<T> LinkedList<T> {
     }
 }
 
-impl<T> Drop for LinkedList<T> {
+// library/alloc/src/collections/linked_list.rs:1177: the elements may dangle when the list is dropped
+unsafe impl<#[may_dangle] T> Drop for LinkedList<T> {
     fn drop(&mut self) {
         while self.pop_front_node().is_some() {}
     }

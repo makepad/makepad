@@ -46,7 +46,7 @@ fn ty_known_to_outlive(prog: &Program, tcx: &Tcx, item: DefId, env: &ParamEnvId,
 }
 
 fn region_known_to_outlive(prog: &Program, tcx: &Tcx, item: DefId, env: &ParamEnvId, wf: &[TyId], a: RegionId, b: RegionId) -> bool {
-    holds(prog, tcx, item, env, wf, |infcx| infcx.inner.borrow_mut().unwrap_region_constraints().make_subregion(&tcx.tys, b, a, false))
+    holds(prog, tcx, item, env, wf, |infcx| infcx.inner.borrow_mut().unwrap_region_constraints().make_subregion(&tcx.tys, crate::infer::region_constraints::SubregionOrigin::Misc, b, a, false))
 }
 
 fn clause(kind: ClauseKind) -> Predicate {

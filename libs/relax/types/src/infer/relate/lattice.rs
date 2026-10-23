@@ -74,10 +74,12 @@ impl<'tcx> TypeRelation<'tcx> for LatticeOp<'_, 'tcx> {
         let mut inner = self.infcx.inner.borrow_mut();
         let mut regions = inner.unwrap_region_constraints();
         let tys = &self.infcx.tcx.tys;
+        // lattice.rs regions: SubregionOrigin::Subtype(trace)
+        let origin = crate::infer::region_constraints::SubregionOrigin::Subtype(self.infcx.origin_span.get());
         Ok(match self.variance {
-            V::Co => regions.glb_regions(tys, a, b),
-            V::Contra => regions.lub_regions(tys, a, b),
-            V::Inv => { regions.make_eqregion(tys, a, b, true); a }
+            V::Co => regions.glb_regions(tys, origin, a, b),
+            V::Contra => regions.lub_regions(tys, origin, a, b),
+            V::Inv => { regions.make_eqregion(tys, origin, a, b, true); a }
             V::Bi => a,
         })
     }
