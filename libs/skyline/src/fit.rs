@@ -145,15 +145,33 @@ mod tests {
         let z = Zones::new(p);
         (content_top_rad(p, &z), ground_depth_rad(p, &z))
     }
-    /// The table's defaults, the app's (the sea about 133 m out, a few lakes), all land with every lake, and `tall`.
-    fn bases() -> [(&'static str, Params); 4] {
-        let mut app = Params::default();
-        app.set(P::SeaD as usize, 0.3);
-        app.set(P::PrLake as usize, 0.6);
-        let mut lakes = Params::default();
-        lakes.set(P::Land as usize, 1.0);
-        lakes.set(P::PrLake as usize, 1.0);
-        [("the defaults", Params::default()), ("the app's", app), ("all lakes", lakes), ("tall", tall())]
+    /// Bare land: low ranges without trees on them, no city, no props.
+    fn bare() -> Params {
+        let mut p = Params::default();
+        for (i, d) in PARAMS.iter().enumerate() { if d.group == "Props" { p.set(i, 0.0); } }
+        for (key, v) in [(P::MtH, 0.02), (P::TrD, 0.0), (P::TrW, 0.0), (P::CtW, 0.0)] { p.set(key as usize, v); }
+        p
+    }
+    /// The bases the fit is measured over, so that every row of FIT_KEYS moves it over one of them (the premise of
+    /// `every_row_outside_fit_keys_leaves_the_fit_alone`). The table's defaults, the app's (the sea about 133 m out, a
+    /// few lakes), all land with every lake and `tall`; and a base for each term of `content_top_rad` that binds nowhere
+    /// else: bare land seen off-centre (any prop stands over it, the props' reach growing as the camera nears them), tall
+    /// trees on low ranges (the trees' tops, some capped by the treeline, over the ridges), a flat forest (no mountains,
+    /// dense trees everywhere: the canopy is the top), the glow off over tall towers far out (the dome would stand over
+    /// them), and cranes seen from an off-centre camera beside them (over the low city).
+    fn bases() -> Vec<(&'static str, Params)> {
+        let with = |mut p: Params, rows: &[(P, f64)]| { for &(key, v) in rows { p.set(key as usize, v); } p };
+        vec![
+            ("the defaults", Params::default()),
+            ("the app's", with(Params::default(), &[(P::SeaD, 0.3), (P::PrLake, 0.6)])),
+            ("all lakes", with(Params::default(), &[(P::Land, 1.0), (P::PrLake, 1.0)])),
+            ("tall", tall()),
+            ("bare land, off-centre", with(bare(), &[(P::Off, 0.5)])),
+            ("tall trees on low ranges", with(bare(), &[(P::MtH, 0.1), (P::TrH, 0.08), (P::TrW, 0.55)])),
+            ("a flat forest", with(bare(), &[(P::MtW, 0.0), (P::TrD, 1.0), (P::TrCon, 0.5), (P::TrW, 1.0)])),
+            ("the glow off", with(bare(), &[(P::CtW, 0.3), (P::CtH, 2.4), (P::CtR, 2.0), (P::Glow, 0.0)])),
+            ("cranes, off-centre", with(bare(), &[(P::CtW, 0.3), (P::CtH, 0.2), (P::CtR, 0.5), (P::Off, 0.6), (P::PrCrane, 1.0)])),
+        ]
     }
     /// The fit ignores the view (the field of view, the horizon, the detail view) and the light: the content's top and the
     /// ground's depth, measured afresh (`band_fit` hands back the cached entry of FIT_KEYS, which these rows are not in).
@@ -165,26 +183,35 @@ mod tests {
             assert_eq!(uncached(&p), uncached(&q), "{name}");
         }
     }
+    /// `base` with row `i` at a share `t` of its range.
+    fn moved(base: &Params, i: usize, t: f64) -> Params {
+        let mut q = base.clone();
+        q.set(i, PARAMS[i].min + t * (PARAMS[i].max - PARAMS[i].min));
+        q
+    }
     /// Every row outside FIT_KEYS but the field of view and the horizon (which `fit_band` writes) leaves the fit alone: set
     /// to two other values (a tenth and nine tenths of its range) over each base, the content's top and the ground's
     /// depth, measured afresh, do not move. A row of the scene's geometry left out of FIT_KEYS, whose change the cache
-    /// would not see, fails here.
+    /// would not see, fails here: the premise is that every row in FIT_KEYS, set the same way, moves the fit over one of
+    /// the bases.
     #[test]
     fn every_row_outside_fit_keys_leaves_the_fit_alone() {
+        let bases: Vec<_> = bases().into_iter().map(|(name, p)| { let want = uncached(&p); (name, p, want) }).collect();
+        let moves = |i: usize| bases.iter().any(|(_, base, want)| [0.1, 0.9].iter().any(|&t| uncached(&moved(base, i, t)) != *want));
+        let still: Vec<&str> = FIT_KEYS.iter().filter(|k| !moves(**k as usize)).map(|k| PARAMS[*k as usize].key).collect();
+        assert!(still.is_empty(), "the premise: these rows of FIT_KEYS move the fit over none of the bases: {still:?}");
         let mut rows = 0;
-        for (name, base) in bases() {
-            let want = uncached(&base);
+        for (name, base, want) in &bases {
             for (i, d) in PARAMS.iter().enumerate() {
                 if FIT_KEYS.iter().any(|k| *k as usize == i) || i == P::Vfov as usize || i == P::Horizon as usize { continue; }
                 for t in [0.1, 0.9] {
-                    let mut q = base.clone();
-                    q.set(i, d.min + t * (d.max - d.min));
+                    let q = moved(base, i, t);
                     assert_ne!(q.v[i], base.v[i], "{name}: {} is not perturbed", d.key);
-                    assert_eq!(uncached(&q), want, "{name}: {} at {} moves the fit", d.key, q.v[i]);
+                    assert_eq!(uncached(&q), *want, "{name}: {} at {} moves the fit", d.key, q.v[i]);
                 }
                 rows += 1;
             }
         }
-        assert!(rows >= 4 * 9, "the premise: the light's and the view's rows are perturbed ({rows})");
+        assert!(rows >= bases.len() * 9, "the premise: the light's and the view's rows are perturbed ({rows})");
     }
 }
