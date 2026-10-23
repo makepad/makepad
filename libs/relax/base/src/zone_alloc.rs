@@ -102,6 +102,9 @@ mod disabled {
     pub fn stats() -> (usize, usize, usize) {
         (0, 0, 0)
     }
+    pub fn census() -> [usize; 11] {
+        [0; 11]
+    }
     pub fn trim() {}
     pub fn detach_thread() {}
     pub fn generation() -> u64 {
@@ -115,6 +118,9 @@ mod disabled {
     }
     pub fn destroy_older() -> (usize, usize) {
         (0, 0)
+    }
+    pub fn generation_live(_: u64) -> usize {
+        0
     }
     pub fn epoch_of(_: *const u8) -> Option<u64> {
         None
@@ -172,6 +178,11 @@ pub fn compiler_stats() -> (usize, usize, usize) {
 }
 
 /// (touched bytes of small chunks, bytes in their live slots, bytes of large blocks, chunks listed for reuse).
+/// The compiler and burst arenas' census (arena.rs `census`): where their committed bytes are.
+pub fn arena_census() -> ([usize; 11], [usize; 11]) {
+    (compiler::census(), burst::census())
+}
+
 pub fn compiler_detail() -> (usize, usize, usize, usize) {
     compiler::detail()
 }
@@ -216,6 +227,11 @@ pub fn compiler_destroy_generation(g: u64) -> (usize, usize) {
 /// Returns (chunks, touched bytes); every user of those generations must be quiesced.
 pub fn compiler_destroy_older() -> (usize, usize) {
     compiler::destroy_older()
+}
+
+/// Requested live bytes of compiler generation `g` (a diagnostic header walk).
+pub fn compiler_generation_live(g: u64) -> usize {
+    compiler::generation_live(g)
 }
 
 /// The generation of the live compiler block at `p` (None: not a live arena address).
@@ -421,6 +437,12 @@ pub fn kept_clone<T: Clone>(v: &T) -> T {
 #[inline]
 pub fn compiler_owns(p: *const u8) -> bool {
     compiler::owns(p as *mut u8)
+}
+
+/// Does `p` lie in the burst (scratch) arena?
+#[inline]
+pub fn burst_owns(p: *const u8) -> bool {
+    burst::owns(p as *mut u8)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android", windows))]

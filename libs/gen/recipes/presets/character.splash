@@ -1,0 +1,76 @@
+use mod.flow.*
+
+/** Who the character is: a name or a short description. The brief keeps it verbatim. */
+let prompt = Input{ type: @text default: "a knight in battered plate armour" }
+
+/** A rig-safe full-body brief that keeps the named identity. */
+let brief = Gen{
+    domain: "text"
+    label: "brief"
+    ports: { in: { prompt: @text identity_anchor: @text } out: { text: @text } }
+    prompt: prompt.text()
+    identity_anchor: prompt.text()
+    target_domain: "rig"
+    temperature: 0
+    max_tokens: 512
+    style: "When the intent names an established character, preserve the exact named identity and canonical official design unchanged. Do not redesign, genericize, or guess traits. If a visual trait is uncertain, omit it instead of inventing it; it is better to say 'canonical official design unchanged' and spend the remaining prompt on full-body framing, a relaxed wide A-pose with straight diagonal arms and hands clear above the hips, visible gaps between every limb and the torso, even studio light, a uniform plain background, and a clean separated silhouette. Rigging constraints may change pose and spacing but never delete canonical anatomy or worn pieces."
+}
+let checked = ValidateBrief{ text: brief.out(@text) anchor: prompt.text() }
+
+let image = Gen{
+    domain: "image"
+    label: "image"
+    ports: { in: { prompt: @text } out: { image: @image } }
+    prompt: checked.out(@text)
+    model: "flux1-dev"
+}
+let matte = Gen{
+    domain: "matte"
+    label: "matte"
+    ports: { in: { prompt: @text image: @image } out: { image: @image } }
+    prompt: checked.out(@text)
+    image: image.out(@image)
+    model: "birefnet-hr"
+}
+let mesh = Gen{
+    domain: "mesh"
+    label: "mesh"
+    ports: { in: { prompt: @text image: @image } out: { mesh: @mesh } }
+    prompt: checked.out(@text)
+    image: matte.out(@image)
+    model: "trellis-2"
+    decimation_target: 20000
+    texture: true
+}
+let rig = Gen{
+    domain: "rig"
+    label: "rig"
+    ports: { in: { prompt: @text mesh: @mesh } out: { mesh: @mesh } }
+    prompt: checked.out(@text)
+    mesh: mesh.out(@mesh)
+    model: "skintokens"
+}
+let rigged = Validate{ mesh: rig.out(@mesh) }
+let motion = Gen{
+    domain: "motion"
+    label: "motion"
+    ports: { in: { prompt: @text mesh: @mesh } out: { mesh: @mesh } }
+    prompt: checked.out(@text)
+    mesh: rigged.out(@mesh)
+    model: "hy-motion"
+}
+let animated = Validate{ mesh: motion.out(@mesh) clips: true }
+
+/** Every stage lands in the library: the reference picture and cutout, the mesh, the rigged and the animated character. */
+let published_image = Publish{ value: image.out(@image) tags: ["character"] }
+let published_matte = Publish{ value: matte.out(@image) tags: ["character"] }
+let published_mesh = Publish{ value: mesh.out(@mesh) tags: ["character"] }
+let published_rig = Publish{ value: rigged.out(@mesh) tags: ["character"] }
+let published = Publish{ value: animated.out(@mesh) tags: ["character"] }
+
+Flow{
+    label: "Character"
+    brief: "The validated character pipeline at full quality: a rig-safe brief that keeps the named identity, a picture, its cutout, a textured mesh, a skinned rig and playable motion clips, every stage checked and published."
+    prompt, brief, checked, image, matte, mesh, rig, rigged, motion, animated,
+    published_image, published_matte, published_mesh, published_rig, published
+}

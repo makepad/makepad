@@ -16,8 +16,9 @@
 //! format ([`crate::providers::claude::parse_stream_line`]), `codex` speaks
 //! its own item/turn events ([`crate::providers::codex_cli`]).
 
+use std::ffi::OsStr;
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::OnceLock;
@@ -37,21 +38,52 @@ pub fn find_cli(env_override: &str, name: &str, extra: &[&str]) -> Option<PathBu
         let p = PathBuf::from(p);
         return p.is_file().then_some(p);
     }
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    let home = std::env::var("HOME").unwrap_or_default();
-    let mut candidates: Vec<PathBuf> =
-        extra.iter().map(|e| PathBuf::from(e.replacen('~', &home, 1))).collect();
-    candidates.push(PathBuf::from(&home).join(".local/bin").join(name));
+    // USERPROFILE on Windows (HOME is usually unset there), HOME elsewhere.
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).unwrap_or_default();
+    find_cli_in(std::env::var_os("PATH").as_deref(), Path::new(&home), name, extra)
+}
+
+/// [`find_cli`] past the override, with `PATH` and the home dir given.
+fn find_cli_in(path: Option<&OsStr>, home: &Path, name: &str, extra: &[&str]) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = path.map(|path| std::env::split_paths(path).map(|dir| dir.join(name)).collect()).unwrap_or_default();
+    let home_text = home.to_string_lossy();
+    candidates.extend(extra.iter().map(|e| PathBuf::from(e.replacen('~', &home_text, 1))));
+    candidates.push(home.join(".local/bin").join(name));
     candidates.push(PathBuf::from("/usr/local/bin").join(name));
     candidates.push(PathBuf::from("/opt/homebrew/bin").join(name));
-    candidates.into_iter().find(|p| p.is_file())
+    candidates.into_iter().find_map(executable)
+}
+
+/// The file that runs `candidate`. On Windows a command is a file named
+/// with one of the PATHEXT extensions (`claude` installs as `claude.exe`,
+/// a package manager's install as `claude.cmd` beside an extensionless
+/// shell shim that Windows cannot start), so those names are tried in
+/// PATHEXT's order.
+fn executable(candidate: PathBuf) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        let pathext = std::env::var("PATHEXT").unwrap_or_default();
+        // Only what CreateProcess starts (std runs .bat/.cmd through cmd).
+        let mut exts: Vec<String> = pathext
+            .split(';')
+            .map(|ext| ext.trim().to_ascii_lowercase())
+            .filter(|ext| matches!(ext.as_str(), ".com" | ".exe" | ".bat" | ".cmd"))
+            .collect();
+        for ext in [".exe", ".cmd"] {
+            if !exts.iter().any(|e| e == ext) {
+                exts.push(ext.to_string());
+            }
+        }
+        exts.iter()
+            .map(|ext| {
+                let mut file = candidate.clone().into_os_string();
+                file.push(ext);
+                PathBuf::from(file)
+            })
+            .find(|file| file.is_file())
+    }
+    #[cfg(not(windows))]
+    candidate.is_file().then_some(candidate)
 }
 
 /// An empty, PRIVATE working directory for ONE CLI turn. Every CLI here
@@ -470,5 +502,33 @@ mod tests {
         std::env::remove_var("MAKEPAD_TEST_CLI_OVERRIDE");
         // Without it, a PATH binary is found.
         assert!(find_cli("MAKEPAD_TEST_CLI_OVERRIDE_UNSET", "sh", &[]).is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_finds_a_cli_by_its_pathext_name() {
+        let root = std::env::temp_dir().join(format!("makepad-find-cli-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (exe_dir, cmd_dir, home) = (root.join("exe"), root.join("cmd"), root.join("home"));
+        let local_bin = home.join(".local/bin");
+        for dir in [&exe_dir, &cmd_dir, &local_bin] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(exe_dir.join("fake-cli.exe"), b"").unwrap();
+        // A package manager's install: an extensionless shell shim Windows cannot start, and its .cmd.
+        std::fs::write(cmd_dir.join("fake-cli"), b"").unwrap();
+        std::fs::write(cmd_dir.join("fake-cli.cmd"), b"").unwrap();
+        std::fs::write(local_bin.join("fake-cli.exe"), b"").unwrap();
+        let nowhere = root.join("nowhere");
+
+        let path = std::env::join_paths([&exe_dir]).unwrap();
+        assert_eq!(find_cli_in(Some(&path), &nowhere, "fake-cli", &[]), Some(exe_dir.join("fake-cli.exe")));
+        let path = std::env::join_paths([&cmd_dir, &exe_dir]).unwrap();
+        assert_eq!(find_cli_in(Some(&path), &nowhere, "fake-cli", &[]), Some(cmd_dir.join("fake-cli.cmd")));
+        // Not on PATH: ~/.local/bin, where the claude installer puts claude.exe.
+        let path = std::env::join_paths([&nowhere]).unwrap();
+        assert_eq!(find_cli_in(Some(&path), &home, "fake-cli", &[]), Some(local_bin.join("fake-cli.exe")));
+        assert_eq!(find_cli_in(Some(&path), &nowhere, "fake-cli", &[]), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

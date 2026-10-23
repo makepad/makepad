@@ -645,8 +645,8 @@ pub fn trace() -> bool {
 /// MAKEPAD_RUN_TRACE, read once (parse workers ask per expansion; std::env::var takes the env lock and
 /// allocates).
 pub fn relax_trace() -> Option<&'static str> {
-    static T: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    T.get_or_init(|| std::env::var("MAKEPAD_RUN_TRACE").ok()).as_deref()
+    static T: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    relax_session::phase::env_once(&T, "MAKEPAD_RUN_TRACE")
 }
 
 /// MAKEPAD_RUN_DERIVES=0 (derives are not expanded; measurement baseline), read once.

@@ -3089,6 +3089,7 @@ impl<'a> Gen<'a> {
             Inst::VX(op, d, a, b) => self.vx(options, *op, *d, *a, *b),
             Inst::VX3(op, d, a, b, c) => self.vx3(*op, *d, *a, *b, *c),
             Inst::FMulAdd(np, na, w, d, a, b, c) => self.fma(options, *np, *na, *w, *d, *a, *b, *c),
+            Inst::Coverage { .. } => unreachable!("coverage lowered before native emission"),
             Inst::AtomicLoad(..) | Inst::AtomicStore(..) | Inst::AtomicRmw(..) | Inst::AtomicCas(..) | Inst::Fence(..) => self.atomic(options, i),
             Inst::TlsAddr(d, off) => self.tls_addr(*d, *off),
             Inst::TlsStatic(d, off) => self.tls_static(*d, *off),
@@ -6117,6 +6118,8 @@ fn imm_fits(i: &Inst) -> bool {
 }
 
 pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq: Option<&[f32]>) -> Result<Compiled, String> {
+    let covered = crate::passes::lower_coverage(f);
+    let f = covered.as_ref().unwrap_or(f);
     let _warm = crate::probe::backend(&f.name);
     let _cost_codegen = crate::probe::phase(5);
     crate::probe::size(f);

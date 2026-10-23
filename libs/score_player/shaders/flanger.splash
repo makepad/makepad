@@ -1,0 +1,30 @@
+// Flanger: a 0.5..8 ms delay swept by a sine, fed back (negative feedback
+// gives the hollow tone), interpolated with a cubic read, the right side
+// swept in opposite phase.
+let rate = param(0.2, 0.01, 5)
+let min_ms = param(0.6, 0.1, 5)
+let max_ms = param(5, 0.5, 12)
+let feedback = param(0.6, -0.95, 0.95)
+let blend = param(0.5, 0, 1)
+
+var bl = [0.0; 1024]
+var br = [0.0; 1024]
+var w = int(0)
+var lfo = 0.0
+var fbl = 0.0
+var fbr = 0.0
+
+fn effect(l, r) {
+    lfo = advance(lfo, rate / sample_rate)
+    let s = sin(TAU * lfo)
+    let span = (max_ms - min_ms) * 0.0005 * sample_rate
+    let base = (min_ms * 0.001 * sample_rate) + span
+    bl[w] = l + fbl * feedback
+    br[w] = r + fbr * feedback
+    let yl = tap_cubic(bl, w, base + span * s)
+    let yr = tap_cubic(br, w, base - span * s)
+    fbl = soft_clip(yl)
+    fbr = soft_clip(yr)
+    w = w + 1
+    vec2(mix(l, (l + yl) * 0.5, blend * 2.0), mix(r, (r + yr) * 0.5, blend * 2.0))
+}

@@ -31,6 +31,7 @@ use crate::da3::{
     DinoLayer, DinoLayerBf16, DinoLinears, FusionBlock, Planar, StrideCache, TensorSource,
     DA3_BASE_PATCH_SIDE, DA3_NORM_EPS, DA3_PATCH,
 };
+use crate::depth_anything_temporal::{FrameCache, MotionModule, TemporalStream};
 use crate::torch_pth::PthStateDict;
 use crate::{DiffusionError, Result};
 use std::cell::RefCell;
@@ -115,6 +116,11 @@ pub struct DepthAnything {
     precision: Da3Precision,
     /// Process-unique id keying the captured-graph cache (see da3.rs).
     generation: u64,
+    /// Video-Depth-Anything: motion modules after layer_3, layer_4,
+    /// refinenet4 and refinenet3, plus the streaming window. Empty for the
+    /// per-frame models.
+    motion: Vec<MotionModule>,
+    stream: Mutex<TemporalStream>,
 }
 
 impl DepthAnything {
@@ -140,6 +146,19 @@ impl DepthAnything {
             Self::prepare(&PthTensors(RefCell::new(dict)), &scope, precision)
         } else {
             Self::prepare(&Da3WeightFile::load(path)?, &scope, precision)
+        }
+    }
+
+    /// Video-Depth-Anything: consecutive frames share a temporal window
+    /// (call [`Self::reset_stream`] on a cut or a seek).
+    pub fn is_temporal(&self) -> bool {
+        !self.motion.is_empty()
+    }
+
+    /// Forget the temporal window: the next frame starts a new stream.
+    pub fn reset_stream(&self) {
+        if let Ok(mut stream) = self.stream.lock() {
+            stream.reset();
         }
     }
 
@@ -315,6 +334,18 @@ impl DepthAnything {
                 index != 4,
             )?);
         }
+        // Video-Depth-Anything carries a temporal head.
+        let mut motion = Vec::new();
+        if names.contains(&format!("{hd}motion_modules.0.temporal_transformer.proj_in.weight")) {
+            for (index, channels) in [oc[2], oc[3], features, features].into_iter().enumerate() {
+                motion.push(MotionModule::load(
+                    scope,
+                    weights,
+                    &format!("{hd}motion_modules.{index}"),
+                    channels,
+                )?);
+            }
+        }
         let neck = features / 2;
         let result = Self {
             patch_w: upload(&patch_w, hidden, patch_dim)?,
@@ -381,6 +412,8 @@ impl DepthAnything {
                 true,
             )?,
             config,
+            motion,
+            stream: Mutex::new(TemporalStream::default()),
             pos_cache: Mutex::new(None),
             stride_cache: Mutex::new(None),
             precision,
@@ -410,11 +443,29 @@ impl DepthAnything {
                 "depth-anything normalized input shape mismatch",
             ));
         }
+        if self.is_temporal() {
+            // The window changes every frame: eager, no captured graph.
+            let mut stream = self
+                .stream
+                .lock()
+                .map_err(|_| DiffusionError::workflow("depth-anything stream poisoned"))?;
+            let window = stream.window((width, height));
+            let image = upload(pixels, 3, width * height)?;
+            let mut cache = Vec::with_capacity(8);
+            let out = self.forward_device(&image, width, height, Some((&window, &mut cache)))?;
+            let output = gpu_download(&out.tensor).map_err(DiffusionError::model)?;
+            stream.push(cache);
+            return Ok(DepthAnythingPrediction {
+                disparity: output,
+                width,
+                height,
+            });
+        }
         let output = match self.forward_graph(pixels, width, height)? {
             Some(output) => output,
             None => {
                 let image = upload(pixels, 3, width * height)?;
-                let out = self.forward_device(&image, width, height)?;
+                let out = self.forward_device(&image, width, height, None)?;
                 gpu_download(&out.tensor).map_err(DiffusionError::model)?
             }
         };
@@ -468,11 +519,11 @@ impl DepthAnything {
             }
             if state.warm_runs < 2 {
                 state.warm_runs += 1;
-                let out = self.forward_device(&state.image, width, height)?;
+                let out = self.forward_device(&state.image, width, height, None)?;
                 return Ok(Some(gpu_download(&out.tensor).map_err(DiffusionError::model)?));
             }
             let captured = gpu_graph_capture(|| {
-                self.forward_device(&state.image, width, height)
+                self.forward_device(&state.image, width, height, None)
                     .map_err(|err| err.to_string())
             });
             match captured {
@@ -492,7 +543,14 @@ impl DepthAnything {
     }
 
     /// Device-resident forward: normalized planar image -> disparity plane.
-    fn forward_device(&self, image: &GpuTensor, width: usize, height: usize) -> Result<Planar> {
+    /// `temporal`: the window frames' caches, and where this frame's go.
+    fn forward_device(
+        &self,
+        image: &GpuTensor,
+        width: usize,
+        height: usize,
+        mut temporal: Option<(&[std::rc::Rc<FrameCache>], &mut FrameCache)>,
+    ) -> Result<Planar> {
         let cfg = &self.config;
         let patch_w = width / DA3_PATCH;
         let patch_h = height / DA3_PATCH;
@@ -578,17 +636,43 @@ impl DepthAnything {
             });
         }
 
+        // One motion module: window caches for its two blocks, new entries out.
+        let mut temporal_step = |module: usize, x: Planar| -> Result<Planar> {
+            let Some((window, cache)) = temporal.as_mut() else {
+                return Ok(x);
+            };
+            let block0: Vec<&GpuTensor> = window.iter().map(|f| &f[module * 2]).collect();
+            let block1: Vec<&GpuTensor> = window.iter().map(|f| &f[module * 2 + 1]).collect();
+            let (out, entries) = self.motion[module].forward(x, [&block0, &block1])?;
+            cache.extend(entries);
+            Ok(out)
+        };
+        if !self.motion.is_empty() {
+            let layer_4 = resized.pop().expect("layer_4");
+            let layer_3 = resized.pop().expect("layer_3");
+            let layer_3 = temporal_step(0, layer_3)?;
+            let layer_4 = temporal_step(1, layer_4)?;
+            resized.push(layer_3);
+            resized.push(layer_4);
+        }
+
         let mut lateral = Vec::with_capacity(4);
         for (conv, input) in self.scratch_layers.iter().zip(&resized) {
             lateral.push(conv.forward(input)?);
         }
         let mut fused =
             self.fusion[3].forward(lateral.remove(3), None, (lateral[2].width, lateral[2].height))?;
+        if !self.motion.is_empty() {
+            fused = temporal_step(2, fused)?;
+        }
         fused = self.fusion[2].forward(
             fused,
             Some(&lateral[2]),
             (lateral[1].width, lateral[1].height),
         )?;
+        if !self.motion.is_empty() {
+            fused = temporal_step(3, fused)?;
+        }
         fused = self.fusion[1].forward(
             fused,
             Some(&lateral[1]),

@@ -257,6 +257,18 @@ impl ScriptHeap {
     #[inline]
     #[relax_api]
     pub fn obj_get(&self, mode: u32, obj: ScriptObject, key: ScriptValue, trap: ScriptTrap) -> ObjGot {
+        let at = match &trap {
+            ScriptTrap::Inner(inner) => Some(inner.ip),
+            ScriptTrap::NoTrap => None,
+        };
+        let got = self.obj_get_untouched(mode, obj, key, trap);
+        let read = if mode == OBJ_GET_MODULE || mode == OBJ_GET_MODULES_ROOT { self.modules } else { obj };
+        self.touch_read(read, got.value, at);
+        got
+    }
+
+    #[inline(always)]
+    fn obj_get_untouched(&self, mode: u32, obj: ScriptObject, key: ScriptValue, trap: ScriptTrap) -> ObjGot {
         match mode {
             OBJ_GET_VALUE => ObjGot { value: self.value_impl(obj, key, trap), found: true },
             OBJ_GET_SCOPE => ObjGot { value: self.scope_value_impl(obj, key, trap), found: true },
@@ -264,7 +276,10 @@ impl ScriptHeap {
                 let got = self.value_for_apply_impl(obj, key, mode == OBJ_GET_APPLY_EVAL);
                 ObjGot { value: got.unwrap_or(NIL), found: got.is_some() }
             }
-            OBJ_GET_MAP_OWN => match self.objects[obj].map.get(&key) {
+            OBJ_GET_MAP_OWN => match {
+                self.touch_obj(obj);
+                self.objects[obj].map.get(&key)
+            } {
                 Some(v) => ObjGot { value: v.value, found: true },
                 None => ObjGot { value: NIL, found: false },
             },
@@ -309,6 +324,7 @@ impl ScriptHeap {
     #[inline]
     #[relax_api]
     pub fn obj_iter_at(&self, obj: ScriptObject, index: usize) -> ObjIterAt {
+        self.touch_obj(obj);
         let object = &self.objects[obj];
         let vec_len = object.vec.len();
         if index < vec_len {
@@ -467,6 +483,7 @@ impl ScriptHeap {
         copy_vec_from_auto_proto: bool,
     ) -> ScriptObject {
         let (proto_fwd, proto_ptr) = if let Some(ptr) = proto.as_object() {
+            self.touch_obj(ptr);
             // Use checked access via ScriptObject. Do not mutate the
             // prototype until all script-controlled growth is preflighted.
             (self.objects[ptr].tag.proto_fwd(), ptr)
@@ -1359,6 +1376,7 @@ impl ScriptHeap {
         let mut ptr = ptr;
         let key = key_sv.as_id().unwrap_or_default();
         loop {
+            self.touch_obj(ptr);
             let object = &self.objects[ptr];
             if let Some(set) = object.map.get(&key_sv) {
                 return set.value;
@@ -1524,6 +1542,7 @@ impl ScriptHeap {
     // Reading object values
 
     fn value_index(&self, ptr: ScriptObject, index: ScriptValue, trap: ScriptTrap) -> ScriptValue {
+        self.touch_obj(ptr);
         let object = &self.objects[ptr];
         // most used path
         let index = index.as_index();
@@ -1546,6 +1565,7 @@ impl ScriptHeap {
     ) -> ScriptValue {
         let mut ptr = obj_ptr;
         loop {
+            self.touch_obj(ptr);
             let object = &self.objects[ptr];
             if let Some(value) = object.map_get(&key) {
                 return value;
@@ -1570,6 +1590,7 @@ impl ScriptHeap {
     fn value_deep(&self, obj_ptr: ScriptObject, key: ScriptValue, trap: ScriptTrap) -> ScriptValue {
         let mut ptr = obj_ptr;
         loop {
+            self.touch_obj(ptr);
             let object = &self.objects[ptr];
             if let Some(value) = object.map_get(&key) {
                 return value;
@@ -1789,6 +1810,7 @@ impl ScriptHeap {
         let Some(mut ptr) = obj.as_object() else { return };
         let mut open = fields.len();
         loop {
+            self.touch_obj(ptr);
             let object = &self.objects[ptr];
             if object.map.len() <= open {
                 for (key, entry) in object.map.iter() {
@@ -1829,6 +1851,7 @@ impl ScriptHeap {
         eval: bool,
     ) -> Option<ScriptValue> {
         // only do top level if dirty
+        self.touch_obj(ptr);
         let object = &self.objects[ptr];
         if let Some(value) = object.map_get(&key) {
             return Some(value);
@@ -1840,6 +1863,7 @@ impl ScriptHeap {
         // if we havent been applied before apply prototype chain too
         let mut ptr = object.proto.as_object()?;
         loop {
+            self.touch_obj(ptr);
             let object = &self.objects[ptr];
             if let Some(value) = object.map_get(&key) {
                 return Some(value);
@@ -1850,6 +1874,7 @@ impl ScriptHeap {
 
     #[inline]
     pub(crate) fn map_ref(&self, object: ScriptObject) -> &ScriptObjectMap {
+        self.touch_obj(object);
         let object = &self.objects[object];
         &object.map
     }
@@ -1858,6 +1883,7 @@ impl ScriptHeap {
     /// `ordered`: in definition order (the map tag's order) instead.
     #[relax_api]
     pub fn map_entries_into(&self, object: ScriptObject, ordered: bool, out: &mut ScriptEntriesOut) {
+        self.touch_obj(object);
         let map = &self.objects[object].map;
         let mut entries: Vec<(u32, ScriptMapEntry)> =
             map.iter().map(|(k, v)| (v.tag.order(), ScriptMapEntry { key: *k, value: v.value })).collect();
@@ -2043,6 +2069,7 @@ impl ScriptHeap {
     #[inline]
     #[relax_api]
     pub fn vec_ref(&self, ptr: ScriptObject) -> &[ScriptVecValue] {
+        self.touch_obj(ptr);
         let object = &self.objects[ptr];
         &object.vec
     }

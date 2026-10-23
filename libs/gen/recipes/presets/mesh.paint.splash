@@ -1,0 +1,16 @@
+use mod.flow.*
+
+/** The mesh to paint. */
+let model = Input{ type: @mesh }
+/** How it should look. */
+let reference = Input{ type: @image }
+/** The materials in words. */
+let prompt = Input{ type: @text default: "weathered bronze with green patina" }
+let paint = Paint{ prompt: prompt.text() mesh: model.mesh() reference_image: reference.image() }
+let published = Publish{ value: paint.out(@mesh) tags: ["mesh"] }
+
+Flow{
+    label: "Paint mesh"
+    brief: "Paints PBR materials onto a mesh from a reference picture."
+    model, reference, prompt, paint, published
+}

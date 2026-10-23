@@ -275,7 +275,10 @@ pub fn type_check_body(tcx: &Tcx, prog: &Program, infcx: &mut dyn RegionDriverOp
     let closure_slots = if matches!(body.source.kind, BodyKind::Closure(_)) { body.local_decls.get(1).map_or(vec![], |env| {
         let env = match tcx.tys.kind(env.ty) { TyKind::Ref(_, t, _) => *t, _ => env.ty };
         free_regions_in_order(tcx, env)
-    }) } else { vec![] };
+    }) } else if matches!(body.source.kind, BodyKind::InlineConst) {
+        // an inline constant's own argument is its type (InlineConstArgs `ty`): the creator instantiates it
+        free_regions_in_order(tcx, body.local_decls[0].ty)
+    } else { vec![] };
 
     let closure_sig_erased_offset = if matches!(body.source.kind, BodyKind::Closure(_)) { body.local_decls.get(1).map_or(0, |env| {
         let env = match tcx.tys.kind(env.ty) { TyKind::Ref(_, t, _) => *t, _ => env.ty };
@@ -342,7 +345,7 @@ impl RegionDriverOps for super::infer_ctxt::BorrowckInferCtxt<'_> {
         match super::type_check::canonical::fully_perform_op_raw(self, universals, &self.region_bound_pairs, &self.param_env.clauses, out,
             super::type_check::Locations::All(span), span, super::constraints::ConstraintCategory::Internal, op) {
             Ok(ty) => ty,
-            Err(_) => { self.tainted_by_errors.set(true); self.tcx.tys.error }
+            Err(_) => { self.tainted_by_errors.set(true); self.type_op_failed.set(true); self.tcx.tys.error }
         }
     }
 }

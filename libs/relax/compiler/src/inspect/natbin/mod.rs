@@ -76,6 +76,8 @@ pub struct NativeBin {
     /// (address, file offset, size) of the executable sections, sorted by address
     text: Vec<(u64, usize, usize)>,
     lazy: Mutex<Lazy>,
+    /// fns by `asm::match_key` of their name (built at the first `find_like`)
+    keys: std::sync::OnceLock<HashMap<String, Vec<u32>>>,
 }
 
 fn intersects(r: &[(u64, u64)], lo: u64, hi: u64) -> bool {
@@ -167,7 +169,7 @@ impl NativeBin {
         } else {
             (Vec::new(), "none")
         };
-        Ok(NativeBin { path: path.to_string(), arch: e.arch, fns, debug_from: from.to_string(), data, text, lazy: Mutex::new(Lazy { files: Interner::default(), srcs }) })
+        Ok(NativeBin { path: path.to_string(), arch: e.arch, fns, debug_from: from.to_string(), data, text, lazy: Mutex::new(Lazy { files: Interner::default(), srcs }), keys: Default::default() })
     }
 
     fn open_macho(path: &str, data: Vec<u8>) -> Result<NativeBin, String> {
@@ -258,7 +260,7 @@ impl NativeBin {
                 from = "binary sections";
             }
         }
-        Ok(NativeBin { path: path.to_string(), arch: m.arch, fns, debug_from: from.to_string(), data: Arc::new(data), text, lazy: Mutex::new(Lazy { files: Interner::default(), srcs }) })
+        Ok(NativeBin { path: path.to_string(), arch: m.arch, fns, debug_from: from.to_string(), data: Arc::new(data), text, lazy: Mutex::new(Lazy { files: Interner::default(), srcs }), keys: Default::default() })
     }
 
     fn load_dsym(path: &str, want: Arch) -> Option<Dbg> {
@@ -314,6 +316,25 @@ impl NativeBin {
             return exact;
         }
         self.fns.iter().zip(&keys).filter(|(_, k)| k.ends_with(&suffix)).map(|(f, _)| f).collect()
+    }
+
+    /// The functions whose name has the same `asm::match_key` as the JIT name `name` (rustc names a
+    /// method by its type's path, `<T as Trait>::m`, closures `f::{closure#k}`): those of the same
+    /// crate when there are any.
+    pub fn find_like(&self, name: &str) -> Vec<&NativeFn> {
+        use crate::inspect::asm::{match_key, match_segs};
+        let idx = self.keys.get_or_init(|| {
+            let mut m: HashMap<String, Vec<u32>> = HashMap::new();
+            for (i, f) in self.fns.iter().enumerate() {
+                m.entry(match_key(&f.name)).or_default().push(i as u32);
+            }
+            m
+        });
+        let Some(v) = idx.get(&match_key(name)) else { return Vec::new() };
+        let cands: Vec<&NativeFn> = v.iter().map(|&i| &self.fns[i as usize]).collect();
+        let krate = match_segs(name).into_iter().next();
+        let same: Vec<&NativeFn> = cands.iter().copied().filter(|f| match_segs(&f.name).into_iter().next() == krate).collect();
+        if same.is_empty() { cands } else { same }
     }
 
     /// The function containing `addr`.

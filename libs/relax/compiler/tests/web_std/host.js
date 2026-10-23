@@ -1,4 +1,4 @@
-// node host.js <module.wasm>: runs run_export of a wasm32 build of web_std.rs; relax_web_print writes to stdout.
+// node host.js <module.wasm>: runs run of a wasm32 build of web_std.rs; relax_web_print writes to stdout.
 const fs = require('fs');
 const m = new WebAssembly.Module(fs.readFileSync(process.argv[2]));
 let mem = null;
@@ -14,4 +14,4 @@ for (const i of WebAssembly.Module.imports(m)) {
 }
 const x = new WebAssembly.Instance(m, imports).exports;
 mem = x.memory;
-x.run_export();
+x.run();

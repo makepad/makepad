@@ -142,25 +142,11 @@ struct Queue {
 
 static Q: Mutex<Queue> = Mutex::new(Queue { lanes: [const { VecDeque::new() }; CLASSES] });
 
-pub(crate) struct ZoneTaken(Queue);
-
-/// None: a request was queued since the quiesce looked (an app thread asks the owner whenever it
-/// likes, and the gate does not hold it back): the swap is tried again later.
-pub(crate) fn zone_take() -> Option<ZoneTaken> {
-    let mut queue = Q.lock().unwrap_or_else(|e| e.into_inner());
-    // Quiescence includes draining every request before taking the lanes' buffers.
-    if !queue.lanes.iter().all(VecDeque::is_empty) {
-        return None;
-    }
-    let taken = ZoneTaken(std::mem::replace(&mut *queue, Queue { lanes: [const { VecDeque::new() }; CLASSES] }));
-    #[cfg(test)]
-    assert!(queue.lanes.iter().all(|lane| lane.is_empty() && lane.capacity() == 0));
-    Some(taken)
-}
-
-pub(crate) fn zone_put_back(taken: ZoneTaken) {
-    let mut queue = Q.lock().unwrap_or_else(|e| e.into_inner());
-    std::mem::forget(std::mem::replace(&mut *queue, taken.0));
+/// Whether the owner's queue is empty (the settle swap: a request queued since the quiesce looked
+/// may hold compiler-generation state, so the swap is tried again later). The queue's buffers are
+/// in the kept heap (`push`): a swap leaves them alone.
+pub(crate) fn queue_empty() -> bool {
+    Q.lock().unwrap_or_else(|e| e.into_inner()).lanes.iter().all(VecDeque::is_empty)
 }
 
 static WAKE: Condvar = Condvar::new();
@@ -1020,7 +1006,8 @@ pub fn post_queued(class: Class, f: impl FnOnce() + Send + 'static) {
 
 fn push(r: usize, class: Class) {
     let mut q = Q.lock().unwrap_or_else(|e| e.into_inner());
-    q.lanes[class as usize].push_back(r);
+    // a lane grows in the kept heap, whichever phase the requester is in
+    crate::zone_alloc::kept_with(|| q.lanes[class as usize].push_back(r));
     if class == Class::Program {
         FOREGROUND.fetch_add(1, Ordering::Relaxed);
         if from_main(r) {
@@ -1294,6 +1281,8 @@ fn owner_loop() -> ! {
         // between top-level requests: the vtables made for real-time trait-object types
         let frame = crate::jit::frame_enter(std::ptr::null());
         let _ = std::panic::catch_unwind(crate::jit::realtime_drain);
+        // ... and the constants background builds' fronts found unevaluated
+        let _ = std::panic::catch_unwind(crate::jit::const_drain);
         crate::jit::frame_leave(frame);
     }
 }

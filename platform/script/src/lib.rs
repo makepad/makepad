@@ -18,6 +18,7 @@ macro_rules! script_eval {
 }
 
 pub mod census;
+pub mod touch;
 pub mod heap_tag;
 pub mod domain;
 pub mod lazy_modules;

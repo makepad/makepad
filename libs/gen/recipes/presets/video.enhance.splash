@@ -1,0 +1,12 @@
+use mod.flow.*
+
+/** The clip to enhance. */
+let source = Input{ type: @video }
+let enhance = VideoEnhance{ video: source.video() }
+let published = Publish{ value: enhance.out(@video) tags: ["video"] }
+
+Flow{
+    label: "Enhance video"
+    brief: "Upscales a clip and smooths its motion to a higher frame rate."
+    source, enhance, published
+}

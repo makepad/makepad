@@ -213,29 +213,38 @@ pub fn check_item(prog: &Program, tcx: &Tcx, def: DefId) -> Outcome {
     }
 }
 
-/// valtrees.rs const_to_valtree_inner over the value of non-generic constant `def`: the type in it
-/// that has no value tree -- a union, a raw pointer that is not an integer or is wide, a function
-/// pointer, a trait object, a closure. None: the value has one, or the interpreter cannot tell
-/// (const_to_pat then judges the type alone).
-pub fn valtree_failure(prog: &Program, tcx: &Tcx, def: DefId) -> Option<TyId> {
+/// valtrees.rs const_to_valtree_inner over the value of non-generic constant `def`.
+pub enum ValtreeWalk {
+    /// the type in the value that has no value tree -- a union, a raw pointer that is not an
+    /// integer or is wide, a function pointer, a trait object, a closure
+    NoValtree(TyId),
+    /// the value has one; the ADT types of its values in pre-order (const_to_pat valtree_to_pat
+    /// judges each: `type_marked_structural`)
+    Adts(Vec<TyId>),
+    /// the interpreter cannot tell (const_to_pat then judges the type alone)
+    Unknown,
+}
+pub fn valtree_of_const(prog: &Program, tcx: &Tcx, def: DefId) -> ValtreeWalk {
     let mut it = Interp { prog, tcx, lay: crate::layout::Layouts::new(), allocs: Vec::new(), frames: Vec::new(), steps: 0, consts: HashMap::new(), ps: tcx.tys.ptr_bytes as u64, frames_root_ty: None, nesting: 0,
         statics: HashMap::new(), static_root: None, mut_global_ok: false, in_progress: Vec::new(), validating: false };
-    let ty = tcx.const_ty(prog, def)?;
+    let Some(ty) = tcx.const_ty(prog, def) else { return ValtreeWalk::Unknown };
+    let mut adts = Vec::new();
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> R<Option<TyId>> {
         let a = it.eval_const(def, &[], false, false)?;
         it.validating = true;
-        it.valtree_walk(MPlace { ptr: Ptr { prov: Some(Prov { alloc: a, shared: true }), off: 0 }, meta: None, ty, variant: None, packed: None }, 0)
+        it.valtree_walk(MPlace { ptr: Ptr { prov: Some(Prov { alloc: a, shared: true }), off: 0 }, meta: None, ty, variant: None, packed: None }, 0, &mut adts)
     }));
     match r {
-        Ok(Ok(bad)) => bad,
-        Ok(Err(_)) => None,
-        Err(p) => { if crate::preempt::is_cancelled(&*p) { std::panic::resume_unwind(p); } None }
+        Ok(Ok(Some(bad))) => ValtreeWalk::NoValtree(bad),
+        Ok(Ok(None)) => ValtreeWalk::Adts(adts),
+        Ok(Err(_)) => ValtreeWalk::Unknown,
+        Err(p) => { if crate::preempt::is_cancelled(&*p) { std::panic::resume_unwind(p); } ValtreeWalk::Unknown }
     }
 }
 
 impl<'a> Interp<'a> {
     /// valtrees.rs const_to_valtree_inner: the first type without a value tree in the value at `p`.
-    fn valtree_walk(&mut self, p: MPlace, depth: u32) -> R<Option<TyId>> {
+    fn valtree_walk(&mut self, p: MPlace, depth: u32, adts: &mut Vec<TyId>) -> R<Option<TyId>> {
         if depth > 64 { return unsupported("deep value tree"); }
         let tys = &self.tcx.tys;
         match tys.kind(p.ty).clone() {
@@ -251,12 +260,12 @@ impl<'a> Interp<'a> {
                 let v = self.read_place(p)?;
                 let q = self.ptr_of(&v, 0)?;
                 let meta = if self.is_fat(pointee)? { Some(self.int_of(&v.slice(self.ps, self.ps, self.ps))? as u64) } else { None };
-                self.valtree_walk(MPlace { ptr: q, meta, ty: pointee, variant: None, packed: None }, depth + 1)
+                self.valtree_walk(MPlace { ptr: q, meta, ty: pointee, variant: None, packed: None }, depth + 1, adts)
             }
             TyKind::Str => Ok(None),
             TyKind::Slice(_) | TyKind::Array(..) => {
                 let n = self.len_of(p)?;
-                for i in 0..n { let e = self.index(p, i)?; if let Some(b) = self.valtree_walk(e, depth + 1)? { return Ok(Some(b)); } }
+                for i in 0..n { let e = self.index(p, i)?; if let Some(b) = self.valtree_walk(e, depth + 1, adts)? { return Ok(Some(b)); } }
                 Ok(None)
             }
             TyKind::Tuple(l) => {
@@ -264,13 +273,14 @@ impl<'a> Interp<'a> {
                 let lay = self.layout(p.ty)?;
                 for (i, t) in l2.iter().enumerate() {
                     let f = MPlace { ptr: Ptr { off: p.ptr.off + lay.fields[i] as u64, ..p.ptr }, meta: None, ty: *t, variant: None, packed: None };
-                    if let Some(b) = self.valtree_walk(f, depth + 1)? { return Ok(Some(b)); }
+                    if let Some(b) = self.valtree_walk(f, depth + 1, adts)? { return Ok(Some(b)); }
                 }
                 Ok(None)
             }
             TyKind::Adt(d, args, _) => {
                 let Some(adt) = self.tcx.adts.get(&d) else { return unsupported("adt") };
                 if adt.is_union { return Ok(Some(p.ty)); }
+                adts.push(p.ty);
                 let lay = self.layout(p.ty)?;
                 let args: Vec<TyId> = tys.list(args).to_vec();
                 let (vi, offs) = if adt.is_enum { let v = self.read_variant(p)? as usize; (v, lay.variant_fields.get(v).cloned().unwrap_or_default()) } else { (0, lay.fields.clone()) };
@@ -279,7 +289,7 @@ impl<'a> Interp<'a> {
                     let Some(&o) = offs.get(i) else { return unsupported("field offset") };
                     if o == u32::MAX { return unsupported("extension field"); }
                     let f = MPlace { ptr: Ptr { off: p.ptr.off + o as u64, ..p.ptr }, meta: None, ty: t, variant: None, packed: None };
-                    if let Some(b) = self.valtree_walk(f, depth + 1)? { return Ok(Some(b)); }
+                    if let Some(b) = self.valtree_walk(f, depth + 1, adts)? { return Ok(Some(b)); }
                 }
                 Ok(None)
             }
@@ -706,7 +716,9 @@ impl<'a> Interp<'a> {
         let len = self.len_of(p)?;
         if i >= len { return ub(format!("indexing out of bounds: the len is {len} but the index is {i}")); }
         let (size, _) = self.size_align(elem)?;
-        Ok(MPlace { ptr: Ptr { off: p.ptr.off + i * size, ..p.ptr }, meta: None, ty: elem, variant: None, packed: p.packed })
+        // (projection.rs: the offset of the element is pointer arithmetic)
+        let Some(o) = i.checked_mul(size).filter(|o| *o <= i64::MAX as u64) else { return ub("overflowing pointer arithmetic: the total offset in bytes does not fit in an `isize`") };
+        Ok(MPlace { ptr: Ptr { off: p.ptr.off.wrapping_add(o), ..p.ptr }, meta: None, ty: elem, variant: None, packed: p.packed })
     }
 
     // ---- operands and constants

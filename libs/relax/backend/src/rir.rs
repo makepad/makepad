@@ -427,6 +427,10 @@ pub enum RelocKind {
     Imm32,
     /// arm64 movz at `at` and movk (lsl 16) at `at + 4`: the low 32 bits of value (must fit)
     A64MovzMovk,
+    /// An arm64 coverage probe's leading NOP. `target` is the bitmap word;
+    /// after bit `bit` is set, the embedder may atomically replace the NOP
+    /// with a branch over the seven-instruction probe. Not a cached fixup.
+    A64CoverageBit(u8),
     /// x64: the disp32 of a `call`/`jmp` at `at` (ends the instruction): value - (base + at + 4);
     /// a target out of reach is branched to through a veneer (`link_with`)
     X64Branch32,
@@ -621,6 +625,11 @@ pub fn link_with(code: &mut [u8], base: u64, relocs: &[RelocAt], value: &dyn Fn(
         };
         let wr32 = |c: &mut [u8], o: usize, w: u32| c[o..o + 4].copy_from_slice(&w.to_le_bytes());
         match r.kind {
+            RelocKind::A64CoverageBit(bit) => {
+                if bit >= 64 || at % 4 != 0 || at + 28 > code.len() || rd32(code, at)? != 0xD503_201F {
+                    return Err(format!("invalid coverage probe at {}", at));
+                }
+            }
             RelocKind::Pool64 => {
                 let w = code.get_mut(at..at + 8).ok_or_else(|| format!("relocation at {} past the code", at))?;
                 w.copy_from_slice(&v.to_le_bytes());
@@ -837,6 +846,11 @@ pub enum RmwOp {
 
 #[derive(Clone, PartialEq, Hash, Debug)]
 pub enum Inst {
+    /// Set bits in an embedder-owned coverage bitmap. The aligned atomic word
+    /// must outlive the code and must not alias program memory. This is an
+    /// observable trace effect, but does not invalidate program loads. Native
+    /// backends lower it after optimisation; it is never persisted in a cache.
+    Coverage { word: u64, mask: u64 },
     Iconst(VReg, i64),
     Fconst(VReg, u64, bool),
     Mov(VReg, VReg),
@@ -1027,7 +1041,7 @@ impl Inst {
             Inst::FpEnv(_, v) => f(*v),
             Inst::Cpuid(ds, a, b) => { ds.iter().for_each(|d| f(*d)); f(*a); f(*b); }
             Inst::Xgetbv(d, a) => { f(*d); f(*a); }
-            Inst::Store(..) | Inst::Copy(..) | Inst::VStore(..) | Inst::VStoreX(..) | Inst::AtomicStore(..) | Inst::StoreX(..) | Inst::Fence(..) => {}
+            Inst::Store(..) | Inst::Copy(..) | Inst::VStore(..) | Inst::VStoreX(..) | Inst::AtomicStore(..) | Inst::StoreX(..) | Inst::Fence(..) | Inst::Coverage { .. } => {}
         }
     }
 
@@ -1066,7 +1080,7 @@ impl Inst {
                 args.iter_mut().for_each(&mut f);
                 rets.iter_mut().for_each(&mut f);
             }
-            Inst::Fence(..) => {}
+            Inst::Fence(..) | Inst::Coverage { .. } => {}
             Inst::FpEnv(_, v) => f(v),
             Inst::Cpuid(ds, a, b) => {
                 ds.iter_mut().for_each(&mut f);
@@ -1665,7 +1679,7 @@ impl Func {
                         regs.push(*a);
                         regs.push(*b);
                     }
-                    Inst::Fence(..) => {}
+                    Inst::Fence(..) | Inst::Coverage { .. } => {}
                     Inst::FpEnv(_, v) => regs.push(*v),
                     Inst::Cpuid(ds, a, b) => { regs.extend_from_slice(ds); regs.push(*a); regs.push(*b); }
                     Inst::Xgetbv(d, a) => { regs.push(*d); regs.push(*a); }

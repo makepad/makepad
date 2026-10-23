@@ -22,6 +22,7 @@ pub fn thread_on(options: &relax_session::Options) -> bool {
 
 pub fn map_inst(x: &Inst, m: &dyn Fn(VReg) -> VReg, slot_base: u32) -> Inst {
     match x {
+        Inst::Coverage { .. } => x.clone(),
         Inst::Iconst(d, v) => Inst::Iconst(m(*d), *v),
         Inst::Fconst(d, v, w) => Inst::Fconst(m(*d), *v, *w),
         Inst::Mov(d, a) => Inst::Mov(m(*d), m(*a)),
@@ -366,7 +367,40 @@ pub fn swap_cond(c: Cond) -> Cond {
 // VX and VX3 (including SHA) only define their result. No scalar constant folding
 // or lane-wise algebra applies to the SHA operations.
 pub fn is_pure(i: &Inst) -> bool {
-    !is_mem_effect(i)
+    !is_mem_effect(i) && !matches!(i, Inst::Coverage { .. })
+}
+
+/// Expand trace effects only after the program's memory optimisations. The
+/// atomic OR preserves simultaneous hits in different bits of the same word.
+pub fn lower_coverage(f: &Func) -> Option<Func> {
+    if !f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::Coverage { .. }))) {
+        return None;
+    }
+    let mut out = f.clone();
+    for bi in 0..out.blocks.len() {
+        let mut k = 0;
+        while k < out.blocks[bi].insts.len() {
+            let Inst::Coverage { word, mask } = out.blocks[bi].insts[k] else {
+                k += 1;
+                continue;
+            };
+            let addr = out.vreg(Cls::I);
+            let bits = out.vreg(Cls::I);
+            let old = out.vreg(Cls::I);
+            let b = &mut out.blocks[bi];
+            if b.pos.len() == b.insts.len() {
+                let pos = b.pos[k];
+                b.pos.splice(k..=k, [pos; 3]);
+            }
+            b.insts.splice(k..=k, [
+                Inst::Iconst(addr, word as i64),
+                Inst::Iconst(bits, mask as i64),
+                Inst::AtomicRmw(RmwOp::Or, Mem::Int(8, false), AtomOrd::Relaxed, old, addr, bits),
+            ]);
+            k += 3;
+        }
+    }
+    Some(out)
 }
 
 pub fn is_mem_effect(i: &Inst) -> bool {
@@ -7461,6 +7495,8 @@ pub fn rotate_loops(f: &mut Func) {
             nuse[u.0 as usize] += 1;
         }
     }
+    // the loops as they are before any rotation (a rotated latch changes the flow)
+    let loops = natural_loops(f).1;
     // latches ending in a branch whose false edge goes to the header get a new block with the
     // header's copy there (laid out after the latch below)
     let mut added = false;
@@ -7473,6 +7509,18 @@ pub fn rotate_loops(f: &mut Func) {
         let hb = f.blocks[h].clone();
         if hb.insts.len() > 4 || !matches!(hb.term, Term::Branch(..)) {
             continue;
+        }
+        // only a header that exits its loop (LLVM LoopRotate: `L->isLoopExiting(OrigHeader)`):
+        // when both of its edges stay inside (inflate's block loop tests `in_len - in_pos >= 8`
+        // for a fast or a slow refill), the latch's copy enters the loop at either target, the
+        // loop has two entries and is no natural loop any more -- the loop splitter, the
+        // cold-call split and loop depths no longer see it
+        let Term::Branch(_, ht, he) = hb.term else { unreachable!() };
+        // (a header whose own branch an earlier latch rotation sent to a new block is left alone)
+        match loops.iter().find(|(x, _)| *x as usize == h) {
+            Some((_, m)) if (ht as usize) < n && (he as usize) < n && m[ht as usize] != m[he as usize] => {}
+            _ if crate::stats::opt_env_off("-rotexit") => {}
+            _ => continue,
         }
         // header defs must be used only inside the header (they get fresh copies)
         let mut ok = true;

@@ -18,7 +18,18 @@ use relax_backend::wasm::{self, Builtin, HostBind, Link, Module};
 use relax_session::sync::Mutex;
 use std::collections::{BTreeMap, HashMap};
 
-static CAPTURED: Mutex<Option<BTreeMap<u32, Func>>> = Mutex::new(None);
+struct Captured {
+    entry: u32,
+    funcs: BTreeMap<u32, Func>,
+}
+
+// Slot and symbol ids belong to a unit. The proc-macro host compiles in the
+// same process, with its own numbering; its code must never replace program RIR.
+static CAPTURED: Mutex<Option<BTreeMap<usize, Captured>>> = Mutex::new(None);
+pub fn new_unit() -> usize {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+    if enabled() { NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) } else { 0 }
+}
 /// the first captured slot: the run's entry (the test fn, main)
 static ENTRY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
 
@@ -31,50 +42,19 @@ pub fn startup() {
     }
 }
 
-/// Block shaking: the coverage stores in a captured body (a byte store of 1 to a coverage table
-/// address, the address an `Iconst`) are removed; a block whose stores all name blocks that never
-/// ran becomes a trap when `trap` (its code never ran in the trace: the same contract as an
-/// untraced function). Returns (blocks trapped, coverage stores removed).
+/// Block shaking: remove native coverage effects from the captured RIR and
+/// optionally trap blocks whose source probes never ran. Required callees and
+/// their predecessor paths retain work's keep-reachable behavior.
+/// Returns (blocks trapped, coverage effects removed).
 fn shake_blocks(f: &mut Func, trap: bool, keep: &dyn Fn(u32) -> bool, mut stub: Option<&mut u32>) -> (usize, usize) {
-    use relax_backend::rir::{Mem, Term, VReg};
-    // single-definition Iconsts
-    let mut defs: HashMap<VReg, (u32, i64)> = HashMap::new();
-    for b in &f.blocks {
-        for i in &b.insts {
-            if let Some(d) = def_of(i) {
-                let e = defs.entry(d).or_insert((0, 0));
-                e.0 += 1;
-                if let Inst::Iconst(_, v) = i {
-                    e.1 = *v;
-                } else {
-                    e.1 = i64::MIN;
-                }
-            }
-        }
-    }
-    for p in &f.params {
-        defs.entry(*p).or_insert((0, 0)).0 += 1;
-    }
-    // a coverage store, possibly merged by the optimiser with its neighbours (consecutive blocks
-    // have consecutive bytes: two byte stores become one 2-, 4- or 8-byte store of 0x0101..):
-    // Some(any of its bytes' blocks ran)
+    use relax_backend::rir::Term;
     let cov = |i: &Inst| -> Option<bool> {
-        if let Inst::Store(Mem::Int(w, _), base, off, _) = i {
-            let (n, v) = defs.get(base).copied()?;
-            if n == 1 && v != i64::MIN {
-                let a = (v as u64).wrapping_add(*off as i64 as u64);
-                let mut any = None;
-                for k in 0..(*w as u64).max(1) {
-                    if let Some(h) = crate::coverage::hit_at(a + k) {
-                        any = Some(any.unwrap_or(false) || h);
-                    }
-                }
-                return any;
-            }
+        match i {
+            Inst::Coverage { word, mask } => crate::coverage::hit(*word, *mask),
+            _ => None,
         }
-        None
     };
-    // per block: Some(entered) when it holds coverage stores (entered when any of them ran)
+    // A block is entered when any of its source probes ran in any lowering.
     let state: Vec<Option<bool>> = f
         .blocks
         .iter()
@@ -146,58 +126,8 @@ fn shake_blocks(f: &mut Func, trap: bool, keep: &dyn Fn(u32) -> bool, mut stub: 
             });
         }
     }
-    // the other shapes the optimiser leaves (a coverage base reached through Mov/IBinI/IBin, an
-    // indexed store): every store whose address derives from a coverage-table constant goes
-    {
-        use std::collections::HashSet;
-        let mut cvr: HashSet<VReg> = HashSet::new();
-        loop {
-            let n0 = cvr.len();
-            for b in &f.blocks {
-                for i in &b.insts {
-                    match i {
-                        Inst::Iconst(d, v) if crate::coverage::hit_at(*v as u64).is_some() => {
-                            cvr.insert(*d);
-                        }
-                        Inst::Mov(d, a) | Inst::IBinI(_, _, d, a, _) if cvr.contains(a) => {
-                            cvr.insert(*d);
-                        }
-                        Inst::IBin(relax_backend::rir::IOp::Add, _, d, a, c) if cvr.contains(a) || cvr.contains(c) => {
-                            cvr.insert(*d);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            if cvr.len() == n0 {
-                break;
-            }
-        }
-        if !cvr.is_empty() {
-            for b in f.blocks.iter_mut() {
-                let keep: Vec<bool> = b.insts.iter().map(|i| !matches!(i, Inst::Store(_, a, _, _) | Inst::StoreX(_, a, _, _, _, _) | Inst::AtomicStore(_, _, a, _) if cvr.contains(a))).collect();
-                if keep.iter().all(|k| *k) {
-                    continue;
-                }
-                removed += keep.iter().filter(|k| !**k).count();
-                let positioned = b.pos.len() == b.insts.len();
-                let mut k = 0;
-                b.insts.retain(|_| { k += 1; keep[k - 1] });
-                if positioned {
-                    let mut k = 0;
-                    b.pos.retain(|_| { k += 1; keep[k - 1] });
-                }
-            }
-        }
-    }
     if removed > 0 {
         relax_backend::passes::dce(f);
-        // a coverage address still named: a store shape this pass does not know (it would write
-        // into linear memory at a wrapped address): say so
-        let left = f.blocks.iter().flat_map(|b| b.insts.iter()).filter(|i| matches!(i, Inst::Iconst(_, v) if crate::coverage::hit_at(*v as u64).is_some())).count();
-        if left > 0 {
-            eprintln!("wasm export: {}: {} coverage addresses left after the strip", f.name, left);
-        }
     }
     (trapped, removed)
 }
@@ -334,37 +264,70 @@ fn succs(t: &relax_backend::rir::Term) -> Vec<u32> {
     }
 }
 
-fn def_of(i: &Inst) -> Option<relax_backend::rir::VReg> {
-    match i {
-        Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::Mov(d, _) | Inst::IBin(_, _, d, _, _) | Inst::IBinI(_, _, d, _, _) | Inst::INeg(_, d, _) | Inst::INot(_, d, _) | Inst::IBit(_, d, _) | Inst::ICmp(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) | Inst::FBin(_, _, d, _, _) | Inst::FUnary(_, _, d, _) | Inst::FCmp(_, _, d, _, _) | Inst::Conv(_, d, _) | Inst::Load(_, d, _, _) | Inst::LoadX(_, d, _, _, _, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::Sel(d, _, _, _) | Inst::TlsAddr(d, _) | Inst::TlsStatic(d, _) => Some(*d),
-        // anything else defining a vreg counts as "not a plain constant": the vreg is reported
-        // as defined (several times) so a base it defines is never read as a coverage address
-        Inst::Call(_, _, r) => r.first().copied(),
-        _ => None,
-    }
-}
-
 pub fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_WASM_EXPORT").is_some())
 }
 
-static ROOTS: Mutex<Vec<(u32, String)>> = Mutex::new(Vec::new());
+/// (slot, export name: None = a test fn, exported as `t<k>` in registration order)
+static ROOTS: Mutex<Vec<(u32, Option<String>)>> = Mutex::new(Vec::new());
 
-/// A function the host calls (a test fn): a root of the export, exported under its name.
-pub fn root(id: u32, name: &str) {
+/// A test fn the harness calls: a root of the export, exported as `t<k>` (the k-th test).
+pub fn root(id: u32, _name: &str) {
+    add_root(id, None);
+}
+
+/// A `#[no_mangle]` / `#[export_name]` fn the embedder calls (`--exports`: the page's `wasm_*`
+/// entries): a root of the export, exported under its symbol name.
+pub fn export(id: u32, symbol: &str) {
+    add_root(id, Some(symbol.to_string()));
+}
+
+fn add_root(id: u32, name: Option<String>) {
     if enabled() {
         let mut r = ROOTS.lock().unwrap_or_else(|e| e.into_inner());
         if !r.iter().any(|x| x.0 == id) {
-            r.push((id, name.to_string()));
+            r.push((id, name));
         }
     }
 }
 
+/// The import module of foreign fn `d` as rustc names it for a wasm target: its extern block's
+/// `#[link(wasm_import_module = "..")]`, else "env" (rustc_codegen_llvm: `wasm_import_module`
+/// defaults to `env`). None: not a foreign item of an extern block.
+fn wasm_import_module(u: &Unit, d: crate::program::DefId) -> Option<String> {
+    let def = u.prog.def(d);
+    let f = &u.prog.files[def.file as usize];
+    let ast = &f.ast;
+    for it in &ast.items {
+        let crate::ast::ItemKind::ForeignMod(r) = &it.kind else { continue };
+        if !ast.list(ast.row(*r).items).contains(&def.item) {
+            continue;
+        }
+        for a in ast.list(it.attrs) {
+            let (lo, hi) = (a.toks.lo, a.toks.hi);
+            if hi <= lo || f.tok_text(lo) != "link" {
+                continue;
+            }
+            let mut t = lo + 1;
+            while t + 2 < hi {
+                if f.tok_text(t) == "wasm_import_module" && f.tok_text(t + 1) == "=" {
+                    return Some(f.tok_text(t + 2).trim_matches('"').to_string());
+                }
+                t += 1;
+            }
+        }
+        return Some("env".to_string());
+    }
+    None
+}
+
 /// Records the RIR slot `id`'s code is compiled from (the last compile of a slot wins).
 static FINISHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// finish() has begun (the union's compiles still capture)
+static FORCING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-pub fn capture(id: u32, f: &Func) {
+pub fn capture(unit: usize, id: u32, f: &Func) {
     if !enabled() || FINISHED.load(std::sync::atomic::Ordering::Acquire) {
         return;
     }
@@ -381,11 +344,12 @@ pub fn capture(id: u32, f: &Func) {
             fn atexit(f: extern "C" fn()) -> i32;
         }
         unsafe { atexit(at_exit) };
-        ENTRY.store(id, std::sync::atomic::Ordering::Relaxed);
     }
     // on the kept heap: a zone swap frees the compile arenas while the run goes on
     crate::zone_alloc::kept_with(|| {
-        g.get_or_insert_with(BTreeMap::new).insert(id, f.clone());
+        g.get_or_insert_with(BTreeMap::new).entry(unit)
+            .or_insert_with(|| Captured { entry: id, funcs: BTreeMap::new() })
+            .funcs.insert(id, f.clone());
     });
 }
 
@@ -439,19 +403,90 @@ fn data_of(u: &Unit, id: u32) -> Option<(Vec<u8>, u64, u64)> {
     Some((bytes, len, align))
 }
 
+/// The union of several runs (`MAKEPAD_RUN_WASM_EXPORT_UNION=<coverage.json>[,...]`: the
+/// makepad-web-trace coverage of the drivers' runs, functions by `jit::slot_key`): every function the
+/// captured code can reach (calls, function addresses, pointers in its data) whose key another run
+/// executed is compiled now, so it is captured too; to a fixpoint (a forced function's own callees).
+/// Returns the slots forced (kept in the module although this run never installed them).
+fn force_union(up: *mut Unit) -> std::collections::BTreeSet<u32> {
+    let mut forced = std::collections::BTreeSet::new();
+    let Ok(file) = std::env::var("MAKEPAD_RUN_WASM_EXPORT_UNION") else { return forced };
+    let mut keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for path in file.split(',').filter(|p| !p.is_empty()) {
+        let j = std::fs::read(path).map_err(|e| e.to_string()).and_then(|d| crate::json::parse(&d).map_err(|e| e.to_string()));
+        match j {
+            Ok(j) => keys.extend(j.get("functions").map_or(&[][..], |f| f.arr()).iter().filter_map(|f| f.get("key")).map(|k| k.str().to_string())),
+            Err(e) => eprintln!("wasm export: union {}: {}", path, e),
+        }
+    }
+    let u = unsafe { &*up };
+    let mut tried: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let (mut failed, mut rounds) = (0usize, 0usize);
+    loop {
+        rounds += 1;
+        // the slots the captured set names that it lacks
+        let want: Vec<u32> = {
+            let g = CAPTURED.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(captured) = g.as_ref().and_then(|g| g.get(&u.wasm_export_id)) else { return forced };
+            let funcs = &captured.funcs;
+            let mut named: Vec<u32> = Vec::new();
+            address_taken(u, funcs, &mut named);
+            for f in funcs.values() {
+                for b in &f.blocks {
+                    for i in &b.insts {
+                        if let Inst::Call(relax_backend::rir::Callee::Fn(t) | relax_backend::rir::Callee::CFn(t, _), _, _) = i {
+                            named.push(*t);
+                        }
+                    }
+                }
+            }
+            named.sort_unstable();
+            named.dedup();
+            named.into_iter().filter(|t| (*t as usize) < u.fns.len() && !funcs.contains_key(t) && !tried.contains(t)).collect()
+        };
+        let mut any = false;
+        for t in want {
+            tried.insert(t);
+            if !keys.contains(crate::jit::slot_key(u, t).as_str()) {
+                continue;
+            }
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { crate::jit::compile_fn(up, t) })) {
+                Ok(Ok(_)) => {
+                    forced.insert(t);
+                    any = true;
+                }
+                _ => failed += 1,
+            }
+        }
+        if !any {
+            break;
+        }
+    }
+    if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
+        eprintln!("wasm export: union: {} keys, {} functions other runs executed compiled in ({} rounds, {} failed)", keys.len(), forced.len(), rounds, failed);
+    }
+    forced
+}
+
 /// Writes the module of the captured functions to the export path.
 pub fn finish(u: &Unit) {
     let Some(path) = std::env::var("MAKEPAD_RUN_WASM_EXPORT").ok() else { return };
+    if FORCING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    let forced = force_union(u as *const Unit as *mut Unit);
     if FINISHED.swap(true, std::sync::atomic::Ordering::AcqRel) {
         return;
     }
     // `%p`: the process id (a run's child processes capture their own sets)
     let path = path.replace("%p", &std::process::id().to_string());
-    let Some(mut funcs) = CAPTURED.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
+    let Some(captured) = CAPTURED.lock().unwrap_or_else(|e| e.into_inner()).as_mut().and_then(|g| g.remove(&u.wasm_export_id)) else { return };
+    ENTRY.store(captured.entry, std::sync::atomic::Ordering::Relaxed);
+    let mut funcs = captured.funcs;
     // the trace: slots whose code was installed (called); a build made ahead of a call that
     // never came is not part of it
     let n_cap = funcs.len();
-    funcs.retain(|id, _| (*id as usize) < u.fns.len() && u.fns[*id as usize].code != 0);
+    funcs.retain(|id, _| (*id as usize) < u.fns.len() && (u.fns[*id as usize].code != 0 || forced.contains(id)));
     if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
         eprintln!("wasm export: {} slots captured, {} installed (of {} slots in the unit)", n_cap, funcs.len(), u.fns.len());
     }
@@ -474,19 +509,24 @@ pub fn finish(u: &Unit) {
                     None => format!("{}.{}", path, name),
                 };
                 eprintln!("wasm export variant {} [{}]:", name, o);
-                emit(u, &funcs, &kept, kept_failed, o, &p);
+                emit(u, &funcs, &kept, kept_failed, &forced, o, &p);
             }
         }
-        Err(_) => emit(u, &funcs, &kept, kept_failed, &std::env::var("MAKEPAD_RUN_WASM_OPT").unwrap_or_default(), &path),
+        Err(_) => emit(u, &funcs, &kept, kept_failed, &forced, &std::env::var("MAKEPAD_RUN_WASM_OPT").unwrap_or_default(), &path),
     }
 }
 
 /// One module of the captured set with options `optv` (`-tee,remat,...`), written to `path`.
-fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet<u32>, kept_failed: usize, optv: &str, path: &str) {
+fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet<u32>, kept_failed: usize, forced: &std::collections::BTreeSet<u32>, optv: &str, path: &str) {
     let options = u.prog.session.options.clone();
     // the web player's profile: panics abort, one thread (TLS keys and waits built in)
     // untraced calls are a bare trap (option untraced: env.u(id) first, for a message)
-    let mut opts = wasm::Options { panic_abort: true, untraced_import: false, ..wasm::Options::default() };
+    let mut opts = wasm::Options {
+        panic_abort: true,
+        untraced_import: false,
+        memory64: options.check_target.web() == Some(crate::options::PtrWidth::W64),
+        ..wasm::Options::default()
+    };
     let mut single = true;
     // off by default: under brotli the merged module is LARGER (P(DOOM), block-shaken: raw -360 KB,
     // 23,345 -> 18,620 functions, br11 +5.0 KB): the compressor already shares near-identical
@@ -535,7 +575,8 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
         let untraced = opts.untraced_import;
         for (id, f) in w.iter_mut() {
             nb += f.blocks.len();
-            let (t, r) = shake_blocks(f, blocks && !kept.contains(id), &keep, if untraced { Some(&mut stub_id) } else { None });
+            // a function another run executed (the union) has no block coverage here: whole
+            let (t, r) = shake_blocks(f, blocks && !kept.contains(id) && !forced.contains(id), &keep, if untraced { Some(&mut stub_id) } else { None });
             nt += t;
             nr += r;
         }
@@ -548,9 +589,9 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
         funcs
     };
     let mut m = Module::new(opts);
-    let mut roots: Vec<(u32, String)> = ROOTS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let mut roots: Vec<(u32, Option<String>)> = ROOTS.lock().unwrap_or_else(|e| e.into_inner()).clone();
     if roots.is_empty() {
-        roots.push((ENTRY.load(std::sync::atomic::Ordering::Relaxed), "main".to_string()));
+        roots.push((ENTRY.load(std::sync::atomic::Ordering::Relaxed), None));
     }
     roots.retain(|r| funcs.contains_key(&r.0));
     // roots: the entry and every function whose address any traced code takes (directly or in
@@ -601,14 +642,22 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
     for id in &reached {
         m.add_func(*id, &funcs[id]);
     }
-    for (k, (id, name)) in roots.iter().enumerate() {
-        // short export names; MAKEPAD_RUN_WASM_EXPORT_STATS lists them
-        let _ = name;
-        m.export_func(*id, &format!("t{}", k));
+    // the embedder's entries under their symbol names (`wasm_create_app`, ...); test fns (and a
+    // run's entry) as t0, t1, ... in registration order
+    let mut k = 0;
+    for (id, name) in &roots {
+        match name {
+            Some(n) => m.export_func(*id, n),
+            None => {
+                m.export_func(*id, &format!("t{}", k));
+                k += 1;
+            }
+        }
     }
     // symbols the code names
     let mut addr_syms: Vec<u32> = Vec::new();
     let mut tls_syms: Vec<u32> = Vec::new();
+    let mut static_tls_syms = std::collections::BTreeSet::new();
     let mut host_syms: Vec<u32> = Vec::new();
     for f in reached.iter().map(|id| &funcs[id]) {
         for b in &f.blocks {
@@ -616,6 +665,7 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
                 match i {
                     Inst::Addr(_, s) => addr_syms.push(s.id),
                     Inst::TlsAddr(_, s) => tls_syms.push(s.id),
+                    Inst::TlsStatic(_, s) => { static_tls_syms.insert(s.id); }
                     Inst::Call(relax_backend::rir::Callee::Host(s) | relax_backend::rir::Callee::CHost(s, _), _, _) => host_syms.push(s.id),
                     _ => {}
                 }
@@ -628,6 +678,7 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
     host_syms.dedup();
     let mut vals: HashMap<u32, u64> = HashMap::new();
     let mut host: HashMap<u32, HostBind> = HashMap::new();
+    let web = options.check_target.web().is_some();
     for id in host_syms {
         let b = match u.syms.kind(id) {
             Some(SymKind::Rt(n)) => match n {
@@ -639,15 +690,23 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
                 "rethrow" if abort => HostBind::Trap,
                 n => HostBind::Import("r".into(), n.to_string()),
             },
-            Some(SymKind::Foreign(n)) if single => single_thread(&n).unwrap_or(HostBind::Import("c".into(), n)),
-            Some(SymKind::Foreign(n)) => HostBind::Import("c".into(), n),
+            Some(SymKind::Foreign(n)) => match single.then(|| single_thread(&n)).flatten() {
+                Some(b) => b,
+                // the web target: the module rustc imports it from (the page's `env.js_*`); a
+                // native capture's C symbols are `c.<name>`
+                None => {
+                    let d = u.syms.foreign_defs.lock().unwrap_or_else(|e| e.into_inner()).get(&id).copied();
+                    let module = if web { d.and_then(|d| wasm_import_module(u, d)) } else { None };
+                    HostBind::Import(module.unwrap_or_else(|| "c".into()), n)
+                }
+            },
             Some(SymKind::Provided(k)) => HostBind::Import("p".into(), k),
             _ => HostBind::Trap,
         };
         host.insert(id, b);
     }
     // data: placed on first reference, pointer words translated (worklist)
-    let tls = m.place(64 * 1024, 64);
+    let tls = m.place(u.tls_next.max(1) as u64, 64);
     let mut placed: HashMap<u32, (u64, u64)> = HashMap::new();
     let mut pending: Vec<u32> = Vec::new();
     let mut images: Vec<(u32, Vec<u8>)> = Vec::new();
@@ -664,13 +723,26 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
     // a thread-local symbol holds its offset in the thread's block: one block (one thread)
     tls_syms.sort_unstable();
     tls_syms.dedup();
-    let tls_size = 64 * 1024u64;
     for &id in &tls_syms {
         let off = u.syms.value(Sym::new(id));
-        if off >= tls_size {
-            eprintln!("wasm export: thread-local offset {} past the {} byte block", off, tls_size);
-        }
         vals.insert(id, tls + off);
+    }
+    // Native static TLS offsets are signed offsets from the host's thread pointer,
+    // not offsets in the dynamic TLS block. Give each static its own zeroed image
+    // for the web profile's one thread; its existing first-use code initializes it.
+    for id in static_tls_syms {
+        let Some(SymKind::ThreadLocal(d)) = u.syms.kind(id) else {
+            eprintln!("wasm export: invalid static TLS symbol {}", id);
+            return;
+        };
+        let Some(ty) = u.tcx.const_ty(&u.prog, d) else {
+            eprintln!("wasm export: no layout for static TLS {}", u.prog.def_path(d));
+            return;
+        };
+        let layout = u.layout_of(ty);
+        let flag = u.tls_places.get(&d).is_some_and(|p| p.init.is_some());
+        let addr = m.place(u64::from(layout.size.max(1)) + u64::from(flag), u64::from(layout.align.max(1)));
+        vals.insert(id, addr);
     }
     let mut n_unlinked = 0usize;
     for &id in &addr_syms {
@@ -681,6 +753,9 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
             Some(SymKind::Rt("tls_base")) => tls,
             _ => {
                 n_unlinked += 1;
+                if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
+                    eprintln!("wasm export: unlinked symbol {}: {}", id, crate::syms::describe(u, Sym::new(id)));
+                }
                 u.syms.value(Sym::new(id))
             }
         };
@@ -702,7 +777,7 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
                         _ => None,
                     };
                     if let Some(nv) = nv {
-                        bytes[k..k + pw].copy_from_slice(&nv.to_le_bytes()[..pw]);
+                        unsafe { crate::syms::write_ptr(u, bytes[k..k + pw].as_mut_ptr() as u64, nv) };
                         n_ptrs += 1;
                     }
                 }
@@ -783,6 +858,9 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
     }
     if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
         let s = &out.stats;
+        for (id, target) in &s.untraced_calls {
+            eprintln!("wasm export: untraced call {} ({}) -> {} ({})", id, funcs[id].name, target, crate::syms::stable_fn_name(u, *target));
+        }
         eprintln!(
             "wasm export: {} bytes ({} functions captured, {} in module, {} types, {} imports): code {} data {} types {} imports {} funcs {} elems {} other {}; {} data objects, {} pointer words linked, {} symbols unlinked, {} untraced call sites, {} functions failed, {} folded into identical ones",
             s.total, nf, s.n_funcs, s.n_types, s.n_imports, s.code, s.data, s.types, s.imports, s.funcs, s.elems, s.other, n_data, n_ptrs, n_unlinked, s.untraced_sites, s.failed.len(), s.n_folded
@@ -815,7 +893,8 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
             eprintln!("  data {:9} {}", b, n.chars().take(140).collect::<String>());
         }
         let mut why: HashMap<String, usize> = HashMap::new();
-        for (_, e) in &s.failed {
+        for (id, e) in &s.failed {
+            eprintln!("wasm export: failed function {} ({}): {}", id, funcs[id].name, e);
             let k: String = e.chars().take(60).collect();
             *why.entry(k).or_insert(0) += 1;
         }

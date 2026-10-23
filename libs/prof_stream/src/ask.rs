@@ -266,12 +266,50 @@ fn pick_lanes(p: &Profile, sel: Option<&str>) -> Result<Vec<usize>, String> {
 
 /// What a lane did in [t0, t1) of a critical path's running step: self time by span, and the
 /// time no span covers (on the main lane: idle, waiting for the next event or frame tick; on
-/// another lane: work without a marker).
+/// another lane: work without a marker). Main-lane time before its first kept record (a flight
+/// recording keeps each lane's last records) is read from the frames' summaries
+/// ([`summary_parts`]): lazy compiles, waits, idle and the UI work between them, never "idle".
 fn run_parts(p: &Profile, lane: usize, t0: u64, t1: u64) -> Vec<(String, u64)> {
     let main = p.main_lane() == Some(lane);
     let mut v: Vec<(String, u64)> = p.exclusive(lane, t0, t1).into_iter().filter(|x| !x.1).map(|(n, _, ns)| (p.s(n).to_string(), ns)).collect();
     let covered: u64 = p.lanes[lane].segs_in(0, t0, t1).iter().filter(|s| !s.wait).map(|s| s.t1.min(t1).saturating_sub(s.t0.max(t0))).sum();
-    let gap = (t1 - t0).saturating_sub(covered);
+    let mut gap = (t1 - t0).saturating_sub(covered);
+    // before the lane's first kept record nothing is known about it (its ring wrapped): the main
+    // lane's frames say what it did; another lane's time there is not recorded (not idle, not
+    // "between requests")
+    let known = main_known_from(p, lane);
+    if t0 < known {
+        let cut = t1.min(known);
+        if main {
+            for (what, ns) in summary_parts(p, t0, cut) {
+                add_part(&mut v, &what, ns);
+            }
+        } else {
+            add_part(&mut v, "not recorded (before its first kept record)", cut - t0);
+        }
+        gap = gap.saturating_sub(cut - t0);
+    }
+    if gap > 0 && main {
+        // the frames' summaries know the idle time (gaps longer than the recorder's threshold
+        // between UI phases): a gap past it is UI work outside the phases' spans
+        let fs: Vec<&Frame> = p.frames[p.frames.partition_point(|f| f.t1 <= t0)..].iter().take_while(|f| f.t0 < t1).collect();
+        if !fs.is_empty() && fs.iter().all(|f| f.summary) {
+            let mut idle = 0u64;
+            let mut inside = 0u64;
+            for f in &fs {
+                let span = f.t1.saturating_sub(f.t0).max(1);
+                let o = f.t1.min(t1).saturating_sub(f.t0.max(t0));
+                inside += o;
+                idle += (f.idle as u128 * o as u128 / span as u128) as u64;
+            }
+            // (time between frames is the event loop waiting)
+            idle += (t1 - t0).saturating_sub(inside);
+            let idle = idle.min(gap);
+            add_part(&mut v, "idle", idle);
+            add_part(&mut v, "UI work without spans", gap - idle);
+            gap = 0;
+        }
+    }
     if gap > 0 {
         let what = if main {
             "idle"
@@ -281,7 +319,7 @@ fn run_parts(p: &Profile, lane: usize, t0: u64, t1: u64) -> Vec<(String, u64)> {
         } else {
             "busy outside its marked spans"
         };
-        v.push((what.to_string(), gap));
+        add_part(&mut v, what, gap);
     }
     if !main {
         let ln = p.lane_name(lane);
@@ -290,6 +328,115 @@ fn run_parts(p: &Profile, lane: usize, t0: u64, t1: u64) -> Vec<(String, u64)> {
         }
     }
     v
+}
+
+fn add_part(v: &mut Vec<(String, u64)>, what: &str, ns: u64) {
+    if ns == 0 {
+        return;
+    }
+    match v.iter_mut().find(|x| x.0 == what) {
+        Some(x) => x.1 += ns,
+        None => v.push((what.to_string(), ns)),
+    }
+}
+
+/// A lane's spans are known from here on: its first kept record (a lane with none: never).
+fn main_known_from(p: &Profile, lane: usize) -> u64 {
+    match p.lanes[lane].first_t {
+        0 => u64::MAX,
+        t => t,
+    }
+}
+
+/// The main lane in [t0, t1) where its spans were not kept, read from the frame summaries of the
+/// frames overlapping it (each part prorated by the overlap): lazy compiles (their own time), the
+/// waits inside them and outside them (on the owner apart), the idle gaps, and the rest as the UI
+/// work no span names (its stack samples name it: `top fn lane=main range=..`). Time between
+/// frames is idle (the event loop waiting). Older recordings do not say how much of the waits
+/// fell inside lazy compiles: their compiles include those waits, and the waits outside are a
+/// lower bound.
+fn summary_parts(p: &Profile, t0: u64, t1: u64) -> Vec<(String, u64)> {
+    let mut v: Vec<(String, u64)> = Vec::new();
+    let a = p.frames.partition_point(|f| f.t1 <= t0);
+    let mut in_frames = 0u64;
+    for f in p.frames[a..].iter().take_while(|f| f.t0 < t1) {
+        let span = f.t1.saturating_sub(f.t0);
+        let o = f.t1.min(t1).saturating_sub(f.t0.max(t0));
+        if span == 0 || o == 0 {
+            continue;
+        }
+        in_frames += o;
+        let part = |x: u64| (x as u128 * o as u128 / span as u128) as u64;
+        let mut parts: Vec<(&str, u64)> = Vec::new();
+        if f.overlap {
+            let cwait = f.cwait_ns.min(f.compile_ns);
+            let cowner = f.cowner_ns.min(cwait);
+            parts.push(("lazy compiles", f.compile_ns - cwait));
+            parts.push(("wait owner (in lazy compiles)", cowner));
+            parts.push(("wait (in lazy compiles)", cwait - cowner));
+            parts.push(("wait owner", f.owner_ns.saturating_sub(cowner)));
+            parts.push(("wait", f.wait_ns.saturating_sub(f.owner_ns).saturating_sub(cwait - cowner)));
+        } else {
+            parts.push(("lazy compiles (incl. their waits)", f.compile_ns));
+            parts.push(("waits outside lazy compiles (at least)", f.wait_ns.saturating_sub(f.compile_ns)));
+        }
+        parts.push(("idle", f.idle));
+        let named: u64 = parts.iter().map(|x| x.1).sum();
+        parts.push((if f.overlap { "UI work without spans" } else { "UI work without spans (at most)" }, span.saturating_sub(named)));
+        for (what, ns) in parts {
+            add_part(&mut v, what, part(ns));
+        }
+    }
+    add_part(&mut v, "idle", (t1 - t0).saturating_sub(in_frames));
+    v
+}
+
+/// What lane `li`'s stack samples in [t0, t1) say it ran (the flight recorder samples the UI
+/// thread through a long frame): the top fns by self and by inclusive weight (below 90%: not
+/// the loop every sample is under). None: no samples there.
+fn sampled_work(p: &Profile, li: usize, t0: u64, t1: u64, lg: &mut Legend) -> Option<String> {
+    let tid = p.lanes[li].thread.tid;
+    let v: Vec<&crate::SampleRec> = p.samples.iter().filter(|s| s.0 == tid && s.2.t >= t0 && s.2.t < t1).map(|s| &s.2).collect();
+    if v.is_empty() {
+        return None;
+    }
+    let total: u64 = v.iter().map(|s| s.weight.max(1)).sum();
+    let mut selfw: HashMap<u32, u64> = HashMap::new();
+    let mut incl: HashMap<u32, u64> = HashMap::new();
+    for s in &v {
+        let w = s.weight.max(1);
+        if let Some(&(f, _)) = s.frames.last() {
+            *selfw.entry(f).or_default() += w;
+        }
+        let mut seen: Vec<u32> = Vec::new();
+        for &(f, _) in &s.frames {
+            if !seen.contains(&f) {
+                seen.push(f);
+                *incl.entry(f).or_default() += w;
+            }
+        }
+    }
+    let top = |m: HashMap<u32, u64>, lg: &mut Legend| {
+        let mut r: Vec<(u32, u64)> = m.into_iter().filter(|x| x.1 * 10 < total * 9).collect();
+        r.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        r.iter().take(3).map(|(f, w)| format!("{} {}%", lg.name(p.s(*f)), pct(*w, total))).collect::<Vec<_>>().join(", ")
+    };
+    let sv = top(selfw, lg);
+    let iv = top(incl, lg);
+    Some(format!("{} stack samples of {}: self {}; inclusive {}", v.len(), p.lane_name(li), sv, iv))
+}
+
+/// A note for answers over frames older than the main lane's first kept span.
+fn unrecorded_note(p: &Profile, t0: u64) -> Option<String> {
+    let main = p.main_lane()?;
+    let known = main_known_from(p, main);
+    (t0 < known && !p.frames.is_empty()).then(|| {
+        if known == u64::MAX {
+            "the main lane kept no spans: its time is read from the frame summaries (lazy compiles, waits, idle; the rest is UI work no span names: `top fn lane=main` names it from stack samples)".to_string()
+        } else {
+            format!("the main lane's spans were kept from {} s of the run on; earlier frames are read from their frame summaries (lazy compiles, waits, idle; the rest is UI work no span names: `top fn lane=main` names it from stack samples)", run_s(p, known))
+        }
+    })
 }
 
 /// What a frame's time went to, in one phrase: the largest critical-path pieces.
@@ -457,7 +604,12 @@ fn frames(p: &Profile, q: &Q) -> Ans {
     let mut t = Table::new(&head);
     for &i in idx.iter().take(n) {
         let f = &p.frames[i];
-        let (b, w) = main.map_or((0, 0), |m| p.busy_in(m, f.t0, f.t1));
+        // a frame from before the main lane's first kept span: its summary's busy and wait time
+        let (b, w) = match main {
+            Some(m) if f.t0 < main_known_from(p, m) => (f.dur().saturating_sub(f.wait_ns), f.wait_ns),
+            Some(m) => p.busy_in(m, f.t0, f.t1),
+            None => (0, 0),
+        };
         let mut row = vec![format!("F{}", f.id), at(p, f.t0), ms(f.dur()), ms(b), ms(w)];
         if multi {
             let cp: u64 = main.map_or(0, |m| p.critical_path(m, f.t0, f.t1).iter().filter(|s| s.wait.is_none()).map(|s| s.t1 - s.t0).sum());
@@ -472,6 +624,9 @@ fn frames(p: &Profile, q: &Q) -> Ans {
     out.table(t);
     if idx.len() > n {
         out.note(format!("+{} frames not shown", idx.len() - n));
+    }
+    if let Some(n) = idx.iter().take(n).map(|&i| p.frames[i].t0).min().and_then(|t| unrecorded_note(p, t)) {
+        out.note(n);
     }
     out.more(format!("frame F{}  hitches  timeline F{}", worst.id, worst.id));
     out
@@ -514,16 +669,55 @@ fn frame(p: &Profile, w: &str) -> Ans {
             }
         }
     }
-    let mut t = Table::new(&["#", "lane", "ms", "critical path step"]);
-    let shown = steps.len().min(12);
-    for (k, (l, what, ns)) in steps.iter().enumerate().take(shown) {
-        t.row(vec![(k + 1).to_string(), format!("T{}", p.lanes[*l].thread.tid), ms(*ns), lg.name(what)]);
+    // a long path (thousands of short waits on the owner) reads best summed by step
+    let many = steps.len() > 12;
+    if many {
+        let n = steps.len();
+        let mut by: Vec<(usize, String, u64, usize)> = Vec::new();
+        for (l, what, ns) in steps.drain(..) {
+            match by.iter_mut().find(|x| x.0 == l && x.1 == what) {
+                Some(x) => {
+                    x.2 += ns;
+                    x.3 += 1;
+                }
+                None => by.push((l, what, ns, 1)),
+            }
+        }
+        by.sort_by(|a, b| b.2.cmp(&a.2));
+        let mut t = Table::new(&["lane", "ms", "times", "critical path step"]);
+        for (l, what, ns, k) in by.iter().take(12) {
+            t.row(vec![format!("T{}", p.lanes[*l].thread.tid), ms(*ns), k.to_string(), lg.name(what)]);
+        }
+        out.title(format!("critical path by step ({} steps, largest first)", n));
+        out.table(t);
+        if by.len() > 12 {
+            let rest: u64 = by[12..].iter().map(|x| x.2).sum();
+            out.note(format!("+{} kinds of steps, {} ms", by.len() - 12, ms(rest)));
+        }
+    } else {
+        let mut t = Table::new(&["#", "lane", "ms", "critical path step"]);
+        for (k, (l, what, ns)) in steps.iter().enumerate() {
+            t.row(vec![(k + 1).to_string(), format!("T{}", p.lanes[*l].thread.tid), ms(*ns), lg.name(what)]);
+        }
+        out.title("critical path (oldest first)");
+        out.table(t);
     }
-    out.title("critical path (oldest first)");
-    out.table(t);
-    if steps.len() > shown {
-        let rest: u64 = steps[shown..].iter().map(|x| x.2).sum();
-        out.note(format!("+{} steps, {} ms", steps.len() - shown, ms(rest)));
+    // a frame from before the main lane's first kept span: what its summary says
+    if f.t0 < main_known_from(p, main) {
+        let mut v = summary_parts(p, f.t0, f.t1.min(main_known_from(p, main)));
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut t = Table::new(&["main lane (frame summary)", "ms", "%"]);
+        for (what, ns) in &v {
+            t.row(vec![lg.name(what), ms(*ns), pct(*ns, f.t1 - f.t0)]);
+        }
+        out.table(t);
+        out.note(format!("{} lazy compiles, {} waits in the frame", f.compiles, f.waits));
+        if let Some(w) = sampled_work(p, main, f.t0, f.t1, &mut lg) {
+            out.note(w);
+        }
+        if let Some(n) = unrecorded_note(p, f.t0) {
+            out.note(n);
+        }
     }
     // the main lane's phases, exclusive
     let ex = p.exclusive(main, f.t0, f.t1);
@@ -537,6 +731,9 @@ fn frame(p: &Profile, w: &str) -> Ans {
         let rest: u64 = ex[shown..].iter().map(|x| x.2).sum();
         out.note(format!("+{} smaller, {} ms total", ex.len() - shown, ms(rest)));
     }
+    if ex.is_empty() {
+        out.blocks.pop();
+    }
     // other lanes busy in the frame
     let mut others: Vec<(usize, u64)> = (0..p.lanes.len()).filter(|&i| i != main).map(|i| (i, p.busy_in(i, f.t0, f.t1).0)).filter(|x| x.1 > 0).collect();
     others.sort_by(|a, b| b.1.cmp(&a.1));
@@ -547,7 +744,8 @@ fn frame(p: &Profile, w: &str) -> Ans {
     let (inst, cns, tiers) = jit_counts(p, f.t0, f.t1);
     let main_compile = p.compile_ns_in(main, f.t0, f.t1);
     if inst > 0 || main_compile > 0 {
-        out.note(format!("jit in frame: {} installs ({}), main lane compiling {} ms, worker compiles {} ms", inst, tiers_text(&tiers), ms(main_compile), ms(cns)));
+        let (prov, _, replaced) = provenance(p, f.t0, f.t1);
+        out.note(format!("jit in frame: {} installs ({}; from: {}; {} replaced earlier code), main lane compiling {} ms, worker compiles {} ms", inst, tiers_text(&tiers), provenance_text(&prov), replaced, ms(main_compile), ms(cns)));
     }
     let (gp, gbusy) = p.gpu_lane_busy(f.t0, f.t1);
     if gbusy > 0 {
@@ -555,7 +753,7 @@ fn frame(p: &Profile, w: &str) -> Ans {
         out.note(format!("gpu busy {} ms ({}% of the frame): {}", ms(gbusy), pct(gbusy, f.dur()), v.join(", ")));
     }
     out.note(lg.render());
-    out.more(format!("timeline F{id}  top cpu range=F{id}  frame F{}  frame F{}", id.saturating_sub(1), id + 1));
+    out.more(format!("timeline F{id}  top cpu range=F{id}  top fn lane=main range=F{id}  frame F{}  frame F{}", id.saturating_sub(1), id + 1));
     out
 }
 
@@ -687,13 +885,51 @@ fn top_fn(p: &Profile, t0: u64, t1: u64, wname: &str, n: usize, tids: Option<&[u
     out
 }
 
+fn origin_name(o: u8) -> &'static str {
+    jit::ORIGINS.get(o as usize).copied().filter(|n| *n != "?").unwrap_or("unknown")
+}
+
+/// Where the installs of [t0, t1) came from: per origin (fresh compile, warm cache, warm image,
+/// live patch, inspect) the installs by tier; and the installs that replaced code the slot had
+/// earlier in the recording, by (tier origin before -> after).
+fn provenance(p: &Profile, t0: u64, t1: u64) -> (Vec<(u8, usize, HashMap<u8, usize>)>, Vec<(String, usize)>, usize) {
+    let mut by: HashMap<u8, (usize, HashMap<u8, usize>)> = HashMap::new();
+    // the code each slot had before (the whole recording up to t1: what an install replaced)
+    let mut had: HashMap<u64, (u8, u8)> = HashMap::new();
+    let mut moves: HashMap<String, usize> = HashMap::new();
+    let mut replaced = 0;
+    for e in p.jit_in(p.t_min.min(t0), t1).iter().filter(|e| e.ev == jit::INSTALL) {
+        let prev = had.insert(e.b, (e.tier, e.origin));
+        if e.t < t0 {
+            continue;
+        }
+        let x = by.entry(e.origin).or_default();
+        x.0 += 1;
+        *x.1.entry(e.tier).or_default() += 1;
+        if let Some((pt, po)) = prev {
+            replaced += 1;
+            *moves.entry(format!("{} {} -> {} {}", Profile::tier_name(pt), origin_name(po), Profile::tier_name(e.tier), origin_name(e.origin))).or_default() += 1;
+        }
+    }
+    let mut v: Vec<(u8, usize, HashMap<u8, usize>)> = by.into_iter().map(|(o, (n, t))| (o, n, t)).collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let mut m: Vec<(String, usize)> = moves.into_iter().collect();
+    m.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    (v, m, replaced)
+}
+
+/// `fresh 9k, warm-cache 30k` for an answer's line.
+fn provenance_text(v: &[(u8, usize, HashMap<u8, usize>)]) -> String {
+    v.iter().map(|(o, n, _)| format!("{} {}", origin_name(*o), n)).collect::<Vec<_>>().join(", ")
+}
+
 fn top_jit(p: &Profile, t0: u64, t1: u64, wname: &str, n: usize) -> Ans {
     let ev = p.jit_in(t0, t1);
     if ev.is_empty() {
         return format!("no JIT events in {wname} (a native app, or nothing compiled)\nmore: summary").into();
     }
-    // per fn: compile ns, installs, last tier, code bytes; its source
-    let mut per: HashMap<u32, (u64, usize, u8, u64)> = HashMap::new();
+    // per fn: compile ns, installs, last tier, code bytes, installs by origin; its source
+    let mut per: HashMap<u32, (u64, usize, u8, u64, HashMap<u8, usize>)> = HashMap::new();
     let mut src: HashMap<u32, u32> = HashMap::new();
     let mut open: HashMap<(u32, u32), u64> = HashMap::new();
     for e in ev {
@@ -711,6 +947,7 @@ fn top_jit(p: &Profile, t0: u64, t1: u64, wname: &str, n: usize) -> Ans {
                 x.1 += 1;
                 x.2 = e.tier;
                 x.3 += e.a;
+                *x.4.entry(e.origin).or_default() += 1;
                 if e.src != 0 {
                     src.insert(e.name, e.src);
                 }
@@ -719,28 +956,64 @@ fn top_jit(p: &Profile, t0: u64, t1: u64, wname: &str, n: usize) -> Ans {
         }
     }
     let (installs, cns, tiers) = jit_counts(p, t0, t1);
-    let mut v: Vec<(u32, (u64, usize, u8, u64))> = per.into_iter().collect();
-    v.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then(b.1 .1.cmp(&a.1 .1)));
+    let (prov, moves, replaced) = provenance(p, t0, t1);
+    let mut v: Vec<(u32, (u64, usize, u8, u64, HashMap<u8, usize>))> = per.into_iter().collect();
+    v.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then(b.1 .1.cmp(&a.1 .1)).then(a.0.cmp(&b.0)));
     let mut lg = Legend::default();
-    let mut out = Ans::new(format!("{} installs in {} ({}), {} ms in compile jobs off the main lane", installs, wname, tiers_text(&tiers), ms(cns)));
+    let mut out = Ans::new(format!("{} installs in {} ({}; from: {}), {} ms in compile jobs off the main lane", installs, wname, tiers_text(&tiers), provenance_text(&prov), ms(cns)));
+    // where the code came from, by tier (fresh = compiled in this run)
+    let mut tier_ids: Vec<u8> = tiers.keys().copied().collect();
+    tier_ids.sort();
+    let mut head: Vec<String> = vec!["from".into()];
+    head.extend(tier_ids.iter().map(|t| Profile::tier_name(*t).to_string()));
+    head.push("all".into());
+    let hr: Vec<&str> = head.iter().map(String::as_str).collect();
+    let mut t = Table::new(&hr);
+    for (o, k, by) in &prov {
+        let mut row = vec![origin_name(*o).to_string()];
+        row.extend(tier_ids.iter().map(|t| by.get(t).copied().unwrap_or(0).to_string()));
+        row.push(k.to_string());
+        t.row(row);
+    }
+    out.table(t);
+    if prov.iter().any(|x| x.0 == 0) {
+        out.note("unknown = the producer did not say where the code came from");
+    }
+    // the producer's warm-cache outcomes (flight recordings: misses by reason)
+    if let Some(e) = p.events.iter().rev().find(|e| p.s(e.cat) == "jit.cache") {
+        out.note(e.text.clone());
+    }
+    if replaced > 0 {
+        let m: Vec<String> = moves.iter().take(5).map(|(w, k)| format!("{w} {k}")).collect();
+        out.note(format!("{} installs replaced code their slot had earlier in the recording: {}{}", replaced, m.join(", "), if moves.len() > 5 { format!(" (+{} kinds)", moves.len() - 5) } else { String::new() }));
+    }
     // per-fn compile time only where the producer sent compile begin / end events
     let timed = v.iter().any(|x| x.1 .0 > 0);
     let mut head = vec!["fn"];
     if timed {
         head.push("compile ms");
     }
-    head.extend(["installs", "tier now", "code KB", "source"]);
+    head.extend(["installs", "tier now", "from", "code KB"]);
+    let files = !src.is_empty();
+    if files {
+        head.push("file");
+    }
     let mut t = Table::new(&head);
-    for (name, (ns, k, tier, bytes)) in v.iter().take(n) {
+    for (name, (ns, k, tier, bytes, origins)) in v.iter().take(n) {
         let mut row = vec![lg.name(p.s(*name))];
         if timed {
             row.push(ms(*ns));
         }
+        let mut o: Vec<(&u8, &usize)> = origins.iter().collect();
+        o.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        let from = o.iter().map(|(o, k)| format!("{} {}", origin_name(**o), k)).collect::<Vec<_>>().join(", ");
+        row.extend([k.to_string(), Profile::tier_name(*tier).to_string(), from, sig(*bytes as f64 / 1024.0)]);
         // the file's name and line (the full path is the row's link)
         let full = src.get(name).map(|s| p.s(*s)).unwrap_or("");
-        let parts: Vec<&str> = full.rsplit('/').take(2).collect();
-        let shown = parts.into_iter().rev().collect::<Vec<_>>().join("/");
-        row.extend([k.to_string(), Profile::tier_name(*tier).to_string(), sig(*bytes as f64 / 1024.0), shown]);
+        if files {
+            let parts: Vec<&str> = full.rsplit('/').take(2).collect();
+            row.push(parts.into_iter().rev().collect::<Vec<_>>().join("/"));
+        }
         let link = (!full.is_empty()).then(|| format!("source {} {}", full, p.s(*name)));
         t.row_link(row, link);
     }
@@ -749,7 +1022,7 @@ fn top_jit(p: &Profile, t0: u64, t1: u64, wname: &str, n: usize) -> Ans {
         out.note(format!("+{} fns not shown", v.len() - n));
     }
     out.note(lg.render());
-    out.more("top cpu lane=compiler  frames");
+    out.more("top cpu lane=compiler  frames  events cat=cache");
     out
 }
 
@@ -887,7 +1160,9 @@ fn why_slow(p: &Profile, q: &Q) -> Ans {
         findings.push((idle / 4, format!("the main lane sat idle {} ms inside frames (between an event and the frame's draw: latency, not work)", ms(idle)), "frames".into()));
     }
     for (w, ns) in rv.iter().take(3) {
-        let look = if q.pos.get(1).is_some() { format!("top cpu lane=all range={name}") } else { "top cpu lane=all".to_string() };
+        // UI work no span names: the main lane's stack samples name it
+        let what = if w.starts_with("UI work without spans") { "top fn lane=main" } else { "top cpu lane=all" };
+        let look = if q.pos.get(1).is_some() { format!("{what} range={name}") } else { what.to_string() };
         findings.push((*ns, format!("{} on the critical path: {} ms ({} ms per frame)", lg.name(w), ms(*ns), ms(*ns / frames.len().max(1) as u64)), look));
     }
     // 2. JIT compiles on the main lane
@@ -914,6 +1189,9 @@ fn why_slow(p: &Profile, q: &Q) -> Ans {
     out.table(t);
     if findings.len() > 8 {
         out.note(format!("+{} smaller findings", findings.len() - 8));
+    }
+    if let Some(n) = unrecorded_note(p, frames.first().map_or(t0, |f| f.t0)) {
+        out.note(n);
     }
     out.note(lg.render());
     out.more("hitches  frames  top jit");
@@ -1234,7 +1512,16 @@ fn stall(p: &Profile, q: &Q) -> Ans {
         None => Ans::new(format!("F{} ({} ms) waited on no other lane for most of its time: {}", id, ms(f.dur()), cause(p, &f))),
     };
     if f.waits > 0 || f.compiles > 0 {
-        out.note(format!("frame summary: {} waits {} ms (on the owner {} ms), {} lazy compiles {} ms, idle {} ms", f.waits, ms(f.wait_ns), ms(f.owner_ns), f.compiles, ms(f.compile_ns), ms(f.idle)));
+        let inside = if f.overlap && f.cwait_ns > 0 { format!(" ({} ms of the waits inside the compiles, {} ms of them on the owner)", ms(f.cwait_ns), ms(f.cowner_ns)) } else { String::new() };
+        out.note(format!("frame summary: {} waits {} ms (on the owner {} ms), {} lazy compiles {} ms{}, idle {} ms", f.waits, ms(f.wait_ns), ms(f.owner_ns), f.compiles, ms(f.compile_ns), inside, ms(f.idle)));
+    }
+    if let Some(n) = unrecorded_note(p, f.t0) {
+        out.note(n);
+        let mut lg = Legend::default();
+        if let Some(w) = p.main_lane().and_then(|m| sampled_work(p, m, f.t0, f.t1, &mut lg)) {
+            out.note(w);
+            out.note(lg.render());
+        }
     }
     // events in and around the frame
     let evs: Vec<&crate::model::Event> = p.events.iter().filter(|e| e.t + 500_000_000 >= f.t0 && e.t <= f.t1 + 100_000_000).collect();

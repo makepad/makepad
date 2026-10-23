@@ -2445,13 +2445,19 @@ pub fn variant_size_differences(prog: &Program, tcx: &Tcx, own: &[bool]) {
         let def = prog.def(d);
         if def.kind != DefKind::Enum || !own.get(def.krate as usize).copied().unwrap_or(false) || lint::generated(prog, d) { continue; }
         let Some(adt) = tcx.adts.get(&d) else { continue };
-        if adt.n_generics != 0 || adt.variants.len() < 2 { continue; }
-        let bad = crate::types::TypeFlags::HAS_PARAM | crate::types::TypeFlags::HAS_ALIAS | crate::types::TypeFlags::HAS_ERROR | crate::types::TypeFlags::HAS_INFER;
+        if adt.n_generics != 0 { continue; }
+        // (rustc computes the layout of every non-generic enum here, projections in its fields normalized:
+        // a layout that needs itself is the cycle E0391; the size comparison is for tagged enums)
+        let bad = crate::types::TypeFlags::HAS_PARAM | crate::types::TypeFlags::HAS_ERROR | crate::types::TypeFlags::HAS_INFER;
         if adt.variants.iter().any(|v| v.fields.iter().any(|f| tcx.tys.flags(f.ty).intersects(bad))) { continue; }
+        // (a field whose projection does not normalize has no layout: rustc's layout_of is an error, the pass returns)
+        let env = crate::tcx::TypingEnv::fully_monomorphized(prog);
+        if adt.variants.iter().any(|v| v.fields.iter().any(|f| tcx.tys.flags(f.ty).intersects(crate::types::TypeFlags::HAS_ALIAS) && tcx.try_normalize_erasing_regions(prog, env, f.ty).is_err())) { continue; }
         let ty = tcx.tys.intern(TyKind::Adt(d, tcx.tys.mk_list(&[]), adt.region_params));
         let lcx = crate::layout::LayoutCx::new(prog);
         let lay = crate::layout::Layouts::new();
         let l = lay.of(&lcx, tcx, ty);
+        if adt.variants.len() < 2 { continue; }
         let (Some((_, mem)), crate::layout::TagEnc::Direct) = (l.tag, l.enc) else { continue };
         let tag_size = match mem { relax_backend::rir::Mem::Int(b, _) => b as u32, relax_backend::rir::Mem::F32 => 4, relax_backend::rir::Mem::F64 => 8 };
         if l.variant_fields.len() != adt.variants.len() { continue; }

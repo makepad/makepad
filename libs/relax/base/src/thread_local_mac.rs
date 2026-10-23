@@ -16,11 +16,18 @@ use crate::lexer::T;
 use crate::tg;
 use crate::tokbuf::TokBuf;
 
-/// The tokens between `thread_local!`'s delimiters, expanded.
-pub fn expand(toks: &[(T, &[u8])], edition: u16) -> Result<TokBuf, String> {
-    let copy = |g: &mut TokBuf, r: &[(T, &[u8])]| {
-        for (k, t) in r {
+/// The tokens between `thread_local!`'s delimiters (kind, text, position), expanded.
+pub fn expand(toks: &[(T, &[u8], u32)], edition: u16) -> Result<TokBuf, String> {
+    let copy = |g: &mut TokBuf, r: &[(T, &[u8], u32)]| {
+        for (k, t, _) in r {
             g.put(*k, &String::from_utf8_lossy(t));
+        }
+    };
+    // the item's attributes and visibility are the caller's tokens (rustc: `$(#[$attr])* $vis` keep
+    // their spans, so the attributes are judged -- feature gates, lints -- as written)
+    let copy_at = |g: &mut TokBuf, r: &[(T, &[u8], u32)]| {
+        for (k, t, at) in r {
+            g.put_at(*k, &String::from_utf8_lossy(t), *at);
         }
     };
     let mut out = TokBuf::new(edition);
@@ -92,7 +99,7 @@ pub fn expand(toks: &[(T, &[u8])], edition: u16) -> Result<TokBuf, String> {
         }
         let mut init = TokBuf::new(edition);
         copy(&mut init, &toks[e0..k]);
-        copy(&mut out, &toks[start..i]);
+        copy_at(&mut out, &toks[start..i]);
         // (several short `tg!`s: one long template exceeded Relax's own macro expansion when this
         // file runs under the JIT -- see TAILTLS.REPORT.md)
         // `Option<*const T>`: what the key's fn returns

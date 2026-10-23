@@ -16,7 +16,7 @@ case "$W" in w32) TRIPLE=wasm32-unknown-unknown ;; w64) TRIPLE=wasm64-unknown-un
 if [ -n "${REF:-}" ]; then
   cp "$REF" "$T/ref.out"
 else
-  rustc --edition 2021 -O --target wasm32-unknown-unknown --crate-type cdylib -C link-arg=--import-undefined "$H/web_std.rs" -o "$T/ref.wasm" 2>"$T/rustc.err" || { cat "$T/rustc.err"; exit 2; }
+  rustc --edition 2021 -O --cfg std_reference --target wasm32-unknown-unknown --crate-type cdylib -C link-arg=--import-undefined "$H/web_std.rs" -o "$T/ref.wasm" 2>"$T/rustc.err" || { cat "$T/rustc.err"; exit 2; }
   node "$H/host.js" "$T/ref.wasm" > "$T/ref.out" || exit 2
 fi
 mkdir -p "$T/u"

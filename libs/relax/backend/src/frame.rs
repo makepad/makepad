@@ -180,9 +180,9 @@ pub fn slot_colors_used(f: &Func, min: u32, addressed: &[bool]) -> Option<Vec<u3
         slot_live_intervals(f, &cand, &der, &acc, &ent, &ext)
     };
     // MAKEPAD_RUN_COLOR_TRACE=<name substring>: each slot of the matching fns, escaping or not
-    static TRACE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    if let Some(w) = TRACE.get_or_init(|| std::env::var("MAKEPAD_RUN_COLOR_TRACE").ok()) {
-        if f.name.contains(w.as_str()) {
+    static TRACE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    if let Some(w) = relax_session::phase::env_once(&TRACE, "MAKEPAD_RUN_COLOR_TRACE") {
+        if f.name.contains(w) {
             for s in 0..ns {
                 if f.slots[s].size >= min && addressed[s] {
                     let k = ci[s];

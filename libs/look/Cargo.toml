@@ -1,0 +1,13 @@
+# The console look: the colour table the music and media apps paint with, and the
+# console controls and fitted ticks that wear it. Widget code only; the
+# product UIs and the panel libraries share it.
+
+[package]
+name = "makepad-look"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "The console look: the colour table, console controls and fitted ticks the music and media apps paint with"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false }

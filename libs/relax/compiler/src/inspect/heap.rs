@@ -773,6 +773,33 @@ fn rows(t: &Tables) -> Vec<Row> {
         .collect()
 }
 
+/// The live samples whose block lies in one arena (`heap top host=1 zone=burst|compiler`), per
+/// stack: what survives there (a few surviving blocks pin a whole chunk of the burst arena).
+fn zone_rows(t: &Tables, zone: &str) -> Vec<Row> {
+    let mut r: Vec<Row> = rows(t).into_iter().map(|x| (x.0, 0, 0, x.3, x.4, x.5, x.6)).collect();
+    for (k, v) in t.keys.iter().zip(t.vals.iter()) {
+        let a = k.load(Relaxed);
+        if a <= 2 {
+            continue;
+        }
+        let inside = match zone {
+            "burst" => crate::zone_alloc::burst_owns(a as *const u8),
+            // a block of a destroyed generation was never freed through the hooks: not live
+            "compiler" => crate::zone_alloc::compiler_owns(a as *const u8) && crate::zone_alloc::compiler_tombstone_of(a as usize).is_none(),
+            _ => !crate::zone_alloc::burst_owns(a as *const u8) && !crate::zone_alloc::compiler_owns(a as *const u8),
+        };
+        if !inside {
+            continue;
+        }
+        let v = v.load(Relaxed);
+        if let Some(x) = r.get_mut((v >> 40) as usize) {
+            x.1 += (v & ((1 << 40) - 1)) as i64;
+            x.2 += 1;
+        }
+    }
+    r
+}
+
 static SNAPS: Mutex<Vec<(String, bool, u64, Vec<Row>)>> = Mutex::new(Vec::new());
 
 fn stack_names(t: &Tables, ids: &[usize], partial: &mut Vec<String>) -> Vec<Vec<super::Frame>> {
@@ -838,7 +865,7 @@ fn tag_name(t: &Tables, id: usize) -> &'static str {
 }
 
 /// `heap start [host=1] [rate=65536] [ttl_s=600]` | `heap stop [host=1]` | `heap status` |
-/// `heap top [host=1] [by=live|alloc|freed|peak] [n=15] [depth=5] [group=stack|tag]` |
+/// `heap top [host=1] [by=live|alloc|freed|peak] [n=15] [depth=5] [group=stack|tag] [zone=burst|compiler|other]` |
 /// `heap snap <name> [host=1]` | `heap diff <a> <b|now>` | `heap path H<id> [host=1]`
 pub fn cmd_heap(req: &Req, out: &mut Out) {
     let host = req.get("host") == Some("1");
@@ -885,7 +912,10 @@ pub fn cmd_heap(req: &Req, out: &mut Out) {
             let by = req.get("by").unwrap_or("live");
             let n = req.num("n", 15) as usize;
             let depth = req.num("depth", 5) as usize;
-            let all = rows(t);
+            let all = match req.get("zone") {
+                Some(z) => zone_rows(t, z),
+                None => rows(t),
+            };
             let key = |x: &Row| match by {
                 "alloc" => x.3,
                 "freed" | "churn" => x.5,

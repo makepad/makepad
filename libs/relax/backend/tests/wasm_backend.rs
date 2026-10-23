@@ -67,9 +67,21 @@ fn inst(bytes: &[u8]) -> Instance {
 }
 
 fn run(fs: &[Func], k: usize, args: &[u64]) -> Result<Vec<u64>, Trap> {
-    let (b, _) = build(fs, opts());
+    run_o(fs, k, args, opts())
+}
+
+fn run_o(fs: &[Func], k: usize, args: &[u64], o: Options) -> Result<Vec<u64>, Trap> {
+    let (b, _) = build(fs, o);
     let mut i = inst(&b);
     i.call_export(&format!("f{}", k), args)
+}
+
+/// Runs on both memories (wasm32, wasm64): the results must agree.
+fn run2(fs: &[Func], k: usize, args: &[u64]) -> Result<Vec<u64>, Trap> {
+    let r32 = run_o(fs, k, args, opts());
+    let r64 = run_o(fs, k, args, Options { memory64: true, ..opts() });
+    assert_eq!(r32, r64, "wasm32 and wasm64 differ");
+    r32
 }
 
 struct B {
@@ -126,6 +138,56 @@ impl B {
 const U8: IntTy = IntTy { bits: 8, signed: false };
 const I8: IntTy = IntTy { bits: 8, signed: true };
 const I16: IntTy = IntTy { bits: 16, signed: true };
+
+#[test]
+fn static_tls_uses_linked_storage_and_symbol_offsets() {
+    let mut f = B::new(&[], &[Cls::I, Cls::I]);
+    let base = f.v(Cls::I);
+    f.i(Inst::TlsStatic(base, Sym::new(0)));
+    let field = f.v(Cls::I);
+    f.i(Inst::TlsStatic(field, Sym { id: 0, off: 8 }));
+    let initial = f.v(Cls::I);
+    f.i(Inst::Load(Mem::Int(8, false), initial, field, 0));
+    let value = f.iconst(123);
+    f.i(Inst::Store(Mem::Int(8, false), base, 8, value));
+    let read = f.v(Cls::I);
+    f.i(Inst::Load(Mem::Int(8, false), read, field, 0));
+    f.term(Term::Ret(vec![initial, read]));
+    let fs = [f.done()];
+    for memory64 in [false, true] {
+        for remat in [false, true] {
+            let o = Options { memory64, remat, heap_pages: 32, ..opts() };
+            assert_eq!(run_o(&fs, 0, &[], o).unwrap(), vec![0, 123]);
+        }
+    }
+}
+
+#[test]
+fn mismatched_call_signatures_remain_errors() {
+    let mut callee = B::new(&[Cls::I], &[Cls::I]);
+    callee.f.name = "integer_identity".into();
+    callee.term(Term::Ret(vec![callee.p(0)]));
+    let mut caller = B::new(&[], &[]);
+    caller.i(Inst::Call(Callee::Fn(0), vec![], vec![]));
+    caller.term(Term::Ret(vec![]));
+    let functions = [callee.done(), caller.done()];
+    for memory64 in [false, true] {
+        let mut module = Module::new(Options { memory64, ..opts() });
+        for (id, f) in functions.iter().enumerate() {
+            module.add_func(id as u32, f);
+            module.export_func(id as u32, &format!("f{id}"));
+        }
+        let out = module.finish(&relax_session::Options::default(), &L);
+        assert_eq!(out.stats.failed.len(), 1);
+        assert_eq!(out.stats.failed[0].0, 1);
+        assert!(out.stats.failed[0].1.contains("integer_identity"));
+        assert!(out.stats.failed[0].1.contains("params: []"));
+        assert!(out.stats.failed[0].1.contains("params: [I64]"));
+        let mut instance = inst(&out.bytes);
+        assert_eq!(instance.call_export("f0", &[17]).unwrap(), vec![17]);
+        assert!(instance.call_export("f1", &[]).is_err());
+    }
+}
 
 #[test]
 fn integer_ops_and_narrow_types() {
@@ -406,7 +468,7 @@ fn memory_and_slots() {
     // x = 0x1_0000_00F5: [p] = x, p[9] = 0xF5, q = copy of p, a = (i8)0xF5 = -11, b = p[8..10] = 0xF500, c = q[16..20]? (p + 3*4 + 4 = p + 16) = low 32 of x
     let xv: u64 = 0x1_0000_00F5;
     let want = (-11i64 as u64).wrapping_add(0xF500).wrapping_add(0xF5).wrapping_add(b'd' as u64);
-    assert_eq!(run(&[fu], 0, &[xv]).unwrap(), vec![want]);
+    assert_eq!(run2(&[fu], 0, &[xv]).unwrap(), vec![want]);
 }
 
 /// An atomic read-modify-write reads its address twice: an address computed just before it
@@ -430,7 +492,7 @@ fn atomic_rmw_address_just_set() {
     let sum = f.bin(IOp::Add, I64, r, old);
     f.term(Term::Ret(vec![sum]));
     // [p+8] = 5, old = 5, new = 6: 11
-    assert_eq!(run(&[f.done()], 0, &[5]).unwrap(), vec![11]);
+    assert_eq!(run2(&[f.done()], 0, &[5]).unwrap(), vec![11]);
 }
 
 /// Direct, recursive, indirect, host and untraced calls; multiple results.
@@ -497,9 +559,9 @@ fn calls() {
         }
         a
     };
-    assert_eq!(run(&fs, 0, &[20]).unwrap(), vec![fibr(20)]);
-    assert_eq!(run(&fs, 2, &[9]).unwrap(), vec![fibr(10) + 18 + 7]);
-    assert_eq!(run(&fs, 3, &[]), Err(Trap::Trap("untraced 99".into())));
+    assert_eq!(run2(&fs, 0, &[20]).unwrap(), vec![fibr(20)]);
+    assert_eq!(run2(&fs, 2, &[9]).unwrap(), vec![fibr(10) + 18 + 7]);
+    assert_eq!(run2(&fs, 3, &[]), Err(Trap::Trap("untraced 99".into())));
     // without the import the untraced call is a bare trap
     let (b, st) = build(&fs, Options { untraced_import: false, ..opts() });
     assert_eq!(st.untraced_sites, 1);
@@ -558,15 +620,17 @@ fn unwinding() {
     f.term(Term::Ret(vec![r]));
     let catcher = f.done();
     let fs = [thrower, middle, inner, catcher];
-    let (b, _) = build(&fs, opts());
-    let mut i = inst(&b);
-    let sp0 = i.globals[0];
-    assert_eq!(i.call_export("f1", &[1000, 5]).unwrap(), vec![5]);
-    assert_eq!(i.globals[0], sp0);
-    assert_eq!(i.call_export("f3", &[2000]).unwrap(), vec![1]);
-    assert_eq!(&i.mem[2000..2008], &77u64.to_le_bytes());
-    assert_eq!(i.globals[0], sp0, "the catch restores the shadow stack");
-    assert_eq!(i.call_export("f1", &[1000, 0]), Err(Trap::Exception));
+    for m64 in [false, true] {
+        let (b, _) = build(&fs, Options { memory64: m64, ..opts() });
+        let mut i = inst(&b);
+        let sp0 = i.globals[0];
+        assert_eq!(i.call_export("f1", &[1000, 5]).unwrap(), vec![5]);
+        assert_eq!(i.globals[0], sp0);
+        assert_eq!(i.call_export("f3", &[2000]).unwrap(), vec![1]);
+        assert_eq!(&i.mem[2000..2008], &77u64.to_le_bytes());
+        assert_eq!(i.globals[0], sp0, "the catch restores the shadow stack");
+        assert_eq!(i.call_export("f1", &[1000, 0]), Err(Trap::Exception));
+    }
 }
 
 #[test]
@@ -764,12 +828,14 @@ fn random_programs_match_rir() {
         let args: Vec<u64> = (0..fu.params.len()).map(|_| rng.below(64).wrapping_sub(16)).collect();
         let mut fuel = 200;
         let want = eval(&fu, &args, &mut fuel);
-        let mut m = Module::new(opts());
+        // every other program on memory64 (the wasm64 target)
+        let mut m = Module::new(Options { memory64: checked % 2 == 1, ..opts() });
         m.add_func(0, &fu);
         m.export_func(0, "f");
         let out = m.finish(&options, &L);
         assert!(out.stats.failed.is_empty(), "{:?}\n{}", out.stats.failed, fu.dump());
         let mut i = inst(&out.bytes);
+        assert_eq!(i.mem64, checked % 2 == 1);
         i.max_steps = 200_000;
         let got = i.call_export("f", &args);
         match want {

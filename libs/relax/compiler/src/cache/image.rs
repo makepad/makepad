@@ -1652,6 +1652,10 @@ impl Linker {
         c.stats.prelink_changed += im.changed;
         c.stats.prelink_failed += im.failed;
         c.stats.prelink_had_code += im.had_code;
+        super::warm_count::add(super::warm_count::IMG_PLACED, n as u64);
+        super::warm_count::add(super::warm_count::IMG_STALE, im.changed);
+        super::warm_count::add(super::warm_count::IMG_FAILED, im.failed);
+        super::warm_count::add(super::warm_count::IMG_HAD_CODE, im.had_code);
         c.stats.prelink_ns += crate::jit::wall_ns() - t0;
         if im.timed && std::env::var_os("MAKEPAD_RUN_BOOT_TRACE").is_some() {
             let tags: Vec<String> = im.t_tag.iter().enumerate().filter(|(_, e)| e.1 != 0).map(|(k, e)| format!("tag{}={}/{:.1}ms", k, e.1, e.0 as f64 / 1e6)).collect();

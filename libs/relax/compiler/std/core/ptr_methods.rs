@@ -10,7 +10,8 @@ use crate::intrinsics_mem as im;
 impl<T: crate::marker::PointeeSized> *const T {
     #[rustc_diagnostic_item = "ptr_const_is_null"]
     pub const fn is_null(self) -> bool {
-        (self as *const u8 as usize) == 0
+        // (core's is_null: the address at run time, `ptr_guaranteed_cmp` with null in const evaluation)
+        unsafe { im::ptr_is_null(self as *const u8) }
     }
     #[rustc_diagnostic_item = "const_ptr_cast"]
     pub const fn cast<U>(self) -> *const U {
@@ -39,16 +40,18 @@ impl<T: crate::marker::PointeeSized> *const T {
     pub const fn byte_offset(self, count: isize) -> *const T {
         self.wrapping_byte_add(count as usize)
     }
+    // (core: `self.cast::<u8>().wrapping_add(count).with_metadata_of(self)`: the address word moves
+    // with its provenance, the metadata stays)
     pub const fn wrapping_byte_add(self, count: usize) -> *const T {
         let mut p = self;
-        let a = &mut p as *mut *const T as *mut usize;
-        unsafe { *a = (*a).wrapping_add(count) };
+        let a = &mut p as *mut *const T as *mut *const u8;
+        unsafe { *a = im::arith_offset(*a, count as isize) };
         p
     }
     pub const fn wrapping_byte_sub(self, count: usize) -> *const T {
         let mut p = self;
-        let a = &mut p as *mut *const T as *mut usize;
-        unsafe { *a = (*a).wrapping_sub(count) };
+        let a = &mut p as *mut *const T as *mut *const u8;
+        unsafe { *a = im::arith_offset(*a, (count as isize).wrapping_neg()) };
         p
     }
 }
@@ -58,28 +61,29 @@ impl<T> *const T {
     pub const unsafe fn add(self, count: usize) -> *const T {
         im::ptr_add(self, count)
     }
+    // (core: in-bounds `offset` / `add` / `sub` and wrapping `arith_offset`, all keeping provenance)
     pub const unsafe fn sub(self, count: usize) -> *const T {
-        ((self as usize).wrapping_sub(count.wrapping_mul(im::size_of::<T>()))) as *const T
+        im::ptr_sub(self, count)
     }
     pub const unsafe fn offset(self, count: isize) -> *const T {
-        ((self as usize).wrapping_add((count as usize).wrapping_mul(im::size_of::<T>()))) as *const T
+        im::ptr_add(self, count as usize)
     }
     pub const fn wrapping_add(self, count: usize) -> *const T {
-        ((self as usize).wrapping_add(count.wrapping_mul(unsafe { im::size_of::<T>() }))) as *const T
+        unsafe { im::arith_offset(self, count as isize) }
     }
     pub const fn wrapping_sub(self, count: usize) -> *const T {
-        ((self as usize).wrapping_sub(count.wrapping_mul(unsafe { im::size_of::<T>() }))) as *const T
+        unsafe { im::arith_offset(self, (count as isize).wrapping_neg()) }
     }
     pub const fn wrapping_offset(self, count: isize) -> *const T {
-        ((self as usize).wrapping_add((count as usize).wrapping_mul(unsafe { im::size_of::<T>() }))) as *const T
+        unsafe { im::arith_offset(self, count) }
     }
-    /// Distance in elements; both pointers into the same allocation.
+    /// Distance in elements; both pointers into the same allocation (core: ptr_offset_from).
     pub const unsafe fn offset_from(self, origin: *const T) -> isize {
         let size = im::size_of::<T>();
         if size == 0 {
             crate::panicking::panic_str("assertion failed: 0 < pointee_size && pointee_size <= isize::MAX as usize");
         }
-        ((self as usize).wrapping_sub(origin as usize) as isize) / (size as isize)
+        im::ptr_offset_from(self, origin)
     }
     pub const unsafe fn offset_from_unsigned(self, origin: *const T) -> usize {
         self.offset_from(origin) as usize
@@ -141,7 +145,8 @@ impl<T> *const [T] {
 impl<T: crate::marker::PointeeSized> *mut T {
     #[rustc_diagnostic_item = "ptr_is_null"]
     pub const fn is_null(self) -> bool {
-        (self as *const u8 as usize) == 0
+        // (core's is_null: the address at run time, `ptr_guaranteed_cmp` with null in const evaluation)
+        unsafe { im::ptr_is_null(self as *const u8) }
     }
     #[rustc_diagnostic_item = "ptr_cast"]
     pub const fn cast<U>(self) -> *mut U {
@@ -177,16 +182,18 @@ impl<T: crate::marker::PointeeSized> *mut T {
     pub const fn byte_offset(self, count: isize) -> *mut T {
         self.wrapping_byte_add(count as usize)
     }
+    // (core: `self.cast::<u8>().wrapping_add(count).with_metadata_of(self)`: the address word moves
+    // with its provenance, the metadata stays)
     pub const fn wrapping_byte_add(self, count: usize) -> *mut T {
         let mut p = self;
-        let a = &mut p as *mut *mut T as *mut usize;
-        unsafe { *a = (*a).wrapping_add(count) };
+        let a = &mut p as *mut *mut T as *mut *const u8;
+        unsafe { *a = im::arith_offset(*a, count as isize) };
         p
     }
     pub const fn wrapping_byte_sub(self, count: usize) -> *mut T {
         let mut p = self;
-        let a = &mut p as *mut *mut T as *mut usize;
-        unsafe { *a = (*a).wrapping_sub(count) };
+        let a = &mut p as *mut *mut T as *mut *const u8;
+        unsafe { *a = im::arith_offset(*a, (count as isize).wrapping_neg()) };
         p
     }
     pub const unsafe fn drop_in_place(self) {
@@ -200,19 +207,19 @@ impl<T> *mut T {
         im::ptr_add_mut(self, count)
     }
     pub const unsafe fn sub(self, count: usize) -> *mut T {
-        ((self as usize).wrapping_sub(count.wrapping_mul(im::size_of::<T>()))) as *mut T
+        im::ptr_sub(self as *const T, count) as *mut T
     }
     pub const unsafe fn offset(self, count: isize) -> *mut T {
-        ((self as usize).wrapping_add((count as usize).wrapping_mul(im::size_of::<T>()))) as *mut T
+        im::ptr_add_mut(self, count as usize)
     }
     pub const fn wrapping_add(self, count: usize) -> *mut T {
-        ((self as usize).wrapping_add(count.wrapping_mul(unsafe { im::size_of::<T>() }))) as *mut T
+        unsafe { im::arith_offset(self as *const T, count as isize) as *mut T }
     }
     pub const fn wrapping_sub(self, count: usize) -> *mut T {
-        ((self as usize).wrapping_sub(count.wrapping_mul(unsafe { im::size_of::<T>() }))) as *mut T
+        unsafe { im::arith_offset(self as *const T, (count as isize).wrapping_neg()) as *mut T }
     }
     pub const fn wrapping_offset(self, count: isize) -> *mut T {
-        ((self as usize).wrapping_add((count as usize).wrapping_mul(unsafe { im::size_of::<T>() }))) as *mut T
+        unsafe { im::arith_offset(self as *const T, count) as *mut T }
     }
     pub const unsafe fn offset_from(self, origin: *const T) -> isize {
         (self as *const T).offset_from(origin)

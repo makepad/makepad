@@ -139,6 +139,9 @@ pub mod remote_schema;
 // the profiler stream of a native build (a `makepad run` app serves it from relax inspect)
 #[cfg(all(not(relax), any(target_os = "macos", target_os = "linux")))]
 pub mod prof_native;
+// `prof` / `why-slow` of a native build (inspect's sampler and buckets; a `makepad run` app gets them from relax inspect)
+#[cfg(all(not(relax), target_os = "macos"))]
+pub mod prof_sampler;
 pub mod devtools;
 pub mod pixel_probe;
 pub mod screen_capture;

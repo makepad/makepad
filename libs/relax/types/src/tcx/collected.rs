@@ -221,12 +221,15 @@ impl Tcx {
         let mut image = crate::image::Writer::default();
         image.add_bytes(0, w);
         if stop() { return None; }
-        image.add_image(1, std::sync::Arc::new(self.tys.collected_writer()?));
         let mut id = 2;
         macro_rules! table { ($($f:ident),+) => { $(if stop() { return None; } self.$f.write_image(&mut image, &mut id);)+ }; }
         tables!(table);
         self.const_tys.write_image(&mut image, &mut id);
         self.contracts_waiting.write_image(&mut image, &mut id);
+        // The interner last (its section stays the second): other threads may intern while this
+        // runs (the settle swap's encode), and every type, region, list and constant the tables
+        // above name was interned before its count is read, so the image is consistent.
+        image.insert_image(1, 1, std::sync::Arc::new(self.tys.collected_writer()?));
         Some(image)
     }
 

@@ -1,0 +1,12 @@
+use mod.flow.*
+
+/** The line to speak, as written. */
+let prompt = Input{ type: @text default: "Game over. Try again?" }
+let speech = Speech{ text: prompt.text() }
+let published = Publish{ value: speech.out(@audio) tags: ["speech"] }
+
+Flow{
+    label: "Speech"
+    brief: "A spoken line: an NPC's voice, an announcer, a narrator."
+    prompt, speech, published
+}

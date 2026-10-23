@@ -85,6 +85,12 @@ impl Layout {
     pub const fn for_value<T: ?Sized>(t: &T) -> Layout {
         unsafe { Layout::from_size_align_unchecked(crate::mem::size_of_val(t), crate::mem::align_of_val(t)) }
     }
+    /// # Safety
+    /// The pointer metadata must describe a valid layout fitting in `isize` (an initialized
+    /// slice length or a valid vtable). The pointee need not contain an initialized value.
+    pub const unsafe fn for_value_raw<T: ?Sized>(t: *const T) -> Layout {
+        Layout::from_size_align_unchecked(crate::intrinsics_mem::size_of_val(t), crate::intrinsics_mem::align_of_val(t))
+    }
     pub const fn array<T>(n: usize) -> Result<Layout, LayoutError> {
         let size = match crate::mem::size_of::<T>().checked_mul(n) {
             Some(s) => s,

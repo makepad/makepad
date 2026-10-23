@@ -172,6 +172,9 @@ pub(crate) struct FrameBuilder {
     warned: std::collections::HashSet<&'static str>,
     /// textures already reported as sampled by a pass that draws into them
     feedback_warned: std::collections::HashSet<usize>,
+    /// The pass being built draws all it recorded, from whole pictures: a draw left out for a
+    /// pipeline the HAL is still compiling, or a sample of an unfinished picture, clears it.
+    pass_whole: bool,
     pub(crate) stats: BuildStats,
 }
 
@@ -466,6 +469,35 @@ impl FrameBuilder {
         let p = self.pipes.get_mut(id.index as usize).filter(|p| p.id == id)?;
         p.failed = true;
         Some((p.first_shader, std::mem::take(&mut p.drawn_unready)))
+    }
+
+    /// A draw of the pass being built is left out (its shader is still queued for
+    /// compilation, or what it samples is not there yet): this paint is not whole.
+    pub(crate) fn left_out(&mut self) {
+        self.pass_whole = false;
+    }
+
+    /// A draw of the pass being built uses pipeline `pipe`: whether to send it. One the HAL has
+    /// not answered yet is sent and skipped by the HAL, so this paint is not whole and the
+    /// answer repaints; a failed one is never drawn, and its picture is final without it.
+    pub(crate) fn draw_with(&mut self, pipe: usize) -> bool {
+        let p = &mut self.pipes[pipe];
+        if !p.ready && !p.failed {
+            p.drawn_unready = true;
+            self.pass_whole = false;
+        }
+        !p.failed
+    }
+
+    /// A draw of the pass being built sampled a render target in state `picture`, and `got`
+    /// says whether there was anything to sample. An unfinished picture makes this paint not
+    /// whole, and so does nothing where a picture is still to be painted; a picture still to
+    /// paint is sampled as its producer painted it last and costs nothing (a consumer
+    /// painted before an animating producer would otherwise never be whole).
+    pub(crate) fn sampled(&mut self, picture: crate::os::cx_shared::SampledPicture, got: bool) {
+        if picture.unfinished || (picture.to_paint && !got) {
+            self.pass_whole = false;
+        }
     }
 }
 
@@ -1061,6 +1093,7 @@ impl Cx {
             // a frozen texture: its producer detached and dropped its list
             if matches!(self.passes[pass_id].parent, CxDrawPassParent::None) {
                 self.passes[pass_id].paint_dirty = false;
+                self.passes[pass_id].incomplete = false;
             } else {
                 crate::error!("Draw pass has no draw list!");
             }
@@ -1117,13 +1150,14 @@ impl Cx {
             match self.fb_pipelines_wait(fb, list_id) {
                 PipelineWait::None => {}
                 PipelineWait::Hal => {
-                    self.passes[pass_id].paint_dirty = false;
+                    self.passes[pass_id].hold_picture();
                     fb.stats.held_for_pipelines += 1;
                     makepad_hal::profile::count("pass kept its picture: pipeline compiling");
                     return None;
                 }
                 PipelineWait::Compile => {
                     // queued for compilation: compiled at the next draw, the pass stays dirty
+                    self.passes[pass_id].incomplete = true;
                     fb.stats.held_for_pipelines += 1;
                     makepad_hal::profile::count("pass kept its picture: pipeline compiling");
                     return None;
@@ -1224,6 +1258,7 @@ impl Cx {
         let sploded = self.passes[pass_id].sploded.is_some();
         let step = self.passes[pass_id].zbias_step;
         let mut zbias = 0.0f32;
+        fb.pass_whole = true;
         self.fb_list(fb, pass_id, list_id, sploded, &mut zbias, step, serial);
         let end = makepad_hal::clock_ns();
         let (target, kind) = match (window, self.passes[pass_id].color_textures.first()) {
@@ -1273,7 +1308,15 @@ impl Cx {
         }
         fb.stats.frames += 1;
         fb.stats.passes += 1;
-        self.passes[pass_id].painted_serial = self.repaint_id;
+        if !picking {
+            // Painted whole when no draw was left out for a shader or pipeline still compiling
+            // and none sampled an unfinished picture (or nothing where a picture is still to
+            // come); only then does `painted_serial` move, so whatever waits for this recording
+            // (a host, a history pass) waits on. A picture still to paint costs nothing: the
+            // last one its producer painted is sampled, a frame older, as before.
+            let whole = fb.pass_whole;
+            self.passes[pass_id].painted(whole, self.repaint_id);
+        }
         Some(serial)
     }
 
@@ -1362,6 +1405,7 @@ impl Cx {
             if self.draw_shaders.compile_set.contains(&shader_index) {
                 self.passes[pass_id].paint_dirty = true;
                 self.passes[pass_id].repaint_next = true;
+                fb.left_out();
             }
             self.pipeline_skips += 1;
             return;
@@ -1441,7 +1485,8 @@ impl Cx {
         tex.resize(wanted, Id::NONE);
         for (i, tid) in texture_ids.iter().enumerate().take(wanted) {
             let Some(tid) = tid else { continue };
-            if crate::os::cx_shared::samples_incomplete_target(&self.passes, &self.textures, *tid, pass_id) {
+            let picture = crate::os::cx_shared::sampled_picture(&self.passes, &self.textures, *tid, pass_id);
+            if picture.to_paint {
                 self.passes[pass_id].paint_dirty = true;
             }
             // A draw may not sample a texture its own pass draws into: Vulkan refused the whole
@@ -1459,18 +1504,19 @@ impl Cx {
                 continue;
             }
             tex[i] = self.fb_sampled(fb, *tid);
+            fb.sampled(picture, !tex[i].is_none());
             // A transient target the HAL gave back (idle) and a pass samples again: its
             // producers paint it first and this pass paints after them.
+            // (A withdrawn or frozen producer cannot paint it: nothing is owed.)
             if tex[i].is_none() && self.textures[*tid].transient && self.textures[*tid].format.is_render() {
-                let producers: Vec<DrawPassId> = self
-                    .passes
-                    .id_iter()
-                    .filter(|producer| *producer != pass_id && self.passes[*producer].color_textures.iter().any(|a| a.texture.texture_id() == *tid))
-                    .collect();
-                for producer in producers {
-                    self.passes[producer].paint_dirty = true;
+                let producers = self.producers_that_paint(*tid, pass_id);
+                if !producers.is_empty() {
+                    fb.left_out();
+                    for producer in producers {
+                        self.passes[producer].paint_dirty = true;
+                    }
+                    self.passes[pass_id].paint_dirty = true;
                 }
-                self.passes[pass_id].paint_dirty = true;
             }
         }
         let tex_range = fb.w.put_ids(&tex);
@@ -1570,11 +1616,7 @@ impl Cx {
             let data = item.retained_instances.as_ref().map(|v| v.data()).or(item.instances.as_deref()).unwrap_or(&[]);
             crate::draw_shader::CxDrawShaderMapping::debug_dump_shader_draw_call("hal", item_id, sh, call, data, instances);
         }
-        let pipe = &mut fb.pipes[pipe_index];
-        if !pipe.ready && !pipe.failed {
-            pipe.drawn_unready = true;
-        }
-        if pipe.failed {
+        if !fb.draw_with(pipe_index) {
             return;
         }
         if let Some(o) = self.draw_owners.as_mut() {
@@ -1750,6 +1792,157 @@ mod tests {
         assert_eq!(fb.pipeline_failed(bad_id), Some((1, true)));
         assert!(!fb.pipeline_waited_for(1), "a failed pipeline never holds a picture");
         assert_eq!(fb.pipelines_pending(), 0);
+    }
+
+    #[test]
+    fn a_draw_whose_pipeline_compiles_leaves_the_paint_not_whole() {
+        let mut fb = FrameBuilder::default();
+        let rec = |id: Id, ready: bool, failed: bool| PipeRec { id, first_shader: 0, ready, drawn_unready: false, failed, pick: None };
+        fb.pipes.push(rec(Id::new(0, 1), true, false));
+        fb.pipes.push(rec(Id::new(1, 1), false, false));
+        fb.pipes.push(rec(Id::new(2, 1), false, true));
+        fb.pass_whole = true;
+        assert!(fb.draw_with(0));
+        assert!(fb.pass_whole);
+        assert!(!fb.draw_with(2), "a failed pipeline is never drawn");
+        assert!(fb.pass_whole, "and the picture is final without it");
+        assert!(fb.draw_with(1), "sent; the HAL skips it until it is ready");
+        assert!(!fb.pass_whole);
+        assert!(fb.pipeline_ready(Id::new(1, 1)), "its answer repaints");
+        // a draw whose shader is still queued for compilation
+        fb.pass_whole = true;
+        fb.left_out();
+        assert!(!fb.pass_whole);
+    }
+
+    #[test]
+    fn a_picture_still_to_paint_costs_no_wholeness_and_an_unfinished_one_does() {
+        use crate::os::cx_shared::SampledPicture;
+        let picture = |to_paint, unfinished| SampledPicture { to_paint, unfinished };
+        let mut fb = FrameBuilder::default();
+        fb.pass_whole = true;
+        fb.sampled(picture(false, false), true);
+        assert!(fb.pass_whole);
+        // a producer that paints after this pass (a sibling, another window's
+        // beat): what it painted last, a frame older, as before; an animating
+        // one would otherwise keep this pass from ever being whole
+        fb.sampled(picture(true, false), true);
+        assert!(fb.pass_whole);
+        // nothing there yet where a picture is still to come
+        fb.sampled(picture(true, false), false);
+        assert!(!fb.pass_whole);
+        // an unfinished picture, whether or not its producer paints again
+        for to_paint in [false, true] {
+            fb.pass_whole = true;
+            fb.sampled(picture(to_paint, true), true);
+            assert!(!fb.pass_whole);
+        }
+    }
+
+    /// A texture pass of 4 x 4 pixels with its own list, ready for `fb_pass` (no window: it
+    /// paints whenever it is built).
+    fn texture_pass(cx: &mut Cx) -> (crate::draw_pass::DrawPass, crate::draw_list::DrawList, crate::texture::Texture) {
+        use crate::draw_pass::{CxDrawPassRect, DrawPassClearColor};
+        use crate::texture::{TextureFormat, TextureSize};
+        let pass = crate::draw_pass::DrawPass::new(cx);
+        let list = crate::draw_list::DrawList::new(cx);
+        let target = Texture::new_with_format(cx, TextureFormat::RenderBGRAu8 { size: TextureSize::Fixed { width: 4, height: 4 }, initial: true });
+        pass.set_color_texture(cx, &target, DrawPassClearColor::ClearWith(crate::makepad_math::vec4(0.0, 0.0, 0.0, 0.0)));
+        let id = pass.draw_pass_id();
+        cx.passes[id].main_draw_list_id = Some(list.id());
+        cx.passes[id].dpi_factor = Some(1.0);
+        cx.passes[id].pass_rect = Some(CxDrawPassRect::Size(crate::makepad_math::dvec2(4.0, 4.0)));
+        (pass, list, target)
+    }
+
+    /// A draw shader with no code, compiled to `pipeline` (None: still queued for compilation).
+    fn shader(cx: &mut Cx, pipeline: Option<usize>) -> usize {
+        let mapping = cx.with_vm(|vm| {
+            let object = vm.new_object();
+            let source = vm.new_object_ref(object);
+            crate::draw_shader::CxDrawShaderMapping::from_desc(
+                source,
+                crate::draw_shader::CxDrawShaderCode::Combined { code: String::new() },
+                vm,
+                &crate::makepad_script::shader_reflection::DrawShaderDesc::default(),
+                None,
+            )
+        });
+        let index = cx.draw_shaders.shaders.len();
+        cx.draw_shaders.shaders.push(crate::draw_shader::CxDrawShader { debug_id: LiveId(0), pipeline_id: pipeline, mapping });
+        if pipeline.is_none() {
+            cx.draw_shaders.compile_set.insert(index);
+        }
+        index
+    }
+
+    /// One draw call of `shader` recorded into `list`.
+    fn record_draw(cx: &mut Cx, list: &crate::draw_list::DrawList, shader: usize) {
+        use crate::draw_list::{CxDrawCall, CxDrawKind, DrawCallUniforms};
+        let recording_gen = cx.next_uniform_gen();
+        let uniforms_gen = cx.next_uniform_gen();
+        let redraw = cx.redraw_id;
+        let items = &mut cx.draw_lists[list.id()];
+        items.clear_draw_items(redraw, recording_gen, uniforms_gen);
+        items.draw_items.push_item(redraw, CxDrawKind::DrawCall(CxDrawCall {
+            draw_shader_id: crate::draw_shader::DrawShaderId { index: shader },
+            options: crate::draw_shader::CxDrawShaderOptions::default(),
+            append_group_id: 0,
+            total_instance_slots: 0,
+            draw_call_uniforms: DrawCallUniforms::default(),
+            geometry_id: None,
+            dyn_uniforms: vec![0.0; 4],
+            texture_slots: Default::default(),
+            uniform_buffer_slots: Default::default(),
+            instance_dirty: true,
+            uniforms_dirty: true,
+            uniforms_gen,
+            turtle_depth: 0.0,
+            pick_id: 0,
+        }));
+        items.draw_items.finish_recording();
+    }
+
+    #[test]
+    fn fb_pass_moves_painted_serial_only_when_no_draw_was_left_out() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut fb = FrameBuilder::default();
+        let (pass, list, _target) = texture_pass(&mut cx);
+        let id = pass.draw_pass_id();
+        // nothing left out: whole
+        cx.repaint_id = 4;
+        assert!(cx.fb_pass(&mut fb, id, 0).is_some());
+        assert_eq!(cx.passes[id].painted_serial, 4);
+        assert!(!cx.passes[id].incomplete);
+        // a draw whose shader is still queued for compilation: painted, not whole
+        let queued = shader(&mut cx, None);
+        record_draw(&mut cx, &list, queued);
+        cx.repaint_id = 5;
+        assert!(cx.fb_pass(&mut fb, id, 0).is_some());
+        assert_eq!(cx.passes[id].painted_serial, 4, "the paint left a draw out");
+        assert!(cx.passes[id].incomplete);
+        assert!(cx.passes[id].paint_dirty, "and paints again");
+    }
+
+    #[test]
+    fn fb_pass_holding_its_picture_for_a_compiling_pipeline_leaves_it_unfinished() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut fb = FrameBuilder::default();
+        let (pass, list, _target) = texture_pass(&mut cx);
+        let id = pass.draw_pass_id();
+        cx.repaint_id = 4;
+        assert!(cx.fb_pass(&mut fb, id, 0).is_some());
+        assert_eq!(cx.passes[id].painted_serial, 4);
+        // recorded again with a draw whose pipeline the HAL is compiling
+        fb.pipes.push(PipeRec { id: Id::new(0, 1), first_shader: 0, ready: false, drawn_unready: false, failed: false, pick: None });
+        let compiling = shader(&mut cx, Some(0));
+        record_draw(&mut cx, &list, compiling);
+        cx.passes[id].paint_dirty = true;
+        cx.repaint_id = 5;
+        assert!(cx.fb_pass(&mut fb, id, 0).is_none(), "it keeps its picture");
+        assert!(cx.passes[id].incomplete);
+        assert!(!cx.passes[id].paint_dirty);
+        assert_eq!(cx.passes[id].painted_serial, 4);
     }
 
     #[test]

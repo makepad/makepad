@@ -72,7 +72,7 @@ impl<'a> CxDraw<'a> {
     pub fn new(cx: &'a mut Cx, draw_event: &'a DrawEvent) -> Self {
         Self::lazy_construct_fonts(cx);
         Self::lazy_construct_nav_tree(cx);
-        cx.redraw_id += 1;
+        cx.begin_draw_context();
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         fonts.borrow_mut().prepare_atlases_if_needed(cx);
         let nav_tree_rc = cx.get_global::<CxNavTreeRc>().clone();

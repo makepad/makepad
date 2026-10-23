@@ -1,0 +1,2952 @@
+use mod.prelude.widgets_internal.*
+
+// Art deco, black and gold. The window is a cabinet of black lacquer: a
+// polished gold rim runs round its edge and round every pane, a thin gold
+// pinstripe beside each rim makes the double line of the period, and the
+// panes are stepped at their corners like a ziggurat. The panes are dark
+// macassar ebony, a fine straight figure under one broad lacquer sheen, calm
+// under the words. The caption band carries the only large ornament: a
+// stepped crest with mother-of-pearl inlays round the title and a gold
+// sunburst fanning out to either side; the big surfaces carry small
+// sunburst fans, studs and pearl wedges in their corners and on their
+// frames, never under their words.
+// A control is a PLATE of satin metal with rounded corners (antique brass,
+// polished gold, champagne, ivory-cream or copper, dark ink on all of them)
+// or of black lacquer in a polished gold rim (cream ink); or a WELL of black
+// lacquer sunk behind the same rim. Knobs are ivory with fluted skirts under
+// spun gold caps, slider thumbs gold streamline wings, toggles gold balls in
+// black pills, the rocker a gold bat-handle lever, the chosen radio a lit
+// lamp among gold beads, lamps LEDs in gold bezels, screens black glass in
+// gold frames with warm amber figures. The light falls from the upper left;
+// polished gold is a mirror: a hot white-gold highlight where it faces the
+// light, a warm darker band where it turns away.
+
+// A ROW OF FIELDS IS ONE HEIGHT. The box metrics are stated once here and
+// handed to each field below, so the search box, the number beside it and
+// the drop-down after it stand at one height.
+let field_height = 28.0
+let field_pad_v = mod.theme.mspace_1.top
+let field_radius = 3.0
+// A hairline, for the few stock fields the faces below do not redraw.
+let field_border = 0.5
+
+let field_room = fn(w) {
+    w.min_height = field_height
+    w.padding.top = field_pad_v
+    w.padding.bottom = field_pad_v
+}
+let field_face = fn(d) {
+    d.border_radius = field_radius
+    d.border_size = field_border
+}
+// A field that lays its own parts out inside a frame: only the height.
+let field_frame = fn(w) {
+    w.min_height = field_height
+}
+
+field_room(mod.widgets.TextInput)
+field_face(mod.widgets.TextInput.draw_bg)
+field_room(mod.widgets.TextInputFlat)
+field_room(mod.widgets.ComboBox)
+field_face(mod.widgets.ComboBox.draw_bg)
+field_room(mod.widgets.DropDown)
+field_face(mod.widgets.DropDown.draw_bg)
+field_room(mod.widgets.DropDown2)
+field_face(mod.widgets.DropDown2.draw_bg)
+field_room(mod.widgets.FieldWell)
+field_face(mod.widgets.FieldWell.draw_bg)
+field_room(mod.widgets.TagField)
+field_face(mod.widgets.TagField.draw_bg)
+field_frame(mod.widgets.NumberField)
+mod.widgets.NumberField.draw_bg.border_radius = field_radius
+field_frame(mod.widgets.ValueInput)
+field_frame(mod.widgets.DateField)
+field_frame(mod.widgets.TimeField)
+field_frame(mod.widgets.DatePicker)
+field_frame(mod.widgets.DateRangePicker)
+mod.widgets.WellInput.min_height = 0.0
+mod.widgets.Window.pass.clear_color = #1f1810
+
+// Plain views stop clipping, so a shadow or a lip may fall into the gap
+// beside its control. Scroll views keep their own clip.
+mod.widgets.View.clip_x = false
+mod.widgets.View.clip_y = false
+
+// ---------------------------------------------------------------------------
+// SHARED PARTS. Distances in points, negative inside, y down; `px` is one
+// device pixel in points.
+
+let g3 = fn(v: float) -> vec3 {
+    return vec3(v, v, v)
+}
+
+// The palette.
+let ad_cream = fn() -> vec3 {
+    return vec3(0.929, 0.886, 0.776)
+}
+let ad_black = fn() -> vec3 {
+    return vec3(0.034, 0.031, 0.028)
+}
+let ad_ebony_c = fn() -> vec3 {
+    return vec3(0.120, 0.095, 0.060)
+}
+let ad_gold_dk = fn() -> vec3 {
+    return vec3(0.270, 0.190, 0.085)
+}
+let ad_gold_md = fn() -> vec3 {
+    return vec3(0.640, 0.520, 0.310)
+}
+let ad_gold_lt = fn() -> vec3 {
+    return vec3(0.910, 0.830, 0.640)
+}
+let ad_gold_hi = fn() -> vec3 {
+    return vec3(1.000, 0.970, 0.880)
+}
+let ad_line_c = fn() -> vec3 {
+    return vec3(0.780, 0.670, 0.450)
+}
+let ad_gold_base = fn() -> vec3 {
+    return vec3(0.790, 0.660, 0.420)
+}
+let ad_champ = fn() -> vec3 {
+    return vec3(0.850, 0.785, 0.640)
+}
+let ad_ivory = fn() -> vec3 {
+    return vec3(0.925, 0.890, 0.790)
+}
+let ad_ivory_dk = fn() -> vec3 {
+    return vec3(0.640, 0.580, 0.455)
+}
+let ad_brass = fn() -> vec3 {
+    return vec3(0.660, 0.555, 0.370)
+}
+let ad_copper = fn() -> vec3 {
+    return vec3(0.700, 0.480, 0.330)
+}
+let ad_bronze = fn() -> vec3 {
+    return vec3(0.215, 0.140, 0.062)
+}
+
+// A rounded box, true radius.
+let md_rbox = fn(p: vec2, c: vec2, h: vec2, r: float) -> float {
+    let rr = clamp(r, 0.0, min(h.x, h.y))
+    let q = abs(p - c) - h + vec2(rr, rr)
+    return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0, 0.0))) - rr
+}
+
+// A rounded box with a radius per corner (tl, tr, br, bl).
+let md_r4 = fn(p: vec2, c: vec2, h: vec2, r4: vec4) -> float {
+    let q0 = p - c
+    let rt = mix(r4.y, r4.x, step(q0.x, 0.0))
+    let rb = mix(r4.z, r4.w, step(q0.x, 0.0))
+    return clamp(mix(rb, rt, step(q0.y, 0.0)), 0.0, min(h.x, h.y))
+}
+let md_rbox4 = fn(p: vec2, c: vec2, h: vec2, r4: vec4) -> float {
+    return md_rbox(p, c, h, md_r4(p, c, h, r4))
+}
+
+// The outward normal of a rounded box at `p`.
+let ad_nrm = fn(p: vec2, c: vec2, h: vec2, r: float) -> vec2 {
+    let q0 = p - c
+    let sx = mix(-1.0, 1.0, step(0.0, q0.x))
+    let sy = mix(-1.0, 1.0, step(0.0, q0.y))
+    let rr = clamp(r, 0.0, min(h.x, h.y))
+    let q = abs(q0) - h + vec2(rr, rr)
+    var n = vec2(0.0, 1.0)
+    if q.x > 0.0 && q.y > 0.0 {
+        n = q / max(length(q), 0.0001)
+    } else {
+        if q.x > q.y {
+            n = vec2(1.0, 0.0)
+        }
+    }
+    return vec2(n.x * sx, n.y * sy)
+}
+
+// A plate's outline: a box with a radius per corner (tl, tr, br, bl; 0
+// leaves it square), and its outward normal.
+let ad_cut = fn(p: vec2, c: vec2, h: vec2, k4: vec4) -> float {
+    return md_rbox4(p, c, h, k4)
+}
+let ad_cut_n = fn(p: vec2, c: vec2, h: vec2, k4: vec4) -> vec2 {
+    let e = 0.3
+    let gx = md_rbox4(p + vec2(e, 0.0), c, h, k4) - md_rbox4(p - vec2(e, 0.0), c, h, k4)
+    let gy = md_rbox4(p + vec2(0.0, e), c, h, k4) - md_rbox4(p - vec2(0.0, e), c, h, k4)
+    let g = vec2(gx, gy)
+    let l = length(g)
+    if l < 0.0001 {
+        return vec2(0.0, 1.0)
+    }
+    return g / l
+}
+
+// A box STEPPED at its corners like a ziggurat: two steps of `s` points.
+let ad_step = fn(p: vec2, c: vec2, h: vec2, s: float) -> float {
+    let s1 = min(s, min(h.x, h.y) * 0.25)
+    let a = md_rbox(p, c, h - vec2(0.0, 2.0 * s1), 0.0)
+    let b = md_rbox(p, c, h - vec2(s1, s1), 0.0)
+    let e = md_rbox(p, c, h - vec2(2.0 * s1, 0.0), 0.0)
+    return min(a, min(b, e))
+}
+let ad_step_n = fn(p: vec2, c: vec2, h: vec2, s: float) -> vec2 {
+    let e = 0.3
+    let gx = ad_step(p + vec2(e, 0.0), c, h, s) - ad_step(p - vec2(e, 0.0), c, h, s)
+    let gy = ad_step(p + vec2(0.0, e), c, h, s) - ad_step(p - vec2(0.0, e), c, h, s)
+    let g = vec2(gx, gy)
+    let l = length(g)
+    if l < 0.0001 {
+        return vec2(0.0, 1.0)
+    }
+    return g / l
+}
+
+// The corners a button group asks for: a corner written as 0 is a square
+// join, any other the family's cut.
+let md_corners = fn(tl: float, tr: float, br: float, bl: float, r: float) -> vec4 {
+    return vec4(mix(r, step(0.5, tl) * r, step(0.0, tl)), mix(r, step(0.5, tr) * r, step(0.0, tr)), mix(r, step(0.5, br) * r, step(0.0, br)), mix(r, step(0.5, bl) * r, step(0.0, bl)))
+}
+
+let md_seg = fn(p: vec2, a: vec2, b: vec2) -> float {
+    let pa = p - a
+    let ba = b - a
+    let k = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0)
+    return length(pa - ba * k)
+}
+
+// A stroke tapering from `r0` at `a` to `r1` at `b`: .x its distance, .y the
+// way along it.
+let ad_taper = fn(p: vec2, a: vec2, b: vec2, r0: float, r1: float) -> vec2 {
+    let pa = p - a
+    let ba = b - a
+    let t = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0)
+    return vec2(length(pa - ba * t) - mix(r0, r1, t), t)
+}
+
+let md_grow = fn(rp: vec2, rs: vec2, m: float) -> vec4 {
+    return vec4(rp.x - m, rp.y - m, rs.x + 2.0 * m, rs.y + 2.0 * m)
+}
+
+// THE EBONY at a point `w` (points): macassar, its figure running straight
+// down the panel in streaks of a few points to a few tens, wandering a
+// little sideways as a real board does; fine dark pores a device pixel or
+// two wide; a grain of one device pixel. Low in contrast, so a word reads
+// the same on any streak.
+let ad_ebony = fn(w: vec2, px: float) -> vec3 {
+    let wx = w.x + (Finish.noise(vec2(w.x * 0.0035, w.y * 0.0021)) - 0.5) * 32.0 + (Finish.noise(vec2(w.x * 0.02, w.y * 0.008) + vec2(3.0, 1.0)) - 0.5) * 5.0
+    let s1 = Finish.noise(vec2(wx * 0.055, w.y * 0.0018 + 7.0))
+    let s2 = Finish.noise(vec2(wx * 0.21, w.y * 0.006 + 2.0))
+    let fig = s1 * 0.65 + s2 * 0.35
+    var col = mix(vec3(0.086, 0.068, 0.042), vec3(0.168, 0.122, 0.078), smoothstep(0.38, 0.86, fig))
+    let pore = Finish.noise(vec2(wx * 1.1, w.y * 0.03 + 11.0))
+    col = col * (1.0 - 0.22 * smoothstep(0.72, 0.9, pore))
+    let lift = Finish.noise(vec2(wx * 0.75 + 4.0, w.y * 0.02))
+    col = col * (1.0 + 0.10 * smoothstep(0.75, 0.92, lift))
+    return col + g3(Finish.grain(w / px, 0.004))
+}
+
+// MOTHER-OF-PEARL: a cool white with soft swirling bands of rose and of
+// green-blue, as the nacre turns.
+let ad_pearl = fn(p: vec2) -> vec3 {
+    let n1 = Finish.noise(p * 0.16 + vec2(3.0, 7.0))
+    let n2 = Finish.noise(p * 0.45 + vec2(11.0, 2.0))
+    let sw = sin((p.x * 0.55 + p.y * 0.9) * 0.8 + n1 * 6.0)
+    var col = vec3(0.860, 0.850, 0.820)
+    col = mix(col, vec3(0.950, 0.860, 0.880), smoothstep(0.2, 0.9, sw) * 0.5)
+    col = mix(col, vec3(0.790, 0.900, 0.880), smoothstep(0.3, 0.9, 0.0 - sw) * 0.4)
+    return col * (0.86 + 0.18 * n2)
+}
+
+// A POLISHED GOLD RIM `w` points wide just inside an edge: `d` the edge's
+// distance (negative inside), `n` its outward normal. Rounded over and lit
+// from the upper left as a mirror: the half that faces the light carries a
+// hot white-gold highlight, the turn away a warm darker band, the far side
+// the deep gold of the floor's reflection; a dark hairline at both of its
+// edges keeps it crisp on black. Premultiplied.
+let ad_rim = fn(d: float, n: vec2, w: float, px: float, glint: float) -> vec4 {
+    let u = clamp(0.0 - d / max(w, 0.01), 0.0, 1.0)
+    let k = 1.0 - 2.0 * u
+    let bulge = sqrt(max(1.0 - k * k, 0.0))
+    let facing = dot(n * k, vec2(-0.45, -0.89))
+    let t = clamp(0.5 + 0.55 * facing + 0.15 * bulge, 0.0, 1.0)
+    var col = mix(ad_gold_dk(), ad_gold_md(), smoothstep(0.0, 0.45, t))
+    col = mix(col, ad_gold_lt(), smoothstep(0.45, 0.78, t))
+    col = mix(col, ad_gold_hi(), smoothstep(0.80, 1.0, t) * clamp(glint, 0.0, 1.5))
+    col = col * (1.0 - 0.30 * exp(0.0 - (facing + 0.1) * (facing + 0.1) / 0.03) * bulge)
+    let e = Finish.band(d, 0.0, px, px) + Finish.band(d, w - px, w, px)
+    col = mix(col, ad_gold_dk() * 0.5, clamp(e, 0.0, 1.0) * 0.5)
+    let a = Finish.band(d, 0.0, w, px)
+    return vec4(col * a, a)
+}
+
+// A thin gold pinstripe `lw` wide at `at` points inside an edge.
+let ad_pin = fn(d: float, at: float, lw: float, px: float, amt: float) -> vec4 {
+    let a = Finish.band(d, at, at + lw, px) * amt
+    return vec4(ad_line_c() * a, a)
+}
+
+// The shadow a raised part throws on the ground, straight down: tight, gone
+// within half the gap to a neighbour. Premultiplied black.
+let ad_drop = fn(p: vec2, c: vec2, h: vec2, r: float, amt: float) -> vec4 {
+    let t = Finish.drop(p, c, h, r, vec2(0.0, 0.8), 0.6) * 0.55 * amt
+    let s = Finish.drop(p, c, h, r, vec2(0.0, 1.6), 1.2) * 0.40 * amt
+    let a = t + s * (1.0 - t)
+    return vec4(0.0, 0.0, 0.0, a)
+}
+
+// Focus: a warm white-gold ring of a device pixel and a half, a point and a
+// half outside.
+let ad_focus = fn(d: float, px: float, focus: float) -> vec4 {
+    let f = Finish.ring_out(d, 1.5, 1.5 + 1.5 * px, px) * 0.95 * focus
+    let c = vec3(1.0, 0.86, 0.52)
+    return vec4(c * f, f)
+}
+
+// BLACK LACQUER over the box `lo`..`hi`: a mirror. A soft band of the room's
+// light across its upper part, the face darkening toward its foot, and a
+// warm glow of its own gold rim reflected along the foot. `k` scales the
+// sheen (a tall surface takes less, so no band crosses its words).
+let ad_lacq = fn(p: vec2, lo: vec2, hi: vec2, base: vec3, k: float) -> vec3 {
+    let t = clamp((p.y - lo.y) / max(hi.y - lo.y, 1.0), 0.0, 1.0)
+    var col = base * (1.30 - 0.50 * t)
+    let band = exp(0.0 - (t - 0.20) * (t - 0.20) / 0.010)
+    col = col + vec3(0.075, 0.068, 0.058) * band * 0.65 * k
+    col = col + vec3(0.090, 0.060, 0.020) * smoothstep(0.78, 1.0, t) * 0.30
+    return col
+}
+
+// POLISHED METAL over the box `lo`..`hi`: a mirror gradient, bright along
+// the top where it faces the light, a warm darker band below the middle, a
+// little light again at the foot from the floor; satin brushing across it.
+// `contrast` 1 is polished gold, less is champagne or ivory. Pressed, the
+// face is dished: the gradient turns over.
+let ad_metal = fn(p: vec2, lo: vec2, hi: vec2, base: vec3, contrast: float, hover: float, press: float) -> vec3 {
+    let t0 = clamp((p.y - lo.y) / max(hi.y - lo.y, 1.0), 0.0, 1.0)
+    let t = mix(t0, 1.0 - t0, press * 0.8)
+    let up = 1.0 - smoothstep(0.0, 0.45, t)
+    let dip = exp(0.0 - (t - 0.68) * (t - 0.68) / 0.03)
+    let foot = smoothstep(0.85, 1.0, t)
+    var col = base * (1.0 + contrast * (0.24 * up - 0.24 * dip + 0.10 * foot))
+    col = mix(col, vec3(1.0, 0.97, 0.88), exp(0.0 - t * t / 0.006) * 0.35 * contrast * (1.0 - press))
+    let br = Finish.brushed(p, vec2(1.0, 0.0), 0.4) - 0.5
+    col = col * (1.0 + br * 0.06)
+    col = Finish.lift(col, 0.20 * hover * (1.0 - press))
+    col = col * (1.0 - 0.14 * press)
+    return min(col, vec3(1.0, 1.0, 1.0))
+}
+
+// A shaped piece of polished gold (a thumb, a cap, a stud): `d` its
+// distance, `n` its outward normal, `depth` how far in its rounded edge
+// runs, `t` 0..1 down it for the mirror gradient.
+let ad_gold_shape = fn(d: float, n: vec2, depth: float, t: float, hover: float, dis: float) -> vec3 {
+    let ins = clamp(0.0 - d / max(depth, 0.01), 0.0, 1.0)
+    let facing = dot(n, vec2(-0.45, -0.89)) * (1.0 - ins)
+    var col = ad_gold_base() * (1.06 + 0.22 * (1.0 - smoothstep(0.0, 0.5, t)) - 0.26 * exp(0.0 - (t - 0.72) * (t - 0.72) / 0.03))
+    col = mix(col, ad_gold_hi(), smoothstep(0.30, 0.95, facing) * 0.85)
+    col = mix(col, ad_gold_dk(), smoothstep(0.15, 0.95, 0.0 - facing) * 0.75)
+    col = Finish.lift(col, 0.12 * hover)
+    col = mix(col, mix(col, g3(Finish.lum(col)), 0.7) * 0.6, dis)
+    return min(col, vec3(1.0, 1.0, 1.0))
+}
+
+// A polished gold dome (a stud, a bead): lit on its upper left.
+let ad_dome = fn(dst: vec4, p: vec2, c: vec2, r: float, px: float, base: vec3) -> vec4 {
+    let q = (p - c) / max(r, 0.01)
+    let lit = clamp(0.5 - 0.6 * dot(q, vec2(0.45, 0.85)), 0.0, 1.0)
+    var col = mix(ad_gold_dk(), base, 0.25 + 0.75 * lit)
+    col = mix(col, ad_gold_hi(), exp(0.0 - dot(q - vec2(-0.35, -0.4), q - vec2(-0.35, -0.4)) / 0.06) * 0.85)
+    let d = length(p - c) - r
+    col = mix(col, ad_gold_dk() * 0.5, Finish.band(d, 0.0, max(px, 0.4), px) * 0.6)
+    let a = Finish.cover(d, px)
+    return Finish.over(dst, vec4(col * a, a))
+}
+
+// A SUNK WELL behind a polished gold rim: the fill, the shade falling in
+// under the top edge, the rim, and a faint catch of gold light on the ground
+// under its foot. `d`, `n` the well's edge; `c`, `h`, `r` its box for the
+// inner shadow.
+let ad_well = fn(p: vec2, c: vec2, h: vec2, r: float, d: float, n: vec2, px: float, fill: vec3, shade: float, w: float, dis: float) -> vec4 {
+    var col = fill
+    let sh = clamp(Finish.inset(p, c, h - vec2(w, w), max(r - w, 0.0), vec2(0.0, 1.4), 1.2), 0.0, 1.0)
+    col = mix(col, vec3(0.0, 0.0, 0.0), sh * shade)
+    let a = Finish.cover(d, px)
+    let lip = Finish.ring_out(d, 0.0, px, px) * clamp(n.y, 0.0, 1.0) * 0.30
+    var out = vec4(ad_gold_md() * lip, lip)
+    out = Finish.over(out, vec4(col * a, a))
+    return Finish.over(out, ad_rim(d, n, w, px, 1.0 - 0.7 * dis) * mix(1.0, 0.5, dis))
+}
+let ad_well_r = fn(p: vec2, c: vec2, h: vec2, r: float, px: float, fill: vec3, shade: float, w: float, dis: float) -> vec4 {
+    let d = md_rbox(p, c, h, r)
+    let n = ad_nrm(p, c, h, r)
+    return ad_well(p, c, h, r, d, n, px, fill, shade, w, dis)
+}
+
+// A dark plaque's indicator jewel, where a stock face carries a lamp.
+let md_led = fn(p: vec2, lc: vec2, rad: float, px: float, ink: vec3, lit: float, glow: float) -> vec4 {
+    let q = p - lc
+    let d = length(q) - rad
+    let k = clamp(length(q) / max(rad, 0.001), 0.0, 1.0)
+    let on = mix(Finish.lift(ink, 0.35), ink * 0.9, smoothstep(0.2, 1.0, k))
+    let off = vec3(0.10, 0.08, 0.06)
+    var col = mix(off, on, lit)
+    col = mix(col, ad_gold_md(), Finish.band(d, 0.0, max(px, 0.6), px))
+    let a = Finish.cover(d, px)
+    let ha = glow * lit * exp(0.0 - max(d, 0.0) / 0.8) * step(0.0, d) * (1.0 - a)
+    var out = vec4(ink * ha, ha)
+    return Finish.over(out, vec4(col * a, a))
+}
+
+// A QUARTER SUNBURST in a corner, in the corner's own frame: `q` in points
+// from the corner along its two edges, both into the surface. A small gold
+// quarter disc on the corner, nine rays fanning out from it, long and short
+// by turns, and a fine arc closing the long ones. `s` its reach in points.
+let ad_fan = fn(dst: vec4, q: vec2, s: float, px: float, amt: float) -> vec4 {
+    var out = dst
+    let r = length(q)
+    if r > s + 2.0 || q.x < -1.0 || q.y < -1.0 {
+        return out
+    }
+    let phi = atan2(q.y, q.x)
+    let st = 1.5707963 / 8.0
+    let k = phi / st
+    let kf = floor(k + 0.5)
+    let dperp = abs(k - kf) * st * r
+    let long = 1.0 - step(0.25, abs(fract(kf * 0.5)))
+    let len = mix(s * 0.68, s, long)
+    let ray = Finish.cover(dperp - max(px * 0.5, 0.32), px) * Finish.cover(r - len, px) * step(r, len + 1.0) * smoothstep(3.5, 5.0, r)
+    let a = ray * amt * 0.9
+    out = Finish.over(out, vec4(ad_line_c() * a, a))
+    let arc = Finish.cover(abs(r - s * 0.68) - max(px * 0.5, 0.3), px) * amt * 0.7
+    out = Finish.over(out, vec4(ad_line_c() * arc, arc))
+    out = ad_dome(out, q, vec2(0.0, 0.0), 4.0, px, ad_gold_base())
+    return out
+}
+
+// The fan set into a box's corner `k` (0 top left, 1 top right, 2 bottom
+// right, 3 bottom left), `ins` points in from its edges.
+let ad_corner_fan = fn(dst: vec4, p: vec2, lo: vec2, hi: vec2, k: float, ins: float, s: float, px: float, amt: float) -> vec4 {
+    let right = step(0.5, k) * step(k, 2.5)
+    let bottom = step(1.5, k)
+    let x = mix(p.x - lo.x, hi.x - p.x, right) - ins
+    let y = mix(p.y - lo.y, hi.y - p.y, bottom) - ins
+    return ad_fan(dst, vec2(x, y), s, px, amt)
+}
+
+// ---------------------------------------------------------------------------
+// BUTTONS. One face for the family: a plate of satin metal with rounded
+// corners in its own polished rim, its edge bevelled toward the light, a
+// tight shadow under it, the legend in dark ink. `kind`: 0 antique brass
+// (the plain button), 1 polished gold (primary), 2 champagne (secondary), 3
+// ivory-cream (tertiary), 4 copper (the one that deletes, its legend in
+// oxblood), 5 the outline (the ground shows inside a double gold line), 6
+// bare until touched (flatter), 7 champagne (the flat root and its sizes),
+// 8 black lacquer (the quiet plates of a strip: a tab, a closed drop-down).
+// Pressed, a plate sinks and its mirror turns over; disabled, it goes flat
+// and dull and a small unlit lamp shows at its left end. The quad is grown
+// by `m` for the shadow and the focus ring.
+let ad_face = fn(p: vec2, lo: vec2, hi: vec2, kind: float, hover: float, press: float) -> vec3 {
+    if kind > 7.5 {
+        return Finish.lift(ad_lacq(p, lo, hi, ad_black(), 1.0 + 1.6 * hover), 0.04 * hover)
+    }
+    if kind < 0.5 {
+        return ad_metal(p, lo, hi, ad_brass(), 0.8, hover, press)
+    }
+    if kind < 1.5 {
+        return ad_metal(p, lo, hi, ad_gold_base(), 1.0, hover, press)
+    }
+    if kind < 2.5 {
+        return ad_metal(p, lo, hi, ad_champ(), 0.7, hover, press)
+    }
+    if kind < 3.5 {
+        return ad_metal(p, lo, hi, ad_ivory(), 0.35, hover, press)
+    }
+    if kind < 4.5 {
+        return ad_metal(p, lo, hi, ad_copper(), 0.85, hover, press)
+    }
+    return ad_metal(p, lo, hi, ad_champ(), 0.7, hover, press)
+}
+let ad_button = fn(pos: vec2, size: vec2, o: vec2, px: float, hover: float, down: float, focus: float, dis: float, loading: float, anim: float, k4: vec4, kind: float, m: float) -> vec4 {
+    let p = pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let live = 1.0 - dis
+    let press = down * live
+    let hov = hover * live
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y, px)) - o
+    let hi = vec2(Finish.snap(o.x + size.x, px), Finish.snap(o.y + size.y, px)) - o
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let d = ad_cut(p, c, h, k4)
+    let n = ad_cut_n(p, c, h, k4)
+    let outline = step(4.5, kind) * step(kind, 5.5)
+    let bare = step(5.5, kind) * step(kind, 6.5)
+    let show = mix(1.0, clamp(hov * 0.85 + press, 0.0, 1.0), bare)
+    let solid = 1.0 - max(outline, bare)
+    var out = ad_drop(p, c, h, 2.0, (1.0 - 0.7 * press) * mix(1.0, 0.5, dis) * solid)
+    let w = 1.5
+    let lacq = step(7.5, kind)
+    var face = ad_face(p, lo + vec2(w, w), hi - vec2(w, w), kind, hov, press)
+    // disabled: the metal goes flat and dull, the lacquer greyed
+    let tt = clamp((p.y - lo.y) / max(hi.y - lo.y, 1.0), 0.0, 1.0)
+    let dull = mix(vec3(0.440, 0.410, 0.350) * (1.06 - 0.12 * tt), mix(face, g3(Finish.lum(face)), 0.65) * 0.55 + vec3(0.025, 0.020, 0.015), lacq)
+    face = mix(face, dull, dis)
+    // the plate's bevelled shoulder inside the rim, lit from the upper
+    // left: light along its top and left, shade along its foot and right
+    let bev = Finish.bevel(d + w, n, 1.8, vec2(-0.45, -0.89)) * Finish.cover(d + w, px) * (1.0 - press)
+    face = face * (1.0 + 0.22 * max(bev, 0.0) * (1.0 - lacq) + 0.22 * min(bev, 0.0))
+    face = face + vec3(0.05, 0.045, 0.04) * max(bev, 0.0) * lacq
+    // pressed: the surround's shade falls in under the top edge
+    let sh = clamp(Finish.inset(p, c, h - vec2(w, w), 1.5, vec2(0.0, 1.7), 1.2), 0.0, 1.0) * press
+    face = mix(face, face * 0.3, sh * 0.85)
+    let fa = Finish.cover(d + w * 0.5, px)
+    out = Finish.over(out, vec4(face * fa, fa) * solid)
+    // the outline and the bare kinds: a faint gold wash under the pointer
+    let wash = max(outline, bare) * (0.10 * hov + 0.18 * press) * fa
+    out = Finish.over(out, vec4(ad_gold_md() * wash, wash))
+    // the pinstripe inside the rim, on the lacquer and the outline
+    let pin = max(lacq, outline) * mix(0.85, 0.35, dis)
+    out = Finish.over(out, ad_pin(d, w + 1.4, max(px, 0.6), px, pin))
+    // disabled, a small lamp at the plate's left end is out: a slot of
+    // milky glass in a dark seat
+    let slot = dis * solid * (1.0 - lacq) * step(50.0, size.x)
+    if slot > 0.5 {
+        let sc = vec2(lo.x + w + 4.4, c.y)
+        let sd = md_rbox(p, sc, vec2(1.3, 4.6), 1.3)
+        let sa = Finish.cover(sd - 0.7, px)
+        out = Finish.over(out, vec4(vec3(0.16, 0.13, 0.09) * sa, sa))
+        let lt = clamp((p.y - (sc.y - 4.6)) / 9.2, 0.0, 1.0)
+        let lc = mix(vec3(0.80, 0.76, 0.66), vec3(0.60, 0.56, 0.47), lt)
+        let la = Finish.cover(sd, px)
+        out = Finish.over(out, vec4(lc * la, la))
+    }
+    // the rim: pressed, its light turns over, so the plaque reads sunk in it
+    out = Finish.over(out, ad_rim(d, n * (1.0 - 2.0 * press), w, px, mix(1.0, 0.3, dis) * (1.0 + 0.5 * hov)) * mix(1.0, 0.5, dis) * show)
+    out = Finish.over(out, ad_focus(d, px, focus * live))
+    if loading > 0.0 {
+        let sdf = Sdf2d.viewport(p)
+        let rr = max(min(h.x, h.y) - 5.0, 2.0)
+        let a0 = anim * 2.0 * PI
+        sdf.arc_round_caps(c.x, c.y, rr, a0, a0 + 1.5 * PI, 1.2)
+        sdf.fill(vec4(0.93, 0.79, 0.48, loading))
+        out = Finish.over(out, sdf.result)
+    }
+    return out
+}
+
+// Every button template: the flat root (and the sizes, which share its draw
+// object) wears champagne gold; the roles are specialised below.
+mod.widgets.ButtonFlat.clip_x = false
+mod.widgets.ButtonFlat.clip_y = false
+mod.widgets.ButtonFlat.draw_bg.vertex = fn() {
+    let g = md_grow(self.rect_pos, self.rect_size, 8.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.ButtonFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(ad_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, md_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 3.5), 7.0, 8.0), 8.0)
+}
+mod.widgets.Button.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(ad_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, md_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 3.5), 0.0, 8.0), 8.0)
+}
+mod.widgets.ButtonPrimary.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(ad_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, md_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 3.5), 1.0, 8.0), 8.0)
+}
+mod.widgets.ButtonSecondary.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(ad_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, md_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 3.5), 2.0, 8.0), 8.0)
+}
+mod.widgets.ButtonTertiary.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(ad_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, md_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 3.5), 3.0, 8.0), 8.0)
+}
+mod.widgets.ButtonDanger.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(ad_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, md_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 3.5), 4.0, 8.0), 8.0)
+}
+mod.widgets.ButtonOutline.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(ad_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, md_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 3.5), 5.0, 8.0), 8.0)
+}
+mod.widgets.ButtonFlatter.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(ad_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, md_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 3.5), 6.0, 8.0), 8.0)
+}
+// The large button is the black lacquer one, as the plain button.
+mod.widgets.ButtonLg.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(ad_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, md_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 4.5), 0.0, 8.0), 8.0)
+}
+
+// Templates that draw a face of their own on top of these roots keep the
+// plain quad: the grown one is only for the faces written here.
+mod.widgets.CloseButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.CopyButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.BurgerButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.ButtonFloating.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.ButtonFloatingSm.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.glass.CutButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+
+// Geometry: one 26 point row, 14 points either side of the word.
+mod.widgets.ButtonFlat.padding = mod.turtle.Inset{left: 12.0 right: 12.0 top: 4.0 bottom: 4.0}
+mod.widgets.Button.padding = mod.turtle.Inset{left: 14.0 right: 14.0 top: 4.0 bottom: 4.0}
+mod.widgets.ButtonPrimary.padding = mod.turtle.Inset{left: 14.0 right: 14.0 top: 4.0 bottom: 4.0}
+mod.widgets.ButtonSecondary.padding = mod.turtle.Inset{left: 14.0 right: 14.0 top: 4.0 bottom: 4.0}
+mod.widgets.ButtonDanger.padding = mod.turtle.Inset{left: 14.0 right: 14.0 top: 4.0 bottom: 4.0}
+mod.widgets.ButtonTertiary.padding = mod.turtle.Inset{left: 14.0 right: 14.0 top: 4.0 bottom: 4.0}
+mod.widgets.ButtonOutline.padding = mod.turtle.Inset{left: 14.0 right: 14.0 top: 4.0 bottom: 4.0}
+mod.widgets.ButtonIcon.padding = mod.turtle.Inset{left: 8.0 right: 8.0 top: 4.0 bottom: 4.0}
+mod.widgets.Button.icon_walk = mod.turtle.Walk{width: 14.0 height: Fit}
+mod.widgets.ButtonFlat.min_height = 26.0
+mod.widgets.Button.min_height = 26.0
+mod.widgets.ButtonXs.min_height = 0.0
+mod.widgets.ButtonXs.padding = mod.turtle.Inset{left: 7.0 right: 7.0 top: 0.0 bottom: 0.0}
+mod.widgets.ButtonXs.draw_text.text_style = mod.theme.font_label{font_size: 5.5}
+mod.widgets.ButtonXl.draw_text.text_style = mod.theme.font_label{font_size: 9.5}
+mod.widgets.ButtonSm.min_height = 0.0
+
+// Words on the plates: the wide geometric legend face in dark ink; gold on
+// the outline and on a bare button, which stand on the ground.
+mod.widgets.ButtonFlat.draw_text.text_style = mod.theme.font_label{font_size: 6.5}
+mod.widgets.ButtonFlat.draw_text.color = #22170a
+mod.widgets.ButtonFlat.draw_text.color_hover = #160e05
+mod.widgets.ButtonFlat.draw_text.color_down = #160e05
+mod.widgets.ButtonFlat.draw_text.color_focus = #22170a
+mod.widgets.ButtonFlat.draw_text.color_disabled = #3d3529
+mod.widgets.Button.draw_text.text_style = mod.theme.font_label{font_size: 7.0}
+mod.widgets.Button.draw_text.color = #1e1408
+mod.widgets.Button.draw_text.color_hover = #120b03
+mod.widgets.Button.draw_text.color_down = #120b03
+mod.widgets.Button.draw_text.color_focus = #1e1408
+mod.widgets.Button.draw_text.color_disabled = #3d3529
+// An icon on a plate is in the plate's dark ink, whatever colour its
+// caller asked for (the catalogue asks for the working cream, which a
+// brass plate would swallow); on the outline and on a bare button, which
+// stand on the dark ground, it is gold.
+mod.widgets.ButtonFlat.draw_icon.get_color = fn() {
+    let base = self.eval_gradient()
+    let k = vec3(0.110, 0.075, 0.035)
+    return vec4(k * base.a, base.a) * self.opacity
+}
+mod.widgets.Button.draw_icon.get_color = fn() {
+    let base = self.eval_gradient()
+    let k = vec3(0.110, 0.075, 0.035)
+    return vec4(k * base.a, base.a) * self.opacity
+}
+mod.widgets.ButtonOutline.draw_icon.get_color = fn() {
+    let base = self.eval_gradient()
+    let k = vec3(0.880, 0.780, 0.560)
+    return vec4(k * base.a, base.a) * self.opacity
+}
+mod.widgets.ButtonFlat.draw_icon_end.get_color = fn() {
+    let base = self.eval_gradient()
+    let k = vec3(0.110, 0.075, 0.035)
+    return vec4(k * base.a, base.a) * self.opacity
+}
+mod.widgets.Button.draw_icon_end.get_color = fn() {
+    let base = self.eval_gradient()
+    let k = vec3(0.110, 0.075, 0.035)
+    return vec4(k * base.a, base.a) * self.opacity
+}
+mod.widgets.ButtonOutline.draw_icon_end.get_color = fn() {
+    let base = self.eval_gradient()
+    let k = vec3(0.880, 0.780, 0.560)
+    return vec4(k * base.a, base.a) * self.opacity
+}
+mod.widgets.ButtonFlatter.draw_icon_end.get_color = fn() {
+    let base = self.eval_gradient()
+    let k = vec3(0.880, 0.780, 0.560)
+    return vec4(k * base.a, base.a) * self.opacity
+}
+// A compound button's second line, on the plate: a quieter brown.
+mod.widgets.ButtonFlat.draw_description.color = #4a3a22
+mod.widgets.ButtonFlat.draw_description.text_style = mod.theme.font_regular{font_size: 8.0}
+mod.widgets.ButtonFlatter.draw_icon.get_color = fn() {
+    let base = self.eval_gradient()
+    let k = vec3(0.880, 0.780, 0.560)
+    return vec4(k * base.a, base.a) * self.opacity
+}
+mod.widgets.ButtonLg.draw_text.text_style = mod.theme.font_label{font_size: 8.5}
+mod.widgets.ButtonLg.draw_text.color = #1e1408
+mod.widgets.ButtonLg.draw_text.color_hover = #120b03
+mod.widgets.ButtonLg.draw_text.color_down = #120b03
+mod.widgets.ButtonLg.draw_text.color_focus = #1e1408
+mod.widgets.ButtonLg.draw_text.color_disabled = #3d3529
+mod.widgets.ButtonSm.draw_text.text_style = mod.theme.font_label{font_size: 6.5}
+mod.widgets.ButtonPrimary.draw_text.text_style = mod.theme.font_label{font_size: 7.0}
+mod.widgets.ButtonPrimary.draw_text.color = #1c1206
+mod.widgets.ButtonPrimary.draw_text.color_hover = #120b03
+mod.widgets.ButtonPrimary.draw_text.color_down = #120b03
+mod.widgets.ButtonPrimary.draw_text.color_focus = #1c1206
+mod.widgets.ButtonPrimary.draw_text.color_disabled = #3d3529
+mod.widgets.ButtonPrimary.draw_icon.color = #1c1206
+mod.widgets.ButtonSecondary.draw_text.text_style = mod.theme.font_label{font_size: 7.0}
+mod.widgets.ButtonSecondary.draw_text.color = #22170a
+mod.widgets.ButtonSecondary.draw_text.color_hover = #160e05
+mod.widgets.ButtonSecondary.draw_text.color_down = #160e05
+mod.widgets.ButtonSecondary.draw_text.color_focus = #22170a
+mod.widgets.ButtonSecondary.draw_icon.color = #22170a
+mod.widgets.ButtonTertiary.draw_text.text_style = mod.theme.font_label{font_size: 7.0}
+mod.widgets.ButtonTertiary.draw_text.color = #2a1f10
+mod.widgets.ButtonTertiary.draw_text.color_hover = #1c1408
+mod.widgets.ButtonTertiary.draw_text.color_down = #1c1408
+mod.widgets.ButtonTertiary.draw_text.color_focus = #2a1f10
+mod.widgets.ButtonTertiary.draw_icon.color = #2a1f10
+mod.widgets.ButtonDanger.draw_text.text_style = mod.theme.font_label{font_size: 7.0}
+mod.widgets.ButtonDanger.draw_text.color = #3a0c06
+mod.widgets.ButtonDanger.draw_text.color_hover = #2a0703
+mod.widgets.ButtonDanger.draw_text.color_down = #2a0703
+mod.widgets.ButtonDanger.draw_text.color_focus = #3a0c06
+mod.widgets.ButtonDanger.draw_icon.color = #3a0c06
+mod.widgets.ButtonOutline.draw_text.text_style = mod.theme.font_label{font_size: 7.0}
+mod.widgets.ButtonOutline.draw_text.color = #e0c891
+mod.widgets.ButtonOutline.draw_text.color_hover = #f0dcaa
+mod.widgets.ButtonOutline.draw_text.color_down = #f0dcaa
+mod.widgets.ButtonOutline.draw_text.color_focus = #e0c891
+mod.widgets.ButtonOutline.draw_text.color_disabled = #6a5c44
+mod.widgets.ButtonOutline.draw_icon.color = #e0c891
+mod.widgets.ButtonFlatter.draw_text.color = #e0c891
+mod.widgets.ButtonFlatter.draw_text.color_hover = #f0dcaa
+mod.widgets.ButtonFlatter.draw_text.color_down = #f0dcaa
+mod.widgets.ButtonFlatter.draw_text.color_focus = #e0c891
+mod.widgets.ButtonFlat.draw_bg.loading_color = #ecd08e
+
+// The window's own buttons stand on the black lacquer: cream strokes.
+mod.widgets.DesktopButton.draw_bg.color = uniform(#ede2c6)
+mod.widgets.DesktopButton.draw_bg.color_hover = uniform(#fff6df)
+mod.widgets.DesktopButton.draw_bg.color_down = uniform(#e0d4b6)
+mod.widgets.DesktopButton.draw_bg.bg_color_hover = uniform(#ede2c620)
+mod.widgets.DesktopButton.draw_bg.bg_color_down = uniform(#ede2c638)
+
+// ---------------------------------------------------------------------------
+// CHECK BOXES. A 14 point well of black lacquer, its corners rounded, in
+// its gold rim; set, a plaque of polished gold fills it with a black check;
+// mixed, the gold with a black dash.
+mod.widgets.CheckBoxFlat.clip_x = false
+mod.widgets.CheckBoxFlat.clip_y = false
+mod.widgets.CheckBoxFlat.draw_bg.vertex = fn() {
+    let g = md_grow(self.rect_pos, self.rect_size, 4.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.CheckBoxCustom.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.CheckBoxFlat.padding = mod.turtle.Inset{left: 0.0 right: 3.0 top: 3.0 bottom: 3.0}
+mod.widgets.CheckBoxFlat.label_walk.margin = mod.turtle.Inset{left: 22.0 right: 3.0 top: 0.0 bottom: 0.0}
+mod.widgets.CheckBoxFlat.draw_bg.size = uniform(14.0)
+mod.widgets.CheckBoxFlat.min_height = 24.0
+mod.widgets.CheckBoxFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 4.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let sz = self.size
+    let live = 1.0 - self.disabled
+    let x0 = mix(1.0, size.x - sz - 1.0, self.mark_at_end)
+    let lo = vec2(Finish.snap(o.x + x0, px), Finish.snap(o.y + (size.y - sz) * 0.5, px)) - o
+    let h = vec2(sz * 0.5, sz * 0.5)
+    let c = lo + h
+    let k = mix(2.5, h.y, step(20.0, self.border_radius))
+    let k4 = vec4(k, k, k, k)
+    let d = ad_cut(p, c, h, k4)
+    let n = ad_cut_n(p, c, h, k4)
+    let on = max(self.active, self.mixed)
+    let press = self.down * live
+    var fill = mix(vec3(0.016, 0.014, 0.013), vec3(0.045, 0.038, 0.030), self.hover * live)
+    fill = mix(fill, vec3(0.06, 0.05, 0.04), self.disabled)
+    var out = ad_well(p, c, h, k, d, n, px, fill, 0.6, 1.2, self.disabled)
+    out = Finish.over(out, ad_pin(d, 1.8, max(px, 0.6), px, 0.55 * self.hover * live * (1.0 - on)))
+    // the gold when set
+    let hf = h - vec2(1.2, 1.2)
+    var gcol = ad_metal(p, c - hf, c + hf, ad_gold_base(), 1.0, self.hover * live, press)
+    gcol = mix(gcol, vec3(0.30, 0.26, 0.20), self.disabled)
+    let ga = Finish.cover(ad_cut(p, c, hf, k4 - vec4(0.5, 0.5, 0.5, 0.5)), px) * on
+    out = Finish.over(out, vec4(gcol * ga, ga))
+    let kk = sz / 14.0
+    let m0 = lo + vec2(3.6, 7.3) * kk
+    let m1 = lo + vec2(6.0, 9.8) * kk
+    let m2 = lo + vec2(10.6, 4.3) * kk
+    let ck = min(md_seg(p, m0, m1), md_seg(p, m1, m2)) - 0.9 * kk
+    let d0 = lo + vec2(4.0, 7.0) * kk
+    let d1 = lo + vec2(10.0, 7.0) * kk
+    let dash = md_seg(p, d0, d1) - 0.9 * kk
+    let show_ck = self.active * (1.0 - self.mixed)
+    let mk = mix(Finish.cover(ck, px) * show_ck, Finish.cover(dash, px), self.mixed)
+    let ink = mix(vec3(0.07, 0.045, 0.02), vec3(0.15, 0.13, 0.10), self.disabled)
+    out = Finish.over(out, vec4(ink * mk, mk))
+    let err = Finish.band(d, 0.0, 2.0 * px, px) * self.error
+    out = Finish.over(out, vec4(vec3(0.75, 0.20, 0.15) * err, err))
+    return Finish.over(out, ad_focus(d, px, self.focus * live))
+}
+
+// ---------------------------------------------------------------------------
+// TOGGLES. A 38 by 16 point pill of black lacquer sunk in its gold rim, a
+// 12 point ball of polished gold riding in it with its own small shadow;
+// while on, the check at its left end burns warm white; while off, a small
+// ring is engraved at its right end. The slide switch (below) fills its
+// track with gold while on and rides an ivory dome.
+let ad_toggle = fn(pos: vec2, size: vec2, o: vec2, px: float, active: float, drag_pos: float, drag: float, hover: float, down: float, focus: float, dis: float, err: float, at_end: float, slide: float) -> vec4 {
+    let m = 4.0
+    let p = pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let live = 1.0 - dis
+    let tw = 38.0
+    let th = 16.0
+    let x0 = mix(1.0, size.x - tw - 1.0, at_end)
+    let lo = vec2(Finish.snap(o.x + x0, px), Finish.snap(o.y + (size.y - th) * 0.5, px)) - o
+    let c = lo + vec2(tw * 0.5, th * 0.5)
+    let h = vec2(tw * 0.5, th * 0.5)
+    let r = h.y
+    let d = md_rbox(p, c, h, r)
+    let on = active
+    var fill = mix(vec3(0.016, 0.014, 0.013), vec3(0.040, 0.034, 0.028), hover * live)
+    fill = mix(fill, vec3(0.06, 0.05, 0.04), dis)
+    var out = ad_well_r(p, c, h, r, px, fill, 0.6, 1.3, dis)
+    out = Finish.over(out, ad_pin(d, 1.9, max(px, 0.6), px, 0.55 * hover * live * (1.0 - on)))
+    let inner = Finish.cover(d + 1.3, px)
+    let cq = p - (lo + vec2(8.0, 8.0))
+    let ck = min(md_seg(cq, vec2(-3.0, 0.2), vec2(-1.0, 2.4)), md_seg(cq, vec2(-1.0, 2.4), vec2(3.2, -2.4))) - 0.75
+    if slide > 0.5 {
+        // the slide switch: the gold of the lit track, a check cut in it
+        let hf = h - vec2(1.3, 1.3)
+        var gcol = ad_metal(p, c - hf, c + hf, ad_gold_base(), 1.0, hover * live, 0.0)
+        gcol = mix(gcol, vec3(0.30, 0.26, 0.20), dis)
+        let ga = Finish.cover(md_rbox(p, c, hf, hf.y), px) * on
+        out = Finish.over(out, vec4(gcol * ga, ga))
+        let cka = Finish.cover(ck, px) * on * 0.85
+        out = Finish.over(out, vec4(vec3(0.10, 0.065, 0.025) * cka, cka))
+    } else {
+        // the toggle: the track stays black; while on, the check at its
+        // left end burns warm white in a short amber glow; while off, a
+        // small ring is engraved at its right end
+        let lit = on * live
+        let cg = exp(0.0 - max(ck, 0.0) / 1.2) * lit * 0.6 * inner
+        out = Finish.over(out, vec4(vec3(1.0, 0.68, 0.30) * cg, cg))
+        let cka = Finish.cover(ck, px) * on
+        let ckc = mix(vec3(0.40, 0.36, 0.30), vec3(1.0, 0.94, 0.78), live)
+        out = Finish.over(out, vec4(ckc * cka, cka))
+        let rq = p - (lo + vec2(tw - 8.0, 8.0))
+        let ring = abs(length(rq) - 2.2) - 0.45
+        let ra = Finish.cover(ring, px) * (1.0 - on) * mix(0.75, 0.4, dis)
+        out = Finish.over(out, vec4(ad_gold_md() * ra, ra))
+    }
+    let ea = Finish.band(d, 0.0, 2.0 * px, px) * err
+    out = Finish.over(out, vec4(vec3(0.75, 0.20, 0.15) * ea, ea))
+    // the ball: polished gold on the toggle, an ivory dome on the slide
+    let kt = clamp(mix(on, drag_pos, drag), 0.0, 1.0)
+    let kr = 6.0
+    let kx = Finish.snap(o.x + lo.x + 2.0 + kr + kt * (tw - 4.0 - 2.0 * kr), px) - o.x
+    let kc = vec2(kx, c.y)
+    let press = down * live
+    out = Finish.over(out, ad_drop(p, kc, vec2(kr, kr), kr, (0.9 - 0.5 * press) * mix(1.0, 0.5, dis)))
+    let q = p - kc
+    let kd = length(q) - kr
+    let kn = q / max(length(q), 0.001)
+    let lit2 = clamp(0.5 - 0.55 * dot(q / kr, vec2(0.45, 0.85)), 0.0, 1.0)
+    let iv = mix(ad_ivory_dk(), ad_ivory(), 0.3 + 0.7 * lit2)
+    let gd = mix(ad_gold_dk(), ad_gold_base(), 0.3 + 0.7 * lit2)
+    var face = mix(gd, iv, slide)
+    face = mix(face, vec3(1.0, 0.99, 0.95), exp(0.0 - dot(q / kr - vec2(-0.35, -0.42), q / kr - vec2(-0.35, -0.42)) / 0.05) * 0.65)
+    face = Finish.lift(face, 0.12 * hover * live * (1.0 - press))
+    face = mix(face, face * 0.88, press)
+    face = mix(face, mix(face, g3(Finish.lum(face)), 0.7) * 0.5, dis)
+    let ka = Finish.cover(kd, px)
+    out = Finish.over(out, vec4(face * ka, ka))
+    out = Finish.over(out, ad_rim(kd, kn, 1.1, px, live) * mix(1.0, 0.5, dis))
+    return Finish.over(out, ad_focus(d, px, focus * live))
+}
+mod.widgets.ToggleFlat.label_walk.margin = mod.turtle.Inset{left: 46.0 right: 3.0 top: 0.0 bottom: 0.0}
+mod.widgets.ToggleFlat.draw_bg.size = 14.0
+mod.widgets.ToggleFlat.min_height = 24.0
+mod.widgets.ToggleFlat.draw_bg.pill_aspect = 2.7143
+mod.widgets.ToggleFlat.draw_bg.knob_inset = 7.0
+mod.widgets.ToggleFlat.clip_x = false
+mod.widgets.ToggleFlat.clip_y = false
+mod.widgets.ToggleFlat.draw_bg.vertex = fn() {
+    let g = md_grow(self.rect_pos, self.rect_size, 4.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.ToggleFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return ad_toggle(self.pos, self.rect_size, self.rect_pos, px, self.active, self.drag_pos, self.drag, self.hover, self.down, self.focus, self.disabled, self.error, self.mark_at_end, 0.0)
+}
+
+// ---------------------------------------------------------------------------
+// RADIOS. A round seat of black lacquer in its gold rim holding a polished
+// gold bead; the chosen one is a lamp instead, burning white at its middle
+// and warm at its rim, its glow held in the seat.
+let ad_radio = fn(p: vec2, c: vec2, rad: float, px: float, hover: float, down: float, focus: float, active: float, dis: float) -> vec4 {
+    let live = 1.0 - dis
+    let q = p - c
+    let lr = length(q)
+    let d = lr - rad
+    var fill = mix(vec3(0.016, 0.014, 0.013), vec3(0.045, 0.038, 0.030), hover * live)
+    fill = mix(fill, vec3(0.06, 0.05, 0.04), dis)
+    var out = ad_well_r(p, c, vec2(rad, rad), rad, px, fill, 0.6, 1.2, dis)
+    out = Finish.over(out, ad_pin(d, 1.8, max(px, 0.6), px, 0.45 * hover * live * (1.0 - active)))
+    let br = rad * 0.58
+    // the glow of the lamp, held inside its seat
+    let on = active * live
+    let glow = exp(0.0 - max(lr - br, 0.0) / 1.3) * on * Finish.cover(d + 1.2, px) * 0.75
+    out = Finish.over(out, vec4(vec3(1.0, 0.70, 0.34) * glow, glow))
+    // not chosen: a polished gold bead, a little lower while pressed
+    let bead = ad_dome(vec4(0.0, 0.0, 0.0, 0.0), p, c, br, px, mix(ad_gold_lt(), vec3(0.36, 0.31, 0.24), dis))
+    out = Finish.over(out, bead * (1.0 - active) * (1.0 - 0.3 * down * live))
+    // chosen: the lamp itself, its middle burning white, warm at its rim
+    let t = clamp(lr / br, 0.0, 1.0)
+    var lc = mix(vec3(1.0, 0.99, 0.95), vec3(1.0, 0.78, 0.46), smoothstep(0.25, 1.0, t))
+    lc = mix(lc, vec3(0.46, 0.42, 0.35), dis)
+    let la = Finish.cover(lr - br, px) * active
+    out = Finish.over(out, vec4(lc * la, la))
+    let gq = q / br - vec2(-0.32, -0.38)
+    let gl = exp(0.0 - dot(gq, gq) / 0.04) * la * 0.55
+    out = Finish.over(out, vec4(vec3(1.0, 1.0, 1.0) * gl, gl))
+    return Finish.over(out, ad_focus(d, px, focus * live))
+}
+
+mod.widgets.RadioButtonFlat.clip_x = false
+mod.widgets.RadioButtonFlat.clip_y = false
+mod.widgets.RadioButtonFlat.draw_bg.vertex = fn() {
+    let g = md_grow(self.rect_pos, self.rect_size, 4.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.glass.RadioButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.RadioButtonFlat.padding = mod.turtle.Inset{left: 0.0 right: 3.0 top: 3.0 bottom: 3.0}
+mod.widgets.RadioButtonFlat.label_walk.margin = mod.turtle.Inset{left: 22.0 right: 3.0 top: 0.0 bottom: 0.0}
+mod.widgets.RadioButtonFlat.draw_bg.size = uniform(14.0)
+mod.widgets.RadioButtonFlat.min_height = 24.0
+mod.widgets.RadioButtonFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 4.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let sz = self.size
+    let lo = vec2(Finish.snap(o.x + 1.0, px), Finish.snap(o.y + (self.rect_size.y - sz) * 0.5, px)) - o
+    let c = lo + vec2(sz * 0.5, sz * 0.5)
+    return ad_radio(p, c, sz * 0.5, px, self.hover, self.down, self.focus, self.active, self.disabled)
+}
+// The flatter radio is its word alone: chosen, the word sits on a small
+// lacquer plaque in a gold rim; under the pointer a faint gold wash.
+mod.widgets.RadioButtonFlatter.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 4.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    let lo = vec2(Finish.snap(o.x - 3.0, px), Finish.snap(o.y + 1.0, px)) - o
+    let hi = vec2(Finish.snap(o.x + self.rect_size.x + 3.0, px), Finish.snap(o.y + self.rect_size.y - 1.0, px)) - o
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let k4 = vec4(2.5, 2.5, 2.5, 2.5)
+    let d = ad_cut(p, c, h, k4)
+    let wash = Finish.cover(d, px) * 0.15 * self.hover * live * (1.0 - self.active)
+    var out = vec4(ad_gold_md() * wash, wash)
+    let face = ad_lacq(p, lo, hi, ad_black(), 1.0)
+    let a = Finish.cover(d, px) * self.active
+    out = Finish.over(out, vec4(face * a, a))
+    out = Finish.over(out, ad_rim(d, ad_cut_n(p, c, h, k4), 1.2, px, 1.0) * self.active)
+    return Finish.over(out, ad_focus(d, px, self.focus * live))
+}
+
+// Radio tabs (the catalogue's Docs, Controls, Actions, Theme): lacquer
+// plaques in their rims; the chosen one champagne gold pressed in, its word
+// dark.
+mod.widgets.RadioButtonTabFlat.padding = mod.turtle.Inset{left: 14.0 right: 14.0 top: 6.0 bottom: 2.0}
+mod.widgets.RadioButtonTabFlat.label_walk.margin = mod.turtle.Inset{left: 0.0 right: 0.0 top: 0.0 bottom: 0.0}
+mod.widgets.RadioButtonTabFlat.min_height = 26.0
+mod.widgets.RadioButtonTabFlat.clip_x = false
+mod.widgets.RadioButtonTabFlat.clip_y = false
+mod.widgets.RadioButtonTabFlat.draw_bg.vertex = fn() {
+    let g = md_grow(self.rect_pos, self.rect_size, 6.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let k4 = vec4(3.0, 3.0, 3.0, 3.0)
+    let dark = ad_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, 0.0, 0.0, k4, 8.0, 6.0)
+    let gold = ad_button(self.pos, self.rect_size, self.rect_pos, px, self.hover * 0.5, 0.6, self.focus, self.disabled, 0.0, 0.0, k4, 2.0, 6.0)
+    return mix(dark, gold, self.active)
+}
+mod.widgets.RadioButtonTabFlat.draw_text.color = #ede2c6
+mod.widgets.RadioButtonTabFlat.draw_text.color_active = #1c1206
+mod.widgets.RadioButtonTabFlat.draw_text.color_disabled = #7a6e5a
+mod.widgets.RadioButtonTabFlat.draw_text.text_style = mod.theme.font_label{font_size: 7.0}
+
+// ---------------------------------------------------------------------------
+// SLIDERS. A gold tube: a capsule three and a half points high in its
+// polished rim, a black slot inside, polished gold filling the slot up to
+// the value; fine gold ticks above it. The thumb is a gold streamline wing:
+// an upright capsule on the value with three feathers swept back from its
+// shoulder, each shorter than the one above it, with its own shadow. Every
+// slider's quad grows for the wing, its shadow and the focus ring.
+let ad_tube = fn(p: vec2, c: vec2, h: vec2, px: float, f0: float, f1: float, dis: float, hover: float) -> vec4 {
+    let r = h.y
+    var out = ad_well_r(p, c, h, r, px, vec3(0.012, 0.011, 0.010), 0.5, 1.4, dis)
+    let w = 1.4
+    let fh = vec2(max((f1 - f0) * 0.5, 0.0), max(h.y - w - 0.5, 0.6))
+    let fc = vec2((f0 + f1) * 0.5, c.y)
+    let fd = md_rbox(p, fc, fh, fh.y)
+    var fcol = ad_metal(p, fc - fh - vec2(0.0, 0.8), fc + fh + vec2(0.0, 0.8), ad_gold_base(), 1.0, hover, 0.0)
+    fcol = mix(fcol, vec3(0.30, 0.26, 0.20), dis)
+    let fa = Finish.cover(fd, px) * step(0.01, f1 - f0) * Finish.cover(md_rbox(p, c, h, r) + w, px)
+    return Finish.over(out, vec4(fcol * fa, fa))
+}
+
+// The distance to a quadratic curve from `A` through the pull of `B` to `C`
+// (.x), and how far along it the nearest point lies (.y, 0..1).
+let ad_bez = fn(pos: vec2, A: vec2, B: vec2, C: vec2) -> vec2 {
+    let a = B - A
+    let b = A - 2.0 * B + C
+    let c = a * 2.0
+    let d = A - pos
+    let kk = 1.0 / max(dot(b, b), 0.0001)
+    let kx = kk * dot(a, b)
+    let ky = kk * (2.0 * dot(a, a) + dot(d, b)) / 3.0
+    let kz = kk * dot(d, a)
+    let p = ky - kx * kx
+    let p3 = p * p * p
+    let q = kx * (2.0 * kx * kx - 3.0 * ky) + kz
+    var h = q * q + 4.0 * p3
+    var res = 0.0
+    var tt = 0.0
+    if h >= 0.0 {
+        h = sqrt(h)
+        let x0 = (h - q) * 0.5
+        let x1 = (0.0 - h - q) * 0.5
+        let u0 = sign(x0) * pow(abs(x0), 1.0 / 3.0)
+        let u1 = sign(x1) * pow(abs(x1), 1.0 / 3.0)
+        tt = clamp(u0 + u1 - kx, 0.0, 1.0)
+        let e = d + (c + b * tt) * tt
+        res = dot(e, e)
+    } else {
+        let z = sqrt(0.0 - p)
+        let v = acos(clamp(q / (p * z * 2.0), -1.0, 1.0)) / 3.0
+        let m = cos(v)
+        let n = sin(v) * 1.732050808
+        let t0 = clamp((m + m) * z - kx, 0.0, 1.0)
+        let t1 = clamp((0.0 - n - m) * z - kx, 0.0, 1.0)
+        let e0 = d + (c + b * t0) * t0
+        let e1 = d + (c + b * t1) * t1
+        let r0 = dot(e0, e0)
+        let r1 = dot(e1, e1)
+        res = min(r0, r1)
+        tt = mix(t1, t0, step(r0, r1))
+    }
+    return vec2(sqrt(res), tt)
+}
+
+// A feather of the wing: a stroke along the curve `A`, `B`, `C`, tapering
+// from `r0` at its root to a rounded tip of `r1`, rounded across, lit along
+// its top, with a dark groove along its edge where it lies over the next.
+let ad_feather = fn(dst: vec4, p: vec2, A: vec2, B: vec2, C: vec2, r0: float, r1: float, t: float, px: float, hover: float, dis: float) -> vec4 {
+    let bz = ad_bez(p, A, B, C)
+    let u = 1.0 - bz.y
+    let q = A * u * u + B * 2.0 * u * bz.y + C * bz.y * bz.y
+    let axis = p - q
+    let rr = mix(r0, r1, bz.y)
+    let d = bz.x - rr
+    let n = axis / max(length(axis), 0.0001)
+    var col = ad_gold_shape(d, n, rr * 1.2, t, hover, dis)
+    col = mix(col, ad_gold_dk() * 0.35, Finish.band(d, 0.0, max(px, 0.55), px) * 0.8)
+    let fa = Finish.cover(d, px)
+    return Finish.over(dst, vec4(col * fa, fa))
+}
+let ad_wing = fn(p: vec2, kc: vec2, s: float, px: float, hover: float, press: float, dis: float) -> vec4 {
+    let live = 1.0 - dis
+    let bh = vec2(5.0, 8.5) * s
+    let bc = kc + vec2(0.0, 0.5 * s)
+    var out = ad_drop(p, bc, bh, bh.x, (1.0 - 0.5 * press) * mix(1.0, 0.5, dis))
+    out = Finish.over(out, ad_drop(p, kc + vec2(-9.5, -5.0) * s, vec2(9.0, 4.5) * s, 3.0 * s, 0.5 * (1.0 - 0.5 * press)))
+    let t = clamp((p.y - (kc.y - 12.0 * s)) / (21.0 * s), 0.0, 1.0)
+    let hv = hover * live * (1.0 - press)
+    if p.x < kc.x + 3.0 * s && p.y < kc.y + 2.5 * s && p.y > kc.y - 14.5 * s && p.x > kc.x - 22.0 * s {
+        out = ad_feather(out, p, kc + vec2(0.0, -1.0) * s, kc + vec2(-6.5, -1.3) * s, kc + vec2(-10.8, -3.4) * s, 2.2 * s, 1.0 * s, t, px, hv, dis)
+        out = ad_feather(out, p, kc + vec2(0.0, -4.1) * s, kc + vec2(-8.5, -4.6) * s, kc + vec2(-14.0, -7.0) * s, 2.2 * s, 1.0 * s, t, px, hv, dis)
+        out = ad_feather(out, p, kc + vec2(0.0, -7.2) * s, kc + vec2(-10.5, -7.9) * s, kc + vec2(-17.2, -10.3) * s, 2.3 * s, 1.05 * s, t, px, hv, dis)
+    }
+    // the body, over the roots of the feathers
+    let db = md_rbox(p, bc, bh, bh.x)
+    let bn = ad_nrm(p, bc, bh, bh.x)
+    var bcol = ad_gold_shape(db, bn, 2.4 * s, t, hv, dis)
+    bcol = mix(bcol, bcol * 0.88, press)
+    bcol = mix(bcol, ad_gold_dk() * 0.4, Finish.band(db, 0.0, max(px, 0.5), px) * 0.75)
+    let ba = Finish.cover(db, px)
+    return Finish.over(out, vec4(bcol * ba, ba))
+}
+
+// Fine gold ticks above a track: one every tenth of the travel, the ends
+// and the middle longer.
+let ad_ticks = fn(p: vec2, x0: float, span: float, ytop: float, px: float, dis: float) -> vec4 {
+    let f = (p.x - x0) / max(span, 1.0) * 10.0
+    let fi = floor(f + 0.5)
+    let dx = abs(p.x - (x0 + fi / 10.0 * span))
+    let major = 1.0 - step(0.1, abs(fi * 0.2 - floor(fi * 0.2 + 0.5)))
+    let len = mix(2.0, 3.4, major)
+    let inr = step(-0.5, fi) * step(fi, 10.5)
+    let tk = Finish.cover(dx - max(px * 0.5, 0.3), px) * step(ytop - len, p.y) * step(p.y, ytop) * inr * mix(0.85, 0.4, dis)
+    return vec4(ad_line_c() * tk, tk)
+}
+
+mod.widgets.SliderFlat.height = 36.0
+mod.widgets.SliderFlat.clip_x = false
+mod.widgets.SliderFlat.clip_y = false
+mod.widgets.SliderFlat.draw_bg.vertex = fn() {
+    let g = md_grow(self.rect_pos, self.rect_size, 18.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.SliderFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 18.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    let cy = Finish.snap(o.y + size.y - 9.0, px) - o.y
+    let x0 = Finish.snap(o.x + 1.0, px) - o.x
+    let x1 = Finish.snap(o.x + size.x - 1.0, px) - o.x
+    let w = x1 - x0
+    let span = w - 18.0
+    let kx = x0 + 9.0 + self.slide_pos * span
+    let ox = x0 + 9.0 + self.origin_pos * span
+    let f0 = mix(x0 + 2.0, min(ox, kx), self.arc_origin)
+    let f1 = mix(kx, max(ox, kx), self.arc_origin)
+    var out = ad_ticks(p, x0 + 9.0, span, cy - 6.0, px, self.disabled)
+    out = Finish.over(out, ad_tube(p, vec2((x0 + x1) * 0.5, cy), vec2(w * 0.5, 4.5), px, f0, f1, self.disabled, max(self.hover, self.drag) * live))
+    let kc = vec2(Finish.snap(o.x + kx, px) - o.x, cy)
+    out = Finish.over(out, ad_wing(p, kc, 1.0, px, max(self.hover, self.focus * 0.5), self.drag * live, self.disabled))
+    return Finish.over(out, ad_focus(md_rbox(p, kc + vec2(0.0, 0.5), vec2(5.0, 8.5), 5.0), px, self.focus * live))
+}
+mod.widgets.SliderFlat.text_input.draw_text.text_style = mod.theme.font_regular{font_size: 9.5}
+
+// The range slider: the same tube, gold between the two ends, a round gold
+// coin on each end with a ring engraved in it, pressed while it is the one
+// held.
+let ad_coin = fn(p: vec2, c: vec2, rad: float, px: float, hover: float, press: float, dis: float) -> vec4 {
+    var out = ad_drop(p, c, vec2(rad, rad), rad, (1.0 - 0.5 * press) * mix(1.0, 0.5, dis))
+    let q = p - c
+    let d = length(q) - rad
+    let n = q / max(length(q), 0.001)
+    let t = clamp((p.y - (c.y - rad)) / (2.0 * rad), 0.0, 1.0)
+    var col = ad_gold_shape(d, n, rad * 0.45, t, hover * (1.0 - press), dis)
+    col = mix(col, col * 0.88, press)
+    col = mix(col, ad_gold_dk() * 0.5, Finish.band(d, 0.0, max(px, 0.45), px) * 0.6)
+    let a = Finish.cover(d, px)
+    out = Finish.over(out, vec4(col * a, a))
+    let ring = Finish.band(d, rad * 0.42, rad * 0.42 + max(px, 0.5), px) * 0.7
+    out = Finish.over(out, vec4(ad_gold_dk() * 0.6 * ring, ring))
+    let ringl = Finish.band(d, rad * 0.42 + max(px, 0.5), rad * 0.42 + 2.0 * max(px, 0.5), px) * 0.5
+    return Finish.over(out, vec4(ad_gold_hi() * ringl, ringl))
+}
+mod.widgets.RangeSliderFlat.handle_size = 16.0
+mod.widgets.RangeSliderFlat.track_inset = 1.0
+mod.widgets.RangeSliderFlat.clip_x = false
+mod.widgets.RangeSliderFlat.clip_y = false
+mod.widgets.RangeSliderFlat.draw_bg.vertex = fn() {
+    let g = md_grow(self.rect_pos, self.rect_size, 6.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.RangeSliderFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 6.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    let top = self.label_px
+    let cy = Finish.snap(o.y + top + (size.y - top) * 0.5, px) - o.y
+    let x0 = Finish.snap(o.x + 1.0, px) - o.x
+    let x1 = Finish.snap(o.x + size.x - 1.0, px) - o.x
+    let w = x1 - x0
+    let span = max(size.x - self.inset_px * 2.0 - self.handle_px, 1.0)
+    let sx = self.inset_px + self.handle_px * 0.5 + self.start_pos * span
+    let ex = self.inset_px + self.handle_px * 0.5 + self.end_pos * span
+    var out = ad_tube(p, vec2((x0 + x1) * 0.5, cy), vec2(w * 0.5, 4.5), px, sx, ex, self.disabled, max(self.hover, self.drag) * live)
+    let k0 = vec2(Finish.snap(o.x + sx, px) - o.x, cy)
+    let k1 = vec2(Finish.snap(o.x + ex, px) - o.x, cy)
+    out = Finish.over(out, ad_coin(p, k0, 7.0, px, max(self.hot_start, self.focus * 0.5) * live, self.drag * self.hot_start * live, self.disabled))
+    out = Finish.over(out, ad_coin(p, k1, 7.0, px, max(self.hot_end, self.focus * 0.5) * live, self.drag * self.hot_end * live, self.disabled))
+    return out
+}
+
+// The minimal slider: a gold hairline (a dark device pixel over a bright
+// one), a brighter gold thread along it to the thumb, and the wing a size
+// smaller riding on it.
+mod.widgets.SliderMinimal.clip_x = false
+mod.widgets.SliderMinimal.clip_y = false
+mod.widgets.SliderMinimal.draw_bg.vertex = fn() {
+    let g = md_grow(self.rect_pos, self.rect_size, 16.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.SliderMinimal.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 16.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    let cy = Finish.snap(o.y + size.y - 6.0, px) - o.y
+    let kr = 5.0
+    let kx = kr + self.slide_pos * (size.x - 2.0 * kr)
+    let inx = step(0.0, p.x) * step(p.x, size.x)
+    let dark = step(cy - px, p.y) * step(p.y, cy) * inx
+    let light = step(cy, p.y) * step(p.y, cy + px) * inx
+    let thread = step(cy - 2.0 * px, p.y) * step(p.y, cy + px) * step(p.x, kx) * inx
+    var out = vec4(0.0, 0.0, 0.0, 0.0)
+    let la = light * 0.75 * mix(1.0, 0.5, self.disabled)
+    out = Finish.over(out, vec4(ad_gold_md() * la, la))
+    let da = dark * 0.9
+    out = Finish.over(out, vec4(vec3(0.0, 0.0, 0.0) * da, da))
+    let tcol = mix(ad_gold_lt(), vec3(0.36, 0.31, 0.24), self.disabled)
+    out = Finish.over(out, vec4(tcol * thread, thread))
+    let kc = vec2(Finish.snap(o.x + kx, px) - o.x, cy - 1.0)
+    out = Finish.over(out, ad_wing(p, kc, 0.8, px, max(self.hover, self.focus * 0.5), self.drag * live, self.disabled))
+    return Finish.over(out, ad_focus(md_rbox(p, kc + vec2(0.0, 0.4), vec2(4.0, 6.8), 4.0), px, self.focus * live))
+}
+mod.widgets.SliderMinimal.text_input.draw_text.text_style = mod.theme.font_regular{font_size: 9.5}
+
+// The round slider: a short gold tube beside its label, gold to the value,
+// a gold ball on the end of the gold; the value reads past it.
+mod.widgets.SliderRoundFlat.height = 18.0
+mod.widgets.SliderRoundFlat.clip_x = false
+mod.widgets.SliderRoundFlat.clip_y = false
+mod.widgets.SliderRoundFlat.draw_bg.vertex = fn() {
+    let g = md_grow(self.rect_pos, self.rect_size, 6.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.SliderRoundFlat.text_input.margin = mod.turtle.Inset{left: 0.0 right: 8.0 top: 0.0 bottom: 0.0}
+mod.widgets.SliderRoundFlat.text_input.width = 30.0
+mod.widgets.SliderRoundFlat.text_input.min_height = 0.0
+mod.widgets.SliderRoundFlat.text_input.padding = mod.turtle.Inset{left: 0.0 right: 0.0 top: 0.0 bottom: 0.0}
+mod.widgets.SliderRoundFlat.text_input.draw_text.text_style = mod.theme.font_regular{font_size: 9.5}
+mod.widgets.SliderRoundFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 6.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    let x0 = Finish.snap(o.x + self.label_size, px) - o.x
+    let y0 = Finish.snap(o.y + 2.0, px) - o.y
+    let x1 = Finish.snap(o.x + size.x - 44.0, px) - o.x
+    let y1 = Finish.snap(o.y + size.y - 2.0, px) - o.y
+    let h = vec2((x1 - x0) * 0.5, (y1 - y0) * 0.5)
+    let c = vec2(x0, y0) + h
+    let ins = 1.4
+    let kr = h.y - ins + 0.2
+    let kx = x0 + ins + kr + self.slide_pos * (2.0 * h.x - 2.0 * ins - 2.0 * kr)
+    var out = ad_tube(p, c, h, px, x0 + ins, kx, self.disabled, self.hover * live)
+    let kc = vec2(Finish.snap(o.x + kx, px) - o.x, c.y)
+    out = Finish.over(out, ad_coin(p, kc, kr + 1.0, px, self.hover, self.drag * live, self.disabled))
+    return Finish.over(out, ad_focus(md_rbox(p, c, h, h.y), px, self.focus * live))
+}
+
+// ---------------------------------------------------------------------------
+// FADERS. A black slot five points wide in its gold rim, fine gold ticks
+// either side, a gold thread in the slot for the value; the cap a polished
+// gold block 22 points across with its corners rounded, two grip grooves cut
+// across it and a black line with a cream thread through its middle.
+mod.widgets.SliderFader.cap_size = 13.0
+mod.widgets.SliderFader.clip_x = false
+mod.widgets.SliderFader.clip_y = false
+mod.widgets.SliderFader.draw_bg.vertex = fn() {
+    let g = md_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.SliderFader.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 5.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    let vert = self.is_vertical
+    let a = mix(p.x, size.y - p.y, vert)
+    let b = mix(p.y, p.x, vert)
+    let along = mix(size.x, size.y, vert)
+    let across = mix(size.y, size.x, vert)
+    let travel = max(along - self.inset_px * 2.0 - self.cap_px, 1.0)
+    let foot = self.inset_px + self.cap_px * 0.5
+    let mid = floor(across * 0.5 / px) * px
+    // the slot, in screen space
+    let sw = 5.0
+    let sc = mix(vec2(along * 0.5, mid), vec2(mid, size.y - along * 0.5), vert)
+    let sh = mix(vec2(along * 0.5 - self.inset_px, sw * 0.5), vec2(sw * 0.5, along * 0.5 - self.inset_px), vert)
+    var out = ad_well_r(p, sc, sh, sw * 0.5, px, vec3(0.010, 0.009, 0.008), 0.5, 1.0, self.disabled)
+    // the value: a gold thread in the slot, from the origin (or the foot)
+    let va0 = foot + self.fill_lo * travel
+    let va1 = foot + self.fill_hi * travel
+    let vl = step(va0, a) * step(a, va1) * (1.0 - smoothstep(0.6, 0.6 + px, abs(b - mid))) * live
+    out = Finish.over(out, vec4(ad_gold_lt() * 0.95 * vl, vl * 0.95))
+    // ticks: a long one every quarter of the travel, short ones between
+    let nt = 16.0
+    let f = (a - foot) / travel * nt
+    let fi = floor(f + 0.5)
+    let da = abs(a - (foot + fi / nt * travel))
+    let major = 1.0 - step(0.1, abs(fi * 0.25 - floor(fi * 0.25 + 0.5)))
+    let tl = mix(2.5, 4.5, major)
+    let off = abs(b - mid) - sw * 0.5 - 2.5
+    let in_rng = step(-0.5, fi) * step(fi, nt + 0.5)
+    let tk = (1.0 - smoothstep(px * 0.6, px * 0.6 + 0.01 + px * 0.4, da)) * step(0.0, off) * step(off, tl) * in_rng * 0.85 * mix(1.0, 0.5, self.disabled)
+    out = Finish.over(out, vec4(ad_line_c() * tk, tk))
+    // the cap
+    let at = foot + self.slide_pos * travel
+    let cw = min(22.0, across)
+    let cs = mix(vec2(at, mid), vec2(mid, size.y - at), vert)
+    let ch = mix(vec2(self.cap_px * 0.5, cw * 0.5), vec2(cw * 0.5, self.cap_px * 0.5), vert)
+    let cc = vec2(Finish.snap(o.x + cs.x, px) - o.x, Finish.snap(o.y + cs.y, px) - o.y)
+    let k4 = vec4(2.5, 2.5, 2.5, 2.5)
+    let cd = ad_cut(p, cc, ch, k4)
+    let press = self.drag * live
+    out = Finish.over(out, ad_drop(p, cc, ch, 2.0, (1.0 - press * 0.5) * mix(1.0, 0.5, self.disabled)))
+    var face = ad_metal(p, cc - ch, cc + ch, ad_gold_base(), 1.0, max(self.hover, self.focus * 0.5) * live, press)
+    face = mix(face, vec3(0.30, 0.26, 0.20), self.disabled)
+    let fa = Finish.cover(cd, px)
+    out = Finish.over(out, vec4(face * fa, fa))
+    // the grooves and the middle line, across the cap
+    let ln = mix(abs(p.y - cc.y), abs(p.x - cc.x), 1.0 - vert)
+    let inside = Finish.cover(cd + 2.0, px)
+    let gr = (1.0 - smoothstep(0.35, 0.35 + px, abs(ln - 3.6))) * inside * 0.55
+    out = Finish.over(out, vec4(vec3(0.20, 0.13, 0.05) * gr, gr))
+    let bl = (1.0 - smoothstep(0.9, 0.9 + px, ln)) * inside
+    out = Finish.over(out, vec4(vec3(0.02, 0.018, 0.016) * bl, bl))
+    let cl = (1.0 - smoothstep(0.25, 0.25 + px, ln)) * inside * 0.9
+    out = Finish.over(out, vec4(ad_cream() * cl, cl))
+    out = Finish.over(out, ad_rim(cd, ad_cut_n(p, cc, ch, k4), 1.2, px, live) * mix(1.0, 0.5, self.disabled))
+    return Finish.over(out, ad_focus(cd, px, self.focus * live))
+}
+
+// ---------------------------------------------------------------------------
+// KNOBS. An ivory knob: a fluted skirt, its flutes running round its side
+// and turning with the light from the upper left, under a cap of spun gold
+// in a polished collar; the pointer a lit cream slit in the cap. Round it a
+// fine gold track and the value in bright gold.
+let ad_knob = fn(p: vec2, c: vec2, rad: float, px: float, ang: float, hover: float, press: float, dis: float) -> vec4 {
+    let live = 1.0 - dis
+    var out = ad_drop(p, c, vec2(rad, rad), rad, (1.0 - 0.4 * press) * mix(1.0, 0.5, dis))
+    let q = p - c
+    let l = length(q)
+    let d = l - rad
+    let n = q / max(l, 0.001)
+    // the fluted skirt
+    let th = atan2(q.y, q.x)
+    let nf = max(floor(rad * 1.1), 14.0)
+    let fl = cos(th * nf)
+    let lit = clamp(0.5 - 0.6 * dot(n, vec2(0.45, 0.85)), 0.0, 1.0)
+    var sk = mix(ad_ivory_dk(), ad_ivory(), 0.2 + 0.8 * lit)
+    sk = sk * (0.86 + 0.14 * fl)
+    sk = mix(sk, sk * 0.72, smoothstep(0.82, 1.0, l / rad) * 0.6)
+    sk = Finish.lift(sk, 0.08 * hover * live)
+    sk = mix(sk, mix(sk, g3(Finish.lum(sk)), 0.7) * 0.55, dis)
+    sk = mix(sk, vec3(0.30, 0.25, 0.18), Finish.band(d, 0.0, max(px, 0.5), px) * 0.6)
+    let a = Finish.cover(d, px)
+    out = Finish.over(out, vec4(sk * a, a))
+    // the spun gold cap in its collar
+    let cr = rad * 0.64
+    let dc = l - cr
+    var cap = ad_gold_base() * Finish.spun(p, c, vec2(-0.45, -0.89))
+    cap = mix(cap, ad_gold_hi(), smoothstep(0.55, 1.0, lit) * 0.25)
+    cap = Finish.lift(cap, 0.10 * hover * live * (1.0 - press))
+    cap = mix(cap, cap * 0.88, press)
+    cap = mix(cap, mix(cap, g3(Finish.lum(cap)), 0.7) * 0.55, dis)
+    let ca = Finish.cover(dc, px)
+    out = Finish.over(out, vec4(min(cap, vec3(1.0, 1.0, 1.0)) * ca, ca))
+    out = Finish.over(out, ad_rim(dc, n, max(0.9, rad * 0.07), px, live) * mix(1.0, 0.5, dis))
+    // the pointer: a lit cream slit cut in the cap from its middle to its
+    // edge, a dark hairline round it
+    let dir = vec2(0.0 - sin(ang), cos(ang))
+    let lw = max(0.5, rad * 0.04)
+    let ld = md_seg(p, c + dir * cr * 0.10, c + dir * (cr - max(1.0, rad * 0.07)))
+    let ea = Finish.cover(ld - lw - max(px, 0.45), px) * 0.7
+    out = Finish.over(out, vec4(vec3(0.06, 0.04, 0.02) * ea, ea))
+    let la = Finish.cover(ld - lw, px)
+    let lcol = mix(vec3(1.0, 0.97, 0.88), vec3(0.60, 0.56, 0.48), dis)
+    return Finish.over(out, vec4(lcol * la, la))
+}
+
+// The value arc round a knob: `ar` its middle radius, `aw` its width; the
+// gap centred at the bottom, the value clockwise from its left end, or from
+// the origin when the knob is bipolar. The track a fine gold line with a
+// tick at either end, the value bright gold.
+let md_arc = fn(p: vec2, c: vec2, ar: float, aw: float, px: float, v0: float, v1: float, gap: float, dis: float) -> vec4 {
+    let start = gap * 0.5
+    let sweep = 2.0 * PI - gap
+    let q = p - c
+    var ang = atan2(0.0 - q.x, q.y)
+    if ang < 0.0 {
+        ang = ang + 2.0 * PI
+    }
+    let rd = abs(length(q) - ar) - aw * 0.5
+    let rt = abs(length(q) - ar) - max(px * 0.6, 0.4)
+    let in_arc = step(start, ang) * step(ang, start + sweep)
+    let e0 = vec2(0.0 - sin(start), cos(start))
+    let e1 = vec2(0.0 - sin(start + sweep), cos(start + sweep))
+    let t0 = md_seg(p, c + e0 * (ar - aw), c + e0 * (ar + aw * 1.2)) - max(px * 0.6, 0.4)
+    let t1 = md_seg(p, c + e1 * (ar - aw), c + e1 * (ar + aw * 1.2)) - max(px * 0.6, 0.4)
+    let track_d = min(mix(1000.0, rt, in_arc), min(t0, t1))
+    let a0 = start + sweep * v0
+    let a1 = start + sweep * v1
+    let l0 = c + vec2(0.0 - sin(a0), cos(a0)) * ar
+    let l1 = c + vec2(0.0 - sin(a1), cos(a1)) * ar
+    let lit_in = step(a0, ang) * step(ang, a1)
+    let lit_d = min(mix(1000.0, rd, lit_in), min(length(p - l0), length(p - l1)) - aw * 0.5)
+    let ta = Finish.cover(track_d, px) * 0.75
+    var out = vec4(ad_line_c() * ta, ta)
+    let la = Finish.cover(lit_d, px)
+    let ink = mix(ad_gold_lt(), vec3(0.36, 0.31, 0.24), dis)
+    return Finish.over(out, vec4(ink * la, la))
+}
+
+mod.widgets.RotaryKnob.clip_x = false
+mod.widgets.RotaryKnob.clip_y = false
+mod.widgets.RotaryKnob.draw_bg.vertex = fn() {
+    let g = md_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.RotaryKnob.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 5.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    let dia = min(size.x, size.y)
+    let rr = dia * 0.5 - 1.0
+    let c = vec2(Finish.snap(o.x + size.x * 0.5, px) - o.x, Finish.snap(o.y + size.y - dia * 0.5, px) - o.y)
+    let gap = self.gap * PI / 180.0
+    let aw = 1.6
+    let ar = floor((rr - aw * 0.5) / px) * px
+    let rad = floor((ar - aw * 0.5 - 2.6) / px) * px
+    let lo = min(self.origin_pos, self.slide_pos)
+    let hi = max(self.origin_pos, self.slide_pos)
+    let v0 = mix(0.0, lo, self.arc_origin)
+    let v1 = mix(self.slide_pos, hi, self.arc_origin)
+    var out = md_arc(p, c, ar, aw, px, v0, v1, gap, self.disabled)
+    let ang = gap * 0.5 + (2.0 * PI - gap) * self.slide_pos
+    out = Finish.over(out, ad_knob(p, c, rad, px, ang, max(self.hover, self.focus * 0.5), self.drag * live, self.disabled))
+    return Finish.over(out, ad_focus(length(p - c) - ar - aw * 0.5, px, self.focus * live))
+}
+// Knob legends are small wide capitals in gold.
+mod.widgets.RotaryKnob.draw_text.color = #d8c08c
+mod.widgets.RotaryKnob.draw_text.text_style = mod.theme.font_label{font_size: 6.5}
+
+// The dial: the knob above set in a sunburst. A polished gold band round
+// the outside steps down to a ring of fan blades, ivory and gold by turns,
+// each ivory blade carrying an LED slot that lights warm white up to the
+// value; a gold step inside the fan, a black moat, and in it the value as a
+// glowing ring round the knob. Where the sweep leaves its gap the fan is
+// black lacquer.
+mod.widgets.RotaryFlat.clip_x = false
+mod.widgets.RotaryFlat.clip_y = false
+mod.widgets.RotaryFlat.draw_bg.vertex = fn() {
+    let g = md_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.RotaryFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 5.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    let dis = self.disabled
+    let room = vec2(size.x, size.y - 24.0)
+    let dia = min(room.x, room.y)
+    let rr = dia * 0.5 - 1.0
+    let c = vec2(Finish.snap(o.x + size.x * 0.5, px) - o.x, Finish.snap(o.y + 24.0 + room.y * 0.5, px) - o.y)
+    let gap = self.gap * PI / 180.0
+    let start = gap * 0.5
+    let sweep = 2.0 * PI - gap
+    let lo = min(self.origin_pos, self.slide_pos)
+    let hi = max(self.origin_pos, self.slide_pos)
+    let v0 = mix(0.0, lo, self.arc_origin)
+    let v1 = mix(self.slide_pos, hi, self.arc_origin)
+    let q = p - c
+    let l = length(q)
+    let n = q / max(l, 0.001)
+    var ang = atan2(0.0 - q.x, q.y)
+    if ang < 0.0 {
+        ang = ang + 2.0 * PI
+    }
+    let d_out = l - rr
+    var out = ad_drop(p, c, vec2(rr, rr), rr, mix(1.0, 0.5, dis))
+    // the black lacquer disc
+    let lac = ad_lacq(p, c - vec2(rr, rr), c + vec2(rr, rr), ad_black(), 0.6)
+    let ba = Finish.cover(d_out, px)
+    out = Finish.over(out, vec4(lac * ba, ba))
+    // the ring of fan blades over the sweep
+    let bw = max(2.0, rr * 0.075)
+    let fo = rr - bw
+    let fw = max(5.0, rr * 0.22)
+    let fi = fo - fw
+    let nb = max(floor(sweep / (2.0 * PI / 24.0) + 0.5), 4.0)
+    let seg = sweep / nb
+    let kf = floor((ang - start) / seg)
+    let ivory = 1.0 - step(0.25, abs(fract(kf * 0.5)))
+    let in_sweep = step(start, ang) * step(ang, start + sweep)
+    let ring = Finish.cover(l - fo, px) * Finish.cover(fi - l, px) * in_sweep
+    let u = clamp((l - fi) / max(fw, 0.01), 0.0, 1.0)
+    let side = fract((ang - start) / seg)
+    var blade = mix(ad_gold_base() * (0.85 + 0.35 * (1.0 - side)), ad_ivory() * (0.80 + 0.22 * (1.0 - side)), ivory)
+    blade = blade * (0.88 + 0.16 * clamp(0.5 - 0.6 * dot(n, vec2(0.45, 0.85)), 0.0, 1.0))
+    blade = mix(blade, mix(blade, g3(Finish.lum(blade)), 0.7) * 0.55, dis)
+    // a dark hairline between the blades
+    let bdist = min(side, 1.0 - side) * seg * l
+    blade = mix(blade, vec3(0.06, 0.04, 0.02), Finish.cover(bdist - max(px * 0.5, 0.3), px) * 0.8)
+    out = Finish.over(out, vec4(blade * ring, ring))
+    // the LED slot in each ivory blade, lit up to the value
+    let bmid = start + (kf + 0.5) * seg
+    let bv = (kf + 0.5) / nb
+    let led_on = step(v0 - 0.001, bv) * step(bv, v1 + 0.001) * live
+    let dir = vec2(0.0 - sin(bmid), cos(bmid))
+    let sd = md_seg(p, c + dir * (fi + fw * 0.30), c + dir * (fi + fw * 0.70)) - max(0.75, rr * 0.022)
+    let sa = Finish.cover(sd, px) * ivory * in_sweep
+    let sglow = exp(0.0 - max(sd, 0.0) / 1.2) * ivory * in_sweep * led_on * step(fi, l) * step(l, fo)
+    out = Finish.over(out, vec4(vec3(1.0, 0.70, 0.30) * sglow * 0.55, sglow * 0.55))
+    let scol = mix(vec3(0.16, 0.12, 0.08), vec3(1.0, 0.97, 0.88), led_on)
+    out = Finish.over(out, vec4(scol * sa, sa))
+    // the polished band outside, and the gold step inside the fan
+    out = Finish.over(out, ad_rim(d_out, n, bw, px, live) * mix(1.0, 0.5, dis))
+    let sw = max(1.4, rr * 0.045)
+    let d_step = l - fi
+    out = Finish.over(out, ad_rim(d_step, n, sw, px, live) * mix(1.0, 0.5, dis))
+    // the moat and the glowing value ring round the knob
+    let kr = fi - sw - max(3.0, rr * 0.09)
+    let gr = (fi - sw + kr) * 0.5
+    let la0 = start + sweep * v0
+    let la1 = start + sweep * v1
+    let lit_in = step(la0, ang) * step(ang, la1)
+    let gd = abs(l - gr) - 0.6
+    let core = Finish.cover(gd, px) * lit_in * live
+    let halo = exp(0.0 - max(gd, 0.0) / 1.1) * lit_in * live * step(kr, l) * step(l, fi - sw)
+    out = Finish.over(out, vec4(vec3(1.0, 0.72, 0.32) * halo * 0.6, halo * 0.6))
+    out = Finish.over(out, vec4(vec3(1.0, 0.97, 0.88) * core, core))
+    let kang = start + sweep * self.slide_pos
+    out = Finish.over(out, ad_knob(p, c, kr, px, kang, max(self.hover, self.focus * 0.5), self.drag * live, dis))
+    return Finish.over(out, ad_focus(d_out, px, self.focus * live))
+}
+
+// The dial's readout: a small plaque of the screens' black glass in its
+// gold rim, amber figures.
+let md_lcd = fn(p: vec2, size: vec2, o: vec2, px: float) -> vec4 {
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y, px)) - o + vec2(0.0, px)
+    let hi = vec2(Finish.snap(o.x + size.x, px), Finish.snap(o.y + size.y, px)) - o - vec2(0.0, 2.0 * px)
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let k4 = vec4(2.5, 2.5, 2.5, 2.5)
+    let d = ad_cut(p, c, h, k4)
+    let t = clamp((p.y - lo.y) / max(2.0 * h.y, 1.0), 0.0, 1.0)
+    var col = vec3(0.020, 0.018, 0.016) * (1.6 - 0.8 * t)
+    col = mix(col, vec3(0.0, 0.0, 0.0), clamp(Finish.inset(p, c, h, 2.0, vec2(0.0, 1.2), 1.0), 0.0, 1.0) * 0.5)
+    let a = Finish.cover(d, px)
+    var out = ad_drop(p, c, h, 2.0, 0.6)
+    out = Finish.over(out, vec4(col * a, a))
+    return Finish.over(out, ad_rim(d, ad_cut_n(p, c, h, k4), 1.3, px, 1.0))
+}
+mod.widgets.RotaryFlat.text_input.padding = mod.turtle.Inset{left: 7.0 right: 7.0 top: 2.0 bottom: 2.0}
+mod.widgets.RotaryFlat.text_input.min_height = 20.0
+mod.widgets.RotaryFlat.text_input.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return md_lcd(self.pos * self.rect_size, self.rect_size, self.rect_pos, px)
+}
+mod.widgets.RotaryFlat.text_input.draw_text.color = #ffb648
+mod.widgets.RotaryFlat.text_input.draw_text.color_hover = #ffc768
+mod.widgets.RotaryFlat.text_input.draw_text.color_focus = #ffc768
+mod.widgets.RotaryFlat.text_input.draw_text.color_empty = #a07a3a
+mod.widgets.RotaryFlat.text_input.draw_text.text_style = mod.theme.font_regular{font_size: 9.5}
+
+// ---------------------------------------------------------------------------
+// TEXT FIELDS. A well of black lacquer sunk behind its gold rim, its corners
+// cut; focused, a fine bright gold line lights inside the rim. Read only,
+// the well is a dull bronze-black and the rim is dimmed.
+let md_field = fn(p: vec2, size: vec2, o: vec2, px: float, hover: float, focus: float, dis: float, k: float) -> vec4 {
+    let ins = 1.5
+    let lo = vec2(Finish.snap(o.x + ins, px), Finish.snap(o.y + ins, px)) - o
+    let hi = vec2(Finish.snap(o.x + size.x - ins, px), Finish.snap(o.y + size.y - ins, px)) - o - vec2(0.0, px)
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let k4 = vec4(k, k, k, k)
+    let d = ad_cut(p, c, h, k4)
+    let n = ad_cut_n(p, c, h, k4)
+    var fill = mix(vec3(0.016, 0.014, 0.013), vec3(0.032, 0.028, 0.024), hover * (1.0 - dis))
+    fill = mix(fill, vec3(0.055, 0.045, 0.035), dis)
+    var out = ad_well(p, c, h, k, d, n, px, fill, mix(0.7, 0.3, dis), 1.3, dis)
+    out = Finish.over(out, ad_pin(d, 2.3, max(px, 0.6), px, 0.45 * hover * (1.0 - focus) * (1.0 - dis)))
+    let fl = Finish.band(d, 2.3, 2.3 + max(px, 0.7), px) * focus * (1.0 - dis)
+    return Finish.over(out, vec4(vec3(1.0, 0.88, 0.60) * fl, fl))
+}
+
+mod.widgets.TextInputFlat.padding = mod.turtle.Inset{left: 10.0 right: 10.0 top: 4.0 bottom: 4.0}
+mod.widgets.TextInputFlat.draw_bg.pixel = fn() {
+    if self.color.a < 0.01 {
+        return vec4(0.0, 0.0, 0.0, 0.0)
+    }
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return md_field(self.pos * self.rect_size, self.rect_size, self.rect_pos, px, self.hover, self.focus, self.disabled, 3.0)
+}
+mod.widgets.TextInputFlat.draw_text.color_empty = #a08f70
+mod.widgets.TextInputFlat.draw_text.color_disabled = #8a7c64
+mod.widgets.TextInputFlat.draw_cursor.color = #f2d07c
+
+// The well a form's field stands in is the same lacquer well; a caller who
+// asks for no box (a clear colour) gets none.
+mod.widgets.FieldWell.draw_bg.pixel = fn() {
+    if self.color.a < 0.01 {
+        return vec4(0.0, 0.0, 0.0, 0.0)
+    }
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return md_field(self.pos * self.rect_size, self.rect_size, self.rect_pos, px, self.hover, self.focus, self.disabled, 3.0)
+}
+
+// NUMBER FIELDS. The lacquer well, and on its right a block of champagne
+// gold split by a fine cut, a small black chevron in each half; the half
+// under the pointer lifts, the held half sinks.
+mod.widgets.NumberField.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return md_field(self.pos * self.rect_size, self.rect_size, self.rect_pos, px, self.hover, self.focus, self.disabled, 3.0)
+}
+mod.widgets.NumberField.pad_left = 10.0
+mod.widgets.NumberSpin.width = 16.0
+mod.widgets.NumberSpin.draw_text.color = #00000000
+mod.widgets.NumberSpin.draw_text.color_disabled = #00000000
+let ad_chev = fn(p: vec2, c: vec2, hw: float, hh: float, dir: float) -> float {
+    // a chevron hw either side, hh tall, pointing up (dir -1) or down (1)
+    let a = c + vec2(0.0 - hw, 0.0 - hh * dir * 0.5)
+    let b = c + vec2(0.0, hh * dir * 0.5)
+    let e = c + vec2(hw, 0.0 - hh * dir * 0.5)
+    return min(md_seg(p, a, b), md_seg(p, b, e))
+}
+mod.widgets.NumberSpin.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y + 2.8, px)) - o
+    let hi = vec2(Finish.snap(o.x + self.rect_size.x - 2.8, px), Finish.snap(o.y + self.rect_size.y - 2.8, px)) - o
+    let mid = Finish.snap(o.y + (lo.y + hi.y) * 0.5, px) - o.y
+    let upper = step(p.y, mid)
+    let hot = mix(max(0.0, 0.0 - self.hot), max(0.0, self.hot), upper) * live
+    let dn = mix(max(0.0, 0.0 - self.down), max(0.0, self.down), upper) * live
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let k4 = vec4(0.0, 1.5, 1.5, 0.0)
+    let d = ad_cut(p, c, h, k4)
+    var face = ad_metal(p, lo, hi, ad_champ(), 0.7, hot, dn)
+    face = mix(face, vec3(0.30, 0.26, 0.20), self.disabled)
+    let a = Finish.cover(d, px)
+    var out = vec4(face * a, a)
+    // the cut down its left and across its middle
+    let vl = step(lo.x, p.x) * step(p.x, lo.x + max(px, 0.7)) * step(lo.y, p.y) * step(p.y, hi.y) * 0.9
+    let hl = step(abs(p.y - mid), max(px, 0.6) * 0.5) * step(lo.x, p.x) * step(p.x, hi.x) * 0.6
+    let la = max(vl, hl)
+    out = Finish.over(out, vec4(vec3(0.16, 0.10, 0.04) * la, la))
+    let cx = (lo.x + hi.x) * 0.5 + 0.5
+    let cu = ad_chev(p, vec2(cx, (lo.y + mid) * 0.5), 2.6, 2.4, -1.0) - 0.55
+    let cd = ad_chev(p, vec2(cx, (mid + hi.y) * 0.5), 2.6, 2.4, 1.0) - 0.55
+    let ti = Finish.cover(min(cu, cd), px)
+    return Finish.over(out, vec4(vec3(0.08, 0.05, 0.02) * ti, ti))
+}
+
+// The drag-number: the lacquer well, its track a faint gold wash behind the
+// ink.
+mod.widgets.ValueInput.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    var out = md_field(p, self.rect_size, self.rect_pos, px, max(self.hover, self.drag), self.focus, 0.0, 3.0)
+    let d = md_rbox(p, self.rect_size * 0.5, self.rect_size * 0.5 - vec2(3.0, 3.0), 1.5)
+    let wx = 3.0 + (self.rect_size.x - 6.0) * max(self.fill, 0.0)
+    let wash = step(0.0, self.fill) * step(p.x, wx) * Finish.cover(d, px) * 0.22
+    return Finish.over(out, vec4(ad_gold_md() * wash, wash))
+}
+mod.widgets.ValueInput.draw_text.color = #ede2c6
+mod.widgets.ValueInput.draw_text.text_style = mod.theme.font_regular{font_size: 9.5 line_spacing: 1.0}
+mod.widgets.ValueInput.arrow_color = #d8c08c
+mod.widgets.ValueInput.text_input.draw_bg.color = #00000000
+
+// ---------------------------------------------------------------------------
+// DROP-DOWNS. A black lacquer plaque in its gold rim, and at its right end a
+// block of champagne gold carrying a black chevron. Open, the plaque is
+// held pressed in.
+let md_dropdown = fn(pos0: vec2, size0: vec2, o0: vec2, px: float, hover: float, held: float, focus: float, dis: float, ins: float) -> vec4 {
+    let m = 6.0
+    let p = pos0 * (size0 + vec2(2.0 * m, 2.0 * m)) - vec2(m, m) - vec2(0.0, ins)
+    let size = size0 - vec2(0.0, 2.0 * ins)
+    let o = o0 + vec2(0.0, ins)
+    let pos = (p + vec2(m, m)) / (size + vec2(2.0 * m, 2.0 * m))
+    let live = 1.0 - dis
+    var out = ad_button(pos, size, o, px, hover, held, focus, dis, 0.0, 0.0, vec4(3.0, 3.0, 3.0, 3.0), 8.0, m)
+    let lo = vec2(Finish.snap(o.x + size.x - 22.0, px) - o.x, 1.5)
+    let hi = vec2(Finish.snap(o.x + size.x - 1.5, px) - o.x, size.y - 1.5)
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let k4 = vec4(0.0, 2.0, 2.0, 0.0)
+    let d = ad_cut(p, c, h, k4)
+    var face = ad_metal(p, lo, hi, ad_champ(), 0.7, hover * live, held * live)
+    face = mix(face, vec3(0.30, 0.26, 0.20), dis)
+    let a = Finish.cover(d, px)
+    out = Finish.over(out, vec4(face * a, a))
+    let sl = step(lo.x, p.x) * step(p.x, lo.x + max(px, 0.7)) * step(lo.y, p.y) * step(p.y, hi.y)
+    out = Finish.over(out, vec4(vec3(0.10, 0.065, 0.025) * sl, sl))
+    let cc = vec2(c.x + 0.5, size.y * 0.5 + held * live * px)
+    let tri = Finish.cover(ad_chev(p, cc, 3.2, 3.0, 1.0) - 0.65, px)
+    return Finish.over(out, vec4(vec3(0.08, 0.05, 0.02) * tri, tri))
+}
+
+mod.widgets.DropDownFlat.padding = mod.turtle.Inset{left: 12.0 right: 32.0 top: 4.0 bottom: 4.0}
+mod.widgets.DropDown.padding = mod.turtle.Inset{left: 12.0 right: 32.0 top: 4.0 bottom: 4.0}
+mod.widgets.DropDownFlat.clip_x = false
+mod.widgets.DropDownFlat.clip_y = false
+mod.widgets.DropDownFlat.draw_bg.vertex = fn() {
+    let g = md_grow(self.rect_pos, self.rect_size, 6.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.DropDownFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return md_dropdown(self.pos, self.rect_size, self.rect_pos, px, self.hover, max(self.down, self.active), self.focus, self.disabled, 1.0)
+}
+mod.widgets.DropDownFlat.draw_text.text_style = mod.theme.font_regular{font_size: 9.5}
+
+mod.widgets.Select.clip_x = false
+mod.widgets.Select.clip_y = false
+mod.widgets.MultiSelect.clip_x = false
+mod.widgets.MultiSelect.clip_y = false
+mod.widgets.Select.face.clip_x = false
+mod.widgets.Select.face.clip_y = false
+mod.widgets.MultiSelect.face.clip_x = false
+mod.widgets.MultiSelect.face.clip_y = false
+mod.widgets.Select.face.draw_bg.vertex = fn() {
+    let g = md_grow(self.rect_pos, self.rect_size, 6.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.MultiSelect.face.draw_bg.vertex = fn() {
+    let g = md_grow(self.rect_pos, self.rect_size, 6.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.Select.face.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return md_dropdown(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, 0.0)
+}
+mod.widgets.MultiSelect.face.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return md_dropdown(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, 0.0)
+}
+mod.widgets.Select.face.padding.right = 32.0
+mod.widgets.MultiSelect.face.padding.right = 32.0
+
+// The combo box: the lacquer well one types into, and the champagne gold
+// block with its chevron at the right end.
+mod.widgets.ComboBox.padding = mod.turtle.Inset{left: 10.0 right: 32.0 top: 4.0 bottom: 4.0}
+mod.widgets.ComboBox.input.min_height = 0.0
+mod.widgets.ComboBox.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let size = self.rect_size
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    var out = md_field(p, size, o, px, self.hover, self.focus, self.disabled, 3.0)
+    let held = self.down * self.hover * live
+    let lo = vec2(Finish.snap(o.x + size.x - 23.0, px) - o.x, Finish.snap(o.y + 2.8, px) - o.y)
+    let hi = vec2(Finish.snap(o.x + size.x - 2.8, px) - o.x, Finish.snap(o.y + size.y - 2.8, px) - o.y - px)
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let d = ad_cut(p, c, h, vec4(0.0, 1.6, 1.6, 0.0))
+    var face = ad_metal(p, lo, hi, ad_champ(), 0.7, self.hover * live, held)
+    face = mix(face, vec3(0.30, 0.26, 0.20), self.disabled)
+    let a = Finish.cover(d, px)
+    out = Finish.over(out, vec4(face * a, a))
+    let sl = step(lo.x, p.x) * step(p.x, lo.x + max(px, 0.7)) * step(lo.y, p.y) * step(p.y, hi.y)
+    out = Finish.over(out, vec4(vec3(0.10, 0.065, 0.025) * sl, sl))
+    let cc = vec2(c.x + 0.5, c.y + held * px)
+    let tri = Finish.cover(ad_chev(p, cc, 3.2, 3.0, 1.0) - 0.65, px)
+    return Finish.over(out, vec4(vec3(0.08, 0.05, 0.02) * tri, tri))
+}
+
+// ---------------------------------------------------------------------------
+// SEGMENTS AND TABS. One black lacquer plaque across the strip in its gold
+// rim; the chosen segment a champagne gold plaque pressed into it, its word
+// dark.
+let md_strip = fn(p: vec2, size: vec2, o: vec2, px: float) -> vec4 {
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y, px)) - o
+    let hi = vec2(Finish.snap(o.x + size.x, px), Finish.snap(o.y + size.y, px)) - o
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let k4 = vec4(3.0, 3.0, 3.0, 3.0)
+    let d = ad_cut(p, c, h, k4)
+    var out = ad_drop(p, c, h, 2.0, 0.8)
+    let face = ad_lacq(p, lo, hi, ad_black(), 1.0)
+    let fa = Finish.cover(d + 0.75, px)
+    out = Finish.over(out, vec4(face * fa, fa))
+    out = Finish.over(out, ad_pin(d, 2.9, max(px, 0.6), px, 0.6))
+    return Finish.over(out, ad_rim(d, ad_cut_n(p, c, h, k4), 1.5, px, 1.0))
+}
+// The chosen cell of a strip: a champagne plaque inside the cell, pressed
+// in, in a rim of its own.
+let md_cell = fn(p: vec2, lo: vec2, hi: vec2, px: float, base: vec3) -> vec4 {
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let k4 = vec4(2.0, 2.0, 2.0, 2.0)
+    let d = ad_cut(p, c, h, k4)
+    var face = ad_metal(p, lo, hi, base, 0.7, 0.0, 0.6)
+    let sh = clamp(Finish.inset(p, c, h - vec2(1.2, 1.2), 1.0, vec2(0.0, 1.0), 0.9), 0.0, 1.0)
+    face = mix(face, face * 0.45, sh * 0.6)
+    let a = Finish.cover(d + 0.6, px)
+    var out = vec4(face * a, a)
+    return Finish.over(out, ad_rim(d, ad_cut_n(p, c, h, k4), 1.2, px, 1.0))
+}
+
+mod.widgets.SegmentedControlFlat.segment_height = 22.0
+mod.widgets.SegmentedControlFlat.draw_bg.vertex = fn() {
+    let g = md_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.SegmentedControlFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 5.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    return md_strip(p, self.rect_size, self.rect_pos, px)
+}
+// The pill is the segment's own box: its quad grows a point each way so the
+// chosen plaque stands just inside the strip's rim.
+mod.widgets.SegmentedControlFlat.draw_pill.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(1.0, 1.0), self.rect_size + vec2(2.0, 2.0))
+}
+mod.widgets.SegmentedControlFlat.draw_pill.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let o = self.rect_pos
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0, 2.0)) - vec2(1.0, 1.0)
+    let lo = vec2(Finish.snap(o.x - 0.5, px), Finish.snap(o.y - 0.5, px)) - o
+    let hi = vec2(Finish.snap(o.x + size.x + 0.5, px), Finish.snap(o.y + size.y + 0.5, px)) - o
+    return md_cell(p, lo, hi, px, ad_champ())
+}
+mod.widgets.SegmentedControlFlat.draw_text.color = #ede2c6
+mod.widgets.SegmentedControlFlat.draw_text_selected.color = #1c1206
+mod.widgets.SegmentedControlFlat.palette.on_neutral_container = #1c1206
+mod.widgets.SegmentedControlFlat.draw_text.text_style = mod.theme.font_label{font_size: 7.0}
+mod.widgets.SegmentedControlFlat.draw_text_selected.text_style = mod.theme.font_label{font_size: 7.0}
+
+// The tab strip: the same plaque; the tab in use a champagne plaque pressed
+// into it, a hovered tab takes a faint gold wash, the quiet ones parted by a
+// fine gold line with a small gold lozenge at its middle.
+mod.widgets.Tabs.height = 26.0
+mod.widgets.Tabs.tab_min_width = 46.0
+mod.widgets.Tabs.clip_x = false
+mod.widgets.Tabs.clip_y = false
+mod.widgets.Tabs.draw_bg.vertex = fn() {
+    let g = md_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.Tabs.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 5.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    return md_strip(p, self.rect_size, self.rect_pos, px)
+}
+mod.widgets.Tabs.draw_tab.pixel = fn() {
+    return vec4(0.0, 0.0, 0.0, 0.0)
+}
+mod.widgets.Tabs.draw_tab_hover.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let h = self.rect_size * 0.5 - vec2(2.5, 3.0)
+    let d = md_rbox(p, self.rect_size * 0.5, h, 1.5)
+    let a = Finish.cover(d, px) * 0.14
+    return vec4(ad_gold_lt() * a, a)
+}
+mod.widgets.Tabs.draw_tab_active.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let o = self.rect_pos
+    let size = self.rect_size
+    let lo = vec2(Finish.snap(o.x + 1.0, px), Finish.snap(o.y + 1.5, px)) - o
+    let hi = vec2(Finish.snap(o.x + size.x - 1.0, px), Finish.snap(o.y + size.y - 1.5, px)) - o
+    return md_cell(self.pos * size, lo, hi, px, ad_champ())
+}
+mod.widgets.Tabs.draw_sep.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let x = self.rect_size.x * 0.5
+    let y = self.rect_size.y * 0.5
+    let ln = step(abs(p.x - x), max(px, 0.6) * 0.5) * step(abs(p.y - y), self.rect_size.y * 0.30) * 0.75
+    let lq = abs(p - vec2(x, y))
+    let lz = Finish.cover(lq.x + lq.y * 0.6 - 1.6, px)
+    let a = max(ln, lz)
+    return vec4(mix(ad_line_c(), ad_gold_lt(), lz * 0.5) * a, a)
+}
+mod.widgets.Tabs.draw_mark.color = #ede2c6
+mod.widgets.Tabs.draw_mark.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let c = vec2(Finish.snap(o.x + self.rect_size.x * 0.5, px), Finish.snap(o.y + self.rect_size.y * 0.5, px)) - o
+    // the add mark a plus in the middle of its room; the close mark a small
+    // cross tucked into the top right of its room, clear of the word
+    let a = mix(0.7853981634, 0.0, self.plus)
+    let r = mix(2.0, 3.6, self.plus)
+    let cm = mix(vec2(self.rect_size.x - 3.0, 4.5), c, self.plus)
+    let u = vec2(cos(a), sin(a)) * r
+    let v = vec2(0.0 - sin(a), cos(a)) * r
+    let dd = min(md_seg(p, cm - u, cm + u), md_seg(p, cm - v, cm + v)) - mix(0.5, 0.6, self.plus)
+    let k = Finish.cover(dd, px) * self.color.a
+    return vec4(self.color.rgb * k, k)
+}
+mod.widgets.Tabs.draw_text.color = #ede2c6
+mod.widgets.Tabs.draw_text_active.color = #1c1206
+mod.widgets.Tabs.draw_text.text_style = mod.theme.font_regular{font_size: 9.0 top_drop: 0.22}
+mod.widgets.Tabs.draw_text_active.text_style = mod.theme.font_regular{font_size: 9.0 top_drop: 0.22}
+
+// ---------------------------------------------------------------------------
+// PROGRESS. A gold tube with a black slot; the value a string of small LED
+// beads down the slot, each burning warm white with a tight glow, a faint
+// gold light under the lit run; the beads past the value are dark glass.
+// The unknown value is a still scatter of lit beads along the whole slot: a
+// face may not run a clock.
+mod.widgets.ProgressBarFlat.height = 11.0
+mod.widgets.ProgressBarFlat.draw_bg.thickness = uniform(11.0)
+mod.widgets.ProgressBarFlat.clip_x = false
+mod.widgets.ProgressBarFlat.clip_y = false
+mod.widgets.ProgressBarFlat.draw_bg.vertex = fn() {
+    let g = md_grow(self.rect_pos, self.rect_size, 3.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.ProgressBarFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 3.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let th = min(self.thickness, size.y)
+    let top = Finish.snap(o.y + (size.y - th) * 0.5, px) - o.y
+    let bot = Finish.snap(o.y + (size.y + th) * 0.5, px) - o.y
+    let x0 = Finish.snap(o.x + size.x * self.start, px) - o.x
+    let x1 = Finish.snap(o.x + size.x * self.end, px) - o.x
+    let h = vec2((x1 - x0) * 0.5, (bot - top) * 0.5)
+    let c = vec2(x0, top) + h
+    let r = h.y
+    let d = md_rbox(p, c, h, r)
+    let dis = step(4.5, self.intent)
+    var out = ad_well_r(p, c, h, r, px, vec3(0.012, 0.011, 0.010), 0.5, 1.4, dis)
+    var v1 = x0 + (x1 - x0) * clamp(self.value, 0.0, 1.0)
+    var unknown = 0.0
+    if self.value < 0.0 {
+        v1 = x1
+        unknown = 1.0
+    }
+    var hue = vec3(1.0, 0.94, 0.80)
+    if self.intent > 0.5 {
+        hue = mix(self.fill_color().rgb, vec3(1.0, 1.0, 1.0), 0.35)
+    }
+    hue = mix(hue, vec3(0.40, 0.36, 0.30), dis)
+    let inner = Finish.cover(d + 1.6, px)
+    let pitch = 4.0
+    let bx0 = x0 + r
+    let k = floor((p.x - bx0) / pitch + 0.5)
+    let bc = vec2(bx0 + k * pitch, c.y)
+    let inb = step(bx0 - 0.5, bc.x) * step(bc.x, x1 - r + 0.5)
+    var lit = step(bc.x, v1 - 1.0)
+    if unknown > 0.5 {
+        lit = step(0.62, Finish.hash(vec2(k * 1.37, 4.1)))
+    }
+    lit = lit * inb * (1.0 - dis * 0.6)
+    let bd = length(p - bc) - 1.05
+    // the faint gold light under the lit run
+    let under = step(x0 + 1.0, p.x) * step(p.x, v1) * inner * 0.10 * (1.0 - unknown)
+    out = Finish.over(out, vec4(vec3(1.0, 0.70, 0.30) * under, under))
+    let glow = exp(0.0 - max(bd, 0.0) / 0.9) * lit * inner * 0.55
+    out = Finish.over(out, vec4(mix(hue, vec3(1.0, 0.75, 0.40), 0.4) * glow, glow))
+    let core = Finish.cover(bd, px) * inb * inner
+    let bcol = mix(vec3(0.10, 0.085, 0.07), hue, lit)
+    out = Finish.over(out, vec4(bcol * core, core))
+    return out * self.track * self.opacity
+}
+
+// ---------------------------------------------------------------------------
+// LEVEL METERS. A black well of cells four points long with a point
+// between: unlit cells dark glass, lit ones warm gold, amber from 70 % and
+// a red ember from 90 %; the hold a cream line; the over lamp a small LED.
+mod.widgets.LevelMeter.height = 8.0
+mod.widgets.LevelMeterColumn.width = 8.0
+mod.widgets.LevelMeter.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let vert = self.vertical
+    let along = mix(self.rect_size.x, self.rect_size.y, vert)
+    let across = mix(self.rect_size.y, self.rect_size.x, vert)
+    let a = mix(p.x, self.rect_size.y - p.y, vert)
+    let b = mix(p.y, p.x, vert)
+    let q = vec2(a, b)
+    let th = min(7.0, across)
+    let lamp_room = self.lamp * (th + 4.0)
+    let bar = max(4.0, along - lamp_room)
+    let h = vec2(bar * 0.5, th * 0.5)
+    let c = vec2(h.x, across * 0.5)
+    let r = 1.0
+    let d = md_rbox(q, c, h, r)
+    let pad = 1.5
+    let span = max(1.0, bar - pad * 2.0)
+    let share = clamp((a - pad) / span, 0.0, 1.0)
+    let pitch = 5.0
+    let cell = fract((a - pad) / pitch)
+    let in_cell = step(cell, 4.0 / pitch)
+    let lit = step(a, pad + span * self.level) * step(pad, a) * in_cell
+    let ramp = mix(mix(mix(vec3(0.93, 0.76, 0.38), vec3(1.0, 0.80, 0.42), smoothstep(0.0, 0.7, share)), vec3(1.0, 0.58, 0.20), step(0.7, share)), vec3(0.95, 0.27, 0.15), step(0.9, share))
+    let well = vec3(0.012, 0.011, 0.010)
+    var fill = mix(well, ramp, lit)
+    let cell_row = in_cell * step(pad, a) * step(a, pad + span)
+    fill = mix(fill, vec3(0.075, 0.060, 0.045), (1.0 - lit) * cell_row * step(1.2, abs(b - c.y) + 1.2))
+    let bt = b - (c.y - h.y)
+    fill = mix(fill, vec3(1.0, 0.97, 0.88), lit * step(1.0, bt) * step(bt, 1.0 + px) * 0.35)
+    if self.hold > 0.002 {
+        let at = pad + span * self.hold
+        let hm = step(abs(a - at), px) * step(abs(b - c.y), h.y)
+        fill = mix(fill, ad_cream(), hm)
+    }
+    let ca = Finish.cover(d, px)
+    var out = vec4(fill * ca, ca)
+    let e = Finish.band(d, 0.0, max(px, 0.7), px)
+    out = Finish.over(out, vec4(ad_gold_md() * e, e))
+    if self.lamp > 0.5 {
+        let la = bar + 2.0 + th * 0.5 + 1.0
+        let lc = vec2(mix(la, across * 0.5, vert), mix(across * 0.5, self.rect_size.y - la, vert))
+        out = Finish.over(out, md_led(p, lc, 2.6, px, vec3(1.0, 0.32, 0.18), step(0.5, self.over), 0.35))
+    }
+    return out * self.opacity
+}
+
+// ---------------------------------------------------------------------------
+// SCROLL BARS. A gold hairline down the length of the view and a slim
+// capsule of polished gold riding on it.
+mod.widgets.ScrollBar.bar_size = 10.0
+mod.widgets.ScrollBar.bar_side_margin = 0.0
+mod.widgets.ScrollBar.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let vert = self.is_vertical
+    let a = mix(p.x, p.y, vert)
+    let b = mix(p.y, p.x, vert)
+    let along = mix(self.rect_size.x, self.rect_size.y, vert)
+    let across = mix(self.rect_size.y, self.rect_size.x, vert)
+    let q = vec2(a, b)
+    let mid = across * 0.5
+    let rail = (1.0 - smoothstep(0.35, 0.35 + px, abs(b - mid))) * 0.55
+    var out = vec4(ad_line_c() * rail, rail)
+    let t0 = along * self.norm_scroll
+    let tl = along * self.norm_handle
+    let th = vec2(max(tl * 0.5 - 1.0, 4.0), 3.0)
+    let tc = vec2(t0 + tl * 0.5, mid)
+    let td = md_rbox(q, tc, th, th.y)
+    let tn = ad_nrm(q, tc, th, th.y)
+    let tn2 = mix(tn, vec2(tn.y, tn.x), vert)
+    let t = clamp((b - (mid - th.y)) / (2.0 * th.y), 0.0, 1.0)
+    var col = ad_gold_shape(td, tn2, 1.6, t, 0.12 * self.hover, 0.0)
+    col = mix(col, col * 0.85, self.drag)
+    col = mix(col, ad_gold_dk() * 0.5, Finish.band(td, 0.0, max(px, 0.45), px) * 0.6)
+    let ta = Finish.cover(td, px)
+    out = Finish.over(out, vec4(col * ta, ta))
+    return out * self.opacity
+}
+
+// ---------------------------------------------------------------------------
+// VIEWS AND PANELS. A raised panel is black lacquer stepped at its corners,
+// in a polished gold rim with a pinstripe inside it, a small sunburst fan in
+// its top right and bottom right corners and gold studs in the other two;
+// the sunken one a deeper black well inside a double gold frame, a stepped
+// wedge of mother-of-pearl set into the frame at the middle of its top and
+// of its foot. The words on both keep the cream ink.
+let ad_wedge = fn(dst: vec4, p: vec2, cx: float, y0: float, dir: float, px: float) -> vec4 {
+    // a stepped wedge on the edge at `y0`, growing into the surface (`dir`
+    // 1 down, -1 up): a broad low step and a narrow tall one, pearl inside
+    // a gold line
+    let yy = (p.y - y0) * dir
+    let qa = vec2(abs(p.x - cx), yy)
+    let s1 = md_rbox(qa, vec2(0.0, 2.2), vec2(13.0, 2.2), 0.0)
+    let s2 = md_rbox(qa, vec2(0.0, 3.6), vec2(7.0, 3.6), 0.0)
+    let d = min(s1, s2)
+    let a = Finish.cover(d, px)
+    var out = Finish.over(dst, vec4(ad_pearl(p * 1.3) * a, a))
+    let e = Finish.band(d, 0.0, max(px, 0.7), px)
+    return Finish.over(out, vec4(ad_gold_md() * e, e))
+}
+let md_plate = fn(p: vec2, size: vec2, o: vec2, px: float, sunken: float) -> vec4 {
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y, px)) - o
+    let hi = vec2(Finish.snap(o.x + size.x, px), Finish.snap(o.y + size.y, px)) - o
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let s = 4.0
+    let d = ad_step(p, c, h, s)
+    let n = ad_step_n(p, c, h, s)
+    var out = vec4(0.0, 0.0, 0.0, 0.0)
+    let k = clamp(30.0 / max(size.y, 1.0), 0.15, 1.0)
+    if sunken > 0.5 {
+        var face = ad_lacq(p, lo, hi, vec3(0.016, 0.014, 0.013), k * 0.5)
+        let sh = clamp(Finish.inset(p, c, h - vec2(1.6, 1.6), 2.0, vec2(0.0, 2.2), 2.4), 0.0, 1.0)
+        face = mix(face, vec3(0.0, 0.0, 0.0), sh * 0.6)
+        let a = Finish.cover(d, px)
+        out = Finish.over(out, vec4(face * a, a))
+        out = Finish.over(out, ad_pin(d, 2.7, max(px, 0.6), px, 0.75))
+        out = Finish.over(out, ad_rim(d + 4.0, n, 1.2, px, 0.8))
+        out = Finish.over(out, ad_rim(d, n, 1.6, px, 1.0))
+        out = ad_wedge(out, p, c.x, lo.y + 0.5, 1.0, px)
+        out = ad_wedge(out, p, c.x, hi.y - 0.5, -1.0, px)
+        return out
+    }
+    out = ad_drop(p, c, h, 2.0, 1.0)
+    var face = ad_lacq(p, lo, hi, ad_black(), k)
+    face = face + g3(Finish.grain(p / px, 0.004))
+    let a = Finish.cover(d, px)
+    out = Finish.over(out, vec4(face * a, a))
+    let fs = clamp(min(size.x, size.y) * 0.32, 14.0, 26.0)
+    out = ad_corner_fan(out, p, lo, hi, 1.0, 5.0, fs, px, 1.0)
+    out = ad_corner_fan(out, p, lo, hi, 2.0, 5.0, fs, px, 1.0)
+    out = ad_dome(out, p, lo + vec2(8.0, 8.0), 2.1, px, ad_gold_base())
+    out = ad_dome(out, p, vec2(lo.x + 8.0, hi.y - 8.0), 2.1, px, ad_gold_base())
+    out = Finish.over(out, ad_pin(d, 3.4, max(px, 0.6), px, 0.75))
+    return Finish.over(out, ad_rim(d, n, 1.6, px, 1.0))
+}
+
+mod.widgets.PanelView.clip_x = false
+mod.widgets.PanelView.clip_y = false
+mod.widgets.PanelView.draw_bg.vertex = fn() {
+    let g = md_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.PanelView.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 5.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    return md_plate(p, self.rect_size, self.rect_pos, px, self.sunken)
+}
+
+// The card is a leaf of macassar ebony laid crosswise, warmer than the
+// ground, in a gold rim and pinstripe, a polished stud in each of its four
+// corners. It lifts a little under the pointer.
+mod.widgets.Card.radius = 2.0
+mod.widgets.Card.draw_bg.vertex = fn() {
+    let g = md_grow(self.rect_pos, self.rect_size, 5.0)
+    return self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.Card.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 5.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y, px)) - o
+    let hi = vec2(Finish.snap(o.x + size.x, px), Finish.snap(o.y + size.y, px)) - o
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let k4 = vec4(4.0, 4.0, 4.0, 4.0)
+    let d = ad_cut(p, c, h, k4)
+    var out = ad_drop(p, c, h, 2.0, 1.0 + 0.4 * self.hover)
+    var face = ad_ebony(vec2(p.y * 1.0 + 300.0, p.x * 0.6 + 40.0), px)
+    face = mix(face, ad_ebony_c(), 0.35) * vec3(1.25, 1.08, 0.95) + vec3(0.018, 0.010, 0.004)
+    face = Finish.lift(face, 0.03 * self.hover)
+    let a = Finish.cover(d, px)
+    out = Finish.over(out, vec4(face * a, a))
+    out = ad_dome(out, p, lo + vec2(7.0, 7.0), 2.0, px, ad_gold_base())
+    out = ad_dome(out, p, vec2(hi.x - 7.0, lo.y + 7.0), 2.0, px, ad_gold_base())
+    out = ad_dome(out, p, hi - vec2(7.0, 7.0), 2.0, px, ad_gold_base())
+    out = ad_dome(out, p, vec2(lo.x + 7.0, hi.y - 7.0), 2.0, px, ad_gold_base())
+    out = Finish.over(out, ad_pin(d, 3.2, max(px, 0.6), px, 0.75))
+    return Finish.over(out, ad_rim(d, ad_cut_n(p, c, h, k4), 1.6, px, 1.0))
+}
+
+// The plain rounded view keeps the colours its caller gives it; the edge is
+// a snapped hairline at the true radius.
+mod.widgets.RoundedView.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    var fill = self.color
+    if self.color_2.x > -0.5 {
+        fill = mix(self.color, self.color_2, mix(self.pos.y, self.pos.x, self.gradient_fill_horizontal))
+    }
+    let lo = vec2(self.border_inset.x, self.border_inset.y)
+    let hi = self.rect_size - vec2(self.border_inset.z, self.border_inset.w)
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let d = md_rbox(p, c, h, max(self.border_radius * 2.0, 1.0))
+    var col = fill
+    if self.border_size > 0.0 {
+        col = mix(col, self.border_color, Finish.band(d, 0.0, max(self.border_size, px), px) * self.border_color.a)
+    }
+    let a = Finish.cover(d, px) * col.a
+    return vec4(col.rgb * a, a)
+}
+
+// ---------------------------------------------------------------------------
+// LISTS. Rows of 22 points on the ebony, parted by a faint gold hairline; a
+// hovered row takes a breath of gold; the chosen row is a plaque of dark old
+// gold in a polished rim (dark enough that the cream ink keeps its 5:1),
+// ending short of the scroll bar.
+let ad_row_plate = fn(p: vec2, c: vec2, h: vec2, px: float) -> vec4 {
+    let k4 = vec4(2.5, 2.5, 2.5, 2.5)
+    let d = ad_cut(p, c, h, k4)
+    let t = clamp((p.y - (c.y - h.y)) / max(2.0 * h.y, 1.0), 0.0, 1.0)
+    var face = ad_bronze() * (1.25 - 0.45 * t)
+    face = face + vec3(0.10, 0.07, 0.03) * exp(0.0 - (t - 0.18) * (t - 0.18) / 0.012) * 0.6
+    let br = Finish.brushed(p, vec2(1.0, 0.0), 0.4) - 0.5
+    face = face * (1.0 + br * 0.08)
+    let a = Finish.cover(d, px)
+    var out = vec4(face * a, a)
+    return Finish.over(out, ad_rim(d, ad_cut_n(p, c, h, k4), 1.2, px, 1.0))
+}
+mod.widgets.ListItemOne.height = 22.0
+mod.widgets.ListItem.padding = mod.turtle.Inset{left: 12.0 right: 8.0 top: 0.0 bottom: 0.0}
+mod.widgets.ListItem.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y, px)) - o
+    let hi = vec2(Finish.snap(o.x + self.rect_size.x, px), Finish.snap(o.y + self.rect_size.y, px)) - o
+    let lay = (self.hover * 0.12 + self.down * 0.08) * live * (1.0 - self.selected)
+    let hd = md_rbox(p, (lo + hi) * 0.5 - vec2(3.0, 0.0), (hi - lo) * 0.5 - vec2(5.0, 1.5), 1.5)
+    let la = Finish.cover(hd, px) * lay
+    var out = vec4(ad_gold_md() * la, la)
+    if self.selected > 0.5 {
+        let h = vec2((hi.x - lo.x) * 0.5 - 6.0, (hi.y - lo.y) * 0.5 - 1.0)
+        let c = vec2(lo.x + h.x + 2.0, (lo.y + hi.y) * 0.5)
+        out = Finish.over(out, ad_row_plate(p, c, h, px))
+    }
+    let yb = hi.y
+    let dk = step(yb - max(px, 0.6), p.y) * step(p.y, yb) * step(lo.x + 4.0, p.x) * step(p.x, hi.x - 8.0) * 0.25 * (1.0 - self.selected)
+    out = Finish.over(out, vec4(ad_line_c() * dk, dk))
+    return out
+}
+mod.widgets.ListItem.draw_text.color = #ede2c6
+
+// The open list of a drop-down: a black lacquer leaf stepped at its corners
+// in a gold rim and pinstripe, with a soft shadow; the row under the
+// pointer a gold wash, the chosen row a gold check.
+mod.widgets.PopupMenuFlat.clip_x = false
+mod.widgets.PopupMenuFlat.clip_y = false
+mod.widgets.PopupMenuFlat.draw_bg.vertex = fn() {
+    let g = md_grow(self.rect_pos, self.rect_size, 10.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.PopupMenuFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 10.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y, px)) - o
+    let hi = vec2(Finish.snap(o.x + size.x, px), Finish.snap(o.y + size.y, px)) - o
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let s = 3.0
+    let d = ad_step(p, c, h, s)
+    let sh = Finish.drop(p, c, h, 2.0, vec2(0.5, 2.5), 2.2) * 0.55
+    var out = vec4(0.0, 0.0, 0.0, sh)
+    let face = ad_lacq(p, lo, hi, ad_black(), clamp(30.0 / max(size.y, 1.0), 0.2, 1.0))
+    let a = Finish.cover(d, px)
+    out = Finish.over(out, vec4(face * a, a))
+    out = Finish.over(out, ad_pin(d, 3.0, max(px, 0.6), px, 0.7))
+    return Finish.over(out, ad_rim(d, ad_step_n(p, c, h, s), 1.5, px, 1.0))
+}
+mod.widgets.PopupMenuItem.padding.left = 18.0
+mod.widgets.PopupMenuItem.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let c = self.rect_size * 0.5
+    let h = c - vec2(3.0, 0.5)
+    let d = md_rbox(p, c, h, 1.5)
+    let live = 1.0 - self.disabled
+    let wa = Finish.cover(d, px) * self.hover * live * 0.22
+    var out = vec4(ad_gold_md() * wa, wa)
+    let m0 = vec2(5.0, c.y + 0.2)
+    let m1 = vec2(7.2, c.y + 2.4)
+    let m2 = vec2(10.6, c.y - 2.6)
+    let mk = Finish.cover(min(md_seg(p, m0, m1), md_seg(p, m1, m2)) - 0.75, px) * self.active
+    return Finish.over(out, vec4(ad_gold_lt() * mk, mk))
+}
+
+// The dock's tabs: the bar is the ground with a gold line at its foot; the
+// tab in use a black lacquer leaf rounded at its top corners in its rim, open at
+// the foot where it joins the panel below; the others lift under the
+// pointer.
+mod.widgets.Tab.padding = mod.turtle.Inset{left: 12.0 right: 12.0 top: 4.0 bottom: 4.0}
+mod.widgets.Tab.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y + 2.0, px)) - o
+    let hi = vec2(Finish.snap(o.x + self.rect_size.x, px), Finish.snap(o.y + self.rect_size.y, px)) - o + vec2(0.0, 8.0)
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let k4 = vec4(3.0, 3.0, 0.0, 0.0)
+    let d = ad_cut(p, c, h, k4)
+    let face = ad_lacq(p, lo, hi, ad_black(), 1.0)
+    let a = Finish.cover(d, px) * self.active
+    var out = vec4(face * a, a)
+    out = Finish.over(out, ad_rim(d, ad_cut_n(p, c, h, k4), 1.3, px, 1.0) * self.active)
+    let lift = Finish.cover(d, px) * 0.12 * self.hover * (1.0 - self.active)
+    return Finish.over(vec4(ad_gold_md() * lift, lift), out)
+}
+mod.widgets.TabBar.draw_fill.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let yb = Finish.snap(self.rect_pos.y + self.rect_size.y, px) - self.rect_pos.y
+    let dk = step(yb - 1.3, p.y) * step(p.y, yb) * 0.9
+    return vec4(ad_gold_md() * dk, dk)
+}
+
+// ---------------------------------------------------------------------------
+// CHIPS AND BADGES. A chip is a small lacquer plaque in its rim (the
+// outline when it asks for a border); a badge a small lacquer plaque in a
+// gold rim with gold figures.
+mod.widgets.ChipFlat.size = mod.widgets.ChipSize.Small
+mod.widgets.Chip.size = mod.widgets.ChipSize.Small
+mod.widgets.ChipFlat.draw_bg.vertex = fn() {
+    let g = md_grow(self.rect_pos, self.rect_size, 6.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.ChipFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 6.0
+    let ch = min(22.0, self.rect_size.y)
+    let dy = (self.rect_size.y - ch) * 0.5
+    let sz = vec2(self.rect_size.x, ch)
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let pp = (p - vec2(0.0, dy) + vec2(m, m)) / (sz + vec2(2.0 * m, 2.0 * m))
+    let has_fill = step(0.05, self.color.a) * step(0.6, Finish.lum(self.ink.rgb))
+    let kind = mix(5.0, 8.0, step(0.5, has_fill + 1.0 - step(0.01, self.border_size)))
+    let lift = mix(0.0, 0.6, has_fill)
+    return ad_button(pp, sz, self.rect_pos + vec2(0.0, dy), px, max(self.hover, lift), self.down, self.keyed, 0.0, 0.0, 0.0, vec4(2.5, 2.5, 2.5, 2.5), kind, m)
+}
+mod.widgets.ChipFlat.draw_text.text_style = mod.theme.font_label{font_size: 6.5}
+mod.widgets.BadgePalette.neutral = #1a1510
+mod.widgets.BadgePalette.on_neutral = #e8d4a2
+mod.widgets.BadgeFlat.draw_text.text_style = mod.theme.font_label{font_size: 6.5}
+mod.widgets.Badge.draw_text.text_style = mod.theme.font_label{font_size: 6.5}
+mod.widgets.BadgeFlat.clip_x = false
+mod.widgets.BadgeFlat.clip_y = false
+mod.widgets.BadgeFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let bh = min(18.0, self.rect_size.y - 2.0)
+    let y0 = Finish.snap(o.y + (self.rect_size.y - bh) * 0.5, px) - o.y
+    let lo = vec2(Finish.snap(o.x + 1.0, px) - o.x, y0)
+    let hi = vec2(Finish.snap(o.x + self.rect_size.x - 1.0, px) - o.x, Finish.snap(o.y + y0 + bh, px) - o.y)
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let k4 = vec4(2.0, 2.0, 2.0, 2.0)
+    let d = ad_cut(p, c, h, k4)
+    let face = ad_lacq(p, lo, hi, self.color.rgb, 1.0)
+    let a = Finish.cover(d, px)
+    var out = vec4(face * a, a)
+    out = Finish.over(out, ad_rim(d, ad_cut_n(p, c, h, k4), 1.2, px, 1.0))
+    return out * self.color.a
+}
+
+// Bold in running text is the reading serif's own bold: the wide legend
+// face is for captions and plaques, and set inside a sentence it would
+// shout.
+mod.widgets.Markdown.text_style_bold = mod.theme.font_regular{font_size: 9.5 font_family: mod.theme.font_regular.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/PlayfairDisplay-Variable.ttf") weight: 700.0 asc: 0.0 desc: 0.0}}}
+mod.widgets.Html.text_style_bold = mod.theme.font_regular{font_size: 9.5 font_family: mod.theme.font_regular.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/PlayfairDisplay-Variable.ttf") weight: 700.0 asc: 0.0 desc: 0.0}}}
+mod.widgets.TextFlow.text_style_bold = mod.theme.font_regular{font_size: 9.5 font_family: mod.theme.font_regular.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/PlayfairDisplay-Variable.ttf") weight: 700.0 asc: 0.0 desc: 0.0}}}
+
+// The spinner keeps its stock turning face (it runs on the pass clock, which
+// a face may not read), in gold on a faint track.
+mod.widgets.SpinnerFlat.draw_bg.color = #cdb07a
+mod.widgets.SpinnerFlat.draw_bg.stroke_width = 2.5
+mod.widgets.SpinnerFlat.draw_bg.track_alpha = 0.25
+
+// Rules between groups: a gold hairline with a small stepped lozenge at its
+// middle.
+mod.widgets.Hr.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let y = Finish.snap(self.rect_pos.y + self.rect_size.y * 0.5, px) - self.rect_pos.y
+    let ln = (1.0 - smoothstep(0.35, 0.35 + px, abs(p.y - y))) * 0.8
+    let lq = abs(p - vec2(self.rect_size.x * 0.5, y))
+    let lz = Finish.cover(lq.x * 0.5 + lq.y - 2.0, px)
+    let a = max(ln, lz)
+    return vec4(ad_line_c() * a, a)
+}
+mod.widgets.Vr.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let x = Finish.snap(self.rect_pos.x + self.rect_size.x * 0.5, px) - self.rect_pos.x
+    let a = (1.0 - smoothstep(0.35, 0.35 + px, abs(p.x - x))) * 0.8
+    return vec4(ad_line_c() * a, a)
+}
+
+// ---------------------------------------------------------------------------
+// THE TREE. Its rows stand on the ebony, clear; the open row is the dark old
+// gold plaque of the list's chosen row.
+mod.widgets.FileTreeNode.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let lo = vec2(2.0, 1.0)
+    let hi = self.rect_size - vec2(4.0, 1.0)
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    return ad_row_plate(p, c, h, px) * self.active
+}
+
+// ---------------------------------------------------------------------------
+// STATES. Every held state is written as a plain value that cuts in at once:
+// the library writes some as snap() values, which a state held as a default
+// (the states page) never applies. Live, the cut is the same as the snap.
+mod.widgets.ButtonFlat.animator.hover.on.from = {all: Snap}
+mod.widgets.ButtonFlat.animator.hover.on.apply = {draw_bg: {down: 0.0 hover: 1.0} draw_text: {down: 0.0 hover: 1.0}}
+mod.widgets.ButtonFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.ButtonFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+mod.widgets.CheckBoxFlat.animator.hover.on.from = {all: Snap}
+mod.widgets.CheckBoxFlat.animator.hover.on.apply = {draw_bg: {down: 0.0 hover: 1.0} draw_text: {down: 0.0 hover: 1.0}}
+mod.widgets.CheckBoxFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.CheckBoxFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+mod.widgets.ToggleFlat.animator.hover.on.from = {all: Snap}
+mod.widgets.ToggleFlat.animator.hover.on.apply = {draw_bg: {down: 0.0 hover: 1.0} draw_text: {down: 0.0 hover: 1.0}}
+mod.widgets.ToggleFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.ToggleFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+mod.widgets.RadioButtonFlat.animator.hover.on.from = {all: Snap}
+mod.widgets.RadioButtonFlat.animator.hover.on.apply = {draw_bg: {down: 0.0 hover: 1.0} draw_text: {down: 0.0 hover: 1.0}}
+mod.widgets.RadioButtonFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.RadioButtonFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+mod.widgets.TextInputFlat.animator.hover.on.from = {all: Snap}
+mod.widgets.TextInputFlat.animator.hover.on.apply = {draw_bg: {down: 0.0 hover: 1.0} draw_text: {down: 0.0 hover: 1.0}}
+mod.widgets.TextInputFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.TextInputFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+mod.widgets.DropDownFlat.animator.hover.on.from = {all: Snap}
+mod.widgets.DropDownFlat.animator.hover.on.apply = {draw_bg: {down: 0.0 hover: 1.0} draw_text: {down: 0.0 hover: 1.0}}
+mod.widgets.DropDownFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.DropDownFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+mod.widgets.SliderFlat.animator.hover.on.from = {all: Snap}
+mod.widgets.SliderFlat.animator.hover.on.apply = {draw_bg: {hover: 1.0} draw_text: {hover: 1.0}}
+mod.widgets.SliderFlat.animator.drag.on.from = {all: Snap}
+mod.widgets.SliderFlat.animator.drag.on.apply = {draw_bg: {drag: 1.0} draw_text: {drag: 1.0}}
+
+// ---------------------------------------------------------------------------
+// THE WINDOW'S GROUND. Black lacquer, with two holes cut in it: the header
+// where the catalogue's toolbar stands and the panes below it, both stepped
+// at their corners, both showing the ebony. A polished gold rim runs round
+// each hole on the lacquer's side and a pinstripe beside it, and a rim runs
+// round the window's own edge, so every band of lacquer between them is
+// drawn with the double gold line. The caption band above the header holds
+// the crest round the title and the sunburst; nothing else of the frame is
+// ornamented, and the ebony is calm under the words.
+let ad_holes = fn(p: vec2, W: float, H: float) -> float {
+    let dh = ad_step(p, vec2(W * 0.5, 60.0), vec2(W * 0.5 - 6.0, 27.0), 4.0)
+    let dp = ad_step(p, vec2(W * 0.5, (95.0 + H - 6.0) * 0.5), vec2(W * 0.5 - 6.0, (H - 6.0 - 95.0) * 0.5), 5.0)
+    return min(dh, dp)
+}
+
+// The crest round the title, in the window's middle: `q` is (distance from
+// the middle, y), so it is drawn the same on both sides. A plaque of black
+// lacquer stepped at its corners in a gold rim and pinstripe, and three
+// steps falling away from it either side, the nearest inlaid with
+// mother-of-pearl, the two beyond with upright gold pinstripes.
+let ad_crest = fn(dst: vec4, q: vec2, px: float) -> vec4 {
+    var out = dst
+    if q.x > 140.0 {
+        return out
+    }
+    // the steps either side
+    let s0 = md_rbox(q, vec2(93.0, 15.5), vec2(8.0, 10.5), 0.0)
+    let s1 = md_rbox(q, vec2(110.0, 18.0), vec2(8.0, 8.0), 0.0)
+    let s2 = md_rbox(q, vec2(127.0, 20.5), vec2(8.0, 5.5), 0.0)
+    let ds = min(s0, min(s1, s2))
+    let sa = Finish.cover(ds, px)
+    let sl = ad_lacq(q, vec2(0.0, 5.0), vec2(0.0, 26.0), ad_black(), 1.0)
+    out = Finish.over(out, vec4(sl * sa, sa))
+    // the pearl in the nearest step
+    let pd = md_rbox(q, vec2(93.0, 15.5), vec2(5.6, 8.1), 0.0)
+    let pa = Finish.cover(pd, px)
+    out = Finish.over(out, vec4(ad_pearl(q * 1.2 + vec2(3.0, 0.0)) * pa, pa))
+    // upright pinstripes in the two beyond
+    let u1 = (1.0 - smoothstep(0.35, 0.35 + px, abs(abs(q.x - 110.0) - 2.5))) * Finish.cover(md_rbox(q, vec2(110.0, 18.0), vec2(6.0, 6.0), 0.0), px)
+    let u2 = (1.0 - smoothstep(0.35, 0.35 + px, abs(q.x - 127.0))) * Finish.cover(md_rbox(q, vec2(127.0, 20.5), vec2(6.0, 3.5), 0.0), px)
+    let ua = max(u1, u2) * 0.85
+    out = Finish.over(out, vec4(ad_line_c() * ua, ua))
+    // each step's gold outline
+    let e0 = Finish.band(s0, 0.0, 1.0, px)
+    let e1 = Finish.band(s1, 0.0, 1.0, px)
+    let e2 = Finish.band(s2, 0.0, 1.0, px)
+    let ea = clamp(e0 + e1 + e2, 0.0, 1.0)
+    out = Finish.over(out, vec4(ad_gold_md() * ea, ea))
+    // the plaque
+    let pc = vec2(0.0, 15.5)
+    let ph = vec2(83.0, 11.5)
+    let d = ad_step(q, pc, ph, 3.0)
+    let n = ad_step_n(q, pc, ph, 3.0)
+    let a = Finish.cover(d, px)
+    let face = ad_lacq(q, pc - ph, pc + ph, ad_black(), 1.0)
+    out = Finish.over(out, vec4(face * a, a))
+    out = Finish.over(out, ad_pin(d, 2.8, max(px, 0.6), px, 0.8))
+    return Finish.over(out, ad_rim(d, n, 1.5, px, 1.0))
+}
+
+// The sunburst: gold rays fanning from a point far below the window's
+// middle, thick and thin by turns, across the caption band clear of the
+// crest; they fade out short of the window's buttons and of its left end.
+let ad_burst = fn(dst: vec4, p: vec2, W: float, px: float) -> vec4 {
+    let cx = W * 0.5
+    let x = abs(p.x - cx)
+    if x < 136.0 {
+        return dst
+    }
+    let q = vec2(p.x - cx, 160.0 - p.y)
+    let r = length(q)
+    let phi = atan2(q.x, q.y)
+    let st = 0.03
+    let k = phi / st
+    let kf = floor(k + 0.5)
+    let dperp = abs(k - kf) * st * r
+    let thick = mix(0.26, 0.6, step(0.25, abs(fract(kf * 0.5))))
+    let ray = Finish.cover(dperp - thick, px)
+    let clear = smoothstep(136.0, 150.0, x) * smoothstep(2.0, 5.0, p.y) * (1.0 - smoothstep(26.0, 28.0, p.y))
+    let fade_r = 1.0 - smoothstep(W - 300.0, W - 165.0, p.x)
+    let fade_l = smoothstep(6.0, 70.0, p.x)
+    let ra = ray * clear * fade_r * fade_l * 0.75
+    return Finish.over(dst, vec4(mix(ad_line_c(), ad_gold_lt(), 0.25) * ra, ra))
+}
+
+mod.widgets.Window.show_bg = true
+mod.widgets.Window.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let W = self.rect_size.x
+    let H = self.rect_size.y
+    let dhole = ad_holes(p, W, H)
+    let e = 0.35
+    let gx = ad_holes(p + vec2(e, 0.0), W, H) - ad_holes(p - vec2(e, 0.0), W, H)
+    let gy = ad_holes(p + vec2(0.0, e), W, H) - ad_holes(p - vec2(0.0, e), W, H)
+    var nh = vec2(0.0, 1.0)
+    if length(vec2(gx, gy)) > 0.0001 {
+        nh = normalize(vec2(gx, gy))
+    }
+    // the lacquer of the frame: a band of the room's light high in the
+    // caption band, a little lighter toward the top
+    var col = vec3(0.026, 0.024, 0.022)
+    let lb = exp(0.0 - (p.y - 9.0) * (p.y - 9.0) / 45.0) * 0.032
+    col = col + vec3(lb, lb * 0.95, lb * 0.88)
+    // the ebony in the holes under one broad diagonal lacquer sheen
+    var wood = ad_ebony(p, px)
+    let u = (p.x * 0.45 + p.y) / max(H, 1.0)
+    let sheen = exp(0.0 - (u - 0.30) * (u - 0.30) / 0.02) * 0.016
+    wood = wood + vec3(sheen, sheen * 0.92, sheen * 0.8)
+    let inh = Finish.cover(dhole, px)
+    col = mix(col, wood, inh)
+    // the frame's shade on the wood along each hole's upper and left edges
+    let sh = (1.0 - smoothstep(0.0, 5.0, 0.0 - dhole)) * inh * (0.4 + 0.6 * clamp(0.0 - nh.y - nh.x * 0.5, 0.0, 1.0))
+    col = mix(col, col * 0.45, sh * 0.7)
+    var out = vec4(col, 1.0)
+    // the caption band's ornament
+    if p.y < 31.0 {
+        out = ad_burst(out, p, W, px)
+        out = ad_crest(out, vec2(abs(p.x - W * 0.5), p.y), px)
+    }
+    // the gold rim along every hole on the lacquer's side, the pinstripe
+    // beyond it, and the rim round the window's edge
+    out = Finish.over(out, ad_rim(0.0 - dhole, nh * -1.0, 2.0, px, 1.0))
+    out = Finish.over(out, ad_pin(0.0 - dhole, 3.0, max(px, 0.7), px, 0.85))
+    let dw = md_rbox(p, vec2(W, H) * 0.5, vec2(W, H) * 0.5, 0.0)
+    let nw = ad_nrm(p, vec2(W, H) * 0.5, vec2(W, H) * 0.5, 0.0)
+    out = Finish.over(out, ad_rim(dw, nw, 1.6, px, 1.0))
+    return vec4(out.rgb, 1.0)
+}
+
+// A splitter is the frame's lacquer band run down between two panes, ten
+// points wide, its gold rims stepping into the header's band above and the
+// foot band below as the panes' corners step.
+let ad_split = fn(q: vec2, mid: float, hw: float, a0: float, a1: float) -> float {
+    let ph = vec2(200.0, (a1 - a0) * 0.5)
+    let dl = ad_step(q, vec2(mid - hw - 200.0, (a0 + a1) * 0.5), ph, 5.0)
+    let dr = ad_step(q, vec2(mid + hw + 200.0, (a0 + a1) * 0.5), ph, 5.0)
+    return min(min(dl, dr), q.y + 4.0)
+}
+mod.widgets.Splitter.draw_bg.vertex = fn() {
+    let g = md_grow(self.rect_pos, self.rect_size, 14.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.Splitter.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 14.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let v = self.is_vertical
+    // work in the bar's own frame: `a` along it, `b` across it
+    let a = mix(p.x, p.y, v)
+    let b = mix(p.y, p.x, v)
+    let along = mix(size.x, size.y, v)
+    let thick = mix(size.y, size.x, v)
+    let mid = thick * 0.5
+    let hw = 5.0
+    let a0 = 4.0
+    let a1 = along - 6.0
+    let q = vec2(b, a)
+    let dh = ad_split(q, mid, hw, a0, a1)
+    let e = 0.35
+    let gx = ad_split(q + vec2(e, 0.0), mid, hw, a0, a1) - ad_split(q - vec2(e, 0.0), mid, hw, a0, a1)
+    let gy = ad_split(q + vec2(0.0, e), mid, hw, a0, a1) - ad_split(q - vec2(0.0, e), mid, hw, a0, a1)
+    var nh = vec2(0.0, 1.0)
+    if length(vec2(gx, gy)) > 0.0001 {
+        nh = normalize(vec2(gx, gy))
+    }
+    let inside = step(-8.0, a) * step(a, along - 1.6) * step(abs(b - mid), hw + 12.0)
+    let band = Finish.cover(0.0 - dh, px) * inside
+    let act = max(max(self.hover, self.drag), self.focus)
+    var lac = vec3(0.026, 0.024, 0.022)
+    lac = Finish.lift(lac, 0.04 * act)
+    var out = vec4(lac * band, band)
+    let nn = vec2(mix(nh.y, nh.x, v), mix(nh.x, nh.y, v))
+    out = Finish.over(out, ad_rim(0.0 - dh, nn * -1.0, 2.0, px, 1.0) * inside)
+    out = Finish.over(out, ad_pin(0.0 - dh, 3.0, max(px, 0.7), px, 0.85) * inside)
+    // under the hand, a bright gold line down the middle of the grip
+    let inbar = 1.0 - smoothstep(self.bar_size * 0.5 - 2.0, self.bar_size * 0.5, abs(a - along * 0.5))
+    let gl = (1.0 - smoothstep(0.5, 0.5 + px, abs(b - mid))) * inbar * act
+    out = Finish.over(out, vec4(ad_gold_lt() * gl, gl))
+    return out
+}
+
+// ---------------------------------------------------------------- switches and meter
+
+// THE SWITCHES. The slide switch is a black pill in its gold rim that fills
+// with gold while on, an ivory dome riding in it. The rocker is a lever
+// switch: a black lacquer plate in its gold rim, a polished gold collar at
+// its middle with a small lamp set in it, and a gold bat-handle lever
+// thrown to the left while off and to the right while on, when the lamp in
+// the collar burns amber.
+let ad_lever_d = fn(p: vec2, cc: vec2, tip: vec2) -> vec4 {
+    // the lever's distance (.x) and its outward normal (.yz): a tapered
+    // shaft from the collar to the tip, and a ball on the tip
+    let ba = tip - cc
+    let k = clamp(dot(p - cc, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0)
+    let ax = p - (cc + ba * k)
+    let dl = length(ax) - mix(2.4, 1.6, k)
+    let bq = p - tip
+    let db = length(bq) - 3.1
+    if db < dl {
+        let nb = bq / max(length(bq), 0.0001)
+        return vec4(db, nb.x, nb.y, 0.0)
+    }
+    let nl = ax / max(length(ax), 0.0001)
+    return vec4(dl, nl.x, nl.y, 0.0)
+}
+let ad_rocker = fn(pos: vec2, size: vec2, o: vec2, px: float, active: float, hover: float, down: float, focus: float, dis: float, at_end: float) -> vec4 {
+    let m = 4.0
+    let p = pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let live = 1.0 - dis
+    let tw = 38.0
+    let th = 16.0
+    let x0 = mix(1.0, size.x - tw - 1.0, at_end)
+    let lo = vec2(Finish.snap(o.x + x0, px), Finish.snap(o.y + (size.y - th) * 0.5, px)) - o
+    let hi = lo + vec2(tw, th)
+    let c = (lo + hi) * 0.5
+    let h = vec2(tw * 0.5, th * 0.5)
+    let d = md_rbox(p, c, h, 3.0)
+    let n = ad_nrm(p, c, h, 3.0)
+    var out = ad_drop(p, c, h, 3.0, mix(1.0, 0.5, dis))
+    let face = mix(ad_lacq(p, lo, hi, ad_black(), 1.0), vec3(0.06, 0.05, 0.04), dis)
+    let a = Finish.cover(d, px)
+    out = Finish.over(out, vec4(face * a, a))
+    out = Finish.over(out, ad_pin(d, 2.6, max(px, 0.6), px, mix(0.6, 0.3, dis)))
+    out = Finish.over(out, ad_rim(d, n, 1.3, px, 1.0 - 0.7 * dis) * mix(1.0, 0.5, dis))
+    let on = clamp(active, 0.0, 1.0)
+    let cc = vec2(Finish.snap(o.x + c.x, px) - o.x, c.y)
+    let tip = cc + vec2(mix(-11.0, 11.0, on), 0.3)
+    let press = down * live
+    // the lever's shadow on the plate, down and to the right
+    let sh = ad_lever_d(p - vec2(0.6, 1.5), cc, tip)
+    let sa = (1.0 - smoothstep(-0.6, 1.8, sh.x)) * 0.6 * a
+    out = Finish.over(out, vec4(0.0, 0.0, 0.0, sa))
+    // the lever, polished gold
+    let lv = ad_lever_d(p, cc, tip)
+    let t = clamp((p.y - (cc.y - 3.0)) / 6.0, 0.0, 1.0)
+    var lc = ad_gold_shape(lv.x, vec2(lv.y, lv.z), 1.8, t, hover * live * (1.0 - press), dis)
+    lc = mix(lc, lc * 0.85, press)
+    lc = mix(lc, ad_gold_dk() * 0.4, Finish.band(lv.x, 0.0, max(px, 0.5), px) * 0.7)
+    let lfa = Finish.cover(lv.x, px)
+    out = Finish.over(out, vec4(lc * lfa, lfa))
+    // the collar over the lever's root, and the lamp in it: amber and
+    // burning while on, dark glass while off
+    out = Finish.over(out, ad_drop(p, cc, vec2(5.2, 5.2), 5.2, 0.6))
+    out = ad_dome(out, p, cc, 5.2, px, mix(ad_gold_base(), vec3(0.36, 0.31, 0.24), dis))
+    let jq = p - cc
+    let jl = length(jq)
+    let seat = Finish.cover(jl - 2.9, px)
+    out = Finish.over(out, vec4(vec3(0.05, 0.035, 0.02) * seat, seat))
+    let lit = on * live
+    let jt = clamp(jl / 2.3, 0.0, 1.0)
+    let jon = mix(vec3(1.0, 0.95, 0.80), vec3(1.0, 0.56, 0.16), smoothstep(0.2, 1.0, jt))
+    let joff = mix(vec3(0.16, 0.09, 0.04), vec3(0.08, 0.045, 0.02), jt)
+    var jc = mix(joff, jon, lit)
+    let gq = jq / 2.3 - vec2(-0.3, -0.4)
+    jc = mix(jc, vec3(1.0, 1.0, 1.0), exp(0.0 - dot(gq, gq) / 0.05) * mix(0.35, 0.5, lit))
+    let ja = Finish.cover(jl - 2.3, px)
+    out = Finish.over(out, vec4(jc * ja, ja))
+    let jg = exp(0.0 - max(jl - 2.3, 0.0) / 1.0) * lit * (1.0 - ja) * Finish.cover(jl - 2.9, px) * 0.8
+    out = Finish.over(out, vec4(vec3(1.0, 0.62, 0.22) * jg, jg))
+    return Finish.over(out, ad_focus(d, px, focus * live))
+}
+mod.widgets.ToggleRocker.label_walk.margin = mod.turtle.Inset{left: 46.0 right: 3.0 top: 0.0 bottom: 0.0}
+mod.widgets.ToggleSlide.label_walk.margin = mod.turtle.Inset{left: 46.0 right: 3.0 top: 0.0 bottom: 0.0}
+mod.widgets.ToggleRocker.draw_bg.size = 14.0
+mod.widgets.ToggleSlide.draw_bg.size = 14.0
+mod.widgets.ToggleRocker.min_height = 24.0
+mod.widgets.ToggleSlide.min_height = 24.0
+mod.widgets.ToggleRocker.draw_bg.pill_aspect = 2.7143
+mod.widgets.ToggleSlide.draw_bg.pill_aspect = 2.7143
+mod.widgets.ToggleRocker.draw_bg.knob_inset = 7.0
+mod.widgets.ToggleSlide.draw_bg.knob_inset = 7.0
+mod.widgets.ToggleRocker.clip_x = false
+mod.widgets.ToggleRocker.clip_y = false
+mod.widgets.ToggleSlide.clip_x = false
+mod.widgets.ToggleSlide.clip_y = false
+mod.widgets.ToggleRocker.draw_bg.vertex = mod.widgets.ToggleFlat.draw_bg.vertex
+mod.widgets.ToggleSlide.draw_bg.vertex = mod.widgets.ToggleFlat.draw_bg.vertex
+mod.widgets.ToggleRocker.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return ad_rocker(self.pos, self.rect_size, self.rect_pos, px, self.active, self.hover, self.down, self.focus, self.disabled, self.mark_at_end)
+}
+mod.widgets.ToggleSlide.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return ad_toggle(self.pos, self.rect_size, self.rect_pos, px, self.active, self.drag_pos, self.drag, self.hover, self.down, self.focus, self.disabled, self.error, self.mark_at_end, 1.0)
+}
+
+// THE GLASS of the readouts, the screen and the meter: black glass, a faint
+// warm sheen across its upper left and the surround's shade falling in under
+// its top edge, set in a polished gold rim with a pinstripe inside it.
+let ad_glass = fn(p: vec2, lo: vec2, hi: vec2, r4: vec4, px: float, face: vec3) -> vec4 {
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let r = md_r4(p, c, h, r4)
+    let d = md_rbox(p, c, h, r)
+    var out = ad_drop(p, c, h, r, 0.8)
+    let hf = h - vec2(1.8, 1.8)
+    var g = face
+    let uv = (p - lo) / max(hi - lo, vec2(1.0, 1.0))
+    let diag = uv.x * 0.7 + uv.y
+    let sheen = smoothstep(0.0, 0.25, diag) * (1.0 - smoothstep(0.30, 0.70, diag)) * 0.045
+    g = g + vec3(0.95, 0.88, 0.72) * sheen
+    g = mix(g, vec3(0.0, 0.0, 0.0), clamp(Finish.inset(p, c, hf, max(r - 1.8, 0.0), vec2(0.0, 2.2), 2.0), 0.0, 1.0) * 0.6)
+    let a = Finish.cover(d, px)
+    out = Finish.over(out, vec4(g * a, a))
+    out = Finish.over(out, ad_pin(d, 3.0, max(px, 0.55), px, 0.55))
+    return Finish.over(out, ad_rim(d, ad_nrm(p, c, h, r), 1.8, px, 1.0))
+}
+
+mod.widgets.ScreenView.clip_x = false
+mod.widgets.ScreenView.clip_y = false
+mod.widgets.ScreenView.padding = mod.turtle.Inset{top: 8.0 right: 11.0 bottom: 8.0 left: 11.0}
+mod.widgets.ScreenView.draw_bg.vertex = fn() {
+    let g = md_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.ScreenView.draw_bg.pixel = fn() {
+    let m = 5.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let lo = vec2(Finish.snap(self.rect_pos.x, px), Finish.snap(self.rect_pos.y, px)) - self.rect_pos
+    let hi = vec2(Finish.snap(self.rect_pos.x + self.rect_size.x, px), Finish.snap(self.rect_pos.y + self.rect_size.y, px) - px) - self.rect_pos
+    return ad_glass(p, lo, hi, vec4(3.0, 3.0, 3.0, 3.0), px, self.color.rgb)
+}
+mod.widgets.ScreenView.bezel = 3.0
+mod.widgets.ScreenView.sheen = 0.02
+
+// THE METER sits in the same glass: its window arched at the top, faint gold
+// rays fanning up from the pivot behind the scale, the scale a fine gold arc
+// with gold ticks, the colour band under it running gold to amber to an
+// ember red, the needle a cream spear and its pivot a polished gold boss.
+mod.widgets.NeedleMeter.clip_x = false
+mod.widgets.NeedleMeter.clip_y = false
+mod.widgets.NeedleMeter.draw_bg.border_radius = uniform(3.0)
+mod.widgets.NeedleMeter.draw_bg.color = uniform(#0b0907)
+mod.widgets.NeedleMeter.draw_bg.color_needle = uniform(#xf3e8cf)
+mod.widgets.NeedleMeter.draw_bg.color_zone = uniform(#xe0482a)
+mod.widgets.NeedleMeter.draw_bg.color_scale = uniform(#xe2cc96)
+mod.widgets.NeedleMeter.draw_bg.vertex = fn() {
+    let g = md_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.NeedleMeter.draw_bg.pixel = fn() {
+    let m = 5.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let lo = vec2(Finish.snap(self.rect_pos.x, px), Finish.snap(self.rect_pos.y, px)) - self.rect_pos
+    let hi = vec2(Finish.snap(self.rect_pos.x + self.rect_size.x, px), Finish.snap(self.rect_pos.y + self.rect_size.y, px) - px) - self.rect_pos
+    let r = min(self.border_radius, min(hi.x - lo.x, hi.y - lo.y) * 0.5)
+    let rt = min(34.0, min(hi.x - lo.x, hi.y - lo.y) * 0.45)
+    var out = ad_glass(p, lo, hi, vec4(rt, rt, r, r), px, vec3(0.043, 0.035, 0.027))
+    let pv = self.pivot()
+    let rr = self.scale_radius()
+    let q = p - pv
+    let rq = length(q)
+    let ang = atan2(q.x, 0.0 - q.y)
+    let sweep = self.sweep * 0.017453293
+    let t = ang / sweep + 0.5
+    let on_scale = step(-0.0001, t) * step(t, 1.0001)
+    let inside = Finish.cover(md_rbox4(p, (lo + hi) * 0.5, (hi - lo) * 0.5 - vec2(2.5, 2.5), vec4(rt - 2.5, rt - 2.5, r, r)), px)
+    // the rays behind the scale
+    let st = sweep / 16.0
+    let kr = ang / st
+    let kd = abs(kr - floor(kr + 0.5)) * st * rq
+    let rays = Finish.cover(kd - max(px * 0.5, 0.3), px) * smoothstep(6.0, 10.0, rq) * (1.0 - smoothstep(rr - 7.0, rr - 5.0, rq)) * on_scale * inside * 0.22
+    out = Finish.over(out, vec4(ad_line_c() * rays, rays))
+    // the colour band under the scale
+    let bandr = Finish.cover(abs(rq - (rr - 2.6)) - 1.6, px) * on_scale
+    let ramp = mix(mix(vec3(0.86, 0.70, 0.38), vec3(1.0, 0.62, 0.24), smoothstep(0.35, 0.7, t)), self.color_zone.rgb, step(self.zone, t))
+    let ba = bandr * 0.85 * inside
+    out = Finish.over(out, vec4(ramp * ba, ba))
+    // the scale: a hairline arc and a tick at every division
+    let arc = Finish.cover(abs(rq - rr) - px * 0.6, px) * on_scale
+    let n = max(floor(self.majors + 0.5), 1.0) * max(floor(self.minors + 0.5), 1.0)
+    let k = floor(clamp(t, 0.0, 1.0) * n + 0.5)
+    let ak = (k / n - 0.5) * sweep
+    let perp = abs(q.x * cos(ak) + q.y * sin(ak))
+    let mn = max(floor(self.minors + 0.5), 1.0)
+    let major = 1.0 - step(0.5, k - mn * floor(k / mn + 0.0001))
+    let len = mix(self.tick_minor, self.tick_major, major)
+    let radial = max(rr - len - rq, rq - rr)
+    let tick = Finish.cover(perp - px * mix(0.55, 0.9, major), px) * Finish.cover(radial, px) * step(0.0, 0.0 - q.y * cos(ak) + q.x * sin(ak))
+    let sa = max(arc, tick) * inside
+    out = Finish.over(out, vec4(self.color_scale.rgb * sa, sa))
+    // the needle: a slim spear from under the pivot to just past the scale
+    let na = self.needle_angle(self.value)
+    let nd = vec2(sin(na), 0.0 - cos(na))
+    let sp = ad_taper(p, pv - nd * 3.0, pv + nd * (rr + 4.0), 1.3, 0.35)
+    let nf = mix(self.color_needle.rgb, ad_gold_lt(), smoothstep(0.3, 1.0, sp.y) * 0.25)
+    let nk = Finish.cover(sp.x, px)
+    out = Finish.over(out, vec4(nf * nk, nk))
+    out = ad_dome(out, p, pv, self.pivot_size + 0.8, px, ad_gold_base())
+    return out * self.color.a * self.opacity
+}
+mod.widgets.NeedleMeter.draw_label.color = #xe2cc96
+
+// ---------------------------------------------------------------- lamps
+// LAMPS: LEDs in polished gold bezels. The emitter is the light: at full
+// current its middle burns toward white and its rim is its most saturated
+// colour; at lower current the middle is no longer white, the colour deeper,
+// the glow smaller; out, it is dark tinted glass, its colour barely there,
+// with a catch light along its lower rim. Its light is added, never
+// painted: a tight hot halo and a short bloom in its own hue, gone in about
+// two radii. A bar is the same light drawn out into a short light pipe.
+let md_led_lamp_add = fn(res: vec4, light: vec3, ground: vec3) -> vec4 {
+    let est = res.rgb + ground * (1.0 - res.a)
+    let add = (vec3(1.0, 1.0, 1.0) - exp(0.0 - light)) * max(vec3(1.0, 1.0, 1.0) - est, vec3(0.0, 0.0, 0.0))
+    return vec4(res.rgb + add, res.a)
+}
+let md_led_lamp_full = fn(ink: vec3) -> vec3 {
+    return ink / max(max(ink.x, max(ink.y, ink.z)), 0.01)
+}
+let md_led_lamp_hue = fn(ink: vec3, vivid: float) -> vec3 {
+    let f = md_led_lamp_full(ink)
+    let mn = min(f.x, min(f.y, f.z))
+    let ch = 1.0 - mn
+    let pure = (f - vec3(mn, mn, mn)) / max(ch, 0.001)
+    return mix(f, pure, clamp(vivid, 0.0, 1.0) * 0.72 * smoothstep(0.03, 0.12, ch))
+}
+let md_led_lamp = fn(dst: vec4, p: vec2, c: vec2, hb: vec2, lit: float, ink: vec3, vivid: float, px: float, ground: vec3, room: float) -> vec4 {
+    let rt = max(min(hb.x, hb.y), 0.4)
+    let d = Material.sd_box(p, c, hb, rt)
+    let bw = clamp(0.32 * rt, 0.8, 2.4)
+    let ds = d - bw
+    let L = clamp(lit, 0.0, 1.0)
+    let b = md_led_lamp_full(ink)
+    let hue = md_led_lamp_hue(ink, vivid)
+    let pw = L * sqrt(L)
+    let white = vec3(1.0, 1.0, 1.0)
+    var res = dst
+    let x = max(ds, 0.0)
+    let reach = max(room, 1.0)
+    let win = 1.0 - smoothstep(0.55 * reach, reach, x)
+    let ex = max(hb.x - hb.y, 0.0)
+    let ey = max(hb.y - hb.x, 0.0)
+    let qx = p.x - c.x
+    let qy = p.y - c.y
+    let q = vec2(qx - clamp(qx, 0.0 - ex, ex), qy - clamp(qy, 0.0 - ey, ey)) / rt
+    let t = clamp(length(q), 0.0, 1.0)
+    let nrm = q / max(length(q), 0.001)
+    // the bezel's shadow on the ground
+    let shd = Finish.drop(p, c, hb + vec2(bw, bw), rt + bw, vec2(0.0, 0.12 * rt + 0.3), 0.10 * rt + 0.5) * 0.5 * (1.0 - 0.6 * pw)
+    res = Finish.over(res, vec4(0.0, 0.0, 0.0, shd))
+    // the polished gold bezel: a ring rounded over, lit from the upper left,
+    // a dark seat line where it holds the lens
+    let a_s = Finish.cover(ds, px)
+    let u = clamp(d / max(bw, 0.01), 0.0, 1.0)
+    let facing = dot(nrm * (u - 0.5) * 2.0, vec2(-0.45, -0.89))
+    var rc = ad_gold_base() * (0.85 + 0.45 * facing)
+    rc = mix(rc, ad_gold_hi(), smoothstep(0.5, 0.95, facing) * 0.8)
+    rc = mix(rc, ad_gold_dk() * 0.6, Finish.band(ds, 0.0, max(px, 0.45), px) * 0.6)
+    rc = mix(rc, vec3(0.02, 0.015, 0.01), Finish.ring_out(d, 0.0, max(px, 0.45), px) * 0.85)
+    res = Finish.over(res, vec4(min(rc, white) * a_s, a_s))
+    if L > 0.001 {
+        let xl = max(d, 0.0)
+        let halo = exp(0.0 - xl / max(0.30 * rt, 0.4)) * 1.5 + exp(0.0 - xl / max(0.65 * rt, 0.7)) * 0.32
+        let hwin = 1.0 - smoothstep(1.1 * rt, 2.0 * rt + 1.0, xl)
+        res = md_led_lamp_add(res, mix(hue, white, 0.15 * pw) * halo * pw * hwin * win, ground)
+    }
+    // THE LENS: lit, its middle burns toward white at full current and its
+    // rim is its most saturated colour.
+    let top = smoothstep(-1.0, 0.6, q.y)
+    let pool = exp(0.0 - (q.y - 0.55) * (q.y - 0.55) / 0.09 - q.x * q.x / 0.30)
+    var on = mix(hue * mix(0.55, 0.8, L), mix(b, hue, 0.5), top)
+    on = mix(on, min(mix(b, hue, 0.4) + vec3(0.35, 0.35, 0.35), white), pool * 0.5)
+    on = mix(on, vec3(1.0, 0.99, 0.975), exp(0.0 - t * t / 0.20) * smoothstep(0.5, 1.0, L) * 0.85)
+    on = mix(on, hue * (0.82 + 0.18 * L), smoothstep(0.62, 1.0, t))
+    on = on * (0.42 + 0.58 * L)
+    // out: dark tinted glass, a catch light along its lower rim
+    let offc = mix(vec3(0.06, 0.055, 0.05), b * 0.42, 0.26)
+    var off = mix(offc * 0.62, offc * 1.15, top)
+    off = mix(off, min(offc + vec3(0.16, 0.16, 0.16), white), pool * 0.35)
+    off = off * mix(1.0, 0.75, smoothstep(0.75, 1.0, t))
+    let catchl = smoothstep(0.62, 0.9, t) * (1.0 - smoothstep(0.9, 1.0, t)) * smoothstep(0.2, 0.9, nrm.y)
+    off = off + vec3(0.30, 0.26, 0.20) * catchl
+    var col = mix(off, min(on, white), smoothstep(0.0, 0.35, L))
+    let e = length(vec2(q.x / 0.62, (q.y + 0.46) / 0.30))
+    let spec = (1.0 - smoothstep(0.55, 1.0, e)) * mix(1.0, 0.3, clamp((q.y + 0.76) / 0.6, 0.0, 1.0))
+    col = mix(col, white, spec * mix(0.8, 0.55, L) * smoothstep(0.9, 2.2, rt))
+    col = min(col, white)
+    let a_l = Finish.cover(d, px)
+    return Finish.over(res, vec4(col * a_l, a_l))
+}
+
+// The Lamp widget and the bar lamp. A round LED takes the middle of its
+// cell; its halo's room is held in the cell, so the light is never cut at
+// its edge and fades within half the gap. A bar is a short light pipe set at
+// the left of its cell, six points thick and twice that long, its glow held
+// to two and a half points round its bezel -- the whole lamp takes the first
+// twenty points of its cell and leaves the rest free.
+mod.widgets.Lamp.halo = 0.3
+mod.widgets.Lamp.size = 14.0
+mod.widgets.Lamp.halo_reach = 0.3
+mod.widgets.LampBar.size = 14.0
+mod.widgets.LampBar.halo_reach = 0.3
+mod.widgets.Lamp.draw_bg.color_accent = uniform(#xffa83a)
+mod.widgets.Lamp.draw_bg.color_success = uniform(#x3ad98a)
+mod.widgets.Lamp.draw_bg.color_warning = uniform(#xf2c443)
+mod.widgets.Lamp.draw_bg.color_error = uniform(#xe5483a)
+mod.widgets.Lamp.draw_bg.color_plain = uniform(#xfff3d8)
+mod.widgets.Lamp.draw_bg.vertex = fn() {
+    let m = 4.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.Lamp.draw_bg.pixel = fn() {
+    let m = 4.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let reach = clamp(self.reach, 0.0, 1.0)
+    let t = min(self.rect_size.y / (1.0 + 2.0 * reach), 14.0)
+    let room = (self.rect_size.y - t) * 0.5
+    let tb = min(t, 6.0)
+    let lb = 14.0
+    let c = mix(self.rect_size * 0.5, vec2(1.6 + lb * 0.5, self.rect_size.y * 0.5), self.bar)
+    let hb = mix(vec2(t * 0.5, t * 0.5), vec2(lb * 0.5, tb * 0.5), self.bar)
+    let glow = mix(max(room - 2.5, 2.0), 2.2, self.bar)
+    let res = md_led_lamp(vec4(0.0, 0.0, 0.0, 0.0), p, c, hb, self.lit, self.intent_color().rgb, 1.0 - step(3.5, self.intent), px, ad_ebony_c(), glow)
+    return res * self.opacity
+}
+true

@@ -41,6 +41,9 @@ pub struct Lane {
     pub instants: Vec<(u64, u32)>,
     /// the latest time seen on the lane
     pub last_t: u64,
+    /// the earliest record of the lane (0: none): a flight recording keeps each lane's last
+    /// records, so before this the lane's spans are unknown (not idle)
+    pub first_t: u64,
 }
 
 impl Lane {
@@ -85,6 +88,13 @@ pub struct Frame {
     pub wait_ns: u64,
     pub owner_ns: u64,
     pub waits: u32,
+    /// of the waits, the time inside the lazy compiles (of it on the owner): compile and wait
+    /// time overlap by this much (`overlap`: the producer reported it; older recordings did not)
+    pub cwait_ns: u64,
+    pub cowner_ns: u64,
+    pub overlap: bool,
+    /// the producer sent the summary (idle .. waits): its idle is the frame's whole idle time
+    pub summary: bool,
 }
 
 impl Frame {
@@ -299,12 +309,18 @@ impl Profile {
                 let mut f = Frame { id, t0, t1: t0 + dur, present: if po == 0 { 0 } else { t0 + po }, vsync: if vo == 0 { 0 } else { t0 + vo }, ..Default::default() };
                 // the flight recorder's summary
                 if !d.done() {
+                    f.summary = true;
                     f.idle = d.u()?;
                     f.compile_ns = d.u()?;
                     f.compiles = d.u()? as u32;
                     f.wait_ns = d.u()?;
                     f.owner_ns = d.u()?;
                     f.waits = d.u()? as u32;
+                    if !d.done() {
+                        f.cwait_ns = d.u()?;
+                        f.cowner_ns = d.u()?;
+                        f.overlap = true;
+                    }
                 }
                 self.frames.push(f);
                 self.see(t0 + dur);
@@ -401,6 +417,9 @@ impl Profile {
             hi = hi.max(t);
             let lane = &mut self.lanes[li];
             lane.last_t = lane.last_t.max(t);
+            if lane.first_t == 0 || t < lane.first_t {
+                lane.first_t = t;
+            }
             match k {
                 span::BEGIN => lane.stack.push((t, name, false, 0)),
                 span::WAIT_BEGIN => lane.stack.push((t, name, true, a)),
@@ -536,23 +555,35 @@ impl Profile {
     /// The critical path of [t0, t1) ending on lane `li`, oldest first: (lane, from, to, step),
     /// where step is None for running and Some(wait seg) for a wait not ended by another lane.
     /// Walking back from t1, the lane's own time counts; a wait another lane ended moves the
-    /// walk to that lane at the wake.
+    /// walk to that lane at the wake, for the time the wait lasted only: before the wait began
+    /// the waiting lane was running itself, and the walk returns to it there.
     pub fn critical_path(&self, li: usize, t0: u64, t1: u64) -> Vec<CpStep> {
         let mut path = Vec::new();
         let (mut lane, mut t) = (li, t1);
-        for _ in 0..512 {
-            if t <= t0 {
-                break;
+        // the lanes the walk left at a wake: (lane, the start of its wait = where it resumes)
+        let mut back: Vec<(usize, u64)> = Vec::new();
+        // (bounded only against a malformed recording: every step consumes time or a wait)
+        for _ in 0..(1 << 22) {
+            let floor = back.last().map_or(t0, |b| b.1);
+            if t <= floor {
+                match back.pop() {
+                    Some((l, at)) => {
+                        lane = l;
+                        t = at;
+                        continue;
+                    }
+                    None => break,
+                }
             }
-            // the latest wait of this lane that starts before t and overlaps the frame
+            // the latest wait of this lane that starts before t and overlaps [floor, t)
             let mut best: Option<Seg> = None;
             for row in &self.lanes[lane].rows {
                 let b = row.partition_point(|s| s.t0 < t);
                 for s in row[..b].iter().rev().take(64) {
-                    if s.wait && s.t1 > t0 && best.map_or(true, |x| s.t1.min(t) > x.t1.min(t)) {
+                    if s.wait && s.t1 > floor && best.map_or(true, |x| s.t1.min(t) > x.t1.min(t)) {
                         best = Some(*s);
                     }
-                    if s.t1 < t0 {
+                    if s.t1 < floor {
                         break;
                     }
                 }
@@ -563,21 +594,25 @@ impl Profile {
                     if end < t {
                         path.push(CpStep { lane, t0: end, t1: t, wait: None, ended_by: None });
                     }
+                    let from = s.t0.max(floor);
                     match self.woke_by(lane, &s) {
                         Some((by, at)) if at > s.t0 => {
-                            path.push(CpStep { lane, t0: at.max(s.t0).min(end), t1: end, wait: Some(s), ended_by: Some(by) });
+                            let w = at.max(from).min(end);
+                            path.push(CpStep { lane, t0: w, t1: end, wait: Some(s), ended_by: Some(by) });
+                            // the waker's time from the wake back to the wait's start
+                            back.push((lane, from));
                             lane = by;
-                            t = at.max(t0).min(end);
+                            t = w;
                         }
                         _ => {
-                            path.push(CpStep { lane, t0: s.t0.max(t0), t1: end, wait: Some(s), ended_by: None });
-                            t = s.t0;
+                            path.push(CpStep { lane, t0: from, t1: end, wait: Some(s), ended_by: None });
+                            t = from;
                         }
                     }
                 }
                 None => {
-                    path.push(CpStep { lane, t0, t1: t, wait: None, ended_by: None });
-                    break;
+                    path.push(CpStep { lane, t0: floor, t1: t, wait: None, ended_by: None });
+                    t = floor;
                 }
             }
         }

@@ -961,7 +961,12 @@ impl<'a> Lcx<'a> {
         if too_big {
             let t = u.tcx.tys.erase_regions(t);
             let ts = crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, t);
-            self.err(self.pos, format!("type `{}` is 4 GiB or larger, which makepad run does not lay out yet", ts));
+            // (rustc: a layout of at least obj_size_bound bytes is a SizeOverflow error)
+            if u.size_overflows(t) {
+                self.err(self.pos, format!("{}values of the type `{}` are too big for the target architecture", relax_front::diagnostics::UNCODED_PREFIX, ts));
+            } else {
+                self.err(self.pos, format!("type `{}` is 4 GiB or larger, which makepad run does not lay out yet", ts));
+            }
         }
         l
     }
@@ -3625,14 +3630,10 @@ impl<'a> Lcx<'a> {
         }
         let id = self.u.fn_id(FnKey::Glue(crate::jit::GLUE_DROP, t));
         let may = self.u.drop_may_unwind(t);
-        self.tree_leaf_call_may(Callee::Fn(id), a, may);
+        self.tree_leaf_call_may(Callee::Fn(id), vec![a], may);
     }
 
-    fn tree_leaf_call(&mut self, c: Callee, a: VReg) {
-        self.tree_leaf_call_may(c, a, false);
-    }
-
-    fn tree_leaf_call_may(&mut self, c: Callee, a: VReg, may: bool) {
+    fn tree_leaf_call_may(&mut self, c: Callee, args: Vec<VReg>, may: bool) {
         let (k, skip, building) = match self.tree_cx.as_mut() {
             Some(tc) => {
                 let k = tc.counter;
@@ -3641,7 +3642,7 @@ impl<'a> Lcx<'a> {
             }
             None => {
                 self.nounwind += 1;
-                self.emit(Inst::Call(c, vec![a], Vec::new()));
+                self.emit(Inst::Call(c, args, Vec::new()));
                 self.nounwind -= 1;
                 return;
             }
@@ -3673,12 +3674,12 @@ impl<'a> Lcx<'a> {
         match pad {
             Some(pb) => {
                 let saved = self.pad_fixed.replace(Some(pb));
-                self.emit(Inst::Call(c, vec![a], Vec::new()));
+                self.emit(Inst::Call(c, args, Vec::new()));
                 self.pad_fixed = saved;
             }
             None => {
                 self.nounwind += 1;
-                self.emit(Inst::Call(c, vec![a], Vec::new()));
+                self.emit(Inst::Call(c, args, Vec::new()));
                 self.nounwind -= 1;
             }
         }
@@ -3707,13 +3708,14 @@ impl<'a> Lcx<'a> {
                 // the allocation without dropping them again
                 let mut sub = prefix.to_vec();
                 sub.push((BOX_STEP, 0));
-                let ptr = self.f.vreg(Cls::I);
-                let pm = self.pmem();
-                self.emit(Inst::Load(pm, ptr, addr, 0));
+                // Read the Box's complete pointer layout, including metadata when present.
+                let pointer = self.load_val(addr, 0, t);
+                let pointer = self.to_leaves(pointer, t);
+                let ptr = pointer[0];
                 self.drop_tree(entries, ptr, inner, &sub);
                 if let Some(free) = self.u.core_path(&["boxed", "box_free_after_move"]) {
                     let id = self.u.fn_id(FnKey::Inst(free, vec![inner]));
-                    self.tree_leaf_call(Callee::Fn(id), ptr);
+                    self.tree_leaf_call_may(Callee::Fn(id), pointer, false);
                 }
                 if let Some(j) = skip {
                     self.goto(j);
@@ -5609,7 +5611,11 @@ impl<'a> Lcx<'a> {
             Mem::F32 => 4,
             Mem::F64 => 8,
         };
-        let mut buf = vec![0u8; l.size as usize];
+        // (fallible, as rustc's interpreter allocates: a value too large for the compiler's memory is left to the
+        // static allocation, which reports "tried to allocate more memory than available to compiler")
+        let mut buf = Vec::new();
+        buf.try_reserve_exact(l.size as usize).ok()?;
+        buf.resize(l.size as usize, 0u8);
         match v {
             Val::L(regs) => {
                 let leaves = l.leaves.as_ref()?;
@@ -6305,7 +6311,7 @@ impl<'a> Lcx<'a> {
                         if let Some(free) = self.u.core_path(&["boxed", "box_free_after_move"]) {
                             let id = self.u.fn_id(FnKey::Inst(free, vec![inner]));
                             self.nounwind += 1;
-                            self.emit(Inst::Call(Callee::Fn(id), vec![b[0]], Vec::new()));
+                            self.emit(Inst::Call(Callee::Fn(id), b, Vec::new()));
                             self.nounwind -= 1;
                         }
                         v
@@ -10479,6 +10485,52 @@ impl<'a> Lcx<'a> {
                 self.emit(Inst::IBinI(IOp::Mul, U64, off, n[0], stride));
                 let d = self.f.vreg(Cls::I);
                 self.emit(Inst::IBin(IOp::Add, U64, d, p[0], off));
+                Val::L(vec![d])
+            }
+            // `p - n * stride` (core's in-bounds `sub`)
+            "ptr_sub" => {
+                let p = leaf(self, 0);
+                let n = leaf(self, 1);
+                let (sz, al) = elem(self);
+                let stride = crate::layout::round_up(sz, al) as i64;
+                let k = self.iconst(stride);
+                let off = self.f.vreg(Cls::I);
+                self.emit(Inst::IBin(IOp::Mul, U64, off, n[0], k));
+                let d = self.f.vreg(Cls::I);
+                self.emit(Inst::IBin(IOp::Sub, U64, d, p[0], off));
+                Val::L(vec![d])
+            }
+            // wrapping element offset (two's complement: the same instructions as ptr_add)
+            "arith_offset" => {
+                let p = leaf(self, 0);
+                let n = leaf(self, 1);
+                let (sz, al) = elem(self);
+                let stride = crate::layout::round_up(sz, al) as i64;
+                let off = self.f.vreg(Cls::I);
+                self.emit(Inst::IBinI(IOp::Mul, U64, off, n[0], stride));
+                let d = self.f.vreg(Cls::I);
+                self.emit(Inst::IBin(IOp::Add, U64, d, p[0], off));
+                Val::L(vec![d])
+            }
+            // (p - origin) / stride, exact by contract (signed)
+            "ptr_offset_from" => {
+                let p = leaf(self, 0);
+                let o = leaf(self, 1);
+                let (sz, al) = elem(self);
+                let stride = crate::layout::round_up(sz, al).max(1) as i64;
+                let diff = self.f.vreg(Cls::I);
+                self.emit(Inst::IBin(IOp::Sub, U64, diff, p[0], o[0]));
+                if stride == 1 { Val::L(vec![diff]) } else {
+                    let k = self.iconst(stride);
+                    let d = self.f.vreg(Cls::I);
+                    self.emit(Inst::IBin(IOp::Div, I64, d, diff, k));
+                    Val::L(vec![d])
+                }
+            }
+            "ptr_is_null" => {
+                let p = leaf(self, 0);
+                let d = self.f.vreg(Cls::I);
+                self.emit(Inst::ICmpI(Cond::Eq, false, d, p[0], 0));
                 Val::L(vec![d])
             }
             "slice_from_raw" | "slice_from_raw_mut" | "str_from_raw" => {

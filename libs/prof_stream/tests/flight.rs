@@ -88,6 +88,66 @@ fn stall_names_both_sides() {
     assert!(at.contains("wait owner main") && at.contains("serve background"), "{at}");
 }
 
+/// A frame from before the main lane's first kept span (its ring wrapped): read from its frame
+/// summary (lazy compiles, waits inside and outside them, the UI work no span names), never as
+/// "idle"; a recording that names the compile/wait overlap splits them additively.
+#[test]
+fn unrecorded_frame_reads_its_summary() {
+    let mut b = ps::prelude().to_vec();
+    let start = 1_000 * MS;
+    ps::record(&mut b, ps::kind::HELLO, &ps::Hello { app: "game".into(), host: String::new(), pid: 7, build: "b".into(), device: String::new(), refresh_mhz: 60_000, flags: 1, start_mono: start }.payload());
+    let mut st = ps::Interner::default();
+    for s in ["", "main", "Draw", "widget-draw"] {
+        st.id(s);
+    }
+    ps::record(&mut b, ps::kind::STRINGS, &st.take_new().unwrap());
+    ps::record(&mut b, ps::kind::THREAD, &ps::thread_payload(1, 11, 0x100, ps::role::MAIN, 1));
+    // the hitch at 5 s: 2110 ms, 901 ms of lazy compiles (700 ms of their waits on the owner),
+    // 1178 ms of waits (839 on the owner); the main lane's spans are kept from 300 s on
+    let t0 = start + 5_000 * MS;
+    let mut prev = (0u64, 0u64);
+    for (id, f0, dur, overlap) in [(1u64, t0, 2110 * MS, true), (2, t0 + 3_000 * MS, 2110 * MS, false), (3, start + 300_000 * MS, 4 * MS, true)] {
+        let mut e = Enc::default();
+        e.u(id - prev.0).d(f0, prev.1).u(dur).u(0).u(0).u(0);
+        if id < 3 {
+            e.u(0).u(901 * MS).u(12887).u(1178 * MS).u(839 * MS).u(13171);
+        } else {
+            e.u(0).u(0).u(0).u(0).u(0).u(0);
+        }
+        if overlap {
+            e.u(if id == 1 { 700 * MS } else { 0 }).u(if id == 1 { 700 * MS } else { 0 });
+        }
+        prev = (id, f0);
+        ps::record(&mut b, ps::kind::FRAME, &e.0);
+    }
+    let t3 = start + 300_000 * MS;
+    let main = [
+        ps::SpanRec { kind: ps::span::BEGIN, t: t3, name: 3, a: 0 },
+        ps::SpanRec { kind: ps::span::END, t: t3 + 3 * MS, name: 3, a: 0 },
+        ps::SpanRec { kind: ps::span::BEGIN, t: t3 + 3 * MS, name: 2, a: 0 },
+        ps::SpanRec { kind: ps::span::END, t: t3 + 4 * MS, name: 2, a: 0 },
+    ];
+    ps::record(&mut b, ps::kind::SPANS, &ps::spans_payload(1, &main));
+    let p = Profile::decode(&b).unwrap();
+    let f = ask::ask(&p, "frame F1", None).text();
+    assert!(!f.contains("idle 2110"), "{f}");
+    assert!(f.contains("UI work without spans") && f.contains("wait owner (in lazy compiles)"), "{f}");
+    // 901 - 700 ms of compiling, 700 ms on the owner inside it, 139 ms on the owner outside,
+    // 339 ms of other waits, the rest (731 ms) UI work
+    let row = |name: &str| f.lines().find(|l| l.split('|').nth(1).is_some_and(|c| c.trim() == name)).map(|l| l.split('|').nth(2).unwrap().trim().to_string());
+    assert_eq!(row("lazy compiles").as_deref(), Some("201"), "{f}");
+    assert_eq!(row("UI work without spans").as_deref(), Some("731"), "{f}");
+    assert_eq!(row("wait owner").as_deref(), Some("139"), "{f}");
+    assert!(f.contains("kept from 300 s of the run on"), "{f}");
+    let s = ask::ask(&p, "stall F1", None).text();
+    assert!(!s.contains("idle 2110"), "{s}");
+    let old = ask::ask(&p, "frame F2", None).text();
+    assert!(old.contains("lazy compiles (incl. their waits)") && old.contains("waits outside lazy compiles (at least)"), "{old}");
+    let w = ask::ask(&p, "why-slow", None).text();
+    assert!(!w.contains("sat idle"), "{w}");
+    assert!(w.contains("UI work without spans"), "{w}");
+}
+
 /// `MKPF=<file> cargo test --release -p makepad-prof-stream --test flight -- --ignored ask_file`:
 /// answers on a recording (Q="<query>", default brief).
 #[test]

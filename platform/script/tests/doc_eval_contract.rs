@@ -110,6 +110,31 @@ fn freezing_a_document_leaves_the_host_modules_alone() {
 }
 
 #[test]
+fn a_document_that_holds_a_module_leaves_it_open_for_later_registration() {
+    // `use mod.lateshaders` puts the module itself in the scope the
+    // document's closures capture. The host registers into it after the
+    // document loaded (a kit built on first use adds its shaders), so
+    // freezing the document must leave the module writable.
+    let vm = &mut test_vm();
+    vm.new_module(id!(lateshaders));
+    let (_, report) = vm.eval_bounded(&EvalLimits::DOC_LOAD, |vm| vm.eval(script("late_first", "mod.lateshaders.Base = {x: 1}\n;")));
+    assert!(report.limit.is_none() && vm.take_errors().is_empty());
+    let doc = "use mod.lateshaders\nlet state = {n: 0}\n{ frame: fn(t) { lateshaders.Base.x + t } poke: fn(t) { state.n = t state.n } }";
+    let (root, report) = vm.eval_bounded(&EvalLimits::DOC_LOAD, |vm| vm.eval(script("late_doc", doc)));
+    assert!(report.limit.is_none(), "{report:?}");
+    assert!(vm.take_errors().is_empty());
+    vm.freeze_document(&[root]);
+
+    let (v, _) = vm.eval_bounded(&EvalLimits::DOC_LOAD, |vm| vm.eval(script("late_second", "mod.lateshaders.Late = {y: 2}\nmod.lateshaders.Late.y")));
+    assert_eq!(vm.take_errors(), Vec::<String>::new(), "the registration after the document was refused");
+    assert_eq!(v.as_number(), Some(2.0));
+    // The document still reads the module, and its own state stays frozen.
+    assert_eq!(call(vm, root, id!(frame), &[1.0f64.into()]).0.as_number(), Some(2.0));
+    let (_, _, errors) = call(vm, root, id!(poke), &[5.0f64.into()]);
+    assert!(!errors.is_empty(), "the write into the document's own state was not refused");
+}
+
+#[test]
 fn frame_limits_bound_each_call() {
     let vm = &mut test_vm();
     let (root, _) = vm.eval_bounded(&EvalLimits::DOC_LOAD, |vm| vm.eval(script("doc4", "{ spin: fn(t) { loop {} } fine: fn(t) { t + 1 } }")));

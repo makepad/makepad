@@ -12,6 +12,8 @@ makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features 
 # docs read the overlay's reflection and theme lab).
 makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", version = "2.0.0" }
 makepad-code-editor = { path = "../../code_editor", version = "2.0.0" }
+# The extra style sheets, in the theme picker beside the library's own.
+makepad-widgets-sheets = { path = "../../widgets/sheets", version = "0.1.0" }
 
 [features]
 maps = ["makepad-widgets/maps"]

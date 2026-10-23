@@ -1197,6 +1197,24 @@ impl Cx {
         self.redraw_id
     }
 
+    /// The drawing being recorded: one per draw event, however many draw
+    /// contexts it makes (a second window's, an offscreen bake's), and one per
+    /// draw context made outside a draw event. A recorder that keeps state
+    /// between frames counts frames by it, not by `redraw_id`.
+    pub fn drawing_id(&self) -> u64 {
+        self.drawing_id
+    }
+
+    /// A draw context begins (`CxDraw::new`): a new `redraw_id` for the lists
+    /// it records, and, outside a draw event, a drawing of its own.
+    pub fn begin_draw_context(&mut self) {
+        if !self.in_draw_event {
+            self.drawing_id += 1;
+            self.drawing_start = self.redraw_id;
+        }
+        self.redraw_id += 1;
+    }
+
     pub fn os_type(&self) -> &OsType {
         &self.os_type
     }

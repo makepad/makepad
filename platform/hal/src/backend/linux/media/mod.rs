@@ -691,9 +691,6 @@ impl Engine {
                         );
                         if let Some(pulse) = &mut self.pulse {
                             self.audio_descs.extend(pulse.get_updated_descs());
-                            if let Some(server) = pulse.server() {
-                                eprintln!("[hal-audio] {server}");
-                            }
                         }
                     }
                     messages.push(Message::Audio(self.audio_descs.clone()));

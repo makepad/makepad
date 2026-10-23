@@ -1522,6 +1522,9 @@ impl<'a> Parser<'a> {
         let m = self.macros.as_ref()?;
         let seg = self.ast.segs(path.segs).last()?;
         let name = String::from_utf8_lossy(self.bytes(seg.name.lo, seg.name.hi)).trim_start_matches("r#").to_string();
+        if path.segs.len() == 1 && !path.global() && (seg.name.lo as usize) < self.src.len() {
+            if let Some(c) = self.bctx.as_ref() { crate::macros::uses::plain_macro_call(&c.path, seg.name.lo, &name); }
+        }
         // a skipped body calls only built-ins (body_outline checked each call where it was)
         if self.lazy_part {
             return crate::builtins::macro_def(&name);
@@ -1575,6 +1578,15 @@ impl<'a> Parser<'a> {
         });
         if out_of_scope {
             r = None;
+        }
+        // a module-relative path (`crate::m!`, `self::m!`, `::k::m!`) to this crate's `#[macro_export]` macro:
+        // a macro-expanded one is the lint macro_expanded_macro_exports_accessed_by_absolute_paths (lint_early)
+        if qual.is_some() || path.global() {
+            if let (Some(d), Some(c)) = (r.as_ref(), self.bctx.as_ref()) {
+                if d.builtin == 0 && d.exported && d.krate == self.krate {
+                    crate::macros::uses::abs_path_macro_call(&c.path, seg.name.lo, d);
+                }
+            }
         }
         // Relax's built-in macros (builtins.rs) when no macro_rules! of that name is visible
         match r {
@@ -2000,6 +2012,7 @@ impl<'a> Parser<'a> {
                         return Ok(());
                     }
                     self.pos = at;
+                    self.record_mac_call_attrs(&attrs);
                     if self.stmt_macro(stmts)? {
                         return Ok(());
                     }
@@ -2015,6 +2028,20 @@ impl<'a> Parser<'a> {
         }
         stmts.push(s);
         Ok(())
+    }
+
+    /// The attributes on a macro call (makepad check): judged by the feature gates (rustc_expand
+    /// check_attributes -> feature_gate::check_attribute).
+    fn record_mac_call_attrs(&self, attrs: &[Attr]) {
+        if attrs.is_empty() || !crate::macros::uses::recording() { return; }
+        let file = self.bctx.as_ref().map_or("", |c| c.path.as_str());
+        for a in attrs {
+            if a.toks.hi <= a.toks.lo { continue; }
+            let t = self.toks.at(a.toks.lo as usize);
+            if !matches!(t.kind, T::Ident) { continue; }
+            let name = String::from_utf8_lossy(self.tok_text(t)).into_owned();
+            crate::macros::uses::mac_call_attr(file, t.lo, &name);
+        }
     }
 
     /// A statement-position `macro_rules!` call at the cursor: its statements splice into the
@@ -2156,6 +2183,7 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if !self.pending_shape.is_empty() { self.check_pending_attrs()?; }
+            if !attrs.is_empty() && self.mac_ahead() { self.record_mac_call_attrs(&attrs); }
             if let Some(v) = self.try_expand_rules(|p, _, _| p.items_until(T::Eof))? {
                 items.extend(v);
                 continue;
@@ -2886,6 +2914,15 @@ impl<'a> Parser<'a> {
             first = false;
             // `...` is last in a C-variadic function: rustc_ast_passes reports it elsewhere
             // only after cfg stripping, so a cfg-stripped function may continue after it
+            if self.kind() == T::DotDotDot && crate::macros::uses::recording() {
+                // parse_param_general: the name is required (fn items, impl items, trait items from
+                // edition 2018; not foreign items): `...` without a pattern is linted
+                let required = self.foreign_abi.is_none() && !(self.in_trait && self.in_assoc > 0 && self.edition < 2018);
+                if required {
+                    let file = self.bctx.as_ref().map_or("", |c| c.path.as_str()).to_string();
+                    crate::macros::uses::varargs_without_pattern(&file, self.tok().lo);
+                }
+            }
             if self.eat(T::DotDotDot) {
                 variadic = true;
                 if self.eat(T::Comma) && self.cfg_out > 0 { continue; }

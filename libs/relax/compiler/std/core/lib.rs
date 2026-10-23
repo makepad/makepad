@@ -288,7 +288,11 @@ macro_rules! offset_of {
             let base = u.as_ptr();
             #[allow(unused_unsafe)]
             let f = unsafe { &raw const (*base).$($field)+ };
-            f as *const u8 as usize - base as *const u8 as usize
+            // (a path call of `cast`, not `as *const u8`: a coercion cast would infer the field's type,
+            // the builtin never infers the container -- `offset_of!(Foo<_>, x)` is E0282; not a method
+            // call: that probes a pointer to an unknown type, tyvar_behind_raw_pointer. The distance, not
+            // two pointer-to-integer casts: a constant cannot cast pointers to integers)
+            unsafe { <*const _>::cast::<u8>(f).offset_from_unsigned(base as *const u8) }
         }
     };
 }

@@ -468,6 +468,7 @@ impl ScriptVmBase {
                 report.allocated_bytes as u64
             }
             CTL_CENSUS_BEGIN => {
+                self.heap.touch_pause();
                 let Some(mut census) = self.heap.census.take() else {
                     if let Some(note) = crate::census::CENSUS_OTHER_VM.get() {
                         note(req.name);
@@ -479,6 +480,7 @@ impl ScriptVmBase {
                 0
             }
             CTL_CENSUS_END => {
+                self.heap.touch_resume(&self.code);
                 let Some(mut census) = self.heap.census.take() else { return 0 };
                 census.end(&self.heap, &self.code);
                 self.heap.census = Some(census);

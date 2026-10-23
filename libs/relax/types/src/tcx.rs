@@ -256,6 +256,10 @@ pub struct Tcx {
     /// `TypeckResults::coroutine_stalled_predicates`, per typeck root: the goals that were stalled on a
     /// coroutine of that body (regions erased), proven once the coroutines' witnesses are known.
     pub coroutine_stalled_predicates: relax_session::sync::Mutex<crate::fxhash::HashMap<DefId, Vec<(crate::next_solver::Goal, u32)>>>,
+    /// `TypeckResults::potentially_region_dependent_goals`, per typeck root of a checked crate: the goals HIR
+    /// typeck proved that may depend on the identity of their regions (regions erased, deduplicated), with
+    /// their spans; re-proven when a type op of the root's borrow check fails.
+    pub potentially_region_dependent_goals: relax_session::sync::Mutex<crate::fxhash::HashMap<DefId, Vec<(crate::next_solver::Goal, u32)>>>,
     /// a coroutine type's saved locals after its upvars: (end offset, alignment), made when its
     /// poll function is lowered (coroutine_transform)
     pub coro_frames: crate::conc::MemoMap<TyId, (u32, u32)>,
@@ -274,6 +278,8 @@ pub struct Tcx {
     /// rustc `inferred_outlives_of` (a query there): the outlives requirements an ADT's fields put on its own
     /// parameters, computed once per ADT; cleared whenever declarations change.
     pub inferred_outlives: crate::conc::ShardMap<DefId, std::sync::Arc<Vec<outlives::OutlivesPredicate>>>,
+    /// the ADTs whose `inferred_outlives` still grew at the recursion limit (rustc: a fatal overflow error)
+    pub inferred_outlives_overflow: crate::conc::ShardMap<DefId, ()>,
     /// each trait with its supertraits, transitively (a trait object implements all of them)
     pub trait_closure: ImageMap<DefId, Vec<DefId>>,
     pub queries: crate::type_queries::QueryCx,
@@ -428,6 +434,7 @@ impl Tcx {
             coroutine_witness_needs_drop: crate::conc::MemoMap::with_bits(10),
             coroutine_hidden_types: crate::conc::MemoMap::new_kept(10),
             coroutine_stalled_predicates: Default::default(),
+            potentially_region_dependent_goals: Default::default(),
             coro_frames: Default::default(),
             coro_shapes: Default::default(),
             coro_slot_ty: Default::default(),
@@ -435,6 +442,7 @@ impl Tcx {
             future_defs: Default::default(),
             opaques: Default::default(),
             inferred_outlives: Default::default(),
+            inferred_outlives_overflow: Default::default(),
             trait_closure: Default::default(),
             queries: crate::type_queries::QueryCx::new(),
             collect_epoch: Default::default(),
@@ -1100,6 +1108,7 @@ impl Tcx {
         self.declarations.invalidate(gone);
         self.alias_tys.clear();
         self.inferred_outlives.clear();
+        self.inferred_outlives_overflow.clear();
         if gone.is_empty() { self.publish_collected(); return; }
         let gone: crate::fxhash::HashSet<_> = gone.iter().copied().collect();
         self.sigs.retain(|d, _| !gone.contains(d));
@@ -1813,8 +1822,11 @@ impl Tcx {
         Some(prog.record_uncoded_error(def.file, pos, "signature", msg))
     }
 
+    /// Signatures computed and resident: a mapped image's entries count once decoded (reading
+    /// all of them here decoded the whole map into the heap: `memory compiler=1` grew the compiler
+    /// arena by 15 MB per call in a Sandbox race).
     pub fn signature_count(&self) -> usize {
-        self.sigs.values().filter(|cell| cell.get().is_some()).count()
+        self.sigs.decoded_values().filter(|cell| cell.get().is_some()).count()
     }
 
     pub fn signature_bytes(&self) -> usize {
@@ -2731,7 +2743,23 @@ impl Tcx {
                 args.push(if declaration.consts.iter().any(|c| c.0 as usize == i) { self.tys.intern(TyKind::Const(self.tys.intern_const(crate::consts::ConstKind::Error))) } else { self.tys.error });
             }
             let bound = u16::try_from(bound).expect("dyn principal bound-region count");
-            return self.tys.intern(TyKind::Dyn(td, self.tys.mk_list(&args), self.tys.mk_list(&binds), regions, region, bound, self.tys.mk_list(&autos)));
+            let object = self.tys.intern(TyKind::Dyn(td, self.tys.mk_list(&args), self.tys.mk_list(&binds), regions, region, bound, self.tys.mk_list(&autos)));
+            // dyn_trait.rs check_elaborated_projection_mentions_input_lifetimes: a projection a
+            // supertrait fixes may not mention a late-bound region of the principal that its
+            // trait's input types do not (E0582: `dyn for<'a> A<&'a _>` with `trait A<T>: B<T = T>`)
+            if bound > 0 && self.validates(prog, file) {
+                let principal = self.object_predicates(prog, object).swap_remove(0);
+                for p in self.supertraits(prog, principal) {
+                    use crate::next_solver::{PredicateKind, ClauseKind, AliasTerm, Term};
+                    let PredicateKind::Clause(ClauseKind::Projection(proj)) = &p.kind else { continue };
+                    let (AliasTerm::Ty(alias), Term::Ty(term)) = (&proj.projection_term, &proj.term) else { continue };
+                    let TyKind::Alias(_, a) = self.tys.kind(*alias).clone() else { continue };
+                    let mut input: Vec<crate::consts::GenericArg> = self.tys.list(a.args).iter().map(|&t| crate::consts::GenericArg::Type(t)).collect();
+                    input.extend(self.tys.region_args(a.regions).iter().map(|&r| crate::consts::GenericArg::Lifetime(r)));
+                    self.validate_late_bound_regions(cx, prog, file, path.lo, &input, &[], *term);
+                }
+            }
+            return object;
         }
         // only auto traits (`dyn Send`, `dyn Send + Sync`): a trait object without a principal
         // (rustc: its vtable is drop, size and align alone); the first auto trait stands for it

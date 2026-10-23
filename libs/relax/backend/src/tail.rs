@@ -148,8 +148,8 @@ pub fn returns_results(f: &Func, mut b: usize, mut at: usize, rets: &[VReg]) -> 
 
 /// MAKEPAD_RUN_TAIL_TRACE=<fn name suffix>: why a matching fn's calls in tail position stay calls.
 fn trace_on(name: &str) -> bool {
-    static P: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    P.get_or_init(|| std::env::var("MAKEPAD_RUN_TAIL_TRACE").ok()).as_deref().is_some_and(|p| name.ends_with(p))
+    static P: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    relax_session::phase::env_once(&P, "MAKEPAD_RUN_TAIL_TRACE").is_some_and(|p| name.ends_with(p))
 }
 
 /// The caller's own convention allows its frame to be replaced: Relax's, or a C body in a

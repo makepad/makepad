@@ -874,6 +874,10 @@ fn mono_check(up: *mut Unit, own: &[bool], root: u32) {
                     }
                 }
             }
+            // (rustc's SizeOverflow of a type the instance lays out: lowering's error, at its use)
+            if let Ok(Err(msg)) = &built {
+                if msg.ends_with("are too big for the target architecture") { (&mut *up).errors.push(msg.clone()); }
+            }
             if !matches!(built, Ok(Ok(()))) { return Vec::new(); }
             let mut out = Vec::new();
             if let Some(f) = &(&*up).fns[id as usize].rir {

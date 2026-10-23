@@ -12,8 +12,10 @@ use makepad_relax_api::relax_api;
 
 use makepad_script::makepad_live_id::*;
 use makepad_script::value::*;
+use makepad_script::heap::ScriptHeap;
 use makepad_script::vm::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 
 /// A top-level statement of a Splash block: its byte range (from the end
 /// of the previous statement, so the comments above it are its own) and
@@ -304,18 +306,7 @@ pub fn top_use_into(vm: &mut ScriptVm, out: &mut BlockReachOut) {
     let heap = &vm.bx.heap;
     let valid = |o: ScriptObject| heap.object_slots().is_valid(o) && heap.object_slots()[o].tag.is_alloced();
     // The module scopes and the preludes hold every name: walls.
-    let mut walls: HashSet<ScriptObject> = HashSet::new();
-    walls.insert(heap.modules);
-    for (key, m) in heap.object_slots()[heap.modules].map.iter() {
-        let Some(module) = m.value.as_object() else { continue };
-        if heap.object_slots()[module].proto != *key {
-            continue;
-        }
-        walls.insert(module);
-        if key.as_id() == Some(id!(prelude)) {
-            walls.extend(heap.object_slots()[module].map.iter().filter_map(|(_, v)| v.value.as_object()));
-        }
-    }
+    let walls = module_walls(heap);
     // The definitions themselves (every value of a module scope): Rust
     // holds each type's proto from its registration on, which is not a use.
     let mut definitions: HashSet<ScriptObject> = HashSet::new();
@@ -371,30 +362,294 @@ pub fn top_use_into(vm: &mut ScriptVm, out: &mut BlockReachOut) {
             }
         }
     }
-    // The object a statement defines: `mod.a.b.C` from the modules down,
-    // `let X` from the block's final scope.
-    let lookup = |from: ScriptObject, name: &str| -> Option<ScriptValue> {
-        let key: ScriptValue = LiveId::from_str(name).into();
-        heap.object_slots()[from].map.iter().find(|(k, _)| **k == key).map(|(_, e)| e.value)
-    };
     for body in vm.bx.code.bodies.borrow().iter() {
         let ScriptSource::Mod(script_mod) = &body.source else { continue };
-        let scope = body.end_scope.as_ref().map(|s| s.as_object()).unwrap_or_else(|| body.scope.as_object());
+        let scope = body_scope(body);
         let statements = top_statements(&script_mod.code)
             .into_iter()
             .map(|s| {
-                let value = match s.path.first().map(String::as_str) {
-                    Some("mod") if s.path.len() >= 3 => s.path[1..].iter().try_fold(heap.modules.into(), |at: ScriptValue, seg| at.as_object().filter(|o| valid(*o)).and_then(|o| lookup(o, seg))),
-                    Some("let") if s.path.len() >= 2 && valid(scope) => lookup(scope, &s.path[1]),
-                    _ => None,
-                };
                 // A prelude or module scope is used by name (`use mod.x.*`).
-                let used = value.and_then(|v| v.as_object()).filter(|o| valid(*o)).map(|o| walls.contains(&o) || reached.contains(&o));
+                let used = defined_object(heap, scope, &s).map(|o| walls.contains(&o) || reached.contains(&o));
                 match used { None => 0u8, Some(false) => 1, Some(true) => 2 }
             })
             .collect::<Vec<u8>>();
         out.block(&script_mod.module_path, &script_mod.file, script_mod.line, script_mod.column, &script_mod.code, &statements);
     }
+}
+
+/// A block's final scope (where its `let`s are).
+fn body_scope(body: &ScriptBody) -> ScriptObject {
+    body.end_scope.as_ref().map(|s| s.as_object()).unwrap_or_else(|| body.scope.as_object())
+}
+
+/// The object a statement defines: `mod.a.b.C` from the modules down,
+/// `let X` from the block's final scope; None when it defines no live object.
+fn defined_object(heap: &ScriptHeap, scope: ScriptObject, s: &TopStatement) -> Option<ScriptObject> {
+    let valid = |o: ScriptObject| heap.object_slots().is_valid(o) && heap.object_slots()[o].tag.is_alloced();
+    let lookup = |from: ScriptObject, name: &str| -> Option<ScriptValue> {
+        let key: ScriptValue = LiveId::from_str(name).into();
+        heap.object_slots()[from].map.iter().find(|(k, _)| **k == key).map(|(_, e)| e.value)
+    };
+    let value = match s.path.first().map(String::as_str) {
+        Some("mod") if s.path.len() >= 3 => s.path[1..].iter().try_fold(heap.modules.into(), |at: ScriptValue, seg| at.as_object().filter(|o| valid(*o)).and_then(|o| lookup(o, seg))),
+        Some("let") if s.path.len() >= 2 && valid(scope) => lookup(scope, &s.path[1]),
+        _ => None,
+    };
+    value.and_then(|v| v.as_object()).filter(|o| valid(*o))
+}
+
+/// The module scopes and the preludes' values: used by name, never by a read of their own.
+fn module_walls(heap: &ScriptHeap) -> HashSet<ScriptObject> {
+    let mut walls: HashSet<ScriptObject> = HashSet::new();
+    walls.insert(heap.modules);
+    for (key, m) in heap.object_slots()[heap.modules].map.iter() {
+        let Some(module) = m.value.as_object() else { continue };
+        if heap.object_slots()[module].proto != *key {
+            continue;
+        }
+        walls.insert(module);
+        if key.as_id() == Some(id!(prelude)) {
+            walls.extend(heap.object_slots()[module].map.iter().filter_map(|(_, v)| v.value.as_object()));
+        }
+    }
+    walls
+}
+
+// ---- Touches: what a run read, not what Rust holds (makepad_script::touch).
+
+/// One block's definitions, as every VM that registered it saw them used.
+struct TouchBlock {
+    module_path: String,
+    file: String,
+    line: usize,
+    column: usize,
+    code: String,
+    /// per statement of [`top_statements`]: 0 defines no object, 1 not touched, 2 touched
+    states: Vec<u8>,
+}
+
+#[derive(Default)]
+struct TouchRecord {
+    blocks: Vec<TouchBlock>,
+    /// (file, line, column, text hash) -> index in `blocks`
+    index: HashMap<(String, usize, usize, u64), usize>,
+    /// a registration's statement (slot) read a definition (slot): kept with it
+    edges: HashSet<(u32, u32)>,
+}
+
+static TOUCHES: Mutex<Option<TouchRecord>> = Mutex::new(None);
+
+fn fnv64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3))
+}
+
+/// A definition slot: block index and statement index.
+const SLOT_BITS: u32 = 16;
+
+fn touch_sink(slot: u32) {
+    let Ok(mut record) = TOUCHES.lock() else { return };
+    let Some(record) = record.as_mut() else { return };
+    if let Some(state) = record.blocks.get_mut((slot >> SLOT_BITS) as usize).and_then(|b| b.states.get_mut((slot & ((1 << SLOT_BITS) - 1)) as usize)) {
+        *state = 2;
+    }
+}
+
+/// Maps the definitions of every evaluated block of `code` not mapped yet: each object a
+/// statement defines is announced to the heap by the ip that made it, so its first read
+/// reports the statement. `late`: blocks mapped only at the end (whatever ran before was not
+/// watched) count as touched.
+fn touch_map_bodies(heap: &ScriptHeap, code: &ScriptCode, late: bool) {
+    let bodies = code.bodies.borrow();
+    // A body that has not run defines nothing yet.
+    let new: Vec<usize> = bodies
+        .iter()
+        .enumerate()
+        .filter(|(id, body)| matches!(body.source, ScriptSource::Mod(_)) && body.source_len > 0 && heap.touch_map_body(*id as u16, body.content_hash))
+        .map(|(id, _)| id)
+        .collect();
+    if new.is_empty() {
+        if let Ok(mut record) = TOUCHES.lock() {
+            if let Some(record) = record.as_mut() {
+                touch_edges(heap, &bodies[..], record);
+            }
+        }
+        return;
+    }
+    let walls = module_walls(heap);
+    let Ok(mut record) = TOUCHES.lock() else { return };
+    let Some(record) = record.as_mut() else { return };
+    for id in new {
+        let body = &bodies[id];
+        let ScriptSource::Mod(m) = &body.source else { continue };
+        let statements = top_statements(&m.code);
+        let key = (m.file.clone(), m.line, m.column, fnv64(m.code.as_bytes()));
+        let at = match record.index.get(&key) {
+            Some(&at) => at,
+            None => {
+                record.blocks.push(TouchBlock { module_path: m.module_path.clone(), file: m.file.clone(), line: m.line, column: m.column, code: m.code.clone(), states: vec![1; statements.len()] });
+                record.index.insert(key, record.blocks.len() - 1);
+                record.blocks.len() - 1
+            }
+        };
+        if statements.len() >= 1 << SLOT_BITS || at >= 1 << (32 - SLOT_BITS) {
+            // Too big to slot: everything in it stays.
+            record.blocks[at].states.iter_mut().for_each(|s| *s = 2);
+            continue;
+        }
+        let scope = body_scope(body);
+        for (si, s) in statements.iter().enumerate() {
+            let state = match defined_object(heap, scope, s) {
+                None => 0,
+                Some(o) if walls.contains(&o) => 2,
+                Some(o) => {
+                    let made_at = heap.made_at(o);
+                    if late || made_at.is_unknown() {
+                        2
+                    } else {
+                        if heap.touch_define(o, made_at, ((at as u32) << SLOT_BITS) | si as u32) { 2 } else { 1 }
+                    }
+                }
+            };
+            // Kept when any VM keeps it: touched, or no object there.
+            let merged = &mut record.blocks[at].states[si];
+            *merged = match (*merged, state) {
+                (2, _) | (_, 2) => 2,
+                (0, _) | (_, 0) => 0,
+                _ => 1,
+            };
+        }
+    }
+    touch_edges(heap, &bodies[..], record);
+}
+
+/// The statement of `body` (its top-level statements `statements`) the opcode `index` belongs to.
+fn statement_at(body: &ScriptBody, statements: &[TopStatement], index: u32) -> Option<usize> {
+    let source_map = &body.parser.source_map;
+    let token = source_map.get(index as usize).copied().flatten().or_else(|| source_map[..(index as usize).min(source_map.len())].iter().rev().find_map(|t| *t))?;
+    let char_pos = body.tokenizer.token_char_pos(token)?;
+    let byte = body.effective_code.char_indices().nth(char_pos).map_or(body.effective_code.len(), |(b, _)| b);
+    statements.iter().position(|s| s.start <= byte && byte < s.end)
+}
+
+/// The registrations' reads as edges between definition slots.
+fn touch_edges(heap: &ScriptHeap, bodies: &[ScriptBody], record: &mut TouchRecord) {
+    let edges = heap.touch_take_edges();
+    if edges.is_empty() {
+        return;
+    }
+    let mut statements: HashMap<u16, Option<(usize, Vec<TopStatement>)>> = HashMap::new();
+    for (reader, target) in edges {
+        let targets = heap.touch_slots(target);
+        if targets.is_empty() {
+            continue;
+        }
+        let at = statements.entry(reader.body).or_insert_with(|| {
+            let body = bodies.get(reader.body as usize)?;
+            let ScriptSource::Mod(m) = &body.source else { return None };
+            let block = *record.index.get(&(m.file.clone(), m.line, m.column, fnv64(m.code.as_bytes())))?;
+            Some((block, top_statements(&m.code)))
+        });
+        let Some((block, stmts)) = at else { continue };
+        let Some(si) = statement_at(&bodies[reader.body as usize], stmts, reader.index) else { continue };
+        let from = ((*block as u32) << SLOT_BITS) | si as u32;
+        for to in targets {
+            if to != from {
+                record.edges.insert((from, to));
+            }
+        }
+    }
+}
+
+fn touch_map(heap: &ScriptHeap, code: &ScriptCode) {
+    touch_map_bodies(heap, code, false);
+}
+
+/// Records touches from now on: in `vm` and in every VM made after (a document's own). Before
+/// the first script module.
+#[relax_api]
+pub fn touch_record(vm: &mut ScriptVm) {
+    if let Ok(mut record) = TOUCHES.lock() {
+        record.get_or_insert_with(Default::default);
+    }
+    let _ = makepad_script::touch::TOUCH_MAP.set(touch_map);
+    let _ = makepad_script::touch::TOUCH_SINK.set(touch_sink);
+    makepad_script::touch::TOUCH_RECORD.store(true, std::sync::atomic::Ordering::Relaxed);
+    vm.bx.heap.touch_start();
+    touch_map_bodies(&vm.bx.heap, &vm.bx.code, false);
+}
+
+/// After a run: every block any VM evaluated, with its statements' use by touches
+/// ([`touch_record`] first; empty without it): read outside a registration, or read by a kept
+/// statement's registration, or kept for what it is (a type's registration, a block's last).
+pub fn touch_use(vm: &mut ScriptVm) -> Vec<BlockUse> {
+    let mut out = Vec::new();
+    touch_use_into(vm, &mut BlockReachOut::new(&mut out));
+    out
+}
+
+/// The record half of [`touch_use`].
+#[relax_api]
+pub fn touch_use_into(vm: &mut ScriptVm, out: &mut BlockReachOut) {
+    touch_map_bodies(&vm.bx.heap, &vm.bx.code, true);
+    let Ok(record) = TOUCHES.lock() else { return };
+    let Some(record) = record.as_ref() else { return };
+    let mut states: Vec<Vec<u8>> = record.blocks.iter().map(|b| b.states.clone()).collect();
+    // A type's registration stays: Rust checks fields against the type by that object.
+    let mut block_statements: Vec<Vec<TopStatement>> = Vec::with_capacity(record.blocks.len());
+    for (bi, b) in record.blocks.iter().enumerate() {
+        let statements = top_statements(&b.code);
+        for (si, s) in statements.iter().enumerate() {
+            if states[bi].get(si) == Some(&1) && registers(&b.code[s.start..s.end]) {
+                states[bi][si] = 2;
+            }
+        }
+        block_statements.push(statements);
+    }
+    let mut next: HashMap<u32, Vec<u32>> = HashMap::new();
+    for &(from, to) in &record.edges {
+        next.entry(from).or_default().push(to);
+    }
+    let slot_state = |states: &Vec<Vec<u8>>, slot: u32| states.get((slot >> SLOT_BITS) as usize).and_then(|b| b.get((slot & ((1 << SLOT_BITS) - 1)) as usize)).copied();
+    // What a kept statement read while it registered is kept with it.
+    let close = |states: &mut Vec<Vec<u8>>, mut stack: Vec<u32>| {
+        while let Some(from) = stack.pop() {
+            for &to in next.get(&from).map(Vec::as_slice).unwrap_or(&[]) {
+                if slot_state(states, to) == Some(1) {
+                    states[(to >> SLOT_BITS) as usize][(to & ((1 << SLOT_BITS) - 1)) as usize] = 2;
+                    stack.push(to);
+                }
+            }
+        }
+    };
+    let roots: Vec<u32> = next.keys().copied().filter(|&s| matches!(slot_state(&states, s), Some(0) | Some(2))).collect();
+    close(&mut states, roots);
+    // A block that would end in a `use` (or in nothing) does not evaluate: then its last
+    // statement stays. A block ending in any other kept statement ends well (the blanked rest
+    // is spaces).
+    let mut lasts = Vec::new();
+    for (bi, statements) in block_statements.iter().enumerate() {
+        let st = &mut states[bi];
+        let Some(last) = st.len().checked_sub(1) else { continue };
+        let ends_in_use = match st.iter().rposition(|&k| k != 1) {
+            None => true,
+            Some(i) => statements.get(i).and_then(|s| s.path.first()).map(String::as_str) == Some("use"),
+        };
+        if ends_in_use && st[last] == 1 {
+            st[last] = 2;
+            lasts.push(((bi as u32) << SLOT_BITS) | last as u32);
+        }
+    }
+    close(&mut states, lasts);
+    for (b, st) in record.blocks.iter().zip(&states) {
+        out.block(&b.module_path, &b.file, b.line, b.column, &b.code, st);
+    }
+}
+
+/// Whether a statement is a Rust type's registration (`= #(..)`, `= set_type_default() do
+/// #(..)`): Rust checks fields against the type by that object.
+fn registers(text: &str) -> bool {
+    let rhs = text.split_once('=').map(|(_, r)| r.trim_start()).unwrap_or("");
+    rhs.starts_with("#(") || rhs.starts_with("set_type_default() do #(")
 }
 
 /// The text half of [`top_use`]: statements kept for what they are or for
@@ -408,10 +663,7 @@ fn keep_named(out: &mut [BlockUse]) {
         let code = block.code.clone();
         let last = block.statements.len().saturating_sub(1);
         for (i, (s, used)) in block.statements.iter_mut().enumerate() {
-            let text = &code[s.start..s.end];
-            let rhs = text.split_once('=').map(|(_, r)| r.trim_start()).unwrap_or("");
-            let registers = rhs.starts_with("#(") || rhs.starts_with("set_type_default() do #(");
-            if *used == Some(false) && (i == last || registers) {
+            if *used == Some(false) && (i == last || registers(&code[s.start..s.end])) {
                 *used = Some(true);
             }
         }

@@ -4124,7 +4124,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs, quiet: bool) {
     // edit made before it is simply what the load read)
     let mut loads_seen = jit::DEFERRED_LOADS.load(std::sync::atomic::Ordering::Relaxed);
     let mut events = watch_events::Watch::new(files.iter().map(|f| f.0.as_str()));
-    if !quiet { eprintln!("makepad live: watching {} source files; session log {}", files.len(), live_log_path()); }
+    if !quiet && crate::run::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) { eprintln!("makepad live: watching {} source files; session log {}", files.len(), live_log_path()); }
     let mut undos: Vec<Undo> = Vec::new();
     // SPEC-V: patches that ran before their verdict
     let mut pending: Vec<PendingPatch> = Vec::new();

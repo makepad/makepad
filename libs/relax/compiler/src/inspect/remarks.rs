@@ -158,7 +158,7 @@ pub fn cmd_remarks(req: &Req, out: &mut Out) {
                     "`{}` (@{}): {}; code: {}",
                     short(&f.name, 100),
                     id,
-                    if built { "its last O3 build kept no call as a call and spilled no value" } else { "no O3 build recorded in this run (O3 code from the disk cache or the startup image carries no remarks: `tier <fn> o3 fresh=1` builds it again)" },
+                    if built { "its last O3 build kept no call as a call and spilled no value" } else { "no O3 build recorded in this run (O3 code from the disk cache or the startup image carries no remarks: `tier <fn> o3 fresh=1` builds it again; why it is not at O3: `why-tier <fn>`)" },
                     if tiers.is_empty() { "none".into() } else { tiers.join(", ") }
                 ));
                 continue;

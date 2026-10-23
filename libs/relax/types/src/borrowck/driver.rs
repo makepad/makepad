@@ -67,6 +67,24 @@ fn closure_extent(ast: &crate::ast::Ast, c: u32) -> (u32, u32) {
     }
 }
 
+/// The inline constants a body (and its promoted bodies) uses: constant operands of their definitions.
+fn created_inline_consts(prog: &Program, mir: &Body, out: &mut Vec<u32>) {
+    use crate::mir::{Const, Location, Operand};
+    struct V<'a> { prog: &'a Program, out: &'a mut Vec<u32> }
+    impl crate::mir::visit::Visitor for V<'_> {
+        fn visit_operand(&mut self, op: &Operand, _: Location) {
+            if let Operand::Constant(c) = op {
+                if let Const::Unevaluated { def, promoted: None, .. } = &c.const_ {
+                    if let Some((_, relax_front::def_collector::NodeId::InlineConst(e))) = self.prog.def_id_to_node_id.get(def) { self.out.push(e.0); }
+                }
+            }
+        }
+    }
+    use crate::mir::visit::Visitor;
+    V { prog, out }.visit_body(mir);
+    for p in &mir.promoted { created_inline_consts(prog, p, out); }
+}
+
 /// The closures a body (and its promoted bodies) creates.
 fn created_closures(mir: &Body, out: &mut Vec<u32>) {
     use crate::mir::{AggregateKind, Rvalue, StatementKind};
@@ -102,6 +120,9 @@ pub fn check_root(cx: &EvalCx<'_>, prog: &Program, tcx: &Tcx, typeck: &typeck::B
     for &c in &closure_order {
         owners.push(CheckedBody { owner: typeck.def, kind: OwnerKind::Closure(crate::ast::ExprId(c)) });
     }
+    for c in body::inline_const_children(prog, tcx, typeck) {
+        owners.push(CheckedBody { owner: typeck.def, kind: OwnerKind::InlineConst(crate::ast::ExprId(c)) });
+    }
     let Some(item) = CheckedBody::item(prog, typeck.def) else {
         let d = prog.def(typeck.def);
         v.unchecked.push(format!("{name}: not a body owner ({:?}, item kind {})", d.kind, match &prog.files[d.file as usize].ast.item(d.item).kind { crate::ast::ItemKind::Static(_, _, init) => format!("static init={}", init.is_some()), _ => "other".into() }));
@@ -113,6 +134,7 @@ pub fn check_root(cx: &EvalCx<'_>, prog: &Program, tcx: &Tcx, typeck: &typeck::B
     for child in body::const_children(prog, tcx, typeck) {
         check_group(&g, &[child], true, &mut v);
     }
+    tcx.potentially_region_dependent_goals.lock().unwrap_or_else(|e| e.into_inner()).remove(&typeck.def);
     v
 }
 
@@ -149,7 +171,7 @@ fn publish_coroutine_witnesses(prog: &Program, tcx: &Tcx, env: TypingEnv, typeck
 /// rustc `check_coroutine_obligations`: the goals the root's typeck stalled on its coroutines are proven now
 /// that the witnesses are known (mode `borrowck`, regions ignored); what does not hold is a normal error.
 fn check_coroutine_obligations(prog: &Program, tcx: &Tcx, env: TypingEnv, typeck: &typeck::Body, v: &mut Verdict) {
-    use crate::next_solver::fulfill::{NextSolverError, ObligationCause, ObligationCtxt};
+    use crate::next_solver::fulfill::{ObligationCause, ObligationCtxt};
     let goals = tcx.coroutine_stalled_predicates.lock().unwrap_or_else(|e| e.into_inner()).remove(&typeck.def);
     let Some(goals) = goals else { return };
     let infcx = crate::infer::InferCtxt::for_item(tcx, prog, env.mode, typeck.def);
@@ -158,13 +180,43 @@ fn check_coroutine_obligations(prog: &Program, tcx: &Tcx, env: TypingEnv, typeck
         ocx.cause = ObligationCause { span, body_id: typeck.def };
         ocx.register_obligation(goal);
     }
-    for error in ocx.engine.evaluate_obligations_error_on_ambiguity(&infcx, prog) {
+    let errors = ocx.engine.evaluate_obligations_error_on_ambiguity(&infcx, prog);
+    report_fulfillment_errors(prog, tcx, &infcx, typeck, errors, v);
+}
+
+/// rustc_hir_analysis check.rs check_potentially_region_dependent_goals (asked by a failing type op of the
+/// root's borrow check, custom.rs scrape_region_constraints): the goals HIR typeck proved that may depend on
+/// the identity of their regions, each region a fresh variable, proven again in the borrowck typing mode
+/// with region constraints ignored; what fails or stays ambiguous is reported.
+fn check_potentially_region_dependent_goals(prog: &Program, tcx: &Tcx, env: TypingEnv, typeck: &typeck::Body, goals: Vec<(crate::next_solver::Goal, u32)>, v: &mut Verdict) {
+    use crate::next_solver::fulfill::{ObligationCause, ObligationCtxt};
+    struct FreshRegions<'i, 'a>(&'i crate::infer::InferCtxt<'a>);
+    impl crate::types::fold::TypeFolder for FreshRegions<'_, '_> {
+        fn fold_region(&mut self, tys: &crate::types::Types, r: crate::types::RegionId, depth: u32) -> crate::types::RegionId {
+            if matches!(tys.region_kind(r), crate::types::RegionKind::ReBound(db, _) if db < depth) { r } else { self.0.next_region_var() }
+        }
+    }
+    let infcx = crate::infer::InferCtxt::for_item(tcx, prog, env.mode, typeck.def);
+    let mut ocx = ObligationCtxt::new(&infcx, prog);
+    for (goal, span) in goals {
+        let predicate = crate::next_solver::fold::fold_predicate(&tcx.tys, &goal.predicate, &mut FreshRegions(&infcx));
+        ocx.cause = ObligationCause { span, body_id: typeck.def };
+        ocx.register_obligation(crate::next_solver::Goal { param_env: goal.param_env, predicate });
+    }
+    let errors = ocx.engine.evaluate_obligations_error_on_ambiguity(&infcx, prog);
+    report_fulfillment_errors(prog, tcx, &infcx, typeck, errors, v);
+}
+
+/// report_fulfillment_errors of goals proven for the borrow check of `typeck`'s root.
+fn report_fulfillment_errors(prog: &Program, tcx: &Tcx, infcx: &crate::infer::InferCtxt<'_>, typeck: &typeck::Body, errors: Vec<crate::next_solver::fulfill::NextSolverError>, v: &mut Verdict) {
+    use crate::next_solver::fulfill::NextSolverError;
+    for error in errors {
         let (code, o) = match error {
             NextSolverError::TrueError(o) => ("E0277", o),
             NextSolverError::Ambiguity(o) => ("E0283", o),
             NextSolverError::Overflow(o) => ("E0275", o),
         };
-        if crate::wfcheck::obligations::predicate_mentions_error(&infcx, &o.goal.predicate) { continue; }
+        if crate::wfcheck::obligations::predicate_mentions_error(infcx, &o.goal.predicate) { continue; }
         let message = match &o.goal.predicate.kind {
             crate::next_solver::PredicateKind::Clause(crate::next_solver::ClauseKind::Trait(p)) => {
                 let message = typeck::trait_error_message(prog, tcx, code, p, &mut |t| typeck::ty_to_string(false, prog, tcx, t));
@@ -173,7 +225,7 @@ fn check_coroutine_obligations(prog: &Program, tcx: &Tcx, env: TypingEnv, typeck
                     "future cannot be sent between threads safely".to_string()
                 } else { message }
             }
-            predicate => crate::wfcheck::obligations::fulfillment_message(&infcx, prog, code, &o.goal).unwrap_or_else(|| format!("unsatisfied obligation {predicate:?}")),
+            predicate => crate::wfcheck::obligations::fulfillment_message(infcx, prog, code, &o.goal).unwrap_or_else(|| format!("unsatisfied obligation {predicate:?}")),
         };
         let span = Span { file: typeck.file, lo: o.cause.span, hi: o.cause.span };
         let mut d = diagnostics::Diag::new(code, span, message);
@@ -277,14 +329,15 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
     // expansions give nested closures equal spans. Inner bodies come first, as do_mir_borrowck requires.
     let mut creator: crate::fxhash::HashMap<u32, Option<u32>> = Default::default();
     for (owner, mir) in &built {
-        let by = match owner.kind { OwnerKind::Closure(e) => Some(e.0), _ => None };
+        let by = match owner.kind { OwnerKind::Closure(e) | OwnerKind::InlineConst(e) => Some(e.0), _ => None };
         let mut created = vec![];
         created_closures(mir, &mut created);
+        created_inline_consts(prog, mir, &mut created);
         for c in created { creator.insert(c, by); }
     }
     let depth = |c: u32| { let (mut d, mut at) = (1usize, c); while let Some(Some(p)) = creator.get(&at) { d += 1; at = *p; if d > creator.len() + 1 { break; } } d };
-    built.sort_by_key(|(o, _)| std::cmp::Reverse(match o.kind { OwnerKind::Closure(e) => depth(e.0), _ => 0 }));
-    let closure_order: Vec<u32> = built.iter().filter_map(|(o, _)| match o.kind { OwnerKind::Closure(e) => Some(e.0), _ => None }).collect();
+    built.sort_by_key(|(o, _)| std::cmp::Reverse(match o.kind { OwnerKind::Closure(e) | OwnerKind::InlineConst(e) => depth(e.0), _ => 0 }));
+    let closure_order: Vec<u32> = built.iter().filter_map(|(o, _)| match o.kind { OwnerKind::Closure(e) | OwnerKind::InlineConst(e) => Some(e.0), _ => None }).collect();
     // `mir_coroutine_witnesses` of the coroutines of this root: dropck of their creators, auto traits.
     publish_coroutine_witnesses(prog, tcx, env, typeck, &built);
     check_coroutine_obligations(prog, tcx, env, typeck, v);
@@ -300,6 +353,14 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
     // run inner-first, so this is a pass of its own over the built bodies).
     let mut closure_sigs: crate::fxhash::HashMap<u32, SignatureRegions> = Default::default();
     for &c in closure_order.iter().rev() {
+        let parent = match creator.get(&c).copied().flatten().and_then(|p| closure_sigs.get(&p)) {
+            Some(p) => p.clone(),
+            None => item_sig.clone(),
+        };
+        if let Some(&ty) = typeck.inline_const_types.get(&c).filter(|_| built.iter().any(|(o, _)| matches!(o.kind, OwnerKind::InlineConst(e) if e.0 == c))) {
+            closure_sigs.insert(c, SignatureRegions::inline_const_in(tcx, prog, typeck.def, c, ty, parent));
+            continue;
+        }
         let Some((_, mir)) = built.iter().find(|(o, _)| matches!(o.kind, OwnerKind::Closure(e) if e.0 == c)) else { continue };
         // A coroutine (async block, async fn body) has no written signature: rustc's
         // `DefiningTy::Coroutine` has the resume argument as its one input and the return type as
@@ -313,10 +374,6 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
                 &synthesized
             }
             (None, None) => { v.unchecked.push(format!("{name}: closure without a signature")); return; }
-        };
-        let parent = match creator.get(&c).copied().flatten().and_then(|p| closure_sigs.get(&p)) {
-            Some(p) => p.clone(),
-            None => item_sig.clone(),
         };
         let env_ty = mir.local_decls.get(1).map_or(tcx.tys.unit, |d| d.ty);
         let plan = super::universal_regions::coroutine_closure_upvars(typeck, c);
@@ -333,6 +390,11 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
                 let key = if mir.coroutine.is_some() { ClauseOwner::Coroutine(id) } else { ClauseOwner::Closure(id) };
                 (sig, key, true)
             }
+            OwnerKind::InlineConst(e) => {
+                let Some(sig) = closure_sigs.get(&e.0).cloned() else { v.unchecked.push(format!("{name}: inline const without universal regions")); return; };
+                let Some(&def) = prog.node_id_to_def_id.get(&(typeck.file, relax_front::def_collector::NodeId::InlineConst(e))) else { v.unchecked.push(format!("{name}: inline const definition")); return; };
+                (sig, ClauseOwner::Def(def), true)
+            }
             _ => (item_sig.clone(), ClauseOwner::Def(typeck.def), false),
         };
         let moves = MoveData::gather_moves(&mir, prog, tcx, env, &|_| true);
@@ -347,6 +409,11 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
             }
         };
         prepared.push(Prepared { owner, key, nested, mir, moves, sig, infcx, typeck: Some(tc) });
+    }
+    // A failing type op asks for the root's potentially region-dependent goals (a query: once per root).
+    if prepared.iter().any(|p| p.infcx.type_op_failed.get()) {
+        let goals = tcx.potentially_region_dependent_goals.lock().unwrap_or_else(|e| e.into_inner()).remove(&typeck.def);
+        if let Some(goals) = goals { check_potentially_region_dependent_goals(prog, tcx, env, typeck, goals, v); }
     }
 
     // The type check's own findings (E0161 and friends) and its internal-error reports.

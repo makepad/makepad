@@ -3232,6 +3232,8 @@ impl<'a> ScriptVm<'a> {
             }
             // lets point our thread to it
             let result = self.run_root(body_id);
+            self.bx.heap.touch_evaluated_body(body_id);
+            self.bx.heap.touch_map(&self.bx.code);
             // Mark the result object with FROM_EVAL flag
             if let Some(result_obj) = result.as_object() {
                 self.bx.heap.set_from_eval(result_obj);

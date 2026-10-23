@@ -611,6 +611,7 @@ pub fn new_cx_with_font_set(
     // the module census from before the first script module.
     if crate::splash_trace::requested() {
         cx.record_module_census();
+        cx.with_vm(|vm| makepad_script_census::touch_record(vm));
     }
     #[cfg(not(target_arch = "wasm32"))]
     cx.init_splash_blank_from_env();

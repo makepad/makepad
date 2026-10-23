@@ -320,8 +320,11 @@ if ($doTunnel) {
 
     # Rights of the tunnel account (only now does its SID resolve).
     $sid = (New-Object Security.Principal.NTAccount $TunnelAccount).Translate([Security.Principal.SecurityIdentifier]).Value
-    & icacls.exe $tunnelDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' "*$($sid):(OI)(CI)M" /T /Q | Out-Null
+    & icacls.exe $tunnelDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' "*$($sid):(OI)(CI)M" /Q | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'icacls failed on the tunnel directory' }
+    # Children inherit the directory's ACL (an explicit /T grant with (OI)(CI) leaves files with an empty DACL).
+    & icacls.exe (Join-Path $tunnelDir '*') /reset /T /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'icacls failed on the tunnel files' }
     & icacls.exe $InstallDir /grant "*$($sid):(OI)(CI)RX" /Q | Out-Null
     Grant $nodeDir '(OI)(CI)M'
     Write-Step 'granting the tunnel its working directory and cargo cache (can take a few minutes on a big checkout)'

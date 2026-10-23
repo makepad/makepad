@@ -313,8 +313,11 @@ fn thread_start(arg: *mut u8) {
     let mut start = unsafe { Box::from_raw(arg as *mut ThreadStart) };
     if let Some(name) = &start.thread.inner.name {
         sys::os::set_thread_name(name.as_ptr());
-        extern "C" { fn __relax_domain_name(name: *const u8); }
-        unsafe { __relax_domain_name(name.as_ptr() as *const u8); }
+        #[cfg(not(relax_web))]
+        {
+            extern "C" { fn __relax_domain_name(name: *const u8); }
+            unsafe { __relax_domain_name(name.as_ptr() as *const u8); }
+        }
     }
     set_current(start.thread.clone());
     let mut main = start.main.take();

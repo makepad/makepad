@@ -271,7 +271,7 @@ pub fn uses_defs(i: &Inst, uses: &mut Vec<VReg>, defs: &mut Vec<VReg>) {
             uses.push(*a);
             uses.push(*b);
         }
-        Inst::Fence(..) => {}
+        Inst::Fence(..) | Inst::Coverage { .. } => {}
         Inst::FpEnv(true, v) => uses.push(*v),
         Inst::FpEnv(false, v) => defs.push(*v),
         Inst::Cpuid(ds, a, b) => { uses.push(*a); uses.push(*b); defs.extend_from_slice(ds); }
@@ -381,7 +381,7 @@ pub fn for_uses(i: &Inst, mut uses: impl FnMut(VReg)) {
             uses(*a);
             uses(*b);
         }
-        Inst::Fence(..) | Inst::FpEnv(false, _) => {}
+        Inst::Fence(..) | Inst::Coverage { .. } | Inst::FpEnv(false, _) => {}
         Inst::FpEnv(true, v) => uses(*v),
         Inst::Cpuid(_, a, b) => { uses(*a); uses(*b); }
         Inst::Xgetbv(_, a) => uses(*a),
@@ -445,7 +445,7 @@ pub fn for_uses(i: &Inst, mut uses: impl FnMut(VReg)) {
 #[inline]
 pub fn for_defs(i: &Inst, mut defs: impl FnMut(VReg)) {
     match i {
-        Inst::Store(..) | Inst::StoreX(..) | Inst::Copy(..) | Inst::Fence(..) | Inst::VStore(..) | Inst::VStoreX(..) | Inst::AtomicStore(..) | Inst::FpEnv(true, _) => {}
+        Inst::Store(..) | Inst::StoreX(..) | Inst::Copy(..) | Inst::Fence(..) | Inst::Coverage { .. } | Inst::VStore(..) | Inst::VStoreX(..) | Inst::AtomicStore(..) | Inst::FpEnv(true, _) => {}
         Inst::FpEnv(false, d) => defs(*d),
         Inst::Cpuid(ds, _, _) => { for d in ds { defs(*d); } }
         Inst::Xgetbv(d, _) => defs(*d),

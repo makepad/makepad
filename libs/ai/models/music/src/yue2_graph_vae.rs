@@ -1,8 +1,11 @@
-//! Oobleck decoder: one reusable Metal graph per padded tile shape. GEMMs
-//! use half operands and f32 accumulation, with f32 Snake/residual states.
-//! Transpose-convolution is two GEMMs plus an exact overlap-add/crop in IR.
-//! Narrow output convolutions put time on the 64-wide GEMM axis and pad
-//! weights to its 32-column tile, then crop whole contiguous channel rows.
+//! Oobleck decoder: one reusable graph per padded tile shape, on Metal or
+//! CUDA. GEMMs use half weights and f32 accumulation, with f32 Snake/residual
+//! states. Transpose-convolution is two GEMMs plus an exact overlap-add/crop
+//! in IR. On Metal, im2col columns are half (the simdgroup GEMM rounds them
+//! anyway) and narrow output convolutions put time on the 64-wide GEMM axis,
+//! padding weights to its 32-column tile, then crop whole contiguous channel
+//! rows. The CUDA graph executor takes f32 activations into its f16-weight
+//! GEMM, so there the columns stay f32 and every GEMM is weights x columns.
 
 use crate::backend::{metal, BufferStorageMode, DeviceGraphSession, DeviceRuntime, GraphDevice};
 use crate::oobleck::YUE2_OOBLECK;
@@ -21,6 +24,9 @@ const A: BufferUsage = BufferUsage::Activations;
 // Includes weights, input, planned scratch and executor tails. A smaller
 // core is selected BEFORE allocation if the planner exceeds this budget.
 const ARENA_BYTES: usize = 1_500_000_000;
+// CUDA keeps f32 im2col columns (twice the Metal slab), so its session is
+// allowed twice the Metal arena before the core is halved.
+const CUDA_ARENA_BYTES: usize = 2 * ARENA_BYTES;
 type IrResult<T> = std::result::Result<T, String>;
 
 #[derive(Clone, Copy)]
@@ -97,10 +103,10 @@ fn specs() -> Vec<Spec> {
     s
 }
 
-fn load_weights(state_bytes: usize) -> Result<(Context, HashMap<String, TensorId>)> {
+fn load_weights(state_bytes: usize, device: GraphDevice) -> Result<(Context, HashMap<String, TensorId>)> {
     let specs = specs();
     let size: usize = specs.iter().map(Spec::bytes).sum();
-    let mut ctx = arena_context(size + state_bytes, GraphDevice::Metal);
+    let mut ctx = arena_context(size + state_bytes, device);
     let mut ids = HashMap::new();
     for s in specs {
         if let Source::Up { input, output, stride } = s.source {
@@ -154,7 +160,10 @@ fn half_bytes(values: impl Iterator<Item = f32>) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn upload_weights(source: &ShardedSafetensors, ctx: &Context, ids: &HashMap<String, TensorId>, session: &DeviceGraphSession) -> Result<()> {
+/// Fold and pack every weight, handing each tensor's bytes to `put`: Metal
+/// writes its device buffers after compilation, CUDA fills the context image
+/// that compilation uploads.
+fn pack_weights(source: &ShardedSafetensors, ids: &HashMap<String, TensorId>, put: &mut dyn FnMut(TensorId, &[u8]) -> Result<()>) -> Result<()> {
     for s in specs() {
         match s.source {
             Source::Up { input, output, stride } => {
@@ -168,7 +177,7 @@ fn upload_weights(source: &ShardedSafetensors, ctx: &Context, ids: &HashMap<Stri
                         let r = i / (input * output);
                         v[(c * output + o) * (2 * stride) + r + shift]
                     }))?;
-                    write_metal_tensor(session, ctx, ids[&format!("{}.{part}", s.name)], &bytes)?;
+                    put(ids[&format!("{}.{part}", s.name)], &bytes)?;
                 }
             }
             Source::Conv { rows } => {
@@ -176,7 +185,7 @@ fn upload_weights(source: &ShardedSafetensors, ctx: &Context, ids: &HashMap<Stri
                 let mut bytes = half_bytes(v.into_iter())?;
                 // Fold only real channels; dummy GEMM columns are exact zero.
                 bytes.resize(s.packed_shape().iter().product::<i64>() as usize * 2, 0);
-                write_metal_tensor(session, ctx, ids[&s.name], &bytes)?;
+                put(ids[&s.name], &bytes)?;
             }
             _ => {
                 let mut v = source.tensor_f32(&s.name, "yue2 graph VAE")?;
@@ -185,7 +194,7 @@ fn upload_weights(source: &ShardedSafetensors, ctx: &Context, ids: &HashMap<Stri
                     Source::InvBeta => v.iter_mut().for_each(|x| *x = 1.0 / (x.exp() + 1e-9)),
                     _ => {}
                 }
-                write_metal_tensor(session, ctx, ids[&s.name], bytes_f32(&v))?;
+                put(ids[&s.name], bytes_f32(&v))?;
             }
         }
     }
@@ -232,7 +241,7 @@ impl TileInput {
     }
 }
 
-struct Builder<'a> { ctx: &'a mut Context, ids: &'a HashMap<String, TensorId> }
+struct Builder<'a> { ctx: &'a mut Context, ids: &'a HashMap<String, TensorId>, cuda: bool }
 
 impl Builder<'_> {
     fn id(&self, name: &str) -> IrResult<TensorId> { self.ids.get(name).copied().ok_or_else(|| format!("missing VAE graph weight {name}")) }
@@ -282,13 +291,22 @@ impl Builder<'_> {
             let x = self.ctx.transpose(x)?;
             self.ctx.cont(x)?
         } else {
-            // The existing simdgroup GEMM already rounds both operands to
-            // half. Materialize columns at that precision to halve scratch.
+            // Metal: the simdgroup GEMM already rounds both operands to half,
+            // so materialize columns at that precision to halve scratch.
+            // CUDA: the f16-weight GEMM takes f32 activations.
+            let cols_ty = if self.cuda { TensorType::F32 } else { TensorType::F16 };
             self.ctx.im2col(w, x, 1, 1, ((shape[0] - 1) * dilation as i64 / 2) as i32, 0,
-                dilation as i32, 1, false, TensorType::F16, A)?
+                dilation as i32, 1, false, cols_ty, A)?
         };
         let w = self.ctx.reshape(w, &[shape[0] * shape[1], shape[2]])?;
-        let mut y = if channels < 64 {
+        let mut y = if channels < 64 && self.cuda {
+            // [K,32] x [K,T] -> [32,T], then time-major and crop the real rows.
+            let y = self.matmul(w, cols, &format!("{p}.gemm"))?;
+            let y = self.ctx.transpose(y)?;
+            let y = self.ctx.cont(y)?;
+            let len = self.ctx.tensor(y).unwrap().ne[0];
+            self.ctx.view_2d(y, len, channels as i64, len as usize * 4, 0)?
+        } else if channels < 64 {
             // [K,T] x [K,32] -> [T,32]. Time fills the 64-wide axis;
             // stereo occupies two whole rows, so cropping needs no copy.
             // Using [K,2] as src1 would select mul_mv_ext instead of mul_mm.
@@ -352,13 +370,13 @@ struct TileGraph {
     output: TensorId,
 }
 
-fn build_tile(ctx: &mut Context, ids: &HashMap<String, TensorId>, layout: &TileInput) -> IrResult<TileGraph> {
+fn build_tile(ctx: &mut Context, ids: &HashMap<String, TensorId>, layout: &TileInput, cuda: bool) -> IrResult<TileGraph> {
     let input = leaf(ctx, TensorType::F32, &[layout.elements as i64])?;
     let x = ctx.view_2d(input, YUE2_LATENT_DIM as i64, layout.frames as i64, YUE2_LATENT_DIM * 4, 0)?;
     let masks = layout.masks.iter().map(|&(offset, len)| {
         ctx.view_2d(input, len as i64, 1, len * 4, offset * 4)
     }).collect::<IrResult<Vec<_>>>()?;
-    let mut b = Builder { ctx, ids };
+    let mut b = Builder { ctx, ids, cuda };
     let mut stages = Vec::new();
     let x = b.ctx.transpose(x)?;
     let x = b.ctx.cont(x)?;
@@ -472,12 +490,21 @@ fn profile_tile(
 
 pub struct Yue2GraphVae { weights: ShardedSafetensors }
 
+/// One compiled tile graph and the context it runs over.
+struct Prepared {
+    ctx: Context,
+    layout: TileInput,
+    graph: TileGraph,
+    session: DeviceGraphSession,
+    core: usize,
+    /// Metal only: the prepared plan, for the GEMM audit and profiling.
+    metal_plan: Option<metal::MetalPreparedGraph>,
+}
+
 impl Yue2GraphVae {
     pub fn load(dir: impl AsRef<Path>) -> Result<Self> {
-        let runtime = DeviceRuntime::new()?;
-        if runtime.device() != GraphDevice::Metal {
-            return Err(DiffusionError::model("yue2 graph VAE requires Metal (CUDA graph executor has no Im2col/Sin)"));
-        }
+        // Fail early when neither graph device exists.
+        DeviceRuntime::new()?;
         let weights = ShardedSafetensors::load(dir.as_ref().join("model.safetensors"), "yue2 graph VAE")?;
         Ok(Self { weights })
     }
@@ -486,23 +513,15 @@ impl Yue2GraphVae {
         YUE2_OOBLECK.strides.iter().fold(frames, |n, &s| up_length(n, s))
     }
 
-    pub fn decode_prefix(&self, latents: &[f32], output_frames: usize, progress: &mut dyn FnMut(Yue2Progress) -> Result<()>) -> Result<Vec<f32>> {
-        let began = Instant::now();
-        if latents.len() % YUE2_LATENT_DIM != 0 || output_frames == 0 || output_frames > latents.len() / YUE2_LATENT_DIM {
-            return Err(DiffusionError::workflow("yue2 graph VAE latent shape"));
-        }
-        let frames = latents.len() / YUE2_LATENT_DIM;
+    /// Metal: the planner's arena is checked against the budget BEFORE any
+    /// allocation, then weights go straight into the device buffers.
+    fn prepare_metal(&self, runtime: metal::MetalRuntime, frames: usize, output_frames: usize, began: Instant) -> Result<Prepared> {
         let halo = YUE2_VAE_HALO_FRAMES;
-        let profile = matches!(std::env::var("MAKEPAD_YUE2_VAE_PROFILE").as_deref(), Ok("1"));
-        // Keep the resident decoder Send; the runtime is owned by this call.
-        let DeviceRuntime::Metal(runtime) = DeviceRuntime::new()? else {
-            return Err(DiffusionError::model("yue2 graph VAE requires Metal"));
-        };
         let mut core = YUE2_VAE_CORE_FRAMES.min(output_frames);
-        let (ctx, ids, layout, g, prepared) = loop {
+        let (ctx, ids, layout, graph, prepared) = loop {
             let layout = TileInput::new(frames.min(core + 2 * halo));
-            let (mut ctx, ids) = load_weights(padded(layout.elements * 4))?;
-            let g = build_tile(&mut ctx, &ids, &layout).map_err(DiffusionError::model)?;
+            let (mut ctx, ids) = load_weights(padded(layout.elements * 4), GraphDevice::Metal)?;
+            let g = build_tile(&mut ctx, &ids, &layout, false).map_err(DiffusionError::model)?;
             let prepared = metal::prepare_graph_with_reuse_cooldown(&ctx, &g.graph, runtime.features(), 0)
                 .map_err(DiffusionError::model)?;
             let bytes = prepared.main_buffer_size + prepared.tail_buffer_size;
@@ -516,6 +535,7 @@ impl Yue2GraphVae {
             core = core.div_ceil(2);
             eprintln!("yue2 graph VAE: reducing core to {core} to reuse a smaller arena; all latents retained");
         };
+        let profile = matches!(std::env::var("MAKEPAD_YUE2_VAE_PROFILE").as_deref(), Ok("1"));
         audit_gemms(&ctx, &prepared, profile).map_err(DiffusionError::model)?;
         let weights: usize = specs().iter().map(Spec::bytes).sum();
         let buffers = metal::MetalContextBuffers {
@@ -530,9 +550,54 @@ impl Yue2GraphVae {
         eprintln!("yue2 graph VAE compile/plan: {:.3}s weights={weights} scratch={} input={} bytes",
             began.elapsed().as_secs_f64(), prepared.main_buffer_size - ctx.used_mem(), layout.elements * 4);
         let upload = Instant::now();
-        upload_weights(&self.weights, &ctx, &ids, &session)?;
+        pack_weights(&self.weights, &ids, &mut |id, bytes| write_metal_tensor(&session, &ctx, id, bytes))?;
         eprintln!("yue2 graph VAE weight fold/pack/upload: {:.3}s", upload.elapsed().as_secs_f64());
-        let DeviceGraphSession::Metal(session) = session else { unreachable!() };
+        Ok(Prepared { ctx, layout, graph, session, core, metal_plan: Some(prepared) })
+    }
+
+    /// CUDA: weights fill the context image before compilation uploads it;
+    /// the session's device footprint is checked against the budget and the
+    /// core halved (recompiling) when it is over.
+    fn prepare_cuda(&self, runtime: &DeviceRuntime, frames: usize, output_frames: usize, began: Instant) -> Result<Prepared> {
+        let halo = YUE2_VAE_HALO_FRAMES;
+        let mut core = YUE2_VAE_CORE_FRAMES.min(output_frames);
+        loop {
+            let layout = TileInput::new(frames.min(core + 2 * halo));
+            let (mut ctx, ids) = load_weights(padded(layout.elements * 4), GraphDevice::Cuda)?;
+            let graph = build_tile(&mut ctx, &ids, &layout, true).map_err(DiffusionError::model)?;
+            let upload = Instant::now();
+            pack_weights(&self.weights, &ids, &mut |id, bytes| ctx.write_tensor_data(id, bytes).map_err(DiffusionError::model))?;
+            let pack = upload.elapsed().as_secs_f64();
+            let mut sessions = runtime.compile_graphs(&ctx, &[(&graph.graph, &[graph.output][..])])?;
+            let session = sessions.pop().ok_or_else(|| DiffusionError::model("yue2 graph VAE: no CUDA session"))?;
+            let DeviceGraphSession::Cuda(cuda) = &session else { unreachable!() };
+            let bytes = cuda.device_bytes();
+            eprintln!("yue2 graph VAE plan: core={core} tile={} device={bytes} budget={CUDA_ARENA_BYTES} bytes nodes={} weight fold/pack={pack:.3}s compile={:.3}s",
+                layout.frames, cuda.node_count(), began.elapsed().as_secs_f64());
+            if bytes <= CUDA_ARENA_BYTES || core == 1 {
+                return Ok(Prepared { ctx, layout, graph, session, core, metal_plan: None });
+            }
+            core = core.div_ceil(2);
+            eprintln!("yue2 graph VAE: reducing core to {core} for a smaller CUDA session; all latents retained");
+        }
+    }
+
+    pub fn decode_prefix(&self, latents: &[f32], output_frames: usize, progress: &mut dyn FnMut(Yue2Progress) -> Result<()>) -> Result<Vec<f32>> {
+        let began = Instant::now();
+        if latents.len() % YUE2_LATENT_DIM != 0 || output_frames == 0 || output_frames > latents.len() / YUE2_LATENT_DIM {
+            return Err(DiffusionError::workflow("yue2 graph VAE latent shape"));
+        }
+        let frames = latents.len() / YUE2_LATENT_DIM;
+        let halo = YUE2_VAE_HALO_FRAMES;
+        let profile = matches!(std::env::var("MAKEPAD_YUE2_VAE_PROFILE").as_deref(), Ok("1"));
+        // Keep the resident decoder Send; the runtime is owned by this call.
+        let p = match DeviceRuntime::new()? {
+            DeviceRuntime::Metal(runtime) => self.prepare_metal(runtime, frames, output_frames, began)?,
+            runtime => self.prepare_cuda(&runtime, frames, output_frames, began)?,
+        };
+        let Prepared { ctx, layout, graph: g, session, core, metal_plan } = p;
+        // Per-node profiling needs the Metal session's command buffers.
+        let profile = profile && metal_plan.is_some();
         let total = Self::natural_output_length(frames).min(output_frames * YUE2_LATENT_HOP);
         let mut audio = vec![0.0f32; total * 2];
         let mut packed = vec![0.0f32; layout.elements];
@@ -540,30 +605,34 @@ impl Yue2GraphVae {
         let mut stage_totals = vec![(0.0f64, 0.0f64); ends.len()];
         let tiles = output_frames.div_ceil(core);
         let mut run_seconds = 0.0;
-        eprintln!("yue2 graph VAE: {output_frames}/{frames} core/input latents, core={core} halo={halo}, {tiles} tiles, one graph, exact crops, profile={profile}");
+        eprintln!("yue2 graph VAE ({}): {output_frames}/{frames} core/input latents, core={core} halo={halo}, {tiles} tiles, one graph, exact crops, profile={profile}",
+            session.device().name());
         for (i, start) in (0..output_frames).step_by(core).enumerate() {
             let tile_began = Instant::now();
             let end = (start + core).min(output_frames);
             let left = start.saturating_sub(halo);
             let right = (end + halo).min(frames);
             layout.pack(&latents[left * YUE2_LATENT_DIM..right * YUE2_LATENT_DIM], &mut packed);
-            let writes = [metal::MetalGraphTensorWrite { tensor_id: g.input, bytes: bytes_f32(&packed) }];
             let run_began = Instant::now();
-            let result = if profile && i == 0 {
-                profile_tile(&session, &ctx, &writes, &g, &mut stage_totals)
-            } else if profile {
-                session.execute_profiled(&ctx, &writes, &[g.output], &ends, &mut |id, wall, gpu| {
-                    let stage = ends.iter().position(|&end| end == id).unwrap();
-                    stage_totals[stage].0 += wall;
-                    stage_totals[stage].1 += gpu;
-                    eprintln!("yue2 graph VAE tile={}/{} {} wall={wall:.3}s gpu={gpu:.3}s", i + 1, tiles, g.stages[stage].0);
-                })
-            } else {
-                session.execute(&ctx, &writes, &[g.output])
-            }.map_err(DiffusionError::model)?;
+            let outputs = match (&session, profile) {
+                (DeviceGraphSession::Metal(metal_session), true) => {
+                    let writes = [metal::MetalGraphTensorWrite { tensor_id: g.input, bytes: bytes_f32(&packed) }];
+                    if i == 0 {
+                        profile_tile(metal_session, &ctx, &writes, &g, &mut stage_totals)
+                    } else {
+                        metal_session.execute_profiled(&ctx, &writes, &[g.output], &ends, &mut |id, wall, gpu| {
+                            let stage = ends.iter().position(|&end| end == id).unwrap();
+                            stage_totals[stage].0 += wall;
+                            stage_totals[stage].1 += gpu;
+                            eprintln!("yue2 graph VAE tile={}/{} {} wall={wall:.3}s gpu={gpu:.3}s", i + 1, tiles, g.stages[stage].0);
+                        })
+                    }.map_err(DiffusionError::model)?.outputs
+                }
+                _ => session.execute(&ctx, &[(g.input, bytes_f32(&packed))], &[g.output])?.outputs,
+            };
             let run = run_began.elapsed().as_secs_f64();
             run_seconds += run;
-            let tile = read_output(&result.outputs[&g.output]);
+            let tile = read_output(&outputs[&g.output]);
             let out_start = start * YUE2_LATENT_HOP;
             let out_end = (end * YUE2_LATENT_HOP).min(total);
             let crop = (start - left) * YUE2_LATENT_HOP;

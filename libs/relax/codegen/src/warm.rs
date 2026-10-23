@@ -33,9 +33,14 @@ struct State {
     reasons: HashMap<u32, String>,
     events: Vec<Event>,
 }
-fn state() -> &'static Mutex<State> {
+/// The accounting is process-wide and outlives the compiler generation of the threads that fill
+/// it (a settle swap destroys that one): everything State owns is allocated in the kept heap. The
+/// guard is held for every access that may allocate or free (keys, names, table growth, events).
+fn state() -> (relax_session::phase::PhaseGuard, relax_session::sync::MutexGuard<'static, State>) {
     static STATE: OnceLock<Mutex<State>> = OnceLock::new();
-    STATE.get_or_init(Default::default)
+    let k = relax_session::phase::kept();
+    let s = STATE.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    (k, s)
 }
 relax_session::gen_local! {
     static SLOTS: RefCell<Vec<(u32, u8)>>;
@@ -61,8 +66,7 @@ impl Drop for Context {
 pub fn name(slot: u32, name: &str) {
     if enabled() {
         state()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .1
             .names
             .insert(slot, name.to_owned());
     }
@@ -70,8 +74,7 @@ pub fn name(slot: u32, name: &str) {
 pub fn instance(slot: u32, def: u32, args: &[u32]) {
     if enabled() {
         state()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .1
             .bodies
             .insert((def, args.to_vec()), slot);
     }
@@ -79,8 +82,7 @@ pub fn instance(slot: u32, def: u32, args: &[u32]) {
 pub fn reason(slot: u32, reason: &str) {
     if enabled() {
         state()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .1
             .reasons
             .insert(slot, reason.to_owned());
     }
@@ -91,7 +93,7 @@ pub fn classify(valid: bool) {
     if !enabled() {
         return;
     }
-    let mut s = state().lock().unwrap_or_else(|e| e.into_inner());
+    let (_kept, mut s) = state();
     s.valid = Some(valid);
     if !valid {
         s.events.clear();
@@ -103,7 +105,7 @@ const BACKGROUND_CHECK: &str = "background borrow check";
 pub struct Scope(Option<(usize, Event, u64)>);
 impl Scope {
     fn new(id: Id, name: String, phase: &'static str) -> Self {
-        if state().lock().unwrap_or_else(|e| e.into_inner()).valid == Some(false) {
+        if state().1.valid == Some(false) {
             return Self(None);
         }
         if CHILD_CPU.try_with(|s| s.borrow_mut().push(0)).is_err() {
@@ -115,7 +117,7 @@ impl Scope {
             phase,
             cpu: 0,
         };
-        let mut s = state().lock().unwrap_or_else(|e| e.into_inner());
+        let (_kept, mut s) = state();
         let index = s.events.len();
         if !s.presented {
             s.events.push(event.clone());
@@ -178,7 +180,7 @@ impl Drop for Scope {
             })
             .unwrap_or(0);
         event.cpu = elapsed.saturating_sub(child);
-        let mut s = state().lock().unwrap_or_else(|e| e.into_inner());
+        let (_kept, mut s) = state();
         if s.valid == Some(false) {
             return;
         }
@@ -226,7 +228,7 @@ fn report(present: bool) {
     if !enabled() {
         return;
     }
-    let mut s = state().lock().unwrap_or_else(|e| e.into_inner());
+    let (_kept, mut s) = state();
     if s.presented {
         return;
     }

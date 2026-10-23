@@ -8,11 +8,34 @@ use crate::infer::outlives::{env::{OutlivesBound, OutlivesEnvironment}, componen
 // ported from N:rustc_trait_selection/src/traits/outlives_bounds.rs @8d1a764
 // ported from N:rustc_traits/src/implied_outlives_bounds.rs @8d1a764
 
-/// implied_outlives_bounds.rs:151-199. NOT PORTED: the bevy_ecs `ParamSet` compatibility hack
-/// (consider_implied_bounds_hack_for_ty, #119956) -- a crate-name special case, left to the lead.
+/// implied_outlives_bounds.rs `compute_implied_outlives_bounds_inner` with `disable_implied_bounds_hack = false`
+/// (every caller here: OutlivesEnvironment::new, and wfcheck, whose first, hack-disabled resolution only decides
+/// whether it retries with the hack -- more assumed bounds never add region errors, so the retry's result is this one).
+/// The query runs in the caller's context (see `implied_outlives_bounds`): "registered region obligations" are those
+/// this computation registered, from `start` on.
 pub fn query_compute_implied_outlives_bounds(ocx: &mut ObligationCtxt<'_, '_>, env: &ParamEnvId, ty: TyId) -> Result<Vec<OutlivesBound>, NoSolution> {
+    let start = ocx.infcx.inner.borrow().region_obligations().len();
     let normalized = ocx.deeply_normalize_ty(env, ty)?;
-    compute_implied_outlives_bounds_inner(ocx, env, ty, normalized)
+    let mut bounds = compute_implied_outlives_bounds_inner(ocx, env, ty, normalized)?;
+    // implied_outlives_bounds.rs:153-167: a type naming `bevy_ecs::ParamSet` (#109628) also assumes the outlives
+    // obligations its normalization and well-formedness registered
+    if crate::borrowck::implied_bounds::contains_bevy_param_set(ocx.infcx.tcx, ocx.prog, ty) {
+        let registered: Vec<(TyId, crate::types::RegionId)> = ocx.infcx.inner.borrow().region_obligations()[start..].iter().map(|&(t, r, _)| (t, r)).collect();
+        for (sup, sub) in registered {
+            let mut parts = Vec::new(); components::push_outlives_components(ocx.infcx.tcx, ocx.prog, sup, &mut parts);
+            push_component_bounds(&mut bounds, sub, parts);
+        }
+    }
+    Ok(bounds)
+}
+/// implied_bounds_from_components
+pub(crate) fn push_component_bounds(out: &mut Vec<OutlivesBound>, r: crate::types::RegionId, parts: Vec<Component>) {
+    for part in parts { match part {
+        Component::Region(s) => out.push(OutlivesBound::RegionSubRegion(r,s)),
+        Component::Param(t) => out.push(OutlivesBound::RegionSubParam(r,t)),
+        Component::Alias(t) => out.push(OutlivesBound::RegionSubAlias(r,t)),
+        Component::Placeholder(_) | Component::EscapingAlias(_) | Component::UnresolvedInferenceVariable(_) => {},
+    } }
 }
 
 /// outlives_bounds.rs:31-97 (implied_outlives_bounds): the bounds a type that is assumed WF
@@ -61,12 +84,7 @@ pub fn compute_implied_outlives_bounds_inner(ocx: &mut ObligationCtxt<'_, '_>, e
                 PredicateKind::Clause(ClauseKind::RegionOutlives(a,b)) => result.push(OutlivesBound::RegionSubRegion(b,a)),
                 PredicateKind::Clause(ClauseKind::TypeOutlives(ty,r)) => {
                     let mut parts = Vec::new(); components::push_outlives_components(ocx.infcx.tcx, ocx.prog, ty, &mut parts);
-                    for part in parts { match part {
-                        Component::Region(s) => result.push(OutlivesBound::RegionSubRegion(r,s)),
-                        Component::Param(t) => result.push(OutlivesBound::RegionSubParam(r,t)),
-                        Component::Alias(t) => result.push(OutlivesBound::RegionSubAlias(r,t)),
-                        Component::Placeholder(_) | Component::EscapingAlias(_) | Component::UnresolvedInferenceVariable(_) => {},
-                    } }
+                    push_component_bounds(&mut result, r, parts);
                 }
                 _ => {}
             }

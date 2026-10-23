@@ -130,9 +130,9 @@ pub mod intrinsics_mem {
     extern "relax-intrinsic" {
         pub fn size_of<T>() -> usize;
         pub fn align_of<T>() -> usize;
-        /// Size/alignment of the value behind a (possibly fat) reference: slices, str, dyn.
-        pub fn size_of_val<T: ?Sized>(v: &T) -> usize;
-        pub fn align_of_val<T: ?Sized>(v: &T) -> usize;
+        /// Size/alignment from a (possibly fat) raw pointer, as in rustc's intrinsics.
+        pub fn size_of_val<T: ?Sized>(v: *const T) -> usize;
+        pub fn align_of_val<T: ?Sized>(v: *const T) -> usize;
         pub fn needs_drop<T>() -> bool;
         /// `T: Copy` for this instantiation (a constant per instance): std's Copy fast paths
         /// (real std specializes Clone-for-Copy into memcpy)
@@ -149,6 +149,15 @@ pub mod intrinsics_mem {
         /// `p + n * size_of::<T>()`
         pub fn ptr_add<T>(p: *const T, n: usize) -> *const T;
         pub fn ptr_add_mut<T>(p: *mut T, n: usize) -> *mut T;
+        /// `p` moved back by `n` elements, in bounds (core's `sub`: `offset` by `-n`)
+        pub fn ptr_sub<T>(p: *const T, n: usize) -> *const T;
+        /// `p` moved by `n` elements with wrapping arithmetic, keeping its provenance (core::intrinsics::arith_offset)
+        pub fn arith_offset<T>(p: *const T, n: isize) -> *const T;
+        /// `(p - origin) / size_of::<T>()` of two pointers into one allocation (core::intrinsics::ptr_offset_from)
+        pub fn ptr_offset_from<T>(p: *const T, origin: *const T) -> isize;
+        /// `p` is null: its address at run time; in const evaluation `ptr_guaranteed_cmp(p, null)`, which may
+        /// not know (core::ptr is_null's const_eval_select)
+        pub fn ptr_is_null(p: *const u8) -> bool;
         pub fn slice_from_raw<'a, T>(p: *const T, len: usize) -> &'a [T];
         pub fn slice_from_raw_mut<'a, T>(p: *mut T, len: usize) -> &'a mut [T];
         pub fn slice_ptr<T>(s: &[T]) -> *const T;

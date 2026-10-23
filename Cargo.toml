@@ -46,6 +46,14 @@ workspace.members = [
     "libs/lz4",
     "apps/route",
     "libs/flowgraph",
+    # === Flow: the generation studio and graph workbench's libraries ===
+    "libs/media_view",
+    "libs/gen",
+    "libs/gen/tools",
+    "libs/live_frame",
+    "libs/flow_ui",
+    "libs/flow_studio",
+    "apps/flow",
     "apps/ai-hub",
     "apps/mixer",
     "apps/storybook",
@@ -182,6 +190,14 @@ workspace.members = [
     "libs/drumkit_phys",
     "libs/audio_synth",
     "libs/musicxml",
+    # === Synth: live-coded scores, their player and the tweak UI kit ===
+    "libs/audio_dsp",
+    "libs/score_player",
+    "libs/score_voice",
+    "libs/beat",
+    "libs/look",
+    "libs/code_values",
+    "libs/flow",
     # === own MP3 / Ogg Vorbis decoders ===
     "libs/audio_decode",
     # === own Ogg Vorbis encoder (stem side-channels) ===
@@ -232,7 +248,6 @@ workspace.members = [
     "tools/run/android_host",
     "tools/run/android_exe",
     "tools/run/android_host/fixture",
-    "tools/run/web_trace",
     "libs/gpu_trace",
     "libs/prof_stream",
     "libs/relax/compiler",

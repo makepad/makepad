@@ -10,6 +10,8 @@ pub fn memory(a: &mut Answer) {
     let nodes = a.take("node");
     let findings = a.take1("findings");
     let domains = a.take("domain");
+    let arenas = a.take("arena");
+    let trims = a.take1("trims");
     a.take1("freed_by_domain_teardown_bytes");
     let node = |k: &str| nodes.iter().find(|n| s(n, "node") == k).map_or(0.0, |n| f(n, "mb"));
     let sp = |k: &str| split.as_ref().map_or(0.0, |x| f(x, k));
@@ -49,12 +51,50 @@ pub fn memory(a: &mut Answer) {
         head.push_str(&format!(". Largest part: {} {}.", p.0, mb(p.1)));
     }
     head.push_str(&format!(" Program malloc heap {} (in use + held free) vs makepad run's own {} (arenas + JIT code).", mb(prog), mb(runtime)));
+    if let Some(t) = &trims {
+        head.push_str(&format!(" Allocator trims: {} (last at {}).", f(t, "trims"), super::ms(f(t, "last_trim_ms"))));
+    }
     a.head = head;
     let mut tb = Table::new(&["part", "MB", "% of RSS", "note"]);
     for (n, v, note) in &parts {
         tb.row(vec![n.clone(), sig(*v), pct(v * 100.0 / rss.max(1.0)), note.clone()]);
     }
     a.line(&tb.md());
+    for x in &arenas {
+        let (sm, lg) = (f(x, "small_touched_mb"), f(x, "large_mb"));
+        if sm + lg < 1.0 {
+            continue;
+        }
+        let top: Vec<String> = arr(x, "largest_mb").iter().filter_map(|v| super::num(Some(v))).filter(|v| *v >= 1.0).map(|v| mb(v)).collect();
+        a.line(&format!("{} arena: {} small chunks touched {} ({} live in {} blocks; {} of it in chunks with <= 4 live blocks), {} large runs {}{}",
+            s(x, "arena"), f(x, "small_chunks"), mb(sm), mb(f(x, "small_live_slots_mb")), f(x, "small_live_blocks"), mb(f(x, "pinned_by_le4_blocks_mb")),
+            f(x, "large_runs"), mb(lg), if top.is_empty() { String::new() } else { format!(" (largest {})", top.join(", ")) }));
+    }
+    // the compiler heap by category (MAKEPAD_RUN_MEM_REPORT=1)
+    let mut tags: Vec<(String, f64)> = nodes.iter().filter_map(|n| {
+        let k = s(n, "node");
+        k.strip_prefix("makepad-run/compiler heap (MAKEPAD_RUN_MEM_REPORT)/").map(|r| (r.to_string(), f(n, "mb")))
+    }).collect();
+    if !tags.is_empty() {
+        tags.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal));
+        let shown: Vec<String> = tags.iter().take(12).map(|(k, v)| format!("{} {}", k, mb(*v))).collect();
+        a.line(&format!("compiler heap by category (live): {}", shown.join(", ")));
+    }
+    // compiler structures (memory compiler=1): the largest, by name
+    let mut st: Vec<(String, f64)> = nodes.iter().filter_map(|n| {
+        let k = s(n, "node");
+        k.strip_prefix("makepad-run/compiler structures/").map(|r| (r.to_string(), f(n, "mb")))
+    }).collect();
+    if !st.is_empty() {
+        st.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal));
+        let total: f64 = st.iter().filter(|x| !x.0.starts_with(' ') && !x.0.contains(": of which")).map(|x| x.1).sum();
+        let mut tb = Table::new(&["compiler structure (shallow)", "MB"]);
+        for (k, v) in st.iter().take(16) {
+            tb.row(vec![k.clone(), sig(*v)]);
+        }
+        a.line(&format!("compiler structures sum {} (shallow sizes; nested vectors not followed):", mb(total)));
+        a.line(&tb.md());
+    }
     // the OS view: resident pages by mapping kind (pages may be counted under several kinds)
     let mut os: Vec<(String, f64)> = nodes
         .iter()

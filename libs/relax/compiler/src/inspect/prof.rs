@@ -21,7 +21,12 @@ pub struct Sample {
     pub weight: u64,
     /// when it was taken (clock::wall_ns; Linux: when its ring was drained, within 10 ms)
     pub t: u64,
+    /// the thread was on a CPU (false only for `wall=1` samples of a waiting thread)
+    pub on_cpu: bool,
 }
+
+/// The activity bucket of a `wall=1` sample of a waiting thread (the native sampler's too).
+const OFF_CPU: &str = "off CPU (waiting)";
 
 /// What a sample counts. CPU time works everywhere; the hardware events need Linux perf_event
 /// (macOS gives an unprivileged process no per-thread hardware sampling).
@@ -91,12 +96,17 @@ pub fn collect(secs: f64, hz: u64, want: &dyn Fn(&super::threads::Thread) -> boo
 /// `collect` counting `ev`: hardware events are sampled about `hz` times a second per thread
 /// (the kernel adapts the period), each sample weighted by its period.
 pub fn collect_ev(secs: f64, hz: u64, ev: Ev, want: &dyn Fn(&super::threads::Thread) -> bool, cancel: &dyn Fn() -> bool) -> Run {
+    collect_opts(secs, hz, ev, false, want, cancel)
+}
+
+/// `collect_ev`; `wall`: waiting threads are sampled too (macOS; their samples have `on_cpu` false).
+pub fn collect_opts(secs: f64, hz: u64, ev: Ev, wall: bool, want: &dyn Fn(&super::threads::Thread) -> bool, cancel: &dyn Fn() -> bool) -> Run {
     super::cfi::refresh();
     let skip = super::SERVER_TIDS.lock().unwrap().clone();
     let mut threads = super::threads::list();
     super::name_handles(&mut threads);
     threads.retain(|t| !super::is_inspect_thread(t, &skip) && want(t));
-    let mut run = imp::collect(threads, secs, hz, ev, cancel);
+    let mut run = imp::collect(threads, secs, hz, ev, wall, cancel);
     if cancel() {
         run.notes.push(format!("stopped after {:.1} s: the client went away", run.secs));
     }
@@ -268,11 +278,14 @@ mod imp {
         };
         let mut buf = [0u64; 96];
         let n = crate::inspect::threads::walk_regs_with(&mut regs, &mut buf, &read);
-        Some(Sample { os_id, frames: buf[..n].to_vec(), weight, t: crate::clock::wall_ns() })
+        Some(Sample { os_id, frames: buf[..n].to_vec(), weight, t: crate::clock::wall_ns(), on_cpu: true })
     }
 
-    pub fn collect(threads: Vec<crate::inspect::threads::Thread>, secs: f64, hz: u64, ev: super::Ev, cancel: &dyn Fn() -> bool) -> Run {
+    pub fn collect(threads: Vec<crate::inspect::threads::Thread>, secs: f64, hz: u64, ev: super::Ev, wall: bool, cancel: &dyn Fn() -> bool) -> Run {
         let mut notes = Vec::new();
+        if wall {
+            notes.push("wall=1 is macOS only (perf task-clock samples a thread only while it runs): CPU samples".into());
+        }
         let mut ev = ev;
         let order = by_activity(&threads);
         let open_all = |ev: super::Ev, notes: &mut Vec<String>| -> Vec<Ring> {
@@ -352,8 +365,11 @@ mod imp {
     /// fixed array and resumes it before anything is allocated or locked (a suspended thread may
     /// hold malloc's lock). The capture lock is taken per round, so `stacks` and `why-hung` get
     /// in between.
-    pub fn collect(threads: Vec<crate::inspect::threads::Thread>, secs: f64, hz: u64, ev: super::Ev, cancel: &dyn Fn() -> bool) -> Run {
+    pub fn collect(threads: Vec<crate::inspect::threads::Thread>, secs: f64, hz: u64, ev: super::Ev, wall: bool, cancel: &dyn Fn() -> bool) -> Run {
         let mut notes = Vec::new();
+        if wall {
+            notes.push("wall=1: waiting threads sampled too (bucket `off CPU (waiting)`)".into());
+        }
         if ev != super::Ev::Cpu {
             notes.push(format!("{} cannot be sampled on macOS without root (per-thread hardware sampling is privileged); CPU time instead -- `counters` gives this process's total instructions and cycles", ev.name()));
         }
@@ -395,12 +411,13 @@ mod imp {
             };
             for (k, t) in threads.iter().enumerate() {
                 let Some(now) = live.iter().find(|x| x.os_id == t.os_id) else { continue };
-                // CPU samples only: a thread that ran lately and is on a CPU right now
-                if !ran[k] || !crate::inspect::threads::running(now) {
+                // CPU samples: a thread that ran lately and is on a CPU right now (`wall`: any)
+                let on = crate::inspect::threads::running(now);
+                if !wall && (!ran[k] || !on) {
                     continue;
                 }
                 if crate::inspect::threads::capture(now, &mut raw).is_ok() && raw.n > 0 {
-                    samples.push(Sample { os_id: t.os_id, frames: raw.frames().to_vec(), weight: 1, t: crate::clock::wall_ns() });
+                    samples.push(Sample { os_id: t.os_id, frames: raw.frames().to_vec(), weight: 1, t: crate::clock::wall_ns(), on_cpu: on });
                 }
             }
             drop(_g);
@@ -422,7 +439,7 @@ mod imp {
 #[cfg(any(windows, target_os = "android"))]
 mod imp {
     use super::Run;
-    pub fn collect(threads: Vec<crate::inspect::threads::Thread>, secs: f64, hz: u64, _ev: super::Ev, _cancel: &dyn Fn() -> bool) -> Run {
+    pub fn collect(threads: Vec<crate::inspect::threads::Thread>, secs: f64, hz: u64, _ev: super::Ev, _wall: bool, _cancel: &dyn Fn() -> bool) -> Run {
         Run { samples: Vec::new(), threads, secs, hz, lost: 0, notes: vec!["no CPU sampler on this target".into()], ev: super::Ev::Cpu }
     }
 }
@@ -479,7 +496,7 @@ fn pick(sel: &str) -> Box<dyn Fn(&super::threads::Thread) -> bool> {
     })
 }
 
-/// `prof [s=3] [hz=200] [threads=all|main|owner|program|compiler|<name>] [n=15] [save=1]`
+/// `prof [s=3] [hz=200] [threads=all|main|owner|program|compiler|<name>] [n=15] [wall=1] [save=1]`
 pub fn cmd_prof(req: &Req, out: &mut Out) {
     let secs = (req.num("s", 3) as f64).clamp(0.2, 30.0);
     let hz = req.num("hz", 200).clamp(10, 2000);
@@ -489,7 +506,7 @@ pub fn cmd_prof(req: &Req, out: &mut Out) {
         Err(e) => return out.err(&e),
     };
     let gone = out.gone();
-    let run = collect_ev(secs, hz, ev, &*pick(req.get("threads").unwrap_or("all")), &*gone);
+    let run = collect_opts(secs, hz, ev, req.get("wall") == Some("1"), &*pick(req.get("threads").unwrap_or("all")), &*gone);
     if gone() {
         return;
     }
@@ -556,8 +573,8 @@ fn report(run: &Run, n: usize, save: bool, out: &mut Out) {
     let _ = ms_per;
     // activity split
     let mut act: Vec<(&str, usize)> = Vec::new();
-    for s in &syms {
-        let a = activity(s);
+    for (s, smp) in syms.iter().zip(&run.samples) {
+        let a = if smp.on_cpu { activity(s) } else { OFF_CPU };
         match act.iter_mut().find(|x| x.0 == a) {
             Some(x) => x.1 += 1,
             None => act.push((a, 1)),
@@ -624,6 +641,9 @@ fn report(run: &Run, n: usize, save: bool, out: &mut Out) {
         let mut folded: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
         for (s, f) in run.samples.iter().zip(&syms) {
             let mut parts: Vec<String> = vec![tname(s.os_id)];
+            if !s.on_cpu {
+                parts.push(OFF_CPU.into());
+            }
             parts.extend(f.iter().rev().map(|x| x.name.replace(';', ":")));
             *folded.entry(parts.join(";")).or_default() += 1;
         }

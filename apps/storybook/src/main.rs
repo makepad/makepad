@@ -1,3 +1,4 @@
 fn main() {
+    makepad_widgets_sheets::register();
     makepad_app_storybook::makepad_widgets::run_app(makepad_app_storybook::app::app_main)
 }

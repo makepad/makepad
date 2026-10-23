@@ -560,6 +560,9 @@ mod imp {
         }
         #[cfg(not(relax))]
         {
+            // the UI thread (start_if_requested runs in Cx::new): `prof threads=main`
+            #[cfg(target_os = "macos")]
+            crate::prof_sampler::note_main_thread();
             let endpoint = makepad_remote::Endpoint::new(&app);
             endpoint.register_cmd(dispatch);
             endpoint.set_end_fields(end_fields);
@@ -815,6 +818,13 @@ mod imp {
                 #[cfg(not(relax))]
                 if makepad_hal::inspect::dispatch(req, out) {
                     return;
+                }
+                // the sampling profiler (inspect's `prof` / `why-slow`, same buckets and lines)
+                #[cfg(all(not(relax), target_os = "macos"))]
+                match req.cmd.as_str() {
+                    "prof" => return crate::prof_sampler::cmd_prof(req, out),
+                    "why-slow" => return crate::prof_sampler::cmd_why_slow(req, out),
+                    _ => {}
                 }
                 // a remote answer is not capped: a widget dump or a snapshot of every widget
                 out.limit = usize::MAX;

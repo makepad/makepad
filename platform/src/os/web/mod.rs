@@ -7,6 +7,7 @@ pub mod web_gl;
 pub mod web_media;
 pub mod web_midi;
 pub mod web_network;
+pub mod web_embed;
 pub mod wasm_link;
 mod web_socket;
 pub use crate::os::web::web::*;

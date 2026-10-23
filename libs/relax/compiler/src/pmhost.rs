@@ -388,6 +388,7 @@ fn build_world(sess: &std::sync::Arc<crate::Session>) -> Result<World, String> {
                 }
             }
             let mut cs = host(&u.features);
+            // Proc macros run in the host Relax session and are never shipped to the web.
             cs.set.push("relax".to_string());
             let k = prog.load_crate_deferred(&u.name, &u.src_path, u.edition, cs, deps).map_err(|e| format!("macro crate {}: {}", u.name, e))?;
             crate_of[i] = k;

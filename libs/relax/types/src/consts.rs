@@ -114,6 +114,10 @@ pub(crate) struct ConstInterner {
 }
 
 impl Types {
+    pub(crate) fn const_count(&self) -> usize {
+        self.consts.lock().unwrap_or_else(|e| e.into_inner()).kinds.len()
+    }
+
     pub fn intern_const(&self, kind: ConstKind) -> Const {
         let mut table = self.consts.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(&id) = table.ids.get(&kind) { return id; }

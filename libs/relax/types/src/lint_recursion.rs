@@ -9,6 +9,13 @@
 //! a recursive call ends the walk of its path, a `return`, a call that never returns (its unwind
 //! edge reaches the caller), an empty `match` or a panic macro sets `escape`, and a loop whose
 //! body or `continue` is reached sets `cycle` (the head is on the search stack).
+//!
+//! `check_drop_recursion` (rustc_mir_build lints.rs, on the MIR after drop elaboration): in a
+//! `Drop::drop` of `T` the recursive terminators are the drops of `T` values instead of the calls.
+//! The walk finds the drops elaboration keeps whatever the moves: a statement's temporary of type
+//! `T` (`let _ = T::new();`, `make();`, a borrowed `&T::new()`), the old value of a place behind a
+//! reference that is assigned (`*self = ..`), and a local of type `T` that no expression names (it
+//! cannot be moved: it is dropped where its block ends).
 //! Check-only.
 
 use crate::ast::*;
@@ -41,6 +48,8 @@ struct Rec<'a> {
     cycle: bool,
     rec_seen: bool,
     loops: Vec<LoopCx>,
+    /// `check_drop_recursion`: the type the checked `Drop::drop` drops (RecursiveDrop's `drop_for`)
+    drop_for: Option<TyId>,
 }
 
 /// Runs the check for one fn body.
@@ -57,9 +66,24 @@ pub fn check(prog: &Program, tcx: &Tcx, body: &Body, block: BlockId) {
         tcx.fn_sig(prog, body.def).map_or(0, |s| s.n_parent_generics)
     } else { 0 };
     let env = crate::pattern_analysis::body_cx(prog, tcx, body).typing_env();
-    let mut r = Rec { prog, tcx, body, ast, env, caller: body.def, trait_args, escape: false, cycle: false, rec_seen: false, loops: Vec::new() };
+    let mut r = Rec { prog, tcx, body, ast, env, caller: body.def, trait_args, escape: false, cycle: false, rec_seen: false, loops: Vec::new(), drop_for: None };
     if r.block(block) { r.escape = true; }
-    if r.escape || r.cycle || !r.rec_seen { return; }
+    let mut found = !(r.escape || r.cycle || !r.rec_seen);
+    // check_drop_recursion: `fn drop(&mut self)` of an impl of `Drop`, its one input `&mut T`
+    if !found && d.kind == DefKind::AssocFn && d.parent != crate::program::NO_DEF
+        && tcx.impl_trait.get(&d.parent).is_some_and(|&t| tcx.lang_items.get(crate::lang_items::LangItem::Drop) == Some(t))
+    {
+        if let Some(sig) = tcx.fn_sig(prog, body.def) {
+            if let [input] = sig.params[..] {
+                if let TyKind::Ref(_, dropped, _) = *tcx.tys.kind(input) {
+                    let mut r = Rec { prog, tcx, body, ast, env, caller: body.def, trait_args, escape: false, cycle: false, rec_seen: false, loops: Vec::new(), drop_for: Some(tcx.tys.erase_regions(dropped)) };
+                    if r.block(block) { r.escape = true; }
+                    found = !(r.escape || r.cycle || !r.rec_seen);
+                }
+            }
+        }
+    }
+    if !found { return; }
     if lint::external(prog, body.file, item.lo) { return; }
     lint::emit(prog, body.def, &UNCONDITIONAL_RECURSION, body.file, item.lo, "function cannot return without recursing");
 }
@@ -108,7 +132,31 @@ impl<'a> Rec<'a> {
     }
 
     fn rec_call(&mut self, callee: DefId, args: crate::types::TyList, n: usize) -> bool {
-        if self.is_recursive(callee, args, n) { self.rec_seen = true; true } else { false }
+        if self.drop_for.is_none() && self.is_recursive(callee, args, n) { self.rec_seen = true; true } else { false }
+    }
+
+    /// RecursiveDrop::is_recursive_terminator: a drop of a value of `drop_for`'s type ends the path.
+    fn rec_drop(&mut self, e: ExprId) -> bool {
+        if self.of_drop_for(e) { self.rec_seen = true; true } else { false }
+    }
+
+    fn of_drop_for(&self, e: ExprId) -> bool {
+        let Some(t) = self.drop_for else { return false };
+        self.expr_ty(e).is_some_and(|x| self.tcx.tys.erase_regions(x) == t)
+    }
+
+    /// A value expression (a temporary when used as a statement), not a place.
+    fn is_rvalue(&self, e: ExprId) -> bool {
+        let e = unparen(self.ast, e);
+        match self.ast.expr(e).kind {
+            ExprKind::Field(..) | ExprKind::TupleField(..) | ExprKind::Index(..) | ExprKind::Unary(UnOp::Deref, _) => false,
+            ExprKind::Path(_) => match self.body.res.get(&e.0).copied() {
+                Some(Res::Local(_)) | Some(Res::Err) | None => false,
+                Some(Res::Def(d)) => !matches!(self.prog.def(d).kind, DefKind::Static | DefKind::ForeignStatic),
+                Some(Res::ConstParam(_)) => true,
+            },
+            _ => true,
+        }
     }
 
     /// An overloaded operator / deref / index call on `n` operands.
@@ -136,20 +184,34 @@ impl<'a> Rec<'a> {
 
     fn block(&mut self, b: BlockId) -> bool {
         let ast = self.ast;
+        // the locals of `drop_for`'s type no expression names: dropped when the block ends
+        let mut unnamed_locals = false;
         for s in ast.stmts(b) {
             match *s {
                 Stmt::Let(r) => {
                     let l = *ast.row(r);
                     if let Some(x) = l.init {
                         if !self.ev(x) { return false; }
+                        // `let _ = <temporary>;`: dropped at the end of the statement
+                        if self.drop_for.is_some() && matches!(ast.pat(l.pat), Pat::Wild) && self.is_rvalue(x) && self.rec_drop(x) { return false; }
+                        if matches!(*ast.pat(l.pat), Pat::Ident { by_ref: false, sub: None, .. }) && self.of_drop_for(x) {
+                            if let Some(&li) = self.body.pat_local.get(&l.pat.0) {
+                                if !self.body.res.iter().any(|(_, r)| matches!(r, Res::Local(x) if *x == li)) { unnamed_locals = true; }
+                            }
+                        }
                     }
                     if let Some(e) = l.else_ { self.block(e); }
                 }
-                Stmt::Expr(e, _) => { if !self.ev(e) { return false; } }
+                Stmt::Expr(e, _) => {
+                    if !self.ev(e) { return false; }
+                    // an expression statement's value is a temporary dropped at its end
+                    if self.drop_for.is_some() && self.is_rvalue(e) && self.rec_drop(e) { return false; }
+                }
                 Stmt::Attrs(r) => { let a = *ast.row(r); if !self.ev(a.expr) { return false; } }
                 Stmt::Item(_) | Stmt::Empty => {}
             }
         }
+        if unnamed_locals { self.rec_seen = true; return false; }
         true
     }
 
@@ -193,7 +255,10 @@ impl<'a> Rec<'a> {
         let ast = self.ast;
         match ast.expr(e).kind {
             ExprKind::Lit(_) | ExprKind::Path(_) | ExprKind::Underscore | ExprKind::Closure(_) | ExprKind::Async(..) | ExprKind::ConstBlock(_) => true,
-            ExprKind::Paren(x) | ExprKind::Cast(x, _) | ExprKind::AddrOf(_, _, x) | ExprKind::Box(x) | ExprKind::Field(x, _) | ExprKind::TupleField(x, _) => self.ev(x),
+            // a borrowed value expression is a temporary (dropped at the end of its statement, or of the
+            // block when the borrow is extended)
+            ExprKind::AddrOf(_, _, x) => self.ev(x) && !(self.drop_for.is_some() && self.is_rvalue(x) && self.rec_drop(x)),
+            ExprKind::Paren(x) | ExprKind::Cast(x, _) | ExprKind::Box(x) | ExprKind::Field(x, _) | ExprKind::TupleField(x, _) => self.ev(x),
             ExprKind::Repeat(x, _) => self.ev(x),
             ExprKind::Unary(op, x) => {
                 if !self.ev(x) { return false; }
@@ -215,7 +280,11 @@ impl<'a> Rec<'a> {
                 if let Some(m) = overloaded { if self.rec_call(m.def, m.args, 2) { return false; } }
                 true
             }
-            ExprKind::Assign(l, r) => self.ev(r) && self.ev(l),
+            ExprKind::Assign(l, r) => {
+                if !(self.ev(r) && self.ev(l)) { return false; }
+                // the old value of a place behind a reference is dropped before the write
+                !(matches!(ast.expr(unparen(ast, l)).kind, ExprKind::Unary(UnOp::Deref, _)) && self.rec_drop(l))
+            }
             ExprKind::AssignOp(_, l, r) => {
                 if !self.ev(l) || !self.ev(r) { return false; }
                 if let Some(m) = self.body.binops.get(&e.0).copied() { if self.rec_call(m.def, m.args, 2) { return false; } }

@@ -2552,6 +2552,8 @@ fn coalesce(f: &Func) -> (Vec<u32>, std::collections::HashSet<(u32, u32)>) {
 }
 
 fn lower(f: &Func, slots: SlotsPtr, syms: u64, sym_class: u64) -> Result<(IFunc, Persist), &'static str> {
+    let covered = relax_backend::passes::lower_coverage(f);
+    let f = covered.as_ref().unwrap_or(f);
     let (alias, skip) = coalesce(f);
     // frame: one cell per vreg (two for V128), then the stack slots, then C ABI buffers; an
     // aliased vreg shares its representative's cell
@@ -3174,6 +3176,7 @@ fn lower_inst(l: &mut Lw, i: &Inst, slots: SlotsPtr, sym_class: u64, sym_val: &d
             let w = l.w4(*d, *a, *e, *n);
             l.emit(h_atomic_cas, &[w, mem_code(*m)]);
         }
+        Inst::Coverage { .. } => unreachable!("coverage lowered before interpreter emission"),
         Inst::Fence(_, compiler_only) => l.emit(h_fence, &[*compiler_only as u64]),
         Inst::FpEnv(write, v) => {
             let w = l.r(*v);
@@ -3254,7 +3257,7 @@ fn lower_inst(l: &mut Lw, i: &Inst, slots: SlotsPtr, sym_class: u64, sym_val: &d
 /// The vregs an instruction defines (its results).
 fn defs_of(i: &Inst, out: &mut Vec<VReg>) {
     match i {
-        Inst::Store(..) | Inst::StoreX(..) | Inst::Copy(..) | Inst::VStore(..) | Inst::VStoreX(..) | Inst::AtomicStore(..) | Inst::Fence(..) => {}
+        Inst::Store(..) | Inst::StoreX(..) | Inst::Copy(..) | Inst::VStore(..) | Inst::VStoreX(..) | Inst::AtomicStore(..) | Inst::Fence(..) | Inst::Coverage { .. } => {}
         Inst::FpEnv(w, v) => {
             if !*w {
                 out.push(*v)

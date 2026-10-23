@@ -31,6 +31,7 @@ script_mod! {
         draw_text +: {
             hover: instance(0.0)
             active: instance(0.0)
+            current: instance(0.0)
 
             ink_centered: true
 
@@ -71,6 +72,7 @@ script_mod! {
         draw_bg +: {
             hover: instance(0.0)
             active: instance(0.0)
+            current: instance(0.0)
 
             overlap_fix: uniform(1.0)
             border_size: uniform(1.)
@@ -86,6 +88,8 @@ script_mod! {
             color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
             color_2_hover: uniform(theme.color_u_hidden)
             color_2_active: uniform(theme.color_bg_app)
+
+            color_active_not_current: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
 
             border_color: uniform(theme.color_u_hidden)
             border_color_hover: uniform(theme.color_u_hidden)
@@ -136,6 +140,10 @@ script_mod! {
                     color_fill = mix(self.color, self.color_2, dir)
                     color_fill_hover = mix(self.color_hover, self.color_2_hover, dir)
                     color_fill_active = mix(self.color_active, self.color_2_active, dir)
+                }
+
+                if self.color_active_not_current.x > -0.5 {
+                    color_fill_active = mix(self.color_active_not_current, color_fill_active, self.current)
                 }
 
                 let mut color_stroke = self.border_color
@@ -279,6 +287,8 @@ pub struct Tab {
     #[rust]
     is_active: bool,
     #[rust]
+    is_current: bool,
+    #[rust]
     is_dragging: bool,
     /// The label the tab bar hands in before each draw.
     #[rust]
@@ -356,6 +366,14 @@ impl Tab {
         self.animator_toggle(cx, is_active, animate, ids!(active.on), ids!(active.off));
     }
 
+    pub fn is_current(&self) -> bool {
+        self.is_current
+    }
+
+    pub fn set_is_current(&mut self, is_current: bool) {
+        self.is_current = is_current;
+    }
+
     /// Returns the cursor for a pointer that is over (or off) this tab.
     ///
     /// The tab sets this itself, since `animator_play` sets a state's cursor only
@@ -368,9 +386,12 @@ impl Tab {
     }
 
     pub fn draw(&mut self, cx: &mut Cx2d, name: &str) {
+        let current = if self.is_current { 1.0 } else { 0.0 };
+        self.draw_bg.draw_vars.set_dyn_instance(cx, id!(current), &[current]);
+        self.draw_text.draw_vars.set_dyn_instance(cx, id!(current), &[current]);
         self.draw_bg.begin(cx, self.walk, self.layout);
         if self.closeable {
-            self.close_button.draw(cx);
+            self.close_button.draw(cx, self.is_current);
         }
 
         self.draw_icon.draw_walk(cx, self.icon_walk);

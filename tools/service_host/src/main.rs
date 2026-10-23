@@ -481,11 +481,17 @@ mod win {
             return Err(format!("cannot open log {} (error {})", cfg.log, unsafe { GetLastError() }));
         }
         let nul = open_nul();
+        // Only a program started in the user's session gets the interactive
+        // desktop; a service account in session 0 keeps its own window
+        // station (its console children fail with STATUS_DLL_INIT_FAILED on
+        // a desktop they cannot open).
+        let mut token = null_mut();
+        let user = session.is_some_and(|s| unsafe { WTSQueryUserToken(s, &mut token) } != 0);
         let mut desktop = wide("winsta0\\default");
         let si = StartupInfo {
             cb: std::mem::size_of::<StartupInfo>() as u32,
             reserved: null_mut(),
-            desktop: desktop.as_mut_ptr(),
+            desktop: if user { desktop.as_mut_ptr() } else { null_mut() },
             title: null_mut(),
             x: 0,
             y: 0,
@@ -506,8 +512,6 @@ mod win {
         let mut cmd = command_line(cfg);
         let cwd = wide(&cfg.cwd);
         let flags = CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW;
-        let mut token = null_mut();
-        let user = session.is_some_and(|s| unsafe { WTSQueryUserToken(s, &mut token) } != 0);
         let ok = if user {
             let base = user_environment(token).unwrap_or_else(|| std::env::vars().collect());
             let env = environment(cfg, base);

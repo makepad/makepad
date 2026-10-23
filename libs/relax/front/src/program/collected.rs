@@ -220,6 +220,13 @@ impl Program {
     }
 
     pub fn collected_writer(&self) -> Option<crate::image::Writer<'_>> {
+        self.collected_writer_with(&|| false)
+    }
+
+    /// `stop`: asked every 256 files and between the tables; yes drops the image (None) -- the
+    /// settle swap's encode under a front read gives way to a waiting writer (relax-compiler
+    /// zone_swap.rs).
+    pub fn collected_writer_with(&self, stop: &dyn Fn() -> bool) -> Option<crate::image::Writer<'_>> {
         if !self.imports_done || !self.errors.is_empty() || !self.pending_macs.is_empty() {
             if crate::preload::trace() { eprintln!("makepad-run collected: Program not recordable: imports {}, errors {}, macros {}", self.imports_done, self.errors.len(), self.pending_macs.len()); if let Some(e) = self.errors.first() { eprintln!("makepad-run collected: first program error: {e}"); } }
             return None;
@@ -255,6 +262,7 @@ impl Program {
         skipped.put(&mut w);
         self.files.len().put(&mut w);
         for (i, f) in self.files.iter().enumerate() {
+            if i % 256 == 255 && stop() { return None; }
             f.source_hash(&self.file_paths[i]).put(&mut w);
             f.edition.put(&mut w); f.src_len.put(&mut w); f.token_input.put(&mut w);
             // length-prefixed: a restore keeps it encoded until a body parse needs it
@@ -267,12 +275,13 @@ impl Program {
             crate::arena::Arena::Mapped(defs) => image.add_mapped(1, defs),
             crate::arena::Arena::Owned(defs) => image.add(1, defs),
         }
+        if stop() { return None; }
         self.macros.write_image(&mut image, 2);
         self.syms.write_image(&mut image, 3);
         let mut id = 6;
-        macro_rules! table { ($($f:ident),+) => { $(self.$f.write_image(&mut image, &mut id);)+ }; }
+        macro_rules! table { ($($f:ident),+) => { $(if stop() { return None; } self.$f.write_image(&mut image, &mut id);)+ }; }
         tables!(table);
-        macro_rules! list { ($($f:ident),+) => { $(self.$f.write_image(&mut image, &mut id);)+ }; }
+        macro_rules! list { ($($f:ident),+) => { $(if stop() { return None; } self.$f.write_image(&mut image, &mut id);)+ }; }
         lists!(list);
         self.repeat_expr_counts.write_image(&mut image, &mut id);
         self.collected_definitions.write_image(&mut image, &mut id);

@@ -1,0 +1,210 @@
+mod.theme = mod.themes.dark
+
+// A grid world at night: an indigo sky, a magenta grid floor, and every
+// control a tube of light round dark smoked glass. The tokens here carry
+// the deep violet ground the world stands on and the hues its tubes burn
+// in; the widgets sheet draws the world and the light. Every state of a
+// family is spelled out, because the base derived its states once, from
+// its own colours.
+mod.theme.color_bg_app = #090619
+mod.theme.color_fg_app = #090619
+mod.theme.color_bg_container = #0e0a22
+mod.theme.color_surface_container_lowest = #04030c
+
+// Raised faces: buttons, handles, tabs. Dark violet glass, a little
+// lighter at the foot than at the head.
+mod.theme.color_outset = #0f0628
+mod.theme.color_outset_1 = #0a041e
+mod.theme.color_outset_2 = #150834
+mod.theme.color_outset_hover = #150832
+mod.theme.color_outset_1_hover = #120630
+mod.theme.color_outset_2_hover = #1c0a40
+mod.theme.color_outset_down = #0a2a44
+mod.theme.color_outset_1_down = #08243c
+mod.theme.color_outset_2_down = #0c3450
+mod.theme.color_outset_focus = #0f0628
+mod.theme.color_outset_1_focus = #0a041e
+mod.theme.color_outset_2_focus = #150834
+mod.theme.color_outset_active = #0a2a44
+mod.theme.color_outset_disabled = #0a041d
+mod.theme.color_outset_1_disabled = #0a041d
+mod.theme.color_outset_2_disabled = #0a041d
+
+// Wells: fields, tracks, boxes. Violet black, below the ground.
+mod.theme.color_inset = #080318
+mod.theme.color_inset_1 = #080318
+mod.theme.color_inset_2 = #080318
+mod.theme.color_inset_hover = #0a041c
+mod.theme.color_inset_1_hover = #0a041c
+mod.theme.color_inset_2_hover = #0a041c
+mod.theme.color_inset_focus = #0a041c
+mod.theme.color_inset_1_focus = #0a041c
+mod.theme.color_inset_2_focus = #0a041c
+mod.theme.color_inset_active = #07203a
+mod.theme.color_inset_1_active = #07203a
+mod.theme.color_inset_2_active = #07203a
+mod.theme.color_inset_down = #0a041c
+mod.theme.color_inset_1_down = #0a041c
+mod.theme.color_inset_2_down = #0a041c
+mod.theme.color_inset_drag = #0a041c
+mod.theme.color_inset_1_drag = #0a041c
+mod.theme.color_inset_2_drag = #0a041c
+mod.theme.color_inset_empty = #080318
+mod.theme.color_inset_1_empty = #080318
+mod.theme.color_inset_2_empty = #080318
+mod.theme.color_inset_disabled = #0a041d
+mod.theme.color_inset_1_disabled = #0a041d
+mod.theme.color_inset_2_disabled = #0a041d
+
+// The edge every stock face still draws: a quiet violet rail. The lit
+// tubes are drawn by the faces themselves.
+mod.theme.color_bevel = #2a1f50
+mod.theme.color_bevel_hover = #4a3a88
+mod.theme.color_bevel_focus = #0f8fa3
+mod.theme.color_bevel_active = #0f8fa3
+mod.theme.color_bevel_down = #0f8fa3
+mod.theme.color_bevel_disabled = #1e1838
+mod.theme.color_bevel_inset_1 = #2a1f50
+mod.theme.color_bevel_inset_2 = #2a1f50
+mod.theme.color_bevel_outset_1 = #2a1f50
+mod.theme.color_bevel_outset_2 = #2a1f50
+mod.theme.color_bevel_inset_1_disabled = #1e1838
+mod.theme.color_bevel_inset_2_disabled = #1e1838
+mod.theme.color_bevel_outset_1_disabled = #1e1838
+mod.theme.color_bevel_outset_2_disabled = #1e1838
+mod.theme.beveling = 0.5
+
+// Label ink: a cool white at rest, white when lit, a dead violet grey when
+// off.
+mod.theme.color_text = #dfe6f5
+mod.theme.color_text_hover = #ffffff
+mod.theme.color_text_focus = #dfe6f5
+mod.theme.color_text_active = #ffffff
+mod.theme.color_text_down = #ffffff
+mod.theme.color_text_disabled = #57537a
+mod.theme.color_text_placeholder = #8c7295
+mod.theme.color_text_placeholder_hover = #a0849f
+mod.theme.color_text_val = #9a92c0
+mod.theme.color_text_meta = #9a92c0
+mod.theme.color_text_hl = #ffffff
+mod.theme.color_label = #dfe6f5
+mod.theme.color_label_hover = #ffffff
+mod.theme.color_label_focus = #dfe6f5
+mod.theme.color_label_active = #ffffff
+mod.theme.color_label_down = #ffffff
+mod.theme.color_label_disabled = #57537a
+mod.theme.color_label_inner = #dfe6f5
+mod.theme.color_label_inner_hover = #ffffff
+mod.theme.color_label_inner_focus = #dfe6f5
+mod.theme.color_label_inner_active = #ffffff
+mod.theme.color_label_inner_down = #ffffff
+mod.theme.color_label_inner_disabled = #57537a
+mod.theme.color_label_outer = #dfe6f5
+mod.theme.color_label_outer_hover = #ffffff
+mod.theme.color_label_outer_focus = #dfe6f5
+mod.theme.color_label_outer_active = #ffffff
+mod.theme.color_label_outer_down = #ffffff
+mod.theme.color_label_outer_disabled = #57537a
+mod.theme.color_icon = #dfe6f5
+mod.theme.color_icon_hover = #ffffff
+mod.theme.color_icon_disabled = #57537a
+// The accent seed: the primary, secondary and tertiary families are grown
+// from `color_ctrl_selected`. Cyan is the accent, magenta the second voice.
+mod.theme.color_ctrl_selected = #2edaff
+mod.theme.color_focus = #2edaff
+mod.theme.color_ctrl_active = #2edaff
+mod.theme.color_val = #2edaff
+mod.theme.color_cursor = #ff56c9
+mod.theme.color_text_cursor = #ff56c9
+mod.theme.color_bg_highlight = #3a1640
+mod.theme.color_bg_highlight_inline = #3a1640
+mod.theme.color_selection = #4a1a44
+mod.theme.color_selection_hover = #4a1a44
+mod.theme.color_selection_focus = #5a1f52
+mod.theme.color_selection_down = #5a1f52
+// Signals: acid yellow warns, red-pink stops, green says done, blue informs.
+mod.theme.color_success = #5df32f
+mod.theme.color_warning = #ffe84d
+mod.theme.color_error = #f5006f
+mod.theme.color_info = #3d63ff
+
+mod.theme.color_terminal_bg = #090619
+mod.theme.color_terminal_text = #dfe6f5
+// The displays: near-black glass, digits lit a pale cyan.
+mod.theme.color_screen = #05040f
+mod.theme.color_screen_ink = #a8f4ff
+
+// Slim: a 26 point control row, 6 point gaps, 4 point corners.
+mod.theme.space_factor = 6.0
+mod.theme.space_1 = 3.0
+mod.theme.space_2 = 6.0
+mod.theme.space_3 = 9.0
+mod.theme.mspace_1 = mod.turtle.Inset{top: 3.0 right: 3.0 bottom: 3.0 left: 3.0}
+mod.theme.mspace_h_1 = mod.turtle.Inset{top: 0.0 right: 3.0 bottom: 0.0 left: 3.0}
+mod.theme.mspace_v_1 = mod.turtle.Inset{top: 3.0 right: 0.0 bottom: 3.0 left: 0.0}
+mod.theme.mspace_2 = mod.turtle.Inset{top: 6.0 right: 6.0 bottom: 6.0 left: 6.0}
+mod.theme.mspace_h_2 = mod.turtle.Inset{top: 0.0 right: 6.0 bottom: 0.0 left: 6.0}
+mod.theme.mspace_v_2 = mod.turtle.Inset{top: 6.0 right: 0.0 bottom: 6.0 left: 0.0}
+mod.theme.mspace_3 = mod.turtle.Inset{top: 9.0 right: 9.0 bottom: 9.0 left: 9.0}
+mod.theme.mspace_h_3 = mod.turtle.Inset{top: 0.0 right: 9.0 bottom: 0.0 left: 9.0}
+mod.theme.mspace_v_3 = mod.turtle.Inset{top: 9.0 right: 0.0 bottom: 9.0 left: 0.0}
+// The rungs the base froze at its own spacing, restated for this row.
+mod.theme.tab_height = 26.0
+mod.theme.tab_flat_height = 24.0
+mod.theme.size_control_s = 22.0
+mod.theme.size_control_m = 26.0
+mod.theme.size_control_l = 32.0
+mod.theme.corner_radius = 2.0
+mod.theme.container_corner_radius = 3.0
+mod.theme.textselection_corner_radius = 1.0
+
+// The base's neutral grotesque carries labels at 8.5 points, a cap of
+// about a third of the 26 point row; values are monospace at 8.
+mod.theme.font_size_base = 8.5
+mod.theme.font_size_p = 8.5
+mod.theme.font_size_code = 8.0
+mod.theme.font_code = mod.theme.font_code{font_size: 8.0}
+mod.theme.font_regular = mod.theme.font_regular{font_size: 8.5}
+mod.theme.font_bold = mod.theme.font_bold{font_size: 8.5}
+mod.theme.font_label = mod.theme.font_label{font_size: 8.5}
+mod.theme.font_italic = mod.theme.font_italic{font_size: 8.5}
+mod.theme.font_bold_italic = mod.theme.font_bold_italic{font_size: 8.5}
+// The body and label rungs the base froze from its own sizes, restated
+// on the slimmer row.
+mod.theme.type_title_l_size = 13.0
+mod.theme.type_title_m_size = 11.5
+mod.theme.type_title_s_size = 10.0
+mod.theme.font_title_l = mod.theme.font_bold{font_size: 13.0 line_spacing: 1.2}
+mod.theme.font_title_m = mod.theme.font_bold{font_size: 11.5 line_spacing: 1.2}
+mod.theme.font_title_s = mod.theme.font_bold{font_size: 10.0 line_spacing: 1.2}
+mod.theme.type_body_l_size = 9.5
+mod.theme.type_body_m_size = 8.5
+mod.theme.type_body_s_size = 7.5
+mod.theme.type_label_l_size = 8.5
+mod.theme.type_label_m_size = 7.5
+mod.theme.type_label_s_size = 7.0
+mod.theme.font_body_l = mod.theme.font_regular{font_size: 9.5 line_spacing: 1.35}
+mod.theme.font_body_m = mod.theme.font_regular{font_size: 8.5 line_spacing: 1.35}
+mod.theme.font_body_s = mod.theme.font_regular{font_size: 7.5 line_spacing: 1.35}
+mod.theme.font_label_l = mod.theme.font_bold{font_size: 8.5 line_spacing: 1.2}
+mod.theme.font_label_m = mod.theme.font_bold{font_size: 7.5 line_spacing: 1.2}
+mod.theme.font_label_s = mod.theme.font_bold{font_size: 7.0 line_spacing: 1.2}
+
+// The surface ladder in deep violet, so every widget built on the roles
+// stays in the family: grounds, containers, their ink and outlines.
+mod.theme.color_surface = #090619
+mod.theme.color_surface_dim = #060414
+mod.theme.color_surface_bright = #2a2050
+mod.theme.color_surface_container_low = #0e0a22
+mod.theme.color_surface_container = #130e2c
+mod.theme.color_surface_container_high = #191238
+mod.theme.color_surface_container_highest = #201845
+mod.theme.color_on_surface = #dfe6f5
+// Captions and the second rung of ink are lit: a pink neon that carries a
+// glow of its own on the world.
+mod.theme.color_on_surface_variant = #ff8fe0
+mod.theme.color_outline = #3a2a6a
+mod.theme.color_outline_variant = #2a1f50
+mod.theme.color_inverse_surface = #dfe6f5
+mod.theme.color_inverse_on_surface = #090619
+true

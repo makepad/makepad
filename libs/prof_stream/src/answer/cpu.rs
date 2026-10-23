@@ -13,8 +13,13 @@ fn fn_cell(r: &Value) -> String {
     }
 }
 
-fn is_jit(r: &Value) -> bool {
-    s(r, "in").starts_with("jit")
+/// The program's own code: JIT code, or a native build's own image (`prof` of a rustc build)
+fn is_program_code(module: &str) -> bool {
+    module.starts_with("jit") || module == "native"
+}
+
+fn is_program_row(r: &Value) -> bool {
+    is_program_code(s(r, "in"))
 }
 
 pub fn prof(a: &mut Answer) {
@@ -28,7 +33,7 @@ pub fn prof(a: &mut Answer) {
     let wall = (secs * 1000.0).max(1.0);
     // the hottest program fn: its own rows plus its inlined copies' rows
     let mut phys: Vec<(String, f64, String, String)> = Vec::new();
-    for r in rows.iter().filter(|r| is_jit(r)) {
+    for r in rows.iter().filter(|r| is_program_row(r)) {
         let into = s(r, "inlined_into");
         let name = if into.is_empty() { s(r, "fn") } else { into }.to_string();
         let slot = if into.is_empty() { super::num(r.get("slot")).map(|x| format!("S{}", x as i64)).unwrap_or_default() } else { String::new() };
@@ -115,7 +120,7 @@ pub fn prof(a: &mut Answer) {
                 let p = super::num(e.first())?;
                 let n = e.get(1)?.as_str()?;
                 let (name, module) = n.split_once(" [").unwrap_or((n, ""));
-                (module.starts_with("jit") && super::frames::kind_of("", name) == super::frames::Kind::Program && !name.starts_with("jit ") && !module.contains("inlined")).then(|| format!("{} {}", short_fn(name), pct(p)))
+                (is_program_code(module) && super::frames::kind_of("", name) == super::frames::Kind::Program && !name.starts_with("jit ") && !module.contains("inlined")).then(|| format!("{} {}", short_fn(name), pct(p)))
             })
             .collect();
         if !prog.is_empty() {

@@ -857,29 +857,6 @@ mod imp {
         }
     }
 
-    fn f32_to_bf16_word(value: f32) -> u16 {
-        let bits = value.to_bits();
-        let lsb = (bits >> 16) & 1;
-        let rounding_bias = 0x7FFF + lsb;
-        ((bits.wrapping_add(rounding_bias)) >> 16) as u16
-    }
-
-    fn f32s_to_bf16_words(values: &[f32]) -> Vec<u16> {
-        values.iter().copied().map(f32_to_bf16_word).collect()
-    }
-
-    fn u16_words_as_le_bytes(words: &[u16]) -> &[u8] {
-        #[cfg(target_endian = "little")]
-        unsafe {
-            std::slice::from_raw_parts(words.as_ptr().cast::<u8>(), words.len() * size_of::<u16>())
-        }
-
-        #[cfg(not(target_endian = "little"))]
-        {
-            unreachable!("u16 byte reinterpreting currently assumes little-endian targets")
-        }
-    }
-
     fn shape_numel(shape: &[usize]) -> Option<usize> {
         shape
             .iter()

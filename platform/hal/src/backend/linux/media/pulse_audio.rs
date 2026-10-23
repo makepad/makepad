@@ -643,8 +643,6 @@ pub struct PulseAudioAccess {
     audio_inputs: Vec<PulseInputStream>,
 
     device_descs: Vec<PulseAudioDesc>,
-    /// The connected server as it names itself, from the last enumeration.
-    server: Option<String>,
     change_signal: Signal,
     context_state: *mut PulseContextState,
     main_loop: *mut pa_threaded_mainloop,
@@ -675,8 +673,6 @@ struct PulseDeviceQuery {
     source_list: Vec<PulseDeviceDesc>,
     default_sink: Option<String>,
     default_source: Option<String>,
-    /// The server's name and version, e.g. "PulseAudio (on PipeWire 1.0.5)".
-    server: Option<String>,
 }
 
 impl PulseDeviceQuery {
@@ -817,7 +813,6 @@ impl PulseAudioAccess {
                 audio_input_cb: entries.0[0].clone(),
                 audio_output_cb: entries.0[1].clone(),
                 device_descs: Default::default(),
-                server: None,
                 failed_devices: Default::default(),
                 last_input_request: Vec::new(),
                 last_output_request: Vec::new(),
@@ -946,22 +941,9 @@ impl PulseAudioAccess {
             if !info.is_null() {
                 query.default_sink = cstr_to_string((*info).default_sink_name);
                 query.default_source = cstr_to_string((*info).default_source_name);
-                query.server =
-                    cstr_to_string((*info).server_name).map(|name| {
-                        match cstr_to_string((*info).server_version) {
-                            Some(version) => format!("{name} {version}"),
-                            None => name,
-                        }
-                    });
             }
             query.signal();
         }));
-    }
-
-    /// The connected server as it names itself ("PulseAudio (on PipeWire
-    /// 1.0.5) 15.0.0"), known after the first device enumeration.
-    pub fn server(&self) -> Option<&str> {
-        self.server.as_deref()
     }
 
     pub fn get_updated_descs(&mut self) -> Vec<AudioDeviceInfo> {
@@ -1023,9 +1005,6 @@ impl PulseAudioAccess {
                 pa_operation_unref(op);
             }
             pa_threaded_mainloop_unlock(self.main_loop);
-            if query.server.is_some() {
-                self.server = query.server.take();
-            }
             // lets add some input/output devices
             let mut out = Vec::new();
             let mut device_descs = Vec::new();

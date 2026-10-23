@@ -1722,6 +1722,12 @@ impl ResolveBoundVars {
             }
         }).collect()
     }
+    /// The names of the lifetimes the opaque captures (its own duplicated lifetimes, in order).
+    pub(crate) fn opaque_capture_names(&self, opaque: DefId) -> Vec<Option<String>> {
+        self.opaque_captured_lifetimes.get(&opaque).map_or(Vec::new(), |v| v.iter().map(|&(_, own)| {
+            self.names.declarations.iter().find(|d| d.id == own).and_then(|d| d.name.clone())
+        }).collect())
+    }
     pub(crate) fn region_for_arg(&self, arg: ResolvedArg) -> RegionKind {
         match arg {
             ResolvedArg::StaticLifetime => RegionKind::ReStatic,

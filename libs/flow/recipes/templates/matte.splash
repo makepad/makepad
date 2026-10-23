@@ -1,0 +1,19 @@
+use mod.flow.*
+
+/** The image whose subject should be cut out. */
+let image = Input{ type: @image  at: vec2(40, 120) }
+
+let matte = Matte{
+    image: image.image()
+    model: "birefnet-hr"
+    at: vec2(360, 120)
+}
+
+/** The RGBA cutout with a soft alpha matte. */
+let cutout = Output{ type: @image  value: matte.out(@image)  at: vec2(680, 120) }
+
+Flow{
+    label: "Image matte"
+    brief: "Extracts a clean soft-alpha subject cutout from a supplied image."
+    image, matte, cutout
+}

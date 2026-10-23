@@ -724,6 +724,14 @@ mod tests {
 /// Whether `d` (or an item around it) was written by a derive, attribute or built-in macro:
 /// rustc reports no lints inside their output (the spans are `in_external_macro`). A
 /// `macro_rules!` expansion is the user's code and is judged.
+/// An item a built-in derive output (`#[derive(..)]` of a compiler derive).
+pub fn derived(prog: &Program, d: DefId) -> bool {
+    let def = prog.def(d);
+    let pf = &prog.files[def.file as usize];
+    let it = pf.ast.item(def.item);
+    it.lo >= pf.src_len && matches!(pf.expansion_region_kind(it.lo), crate::parser::ExpnKind::Builtin)
+}
+
 pub fn generated(prog: &Program, d: DefId) -> bool {
     let mut cur = d;
     let mut guard = 0;

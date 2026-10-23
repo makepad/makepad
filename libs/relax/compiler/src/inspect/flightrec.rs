@@ -88,12 +88,12 @@ pub(super) struct Slots<T: Copy> {
 unsafe impl<T: Copy + Send> Sync for Slots<T> {}
 
 impl<T: Copy> Slots<T> {
-    fn new(n: usize) -> Slots<T> {
+    pub(super) fn new(n: usize) -> Slots<T> {
         assert!(n.is_power_of_two());
         Slots { head: AtomicU64::new(0), seq: (0..n).map(|_| AtomicU64::new(0)).collect(), data: (0..n).map(|_| UnsafeCell::new(std::mem::MaybeUninit::uninit())).collect() }
     }
 
-    fn push(&self, v: T) {
+    pub(super) fn push(&self, v: T) {
         let n = self.head.fetch_add(1, Relaxed);
         let i = n as usize & (self.seq.len() - 1);
         self.seq[i].store(0, Relaxed);
@@ -104,7 +104,7 @@ impl<T: Copy> Slots<T> {
 
     /// Entries `from..` (at most a ring back): `f(n, entry)`. Returns the cursor to read from next
     /// time and the entries lost (overwritten before or while they were read).
-    fn read(&self, from: u64, f: &mut dyn FnMut(u64, T)) -> (u64, u64) {
+    pub(super) fn read(&self, from: u64, f: &mut dyn FnMut(u64, T)) -> (u64, u64) {
         let len = self.seq.len() as u64;
         let head = self.head.load(Acquire);
         let mut lost = 0;
@@ -194,16 +194,21 @@ struct Jit {
     origin: u8,
 }
 
+/// A UI frame's summary (timeline's frame watch): its span, the idle gaps in it, its lazy
+/// compiles, its waits (of them on the owner) and the waits made inside the lazy compiles (of
+/// them on the owner: compile and wait times overlap by these).
 #[derive(Clone, Copy)]
-struct Fr {
-    t0: u64,
-    t1: u64,
-    idle: u64,
-    compile_ns: u64,
-    wait_ns: u64,
-    owner_ns: u64,
-    compiles: u32,
-    waits: u32,
+pub struct Fr {
+    pub t0: u64,
+    pub t1: u64,
+    pub idle: u64,
+    pub compile_ns: u64,
+    pub wait_ns: u64,
+    pub owner_ns: u64,
+    pub compiles: u32,
+    pub waits: u32,
+    pub cwait_ns: u64,
+    pub cowner_ns: u64,
 }
 
 static EVENTS: std::sync::OnceLock<Slots<Ev>> = std::sync::OnceLock::new();
@@ -316,14 +321,12 @@ pub fn jit_install(id: u32, len: u32, tier: u8, origin: u8) {
     jits().push(Jit { t: crate::clock::wall_ns(), os_id: super::threads::self_os_id(), id, len, tier, origin });
 }
 
-/// A UI frame ended (timeline's frame watch): its span, the idle gaps in it, its lazy compiles
-/// and its waits (of them on the owner).
-#[allow(clippy::too_many_arguments)]
-pub fn frame(t0: u64, t1: u64, idle: u64, compile_ns: u64, compiles: u32, wait_ns: u64, owner_ns: u64, waits: u32) {
+/// A UI frame ended (timeline's frame watch): its summary.
+pub fn frame(f: Fr) {
     if !on() {
         return;
     }
-    frames().push(Fr { t0, t1, idle, compile_ns, wait_ns, owner_ns, compiles, waits });
+    frames().push(f);
 }
 
 /// wall ns the UI thread entered its current root phase (0: between phases: idle in the event
@@ -478,7 +481,9 @@ fn watch() {
             if last == 0 || now.saturating_sub(last) >= gap {
                 LAST_AUTO.store(now, Relaxed);
                 match save(if why == Why::Hitch { HITCH_LAST_NS } else { DUMP_LAST_NS }, why, None, true) {
-                    Ok((path, n)) => eprintln!("makepad-run flightrec: {} recorded: {} ({} KB; makepad inspect file={} pf brief)", why.name(), path.display(), n / 1024, path.display()),
+                    // a hitch (a cold start has some) is named with --verbose; panics and faults always
+                    Ok((path, n)) if why != Why::Hitch || crate::run::VERBOSE.load(Relaxed) => eprintln!("makepad-run flightrec: {} recorded: {} ({} KB; makepad inspect file={} pf brief)", why.name(), path.display(), n / 1024, path.display()),
+                    Ok(_) => {}
                     Err(e) => eprintln!("makepad-run flightrec: cannot write the {} recording: {}", why.name(), e),
                 }
             }
@@ -569,7 +574,7 @@ pub(super) fn encode(cur: &mut Cursors, enc: &mut super::pstream::StreamEnc, min
         let (pn, pt) = cur.prev_frame.unwrap_or((0, 0));
         // frame numbers count from the run's first frame (frame n is F<n+1>)
         e.u(n + 1 - pn.min(n + 1)).d(t0, pt).u(f.t1.saturating_sub(f.t0)).u(0).u(0).u(0);
-        e.u(f.idle).u(f.compile_ns).u(f.compiles as u64).u(f.wait_ns).u(f.owner_ns).u(f.waits as u64);
+        e.u(f.idle).u(f.compile_ns).u(f.compiles as u64).u(f.wait_ns).u(f.owner_ns).u(f.waits as u64).u(f.cwait_ns).u(f.cowner_ns);
         cur.prev_frame = Some((n + 1, t0));
         ps::record(&mut out, ps::kind::FRAME, &e.0);
     }
@@ -610,6 +615,8 @@ pub(super) fn encode(cur: &mut Cursors, enc: &mut super::pstream::StreamEnc, min
         cur.run_sent = true;
         if let Some((args, cwd, env)) = RUN.lock().unwrap_or_else(|e| e.into_inner()).clone() {
             run_evs = vec![("run.args", args), ("run.cwd", cwd), ("run.env", env), ("run.home", crate::gitstore::relax_home().display().to_string())];
+            // where the session's code came from, as of this recording (warm-cache outcomes)
+            run_evs.push(("jit.cache", crate::cache::warm_summary()));
         }
     }
     let mut ev_payload = None;
@@ -666,7 +673,7 @@ pub(super) fn encode(cur: &mut Cursors, enc: &mut super::pstream::StreamEnc, min
     let mut samples = Vec::new();
     if !raw.is_empty() {
         let run = super::prof::Run {
-            samples: raw.into_iter().map(|s| super::prof::Sample { os_id: s.os_id, frames: s.pcs, weight: s.w, t: s.t }).collect(),
+            samples: raw.into_iter().map(|s| super::prof::Sample { os_id: s.os_id, frames: s.pcs, weight: s.w, t: s.t, on_cpu: true }).collect(),
             threads: Vec::new(),
             secs: 0.0,
             hz: 200,

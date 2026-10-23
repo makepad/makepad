@@ -561,6 +561,8 @@ impl Cx {
             self.hal.glyph_wait.pending.clear();
             self.hal.glyph_wait.drawn_blank = 0;
             if self.need_redrawing() {
+                // (a frame drawn again below still paints what an earlier drawing of it recorded
+                // and this one did not: `call_draw_event` keeps it)
                 self.call_draw_event(time_now);
             }
             if !self.draw_shaders.compile_set.is_empty() {
@@ -580,6 +582,7 @@ impl Cx {
                     eprintln!("[hal-client] first window FramePacket deferred: pending_glyphs={} pending_pipelines={}; waiting for resources before submission",
                         self.hal.glyph_wait.pending.len(), self.hal.frames.pipelines_pending());
                 }
+                self.frame_drawn_again();
                 self.redraw_all();
                 return true;
             }
@@ -612,6 +615,7 @@ impl Cx {
                 }
             }
             // Rebuild even on timeout, so every glyph that arrived within the budget is used.
+            self.frame_drawn_again();
             self.redraw_all();
         }
         self.hal.beat_phases[2] = [walk_start, makepad_hal::clock_ns()];
@@ -636,6 +640,7 @@ impl Cx {
         self.fb_build(&mut fb, &passes, pass_time, input_ns);
         self.fb_picks(&mut fb);
         self.hal.frames = fb;
+        self.release_painted_recordings();
         if let Some(start) = build_start {
             makepad_hal::profile::since(makepad_hal::profile::Metric::CpuBuild, start);
             if passes.is_empty() { makepad_hal::profile::count("beat: no pass painted"); }

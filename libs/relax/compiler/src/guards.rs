@@ -92,9 +92,11 @@ fn env_u64(name: &str, d: u64) -> u64 {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).filter(|v| *v > 0).unwrap_or(d)
 }
 
+/// Never for a W32 web program (codegen web32.rs): its site records are host memory, outside the
+/// window its masked loads/stores address.
 pub fn enabled() -> bool {
     static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *E.get_or_init(|| std::env::var("MAKEPAD_RUN_GUARDS").is_ok_and(|v| v == "1"))
+    *E.get_or_init(|| std::env::var("MAKEPAD_RUN_GUARDS").is_ok_and(|v| v == "1")) && relax_codegen::web32::cfg().is_none()
 }
 fn ready() -> u64 {
     static E: std::sync::OnceLock<u64> = std::sync::OnceLock::new();

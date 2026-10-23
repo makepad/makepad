@@ -48,7 +48,7 @@ pub(super) struct DeferredLivenessSource<'a> {
 }
 pub(super) struct RegionLiveness<'a> {
     pub direction: super::ConstraintDirection,
-    points: Option<&'a crate::mir::dataflow::BitSet>,
+    points: Option<&'a crate::mir::dataflow::IntervalSet>,
 }
 impl RegionLiveness<'_> {
     pub fn is_live_at(&self, point: usize) -> bool { self.points.is_some_and(|row| row.contains(point)) }

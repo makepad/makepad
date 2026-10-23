@@ -1,0 +1,236 @@
+mod.theme = mod.themes.light
+
+// White porcelain on a lavender-white plate, from the pictures in
+// interface/white: thick white slabs and moulded white pills, each throwing
+// a large soft lavender shadow, with deep navy as the strong second colour
+// (the primary button, what is chosen, a switch that is on) carrying white
+// words. The accent is an indigo going to violet: the value a control holds,
+// a mark that is set, focus. Screens are navy displays with pale lavender
+// digits. Warm orange is never paint: it is only the light that leaks from
+// under a slab. The faces are drawn in widgets.splash; this file holds the
+// tokens every face and every stock widget reads.
+mod.theme.color_bg_app = #e8e8f2
+// The surface ladder is grown from this one: a white a step over the plate.
+mod.theme.color_fg_app = #f4f4fa
+mod.theme.color_bg_container = #e8e8f2
+mod.theme.color_surface_container_lowest = #dfdfeb
+
+// Raised faces the sheet does not redraw: a moulded white pill, its top the
+// brightest, its foot turning lavender.
+mod.theme.color_outset = #f6f6fb
+mod.theme.color_outset_1 = #ffffff
+mod.theme.color_outset_2 = #e9e9f3
+mod.theme.color_outset_hover = #fafafd
+mod.theme.color_outset_1_hover = #ffffff
+mod.theme.color_outset_2_hover = #eeeef6
+mod.theme.color_outset_focus = #f6f6fb
+mod.theme.color_outset_1_focus = #ffffff
+mod.theme.color_outset_2_focus = #e9e9f3
+mod.theme.color_outset_active = #e6e6f0
+mod.theme.color_outset_1_active = #dfdfeb
+mod.theme.color_outset_2_active = #ececf4
+mod.theme.color_outset_down = #e6e6f0
+mod.theme.color_outset_1_down = #dfdfeb
+mod.theme.color_outset_2_down = #ececf4
+mod.theme.color_outset_drag = #e6e6f0
+mod.theme.color_outset_1_drag = #dfdfeb
+mod.theme.color_outset_2_drag = #ececf4
+mod.theme.color_outset_disabled = #eeeef5
+mod.theme.color_outset_1_disabled = #eeeef5
+mod.theme.color_outset_2_disabled = #eeeef5
+
+// Wells: a white pressed into the plate, whiter than it; the edges below
+// shade its top and light its foot.
+mod.theme.color_inset = #f7f7fb
+mod.theme.color_inset_1 = #f2f2f8
+mod.theme.color_inset_2 = #fafafd
+mod.theme.color_inset_hover = #fafafd
+mod.theme.color_inset_1_hover = #f5f5fa
+mod.theme.color_inset_2_hover = #fcfcfe
+mod.theme.color_inset_focus = #fcfcfe
+mod.theme.color_inset_1_focus = #f7f7fb
+mod.theme.color_inset_2_focus = #fcfcfe
+mod.theme.color_inset_active = #fcfcfe
+mod.theme.color_inset_1_active = #f7f7fb
+mod.theme.color_inset_2_active = #fcfcfe
+mod.theme.color_inset_down = #f0f0f6
+mod.theme.color_inset_1_down = #eaeaf2
+mod.theme.color_inset_2_down = #f2f2f8
+mod.theme.color_inset_drag = #f0f0f6
+mod.theme.color_inset_1_drag = #eaeaf2
+mod.theme.color_inset_2_drag = #f2f2f8
+mod.theme.color_inset_empty = #f7f7fb
+mod.theme.color_inset_1_empty = #f2f2f8
+mod.theme.color_inset_2_empty = #fafafd
+mod.theme.color_inset_disabled = #eeeef5
+mod.theme.color_inset_1_disabled = #eeeef5
+mod.theme.color_inset_2_disabled = #eeeef5
+
+// The device pixel edges of a stock face: white on top of a pill, a soft
+// lavender contact line under it; lavender on top of a well, white under it.
+mod.theme.beveling = 0.5
+mod.theme.color_bevel = #c5c5d8
+mod.theme.color_bevel_hover = #b9b9cf
+mod.theme.color_bevel_focus = #6a5cc8
+mod.theme.color_bevel_active = #b9b9cf
+mod.theme.color_bevel_empty = #c5c5d8
+mod.theme.color_bevel_down = #b9b9cf
+mod.theme.color_bevel_drag = #b9b9cf
+mod.theme.color_bevel_disabled = #dadae6
+mod.theme.color_bevel_inset_1 = #b9b9cf
+mod.theme.color_bevel_inset_2 = #ffffff
+mod.theme.color_bevel_outset_1 = #ffffff
+mod.theme.color_bevel_outset_2 = #b9b9cf
+mod.theme.color_bevel_inset_1_hover = #b1b1c8
+mod.theme.color_bevel_inset_2_hover = #ffffff
+mod.theme.color_bevel_outset_1_hover = #ffffff
+mod.theme.color_bevel_outset_2_hover = #b1b1c8
+mod.theme.color_bevel_inset_1_focus = #6a5cc8
+mod.theme.color_bevel_inset_2_focus = #6a5cc8
+mod.theme.color_bevel_outset_1_focus = #6a5cc8
+mod.theme.color_bevel_outset_2_focus = #6a5cc8
+mod.theme.color_bevel_inset_1_down = #aeaec6
+mod.theme.color_bevel_inset_2_down = #ffffff
+mod.theme.color_bevel_outset_1_down = #c5c5d8
+mod.theme.color_bevel_outset_2_down = #ffffff
+mod.theme.color_bevel_inset_1_disabled = #dadae6
+mod.theme.color_bevel_inset_2_disabled = #dadae6
+mod.theme.color_bevel_outset_1_disabled = #dadae6
+mod.theme.color_bevel_outset_2_disabled = #dadae6
+
+// Ink: the pictures' near-black navy, about 14:1 on the plate and 16:1 on a
+// white pill. The second voice a slate navy at 6.5:1; only disabled words go
+// pale.
+mod.theme.color_text = #191b38
+mod.theme.color_text_hover = #10122b
+mod.theme.color_text_focus = #10122b
+mod.theme.color_text_active = #10122b
+mod.theme.color_text_down = #10122b
+mod.theme.color_text_val = #4a4d6e
+mod.theme.color_text_disabled = #9c9eb8
+mod.theme.color_text_placeholder = #65688a
+mod.theme.color_text_placeholder_hover = #5c5f82
+mod.theme.color_text_meta = #54577a
+mod.theme.color_text_cursor = #191b38
+mod.theme.color_cursor = #191b38
+mod.theme.color_cursor_focus = #191b38
+mod.theme.color_label = #191b38
+mod.theme.color_label_hover = #10122b
+mod.theme.color_label_focus = #10122b
+mod.theme.color_label_active = #10122b
+mod.theme.color_label_down = #10122b
+mod.theme.color_label_disabled = #9c9eb8
+mod.theme.color_label_inner = #191b38
+mod.theme.color_label_inner_hover = #10122b
+mod.theme.color_label_inner_focus = #191b38
+mod.theme.color_label_inner_active = #10122b
+mod.theme.color_label_inner_down = #10122b
+mod.theme.color_label_inner_drag = #10122b
+mod.theme.color_label_inner_inactive = #54577a
+mod.theme.color_label_inner_disabled = #9c9eb8
+mod.theme.color_label_outer = #191b38
+mod.theme.color_label_outer_off = #4a4d6e
+mod.theme.color_label_outer_hover = #10122b
+mod.theme.color_label_outer_focus = #10122b
+mod.theme.color_label_outer_active = #10122b
+mod.theme.color_label_outer_active_focus = #10122b
+mod.theme.color_label_outer_down = #10122b
+mod.theme.color_label_outer_drag = #10122b
+mod.theme.color_label_outer_disabled = #9c9eb8
+mod.theme.color_icon = #272a4c
+mod.theme.color_icon_hover = #10122b
+mod.theme.color_icon_focus = #272a4c
+mod.theme.color_icon_active = #10122b
+mod.theme.color_icon_down = #10122b
+mod.theme.color_icon_disabled = #a2a4bc
+// The inks on the surface ladder, named so they hold on its deepest rung.
+mod.theme.color_on_surface = #171936
+mod.theme.color_on_surface_variant = #4a4d6e
+
+// The accent: the pictures' indigo going to violet, measured on their knob
+// arcs (#4c47ab at the arc, #6e56b7 to #7b71c9 where it is lit). It fills a
+// value, sets a mark and draws the focus frame.
+mod.theme.color_focus = #6a5cc8
+mod.theme.color_ctrl_active = #4f49b0
+mod.theme.color_val = #5249b4
+mod.theme.color_val_hover = #6a5cc8
+mod.theme.color_val_focus = #6a5cc8
+mod.theme.color_val_drag = #6a5cc8
+mod.theme.color_val_disabled = #cdcddc
+mod.theme.color_mark = #191b38
+mod.theme.color_mark_active = #191b38
+mod.theme.color_mark_active_hover = #10122b
+mod.theme.color_mark_focus = #191b38
+mod.theme.color_mark_disabled = #a2a4bc
+// The accent seed: the primary, secondary and tertiary families are grown
+// from its hue. A deep indigo, so the grown primary carries white ink.
+mod.theme.color_ctrl_selected = #3d3a8c
+mod.theme.color_bg_highlight = #e2e2ee
+mod.theme.color_bg_highlight_inline = #c9c2f080
+mod.theme.color_text_on_accent = #ffffff
+// Selected text: a lavender wash, stronger while focused.
+mod.theme.color_selection = #00000000
+mod.theme.color_selection_hover = #8f84e038
+mod.theme.color_selection_down = #8f84e066
+mod.theme.color_selection_focus = #8f84e066
+mod.theme.color_handle = #fbfbfe
+mod.theme.color_handle_hover = #ffffff
+mod.theme.color_handle_1 = #ffffff
+mod.theme.color_handle_2 = #e6e6f0
+
+// Screens are the pictures' navy displays ("Filter Envelope", "Available
+// Presets", the CPU graph): a navy face (#10152b) with pale lavender
+// figures (#e6e8fa). The terminal stays a white page with navy words.
+mod.theme.color_screen = #10152b
+mod.theme.color_screen_ink = #e6e8fa
+mod.theme.screen_ghost = 0.09
+mod.theme.color_terminal_bg = #f6f6fa
+mod.theme.color_terminal_text = #191b38
+
+// SPACING. Rows of 26 points, gaps of 8 between controls, 6 inside a
+// group, panels padded 10. The base froze what it derived from the
+// factor, so every rung this sheet depends on is stated again.
+mod.theme.space_factor = 8.0
+mod.theme.space_1 = 4.0
+mod.theme.space_2 = 8.0
+mod.theme.space_3 = 12.0
+mod.theme.space_4 = 16.0
+mod.theme.space_5 = 24.0
+mod.theme.space_6 = 32.0
+mod.theme.mspace_1 = mod.turtle.Inset{top: 4.0 right: 4.0 bottom: 4.0 left: 4.0}
+mod.theme.mspace_h_1 = mod.turtle.Inset{top: 0.0 right: 4.0 bottom: 0.0 left: 4.0}
+mod.theme.mspace_v_1 = mod.turtle.Inset{top: 4.0 right: 0.0 bottom: 4.0 left: 0.0}
+mod.theme.mspace_2 = mod.turtle.Inset{top: 8.0 right: 8.0 bottom: 8.0 left: 8.0}
+mod.theme.mspace_h_2 = mod.turtle.Inset{top: 0.0 right: 8.0 bottom: 0.0 left: 8.0}
+mod.theme.mspace_v_2 = mod.turtle.Inset{top: 8.0 right: 0.0 bottom: 8.0 left: 0.0}
+mod.theme.mspace_3 = mod.turtle.Inset{top: 12.0 right: 12.0 bottom: 12.0 left: 12.0}
+mod.theme.mspace_h_3 = mod.turtle.Inset{top: 0.0 right: 12.0 bottom: 0.0 left: 12.0}
+mod.theme.mspace_v_3 = mod.turtle.Inset{top: 12.0 right: 0.0 bottom: 12.0 left: 0.0}
+mod.theme.size_control_s = 22.0
+mod.theme.size_control_m = 26.0
+mod.theme.size_control_l = 30.0
+mod.theme.tab_height = 26.0
+mod.theme.tab_flat_height = 26.0
+// Stock shaders draw a corner twice the number written: 4 is the 8 point
+// corner of a pill, 7 the 14 point corner of a slab.
+mod.theme.corner_radius = 4.0
+mod.theme.container_corner_radius = 7.0
+mod.theme.textselection_corner_radius = 1.0
+// The radius rungs in true points: caps 6, fields 6, slabs and cards 14.
+mod.theme.radius_s = 4.0
+mod.theme.radius_m = 6.0
+mod.theme.radius_l = 14.0
+
+// TYPE. The base's grotesque at 9 points (12 layout points), so a label's
+// cap height is about a third of the 26 point row.
+mod.theme.font_size_p = 9.0
+mod.theme.font_size_base = 9.0
+
+// No surface material: the faces that matter are drawn by the sheet. The
+// glow colour is the warm light from under a slab.
+mod.theme.material_level = 0.0
+mod.theme.material_margin = 0.0
+mod.theme.material_glow = 0.0
+mod.theme.material_ink_glow = 0.0
+mod.theme.color_material_glow = #f39a4e
+true

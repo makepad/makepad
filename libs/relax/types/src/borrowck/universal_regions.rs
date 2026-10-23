@@ -57,8 +57,12 @@ pub struct SignatureRegions {
     pub contract: RegionContract, pub fr_static: usize, pub fr_fn_body: usize,
     pub query_placeholders: Vec<RegionId>,
 }
-enum DefiningTy { FnDef(DefId, bool), Const(DefId), AnonConst(DefId), Closure { owner: DefId, expr: u32, signature: TyId, bound: TyId, annotation_eq: bool } }
+enum DefiningTy { FnDef(DefId, bool), Const(DefId), AnonConst(DefId), Closure { owner: DefId, expr: u32, signature: TyId, bound: TyId, annotation_eq: bool },
+    /// an inline constant `expr` of the typeck root `owner`, of type `ty` (rustc `DefiningTy::InlineConst`)
+    InlineConst { owner: DefId, expr: u32, ty: TyId } }
 impl DefiningTy {
+    /// A typeck child: its universal regions are its creator's (external) and those of its own type.
+    fn is_typeck_child(&self) -> bool { matches!(self, Self::Closure { .. } | Self::InlineConst { .. }) }
     fn inputs_and_output(&self, tcx: &Tcx, prog: &Program) -> (Vec<TyId>, TyId, u32) {
         match *self {
             Self::FnDef(d, body) => {
@@ -77,6 +81,7 @@ impl DefiningTy {
             }
             Self::Const(d) => (vec![],tcx.const_ty(prog, d).unwrap(),0),
             Self::AnonConst(_) => (vec![],tcx.tys.usize_,0),
+            Self::InlineConst { ty, .. } => (vec![], ty, 0),
             Self::Closure { signature, bound, .. } => {
                 let TyKind::FnPtr(ins,out,_,_) = tcx.tys.kind(signature) else { unreachable!() };
                 let TyKind::FnPtr(_,_,_,n) = tcx.tys.kind(bound) else { unreachable!() };
@@ -85,7 +90,7 @@ impl DefiningTy {
         }
     }
     fn scope(&self) -> RegionScope {
-        match *self { Self::FnDef(d, _) | Self::Const(d) | Self::AnonConst(d) => RegionScope::Item(d), Self::Closure { owner,expr,.. } => RegionScope::Closure { owner,expr } }
+        match *self { Self::FnDef(d, _) | Self::Const(d) | Self::AnonConst(d) => RegionScope::Item(d), Self::Closure { owner,expr,.. } | Self::InlineConst { owner,expr,.. } => RegionScope::Closure { owner,expr } }
     }
 }
 struct UniversalRegionIndices { regions: Vec<UniversalRegion> }
@@ -103,7 +108,7 @@ impl UniversalRegionsBuilder<'_> {
         let scope = self.defining_ty.scope();
         let (mut inputs,mut output,bound_regions) = self.defining_ty.inputs_and_output(tcx,self.prog);
         let mut query_placeholders = vec![];
-        if matches!(self.defining_ty,DefiningTy::Closure { .. }) {
+        if self.defining_ty.is_typeck_child() {
             // Like the implied-bounds query, give each erased external occurrence
             // a distinct identity. The MIR driver instantiates these as free vars.
             // Relax's liberated closure signature can still contain regions
@@ -135,7 +140,7 @@ impl UniversalRegionsBuilder<'_> {
         // Declaration parameters are enumerated even when absent from I/O.
         for (name,r) in &mut self.contract.regions {
             if let RegionKind::ReBound(0,v) = tcx.tys.region_kind(*r) { *r = late(v); }
-            if !matches!(self.defining_ty,DefiningTy::Closure { .. }) {
+            if !self.defining_ty.is_typeck_child() {
                 indices.insert_late_bound_region(scope,*r,name,RegionClassification::Local);
             }
         }
@@ -160,9 +165,22 @@ impl UniversalRegionsBuilder<'_> {
                 }
             }
         }
+        // An inline constant's type is its own argument (InlineConstArgs `ty`, regions renumbered): its
+        // regions are external, like the creator's.
+        if let DefiningTy::InlineConst { owner, .. } = self.defining_ty {
+            let found = std::cell::RefCell::new(vec![]);
+            tcx.tys.map_regions(output,&|r,_| {
+                if !matches!(tcx.tys.region_kind(r),RegionKind::ReBound(..)|RegionKind::ReErased|RegionKind::ReError|RegionKind::ReStatic) { found.borrow_mut().push(r); }
+                r
+            },0);
+            for r in found.into_inner() {
+                let scope = match tcx.tys.region_kind(r) { RegionKind::ReLateParam(s,_) => s, _ => RegionScope::Item(owner) };
+                indices.insert_late_bound_region(scope,r,"'_",RegionClassification::External);
+            }
+        }
         // Globals, externals, locals, then the body region, as in nightly.
         indices.regions.sort_by_key(|r| match r.class { RegionClassification::Global => 0, RegionClassification::External => 1, RegionClassification::Local => 2 });
-        let (inputs,output) = if matches!(self.defining_ty,DefiningTy::Closure { .. }) { (inputs,output) }
+        let (inputs,output) = if self.defining_ty.is_typeck_child() { (inputs,output) }
             else { let mut f = BoundVarReplacer::new(late, |_| panic!("signature bound type"));
                 (inputs.iter().map(|&t| f.fold_ty(&tcx.tys,t,0)).collect(),f.fold_ty(&tcx.tys,output,0)) };
         let fr_fn_body = indices.regions.len();
@@ -335,6 +353,12 @@ impl SignatureRegions {
         Some(UniversalRegionsBuilder { tcx,prog,
             defining_ty:DefiningTy::Closure { owner,expr,signature,bound,annotation_eq:sig.annotation_eq.is_some() },
             contract:parent.contract.clone(),parent:Some(parent) }.build())
+    }
+    /// An inline constant's universal regions (`DefiningTy::InlineConst`): its creator's (the item or a
+    /// closure) as external regions, and the regions of its type, external too. No inputs; the output
+    /// is the constant's type.
+    pub fn inline_const_in(tcx: &Tcx, prog: &Program, owner: DefId, expr: u32, ty: TyId, parent: Self) -> Self {
+        UniversalRegionsBuilder { tcx,prog,defining_ty:DefiningTy::InlineConst { owner,expr,ty },contract:parent.contract.clone(),parent:Some(parent) }.build()
     }
     /// The closure body's implicit first argument (the environment, `&'env C`, `&'env mut C`
     /// or `C` for FnOnce), with the `'env` universal region inserted as the last local region,

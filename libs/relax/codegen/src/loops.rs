@@ -2372,9 +2372,15 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
             }
         }
         if size * t > budget {
+            if tr {
+                eprintln!("  {} copies of {} insts over the budget {}", t, size, budget);
+            }
             continue;
         }
         budget -= size * t;
+        if tr {
+            eprintln!("  unrolled {}: {} copies", f.name, t);
+        }
         // iteration-local values: single-definition vregs defined in the loop whose every use is
         // in the loop, in a block the definition's block dominates (after it, in its own block).
         // Each copy gets its own: as clones of one definition they would be defined T+1 times,

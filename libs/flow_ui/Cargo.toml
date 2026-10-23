@@ -1,0 +1,19 @@
+# Flow's graph UI: the graph editor and view, bindings, the node picker and the
+# value cache the Flow app (and the apps embedding its pages) edit graphs with.
+
+[package]
+name = "makepad-flow-ui"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Graph editing and viewing widgets for flow documents"
+
+[features]
+default = ["remote-values"]
+remote-values = ["makepad-flow/client", "dep:makepad-media-view"]
+
+[dependencies]
+makepad-flow = { path = "../flow", default-features = false, features = ["document"] }
+makepad-flowgraph = { path = "../flowgraph" }
+makepad-widgets = { path = "../../widgets", default-features = false, features = ["data"] }
+makepad-media-view = { path = "../media_view", optional = true }

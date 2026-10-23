@@ -267,8 +267,12 @@ pub(crate) unsafe fn add_crates(up: *mut Unit, new: &[NewCrate], tolerant: bool,
     // host) are not the module's errors. Only diagnostics in the module's files refuse it.
     let mine: Vec<String> = (f0..u.prog.files.len()).map(|f| u.prog.file_paths[f].clone()).collect();
     let mut errs: Vec<String> = u.prog.errors[e0..].iter().filter(|e| mine.iter().any(|p| e.starts_with(p.as_str()))).cloned().collect();
-    u.prog.errors.truncate(e0);
-    u.prog.errors.extend(errs.iter().cloned());
+    {
+        // (Program.errors is read off the owner under a front read: the swap's encode)
+        let _fw = jit::front_write();
+        u.prog.errors.truncate(e0);
+        u.prog.errors.extend(errs.iter().cloned());
+    }
     // imports of the module that did not resolve (a macro import stays open by design: macros
     // resolve by name at the call)
     for i in u.prog.open_reportable_imports(i0) {
@@ -317,11 +321,7 @@ unsafe fn front(up: *mut Unit, name: &str, path: &str, deps: &[String], sandbox:
             None => return Err(vec![format!("{}: dependency `{}` is not a crate of the running program", path, c)]),
         }
     }
-    let cfg = {
-        let mut c = crate::cfg::CfgSet::host(sess, &[]);
-        c.set.push("relax".to_string());
-        c
-    };
+    let cfg = crate::program_cfg(sess, &[]);
     let tr = std::env::var_os("MAKEPAD_RUN_MODULE_TRACE").is_some();
     let mut marks: Vec<(&str, std::time::Instant)> = vec![("", std::time::Instant::now())];
     let added = add_crates(up, &[NewCrate { name: name.to_string(), path: path.to_string(), edition: 2021, cfg, deps: dep_list, proc_macro: false }], false, None)?;
@@ -370,6 +370,7 @@ unsafe fn front(up: *mut Unit, name: &str, path: &str, deps: &[String], sandbox:
     if !errs.is_empty() {
         drop_defs(up, &defs);
         let u = &mut *up;
+        let _fw = jit::front_write();
         u.prog.errors.truncate(e0);
         return Err(errs);
     }
@@ -449,6 +450,7 @@ pub(crate) unsafe fn load_in_module(up: *mut Unit, parent: u32, name: &str, v: c
     let defs: Vec<DefId> = (d0 as u32..u.prog.defs.len() as u32).map(DefId).collect();
     let fail = |up: *mut Unit, errs: Vec<String>| -> Result<(u32, Vec<DefId>), Vec<String>> {
         drop_defs(up, &defs);
+        let _fw = jit::front_write();
         (&mut *up).prog.errors.truncate(e0);
         Err(errs)
     };

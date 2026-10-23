@@ -16,9 +16,9 @@ const FONTS: &[&str] = &[
     "widgets/resources/jetbrains_mono_variable.ttf",
     "widgets/resources/Inter.ttf",
     "widgets/resources/IBMPlexSans-Text.ttf",
-    "apps/commercial/engine/motion/resources/fonts/playfair-display/PlayfairDisplay-Variable.ttf",
-    "apps/commercial/engine/motion/resources/fonts/playfair-display/PlayfairDisplay-Italic-Variable.ttf",
-    "apps/commercial/engine/motion/resources/fonts/cormorant-garamond/CormorantGaramond-Variable.ttf",
+    "apps/commercial/engine/fonts/resources/fonts/playfair-display/PlayfairDisplay-Variable.ttf",
+    "apps/commercial/engine/fonts/resources/fonts/playfair-display/PlayfairDisplay-Italic-Variable.ttf",
+    "apps/commercial/engine/fonts/resources/fonts/cormorant-garamond/CormorantGaramond-Variable.ttf",
 ];
 const CJK_FONT: &str = "widgets/resources/LXGWWenKaiRegular.ttf";
 
@@ -321,9 +321,9 @@ fn reserved_font_names_from_licences() {
     assert_eq!(reserved_font_names("Copyright 2011 The X Authors, with Reserved Font Name Fira Sans.\n"), ["Fira Sans"]);
     assert!(reserved_font_names("Copyright 2020 The Archivo Project Authors\n\"Reserved Font Name\" refers to any names specified as such").is_empty());
     for (licence, expected) in [
-        ("apps/commercial/engine/motion/resources/fonts/playfair-display/OFL.txt", vec!["Playfair Display"]),
-        ("apps/commercial/engine/motion/resources/fonts/anton/OFL.txt", vec![]),
-        ("apps/commercial/engine/motion/src/fonts/ibm-plex-mono-OFL.txt", vec!["Plex"]),
+        ("apps/commercial/engine/fonts/resources/fonts/playfair-display/OFL.txt", vec!["Playfair Display"]),
+        ("apps/commercial/engine/fonts/resources/fonts/anton/OFL.txt", vec![]),
+        ("apps/commercial/engine/fonts/src/licences/ibm-plex-mono-OFL.txt", vec!["Plex"]),
     ] {
         if let Some(text) = load(licence) {
             assert_eq!(reserved_font_names(&String::from_utf8(text).unwrap()), expected, "{licence}");
@@ -333,7 +333,7 @@ fn reserved_font_names_from_licences() {
 
 #[test]
 fn rename_replaces_the_reserved_family() {
-    let path = "apps/commercial/engine/motion/resources/fonts/playfair-display/PlayfairDisplay-Variable.ttf";
+    let path = "apps/commercial/engine/fonts/resources/fonts/playfair-display/PlayfairDisplay-Variable.ttf";
     let Some(original) = load(path) else { return };
     let inputs = ClosureInputs { runs: vec![run("Title")], ..Default::default() };
     let keep = closure(&original, &inputs).unwrap();

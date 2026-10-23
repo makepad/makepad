@@ -260,6 +260,9 @@ impl<'a> Parser<'a> {
         }
         let shapes = self.derive_shapes(&it);
         let is_enum = matches!(it.kind, ItemKind::Enum(..));
+        // deriving/generic/mod.rs: the fields of a `repr(packed)` struct are copied (`&{ self.x }`), never
+        // borrowed in place (a packed enum gets no derived impl)
+        let packed = !is_enum && self.is_packed(&it);
         // the discriminant type (`#[repr(u8)]` ..; isize by default): derived orderings compare
         // discriminant values as this type (rustc's derive uses discriminant_value)
         let mut disc_ty = "isize".to_string();
@@ -281,7 +284,7 @@ impl<'a> Parser<'a> {
             let path = trait_path(tr).expect("compiler derive trait");
             let mut body = Gen::new(self.edition);
             match tr {
-                "Debug" => gen_debug(&mut body, &name, is_enum, &shapes),
+                "Debug" => gen_debug(&mut body, &name, is_enum, &shapes, packed),
                 "Default" => {
                     if !gen_default(&mut body, &name, is_enum, &shapes) {
                         return Err(PErr { pos: it.name.lo, msg: "derive(Default) on an enum needs one `#[default]` unit variant".to_string() });
@@ -294,10 +297,10 @@ impl<'a> Parser<'a> {
                     while gparams.iter().any(|g| g.1 == h) {
                         h.push('_');
                     }
-                    gen_hash(&mut body, &name, is_enum, &shapes, &h)
+                    gen_hash(&mut body, &name, is_enum, &shapes, &h, packed)
                 }
-                "PartialOrd" => gen_ord(&mut body, &name, is_enum, &shapes, true, &disc_ty),
-                _ => gen_ord(&mut body, &name, is_enum, &shapes, false, &disc_ty),
+                "PartialOrd" => gen_ord(&mut body, &name, is_enum, &shapes, true, &disc_ty, packed),
+                _ => gen_ord(&mut body, &name, is_enum, &shapes, false, &disc_ty, packed),
             };
             // impl<params + bound> Trait for Name<args> where ..
             tg!(&mut all; impl);
@@ -629,6 +632,15 @@ fn trait_path_tokens(g: &mut Gen, segs: &str) {
     }
 }
 
+/// The arm pattern of a shape, or for a packed struct `_` and the fields copied: `let {p}{i} = &{ {of}.f };`
+/// (the caller has opened the arm's block).
+fn packed_fields(g: &mut Gen, s: &Shape, p: &str, of: &str) {
+    for (i, n) in s.fields.iter().enumerate() {
+        let field = n.clone().unwrap_or_else(|| i.to_string());
+        tg!(g; let #word(&format!("{}{}", p, i)) = & { #word(of) . #word(&field) } ;);
+    }
+}
+
 /// `Self` or `Self::Variant`.
 fn variant_path(g: &mut Gen, variant: Option<&str>) {
     g.word("Self");
@@ -673,7 +685,7 @@ fn field_name(n: &Option<String>) -> String {
     n.strip_prefix("r#").unwrap_or(n).to_string()
 }
 
-fn gen_debug(g: &mut Gen, ty: &str, is_enum: bool, shapes: &[Shape]) {
+fn gen_debug(g: &mut Gen, ty: &str, is_enum: bool, shapes: &[Shape], packed: bool) {
     tg!(g; fn fmt (& self , f : & mut #core() :: fmt :: Formatter < '_ >) -> #core() :: fmt :: Result);
     g.open_brace();
     if is_enum && shapes.is_empty() {
@@ -683,8 +695,14 @@ fn gen_debug(g: &mut Gen, ty: &str, is_enum: bool, shapes: &[Shape]) {
         g.open_brace();
         for s in shapes {
             let shown = s.name.clone().unwrap_or_else(|| ty.to_string());
-            pat(g, s, "__s");
-            g.punct(T::FatArrow);
+            if packed {
+                tg!(g; _ =>);
+                g.open_brace();
+                packed_fields(g, s, "__s", "self");
+            } else {
+                pat(g, s, "__s");
+                g.punct(T::FatArrow);
+            }
             match s.kind {
                 0 => tg!(g; f . write_str (#str_lit(&shown))),
                 1 => {
@@ -717,6 +735,7 @@ fn gen_debug(g: &mut Gen, ty: &str, is_enum: bool, shapes: &[Shape]) {
                     tg!(g; . finish ());
                 }
             }
+            if packed { g.close_brace(); }
             g.punct(T::Comma);
         }
         g.close_brace();
@@ -764,7 +783,7 @@ fn gen_default(g: &mut Gen, ty: &str, is_enum: bool, shapes: &[Shape]) -> bool {
     true
 }
 
-fn gen_hash(g: &mut Gen, _ty: &str, is_enum: bool, shapes: &[Shape], h: &str) {
+fn gen_hash(g: &mut Gen, _ty: &str, is_enum: bool, shapes: &[Shape], h: &str, packed: bool) {
     tg!(g; fn hash < #word(h) : #core() :: hash :: Hasher > (& self , state : & mut #word(h)));
     g.open_brace();
     if is_enum && shapes.is_empty() {
@@ -773,9 +792,10 @@ fn gen_hash(g: &mut Gen, _ty: &str, is_enum: bool, shapes: &[Shape], h: &str) {
         tg!(g; match self);
         g.open_brace();
         for (vi, s) in shapes.iter().enumerate() {
-            pat(g, s, "__s");
+            if packed { tg!(g; _); } else { pat(g, s, "__s"); }
             tg!(g; =>);
             g.open_brace();
+            if packed { packed_fields(g, s, "__s", "self"); }
             if is_enum && shapes.len() > 1 {
                 tg!(g; #core() :: hash :: Hash :: hash (& (#int(format!("{}isize", vi))), state) ;);
             }
@@ -790,7 +810,7 @@ fn gen_hash(g: &mut Gen, _ty: &str, is_enum: bool, shapes: &[Shape], h: &str) {
 }
 
 /// PartialOrd::partial_cmp (`partial`) or Ord::cmp: lexicographic over variants then fields.
-fn gen_ord(g: &mut Gen, _ty: &str, is_enum: bool, shapes: &[Shape], partial: bool, disc_ty: &str) {
+fn gen_ord(g: &mut Gen, _ty: &str, is_enum: bool, shapes: &[Shape], partial: bool, disc_ty: &str, packed: bool) {
     let m = if partial { "partial_cmp" } else { "cmp" };
     let tr = if partial { "PartialOrd" } else { "Ord" };
     let ordering = |g: &mut Gen| tg!(g; #core() :: cmp :: Ordering);
@@ -827,13 +847,16 @@ fn gen_ord(g: &mut Gen, _ty: &str, is_enum: bool, shapes: &[Shape], partial: boo
     tg!(g; match (self , other));
     g.open_brace();
     for s in shapes {
-        g.open();
-        pat(g, s, "__s");
-        g.punct(T::Comma);
-        pat(g, s, "__o");
-        g.close();
+        if packed { tg!(g; _); } else {
+            g.open();
+            pat(g, s, "__s");
+            g.punct(T::Comma);
+            pat(g, s, "__o");
+            g.close();
+        }
         tg!(g; =>);
         g.open_brace();
+        if packed { packed_fields(g, s, "__s", "self"); packed_fields(g, s, "__o", "other"); }
         for i in 0..s.fields.len() {
             tg!(g; match #core() :: cmp :: #word(tr) :: #word(m) (#word(&format!("__s{}", i)) , #word(&format!("__o{}", i))));
             g.open_brace();

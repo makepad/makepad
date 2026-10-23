@@ -598,6 +598,70 @@ impl Layouts {
         w & SLOT_IDX != 0 && self.entry(w).too_big
     }
 
+    /// rustc_abi's `LayoutError::SizeOverflow`: is `t`'s size at least the target's `obj_size_bound`
+    /// (2^61 bytes with 64-bit pointers, 2^31 with 32-bit ones)? Only a type whose u32 layout
+    /// saturated can be (`is_too_big`); its exact size is `wide_size`.
+    pub fn size_overflows(&self, lcx: &LayoutCx<'_>, tcx: &Tcx, t: TyId) -> bool {
+        let t = tcx.tys.erase_regions(t);
+        let _ = self.of(lcx, tcx, t);
+        if !self.is_too_big(t) { return false; }
+        let bound: u128 = if tcx.tys.ptr_bytes == 4 { 1 << 31 } else { 1 << 61 };
+        self.wide_size(lcx, tcx, t, &mut Default::default()) >= bound
+    }
+
+    /// The exact size of `t` where its u32 layout saturated, with the same choices the layout made
+    /// (variant encoding, field reordering): a reordered struct packs its fields by decreasing
+    /// alignment (each size a multiple of its alignment, so without padding), a `repr(C)` one lays
+    /// them out in order; a tagged enum puts each variant after its tag.
+    fn wide_size(&self, lcx: &LayoutCx<'_>, tcx: &Tcx, t: TyId, memo: &mut crate::fxhash::HashMap<TyId, u128>) -> u128 {
+        let t = tcx.tys.erase_regions(t);
+        let l = self.of(lcx, tcx, t);
+        let up = |x: u128, a: u32| { let a = a.max(1) as u128; x.div_ceil(a) * a };
+        if !self.is_too_big(t) { return up(l.size as u128, l.align); }
+        if let Some(&w) = memo.get(&t) { return w; }
+        let fields = |this: &Self, fts: &[TyId], reorder: bool, memo: &mut crate::fxhash::HashMap<TyId, u128>| -> u128 {
+            let mut off = 0u128;
+            for &f in fts {
+                let fl = this.of(lcx, tcx, f);
+                let w = this.wide_size(lcx, tcx, f, memo);
+                off = if reorder { off + up(w, fl.align) } else { up(off, fl.align) + w };
+            }
+            off
+        };
+        let w = match tcx.tys.kind(t).clone() {
+            TyKind::Array(e, n) => match n.try_to_target_usize(&tcx.tys) {
+                Some(n) => { let el = self.of(lcx, tcx, e); up(self.wide_size(lcx, tcx, e, memo), el.align) * n as u128 }
+                None => l.size as u128,
+            },
+            TyKind::Tuple(v) => fields(self, &tcx.tys.list(v).to_vec(), true, memo),
+            TyKind::Adt(d, args, _) => match tcx.adts.get(&d) {
+                Some(adt) => {
+                    let args = tcx.tys.list(args).to_vec();
+                    let reorder = !adt.repr_c && adt.repr_int.is_none();
+                    let tag = match (&l.enc, l.tag) { (TagEnc::Direct, Some((_, Mem::Int(b, _)))) => b as u128, _ => 0 };
+                    let mut max = 0u128;
+                    for (vi, v) in adt.variants.iter().enumerate() {
+                        let fts: Vec<TyId> = (0..v.fields.len()).map(|fi| self.field_ty(lcx, tcx, d, vi as u32, fi as u32, &args)).collect();
+                        let size = if adt.is_union {
+                            fts.iter().map(|&f| self.wide_size(lcx, tcx, f, memo)).max().unwrap_or(0)
+                        } else {
+                            let valign = fts.iter().map(|&f| self.of(lcx, tcx, f).align).max().unwrap_or(1);
+                            (if tag > 0 { up(tag, valign) } else { 0 }) + fields(self, &fts, reorder, memo)
+                        };
+                        max = max.max(size);
+                        if !adt.is_enum { break; }
+                    }
+                    max
+                }
+                None => l.size as u128,
+            },
+            _ => l.size as u128,
+        };
+        let w = up(w, l.align);
+        memo.insert(t, w);
+        w
+    }
+
     fn rup(&self, lcx: &LayoutCx<'_>, x: u32, a: u32) -> u32 {
         if a > 1 && x as u64 + a as u64 - 1 > u32::MAX as u64 {
             lcx.overflowed.set(true);

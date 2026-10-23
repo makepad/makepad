@@ -3,7 +3,8 @@
 // host's `relax_web_print`; the output must equal the one of the same program built by rustc for
 // wasm32 and run in node (host.js). Panics do not unwind in the rustc build, so the observations of
 // panicking calls are Relax-only (`relax_only`, lines prefixed `RELAX-ONLY`), checked against
-// relax_only.expected. Driver: run.sh.
+// relax_only.expected. Driver: run.sh passes --cfg std_reference only to rustc; like web_diff
+// and web_libm, both builds have main and the exported run entry, independent of cfg(relax).
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::ffi::{CString, OsString};
@@ -373,7 +374,7 @@ fn misc_section() {
     out!("misc: {:?}", std::panic::catch_unwind(|| ()).is_ok());
 }
 
-pub fn run() {
+fn body() {
     out!("web_std start");
     fmt_section();
     str_section();
@@ -389,13 +390,13 @@ pub fn run() {
     net_section();
     time_section();
     misc_section();
-    #[cfg(relax)]
+    #[cfg(not(std_reference))]
     relax_only();
     out!("web_std end");
 }
 
 // Observations of calls that panic on rustc's wasm32 (it aborts there: no unwinding), caught here.
-#[cfg(relax)]
+#[cfg(not(std_reference))]
 fn relax_only() {
     fn caught<F: FnOnce() + std::panic::UnwindSafe>(name: &str, f: F) {
         std::panic::set_hook(Box::new(|_| {}));
@@ -421,13 +422,11 @@ fn relax_only() {
     caught("File::open unwrap", || drop(std::fs::File::open("x").unwrap()));
 }
 
-#[cfg(relax)]
 fn main() {
-    run();
+    body();
 }
 
-#[cfg(not(relax))]
 #[no_mangle]
-pub extern "C" fn run_export() {
-    run();
+pub extern "C" fn run() {
+    body();
 }

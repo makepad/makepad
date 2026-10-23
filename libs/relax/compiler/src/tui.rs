@@ -417,8 +417,11 @@ mod unix {
             return;
         }
         *super::SESSION_LOG.lock().unwrap_or_else(|e| e.into_inner()) = Some(crate::zone_alloc::kept_with(|| path.clone()));
-        let note = format!("makepad-run: session log {}\n", path.display());
-        out_all(write_fd, note.as_bytes());
+        // the path is named at the start with --verbose; a run that ends badly names it when it keeps the log
+        if crate::run::VERBOSE.load(Ordering::Relaxed) {
+            let note = format!("makepad-run: session log {}\n", path.display());
+            out_all(write_fd, note.as_bytes());
+        }
         let mut st = State { out, read_fd, write_fd, path, forwarded: 0, partial: Vec::new(), drawn: false, last_draw_ms: 0.0 };
         PHASE.store(1, Ordering::Relaxed);
         if progress { TRACK.store(true, Ordering::Relaxed); }

@@ -1021,14 +1021,22 @@ impl<'a> Ctx<'a> {
         let ExprKind::Unsafe(fb) = ast.expr(*fi).kind else { return None };
         let [Stmt::Expr(addr, false)] = ast.stmts(fb) else { return None };
         let ExprKind::AddrOf(true, false, place) = ast.expr(*addr).kind else { return None };
-        let ExprKind::Binary(BinOp::Sub, lhs, rhs) = ast.expr(*tail).kind else { return None };
-        // Both operands are exactly `local as *const u8 as usize`.
-        for (e, local) in [(lhs, field), (rhs, base)] {
-            if b.ty(e) != self.u.tcx.tys.usize_ { return None; }
-            let ExprKind::Cast(ptr, _) = ast.expr(e).kind else { return None };
-            if !matches!(self.kind(b.ty(ptr)), TyKind::Ptr(false, p) if matches!(self.kind(p), TyKind::Int(crate::program::Prim::U8))) { return None; }
-            let ExprKind::Cast(value, _) = ast.expr(ptr).kind else { return None };
-            if b.res.get(&value.0) != Some(&Res::Local(local)) { return None; }
+        // The tail is exactly `unsafe { <*const _>::cast::<u8>(field).offset_from_unsigned(base as *const u8) }`.
+        let ExprKind::Unsafe(tb) = ast.expr(*tail).kind else { return None };
+        let [Stmt::Expr(dist, false)] = ast.stmts(tb) else { return None };
+        let ExprKind::MethodCall(recv, mrow) = ast.expr(*dist).kind else { return None };
+        let m = b.methods.get(&dist.0)?;
+        if self.u.prog.def(m.def).krate != self.u.core_crate || self.u.prog.name(m.def) != "offset_from_unsigned" { return None; }
+        let [origin] = ast.list(ast.row(mrow).args) else { return None };
+        let ExprKind::Call(cast, cargs) = ast.expr(recv).kind else { return None };
+        let TyKind::FnDef(cd, _, _) = self.kind(b.ty(cast)) else { return None };
+        if self.u.prog.def(cd).krate != self.u.core_crate || self.u.prog.name(cd) != "cast" { return None; }
+        let [fv] = ast.list(cargs) else { return None };
+        if b.res.get(&fv.0) != Some(&Res::Local(field)) { return None; }
+        let ExprKind::Cast(value, _) = ast.expr(*origin).kind else { return None };
+        if b.res.get(&value.0) != Some(&Res::Local(base)) { return None; }
+        for e in [recv, *origin] {
+            if !matches!(self.kind(b.ty(e)), TyKind::Ptr(false, p) if matches!(self.kind(p), TyKind::Int(crate::program::Prim::U8))) { return None; }
         }
         let offset = self.place_offset(b, place, base)?;
         Some((offset as u64).to_le_bytes().to_vec())

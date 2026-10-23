@@ -17,6 +17,12 @@
 # target/release). Logs stay in a scratch directory under TMPDIR.
 T=${TARGET:-target/release}
 PACKAGES=${PACKAGES:-makepad-app-calculator}
+# the probes are driven through makepad-remote: without it the counted fn never runs and the run
+# fails as "the counted fn stopped counting after the swap", which reads like a swap bug
+if [ ! -x "$T/makepad-remote" ]; then
+    echo "zone_swap: FAIL: $T/makepad-remote is missing (cargo build --release -p makepad-remote): the probes cannot be driven"
+    exit 2
+fi
 AFTER=${AFTER:-6}
 WAIT=${WAIT:-90}
 # the counted fn and the request that runs it (an idle hidden app runs no code by itself:

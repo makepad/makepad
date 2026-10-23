@@ -53,6 +53,15 @@
     "menu": "other"
   },
   {
+    "id": "flow",
+    "title": "Flow",
+    "package": "makepad-app-flow",
+    "binary": "makepad-app-flow",
+    "workspace": "makepad/apps/flow",
+    "features": [],
+    "menu": "other"
+  },
+  {
     "id": "code",
     "title": "Code",
     "package": "makepad-app-code",

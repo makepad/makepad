@@ -145,13 +145,20 @@ impl ScriptVm<'_> {
     /// Freezes the document reachable from `roots` (its value, its
     /// closures and the scopes they captured) so later calls can read it
     /// but never write it. Host-owned objects are left alone and not
-    /// entered: static and already-frozen objects (modules, components,
-    /// types, APIs), the module table and the host's injected globals.
+    /// entered: static and already-frozen objects (components, types,
+    /// APIs), the module table, every module in it and the host's injected
+    /// globals. A module stays open when the document holds it (`use
+    /// mod.draw` puts `mod.draw` itself in the scope its closures capture):
+    /// the host goes on registering into its modules after a document has
+    /// loaded (a kit built on first use adds its shaders to `mod.draw`),
+    /// and a module frozen here would refuse that write.
     /// Returns how many objects and arrays were frozen.
     #[relax_api]
     pub fn freeze_document(&mut self, roots: &[ScriptValue]) -> (usize, usize) {
         let mut stop: Vec<ScriptValue> = self.bx.injected_globals.values().copied().collect();
-        stop.push(self.bx.heap.modules.into());
+        let heap = &self.bx.heap;
+        stop.push(heap.modules.into());
+        heap.objects[heap.modules].map_iter(|_, module| stop.push(module));
         self.bx.heap.freeze_reachable(roots, &stop)
     }
 }

@@ -155,6 +155,8 @@ impl Cx {
                     pass.parent = crate::draw_pass::CxDrawPassParent::None;
                     pass.attached_by = None;
                     pass.paint_dirty = false;
+                    pass.incomplete = false;
+                    pass.kept_recording = false;
                 }
             }
         }
@@ -175,7 +177,7 @@ impl Cx {
                 }
                 live[walk.0] = Some(false);
                 path.push(walk);
-                if self.pass_attachment_is_stale(walk) {
+                if self.pass_attachment_is_stale(walk) && !self.passes[walk].kept_recording {
                     break false;
                 }
                 match self.passes[walk].parent {
@@ -199,6 +201,8 @@ impl Cx {
             let requested = self.passes[draw_pass_id].repaint_requested;
             if !requested && live[draw_pass_id.0] != Some(true) {
                 self.passes[draw_pass_id].paint_dirty = false;
+                // an orphan's picture is final as it stands: nothing it was drawing waits on it
+                self.passes[draw_pass_id].incomplete = false;
             }
             let repaint_next = std::mem::take(&mut self.passes[draw_pass_id].repaint_next);
             let pass = &self.passes[draw_pass_id];
@@ -306,6 +310,123 @@ impl Cx {
         passes_todo.sort_by_key(|id| std::cmp::Reverse(depth_of(*id)));
         self.pass_time_rebase = !time_owed;
         self.demo_time_repaint = false;
+    }
+
+    /// Whether a pass's own list was recorded by the current drawing (any of
+    /// its draw contexts).
+    fn recorded_by_this_drawing(&self, id: DrawPassId) -> bool {
+        self.passes[id].main_draw_list_id.is_some_and(|l| !self.draw_lists.is_id_freed(l) && self.draw_lists[l].redraw_id > self.drawing_start)
+    }
+
+    /// The frame is drawn again before it painted (the glyph wait, a first
+    /// frame waiting for its pipelines): what the last draw event recorded
+    /// and attached and has not painted is taken, each pass with the redraw
+    /// its list was recorded in, for the next drawing to keep what it does not
+    /// record again ([`Cx::keep_unrepeated_recordings`]). The draw event's own
+    /// redraws are used, not the current drawing's: a draw context made
+    /// outside a draw event since (while the wait pumps events) is a drawing
+    /// of its own and would hide them.
+    #[allow(dead_code)]
+    pub(crate) fn frame_drawn_again(&mut self) {
+        let (start, end) = self.redraw_keep.drawn;
+        let drawn = |cx: &Self, id: DrawPassId| {
+            cx.passes[id].main_draw_list_id.is_some_and(|l| !cx.draw_lists.is_id_freed(l) && cx.draw_lists[l].redraw_id > start && cx.draw_lists[l].redraw_id <= end)
+        };
+        let taken: Vec<(DrawPassId, u64)> = self
+            .passes
+            .id_iter()
+            .filter(|id| !self.passes.0.is_free(id.0) && drawn(self, *id))
+            .filter_map(|id| {
+                let pass = &self.passes[id];
+                let attached = pass.attached_by.is_some() && !self.pass_attachment_is_stale(id);
+                (pass.paint_dirty && attached).then(|| (id, self.draw_lists[pass.main_draw_list_id.unwrap()].redraw_id))
+            })
+            .collect();
+        self.redraw_keep.taken = taken;
+    }
+
+    /// After a drawing (`call_draw_event`): a pass an earlier drawing of this
+    /// frame recorded and attached (taken by [`Cx::frame_drawn_again`]), or
+    /// one kept before and not yet painted whole, which this drawing neither
+    /// recorded nor attached again, stays attached (`kept_recording`) and
+    /// paints what was recorded. The native backends painted every drawing;
+    /// a pass recorded only on some frames (a tile written into a ring when
+    /// one is due, a cache drawn now and then) was dropped unpainted when the
+    /// frame was drawn again, and what it wrote never came. Not kept: a pass
+    /// this drawing recorded again (it is its own), and one whose colour
+    /// target a pass this drawing recorded writes (the newer recording owns
+    /// that picture). A depth target does not count: it is the drawing's
+    /// scratch, often one buffer shared by passes that do not share a picture.
+    pub(crate) fn keep_unrepeated_recordings(&mut self) {
+        self.redraw_keep.drawn = (self.drawing_start, self.redraw_id);
+        let taken = std::mem::take(&mut self.redraw_keep.taken);
+        let carried = std::mem::take(&mut self.redraw_keep.kept);
+        let targets_of = |pass: &crate::draw_pass::CxDrawPass| -> Vec<crate::texture::TextureId> {
+            pass.color_textures.iter().map(|a| a.texture.texture_id()).collect()
+        };
+        for kept in &carried {
+            if !self.passes.0.is_free(kept.pass.0) {
+                self.passes[kept.pass].kept_recording = false;
+            }
+        }
+        let fresh: Vec<KeptRecording> = taken.into_iter().filter(|(pass, _)| !self.passes.0.is_free(pass.0)).map(|(pass, redraw)| KeptRecording { pass, redraw, painted: self.passes[pass].painted_serial }).collect();
+        let candidates: Vec<KeptRecording> = carried.into_iter().chain(fresh).collect();
+        let mut kept: Vec<KeptRecording> = Vec::new();
+        for candidate in candidates {
+            let id = candidate.pass;
+            if self.passes.0.is_free(id.0) || kept.iter().any(|k| k.pass == id) {
+                continue;
+            }
+            let Some(list) = self.passes[id].main_draw_list_id else { continue };
+            if self.draw_lists.is_id_freed(list) || self.draw_lists[list].redraw_id != candidate.redraw || !self.pass_attachment_is_stale(id) {
+                continue;
+            }
+            let targets = targets_of(&self.passes[id]);
+            let newer = self.passes.id_iter().any(|other| {
+                other != id && !self.passes.0.is_free(other.0) && self.recorded_by_this_drawing(other) && targets_of(&self.passes[other]).iter().any(|t| targets.contains(t))
+            });
+            if !newer {
+                self.passes[id].kept_recording = true;
+                kept.push(candidate);
+            }
+        }
+        self.redraw_keep.kept = kept;
+    }
+
+    /// After a build: a kept pass that has painted whole since it was kept
+    /// is an orphan again; one that has not (a window that could not take a
+    /// frame, a pipeline still compiling) stays kept.
+    #[allow(dead_code)]
+    pub(crate) fn release_painted_recordings(&mut self) {
+        let kept = std::mem::take(&mut self.redraw_keep.kept);
+        for k in kept {
+            if self.passes.0.is_free(k.pass.0) {
+                continue;
+            }
+            if self.passes[k.pass].painted_serial > k.painted {
+                self.passes[k.pass].kept_recording = false;
+            } else {
+                self.redraw_keep.kept.push(k);
+            }
+        }
+    }
+
+    /// The passes other than `consumer` that render into `texture` and can
+    /// paint: they have a draw list (a withdrawn or frozen one has none) and
+    /// are still attached (an orphan, its attaching list recorded again
+    /// without it, does not paint unless it is kept).
+    #[allow(dead_code)]
+    pub(crate) fn producers_that_paint(&self, texture: crate::texture::TextureId, consumer: DrawPassId) -> Vec<DrawPassId> {
+        self.passes
+            .id_iter()
+            .filter(|p| {
+                let pass = &self.passes[*p];
+                *p != consumer
+                    && pass.main_draw_list_id.is_some()
+                    && (!self.pass_attachment_is_stale(*p) || pass.kept_recording)
+                    && pass.color_textures.iter().any(|a| a.texture.texture_id() == texture)
+            })
+            .collect()
     }
 
     /// The `draw_pass.time` for a repaint stamped `now`. Its origin only moves while
@@ -1675,6 +1796,9 @@ impl Cx {
         let mut draw_event = DrawEvent::default();
         std::mem::swap(&mut draw_event, &mut self.new_draw_event);
         draw_event.time = time;
+        // one drawing, however many draw contexts the handler makes
+        self.drawing_id += 1;
+        self.drawing_start = self.redraw_id;
         self.in_draw_event = true;
         crate::frame_trace::note_drawn();
         // The flag comes down whether the draw returned or unwound: a
@@ -1688,6 +1812,7 @@ impl Cx {
             std::panic::resume_unwind(payload);
         }
         self.validate_scoped_sweep_locks_after_draw();
+        self.keep_unrepeated_recordings();
         if let Some(mut hook) = self.post_draw_hook.take() {
             hook(self);
             if self.post_draw_hook.is_none() {
@@ -1749,29 +1874,79 @@ impl Cx {
 /// was still compiling, which only showed under load) came out clean with
 /// a black or stale sample, and a host waiting for a clean paint read it.
 /// Cheap: only render-target textures are looked up, against the passes.
+#[allow(dead_code)]
 pub(crate) fn samples_incomplete_target(
     passes: &crate::draw_pass::CxDrawPassPool,
     textures: &crate::texture::CxTexturePool,
     texture: crate::texture::TextureId,
     consumer: DrawPassId,
 ) -> bool {
+    sampled_picture(passes, textures, texture, consumer).to_paint
+}
+
+/// The picture a pass samples from other passes' colour target.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) struct SampledPicture {
+    /// A producer still has to paint it ([`samples_incomplete_target`]): the
+    /// consumer paints again after it.
+    pub(crate) to_paint: bool,
+    /// A producer's picture is unfinished (`CxDrawPass::incomplete`: painted
+    /// with a draw left out, or keeping an older picture, while a pipeline
+    /// compiles), dirty or not: the consumer's paint is not whole. Nothing is
+    /// owed a repaint for it (the pipeline's answer repaints every pass).
+    pub(crate) unfinished: bool,
+}
+
+/// What `consumer` samples in `texture`, in one look over the passes.
+#[allow(dead_code)]
+pub(crate) fn sampled_picture(
+    passes: &crate::draw_pass::CxDrawPassPool,
+    textures: &crate::texture::CxTexturePool,
+    texture: crate::texture::TextureId,
+    consumer: DrawPassId,
+) -> SampledPicture {
+    let mut picture = SampledPicture::default();
     if !textures[texture].format.is_render() {
-        return false;
+        return picture;
     }
-    passes.id_iter().any(|producer| {
-        producer != consumer
-            && passes[producer].paint_dirty
-            && passes[producer]
-                .color_textures
-                .iter()
-                .any(|attachment| attachment.texture.texture_id() == texture)
-    })
+    for producer in passes.id_iter() {
+        let pass = &passes[producer];
+        if producer == consumer || !(pass.paint_dirty || pass.incomplete) {
+            continue;
+        }
+        if pass.color_textures.iter().any(|attachment| attachment.texture.texture_id() == texture) {
+            picture.to_paint |= pass.paint_dirty;
+            picture.unfinished |= pass.incomplete;
+        }
+    }
+    picture
+}
+
+/// A drawing kept for a frame drawn again (`Cx::keep_unrepeated_recordings`):
+/// the pass, the redraw its list was recorded in, and its `painted_serial`
+/// when it was kept.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct KeptRecording {
+    pub(crate) pass: DrawPassId,
+    pub(crate) redraw: u64,
+    pub(crate) painted: u64,
+}
+
+/// What [`Cx::frame_drawn_again`] took and what is kept.
+#[derive(Default)]
+pub(crate) struct RedrawKeep {
+    pub(crate) taken: Vec<(DrawPassId, u64)>,
+    pub(crate) kept: Vec<KeptRecording>,
+    /// The redraws the last draw event's draw contexts took: after the first,
+    /// up to the second.
+    pub(crate) drawn: (u64, u64),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{draw_list::DrawList, draw_pass::DrawPass};
+    use crate::{draw_list::{DrawList, DrawListId}, draw_pass::DrawPass};
     use std::{cell::Cell, rc::Rc};
 
     #[test]
@@ -1811,6 +1986,350 @@ mod tests {
             width: 1, height: 1, data: Some(vec![0]), updated: crate::texture::TextureUpdated::Full,
         });
         assert!(!samples_incomplete_target(&cx.passes, &cx.textures, image.texture_id(), c));
+    }
+
+    #[test]
+    fn a_pass_sampling_an_unfinished_picture_is_not_whole() {
+        use crate::draw_pass::DrawPassClearColor;
+        use crate::makepad_math::vec4;
+        use crate::texture::{Texture, TextureFormat, TextureSize};
+        // The producer painted with a draw left out (or kept an older
+        // picture) while its pipeline compiled: what it shows is not what it
+        // recorded, dirty or not.
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let consumer = DrawPass::new(&mut cx);
+        let producer = DrawPass::new(&mut cx);
+        let target = Texture::new_with_format(&mut cx, TextureFormat::RenderBGRAu8 {
+            size: TextureSize::Fixed { width: 4, height: 4 },
+            initial: true,
+        });
+        producer.add_color_texture(&mut cx, &target, DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
+        let (c, p) = (consumer.draw_pass_id(), producer.draw_pass_id());
+        let sampled = |cx: &Cx, by| sampled_picture(&cx.passes, &cx.textures, target.texture_id(), by);
+        let picture = |to_paint, unfinished| SampledPicture { to_paint, unfinished };
+        cx.passes[p].hold_picture();
+        assert_eq!(sampled(&cx, c), picture(false, true));
+        assert!(!samples_incomplete_target(&cx.passes, &cx.textures, target.texture_id(), c), "nothing to repaint for it");
+        assert_eq!(sampled(&cx, p), picture(false, false), "not waiting on itself");
+        // dirty as well (to paint after the consumer, or held for a queued
+        // shader): the consumer paints again and is not whole either
+        cx.passes[p].paint_dirty = true;
+        assert_eq!(sampled(&cx, c), picture(true, true));
+        // painted whole: the sample is final
+        cx.passes[p].painted(true, 3);
+        cx.passes[p].paint_dirty = false;
+        assert_eq!(sampled(&cx, c), picture(false, false));
+        // withdrawn after a partial paint: nothing draws from it until it records again
+        cx.passes[p].painted(false, 4);
+        assert_eq!(sampled(&cx, c), picture(false, true));
+        producer.withdraw(&mut cx);
+        assert_eq!(sampled(&cx, c), picture(false, false));
+        // orphaned (nothing attaches it any more): its picture is final as it stands
+        let list = DrawList::new(&mut cx);
+        let recording_gen = cx.next_uniform_gen();
+        let uniforms_gen = cx.next_uniform_gen();
+        cx.draw_lists[list.id()].clear_draw_items(1, recording_gen, uniforms_gen);
+        cx.attach_child_pass(p, c, Some(list.id()));
+        cx.passes[p].painted(false, 5);
+        let recording_gen = cx.next_uniform_gen();
+        let uniforms_gen = cx.next_uniform_gen();
+        cx.draw_lists[list.id()].clear_draw_items(2, recording_gen, uniforms_gen);
+        cx.compute_pass_repaint_order(&mut Vec::new());
+        assert_eq!(sampled(&cx, c), picture(false, false));
+    }
+
+    #[test]
+    fn only_a_producer_with_a_draw_list_can_paint_a_given_back_target() {
+        use crate::draw_pass::DrawPassClearColor;
+        use crate::makepad_math::vec4;
+        use crate::texture::{Texture, TextureFormat, TextureSize};
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let consumer = DrawPass::new(&mut cx);
+        let (producer, _list) = pass_with_current_list(&mut cx);
+        let target = Texture::new_with_format(&mut cx, TextureFormat::RenderBGRAu8 {
+            size: TextureSize::Fixed { width: 4, height: 4 },
+            initial: true,
+        });
+        producer.add_color_texture(&mut cx, &target, DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
+        let (c, p) = (consumer.draw_pass_id(), producer.draw_pass_id());
+        assert_eq!(cx.producers_that_paint(target.texture_id(), c), vec![p]);
+        assert!(cx.producers_that_paint(target.texture_id(), p).is_empty(), "not its own producer");
+        // orphaned (its attaching list recorded again without it): it does
+        // not paint either, unless it is kept
+        let host = DrawList::new(&mut cx);
+        let record = |cx: &mut Cx, redraw: u64| {
+            let recording_gen = cx.next_uniform_gen();
+            let uniforms_gen = cx.next_uniform_gen();
+            cx.draw_lists[host.id()].clear_draw_items(redraw, recording_gen, uniforms_gen);
+        };
+        record(&mut cx, 5);
+        cx.attach_child_pass(p, c, Some(host.id()));
+        assert_eq!(cx.producers_that_paint(target.texture_id(), c), vec![p]);
+        record(&mut cx, 6);
+        assert!(cx.producers_that_paint(target.texture_id(), c).is_empty());
+        cx.passes[p].kept_recording = true;
+        assert_eq!(cx.producers_that_paint(target.texture_id(), c), vec![p]);
+        cx.passes[p].kept_recording = false;
+        // withdrawn (its attachments stay): it cannot paint, so nothing is owed
+        producer.withdraw(&mut cx);
+        assert!(cx.producers_that_paint(target.texture_id(), c).is_empty());
+    }
+
+    #[test]
+    fn a_paint_moves_painted_serial_only_when_whole() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let pass = DrawPass::new(&mut cx);
+        let p = pass.draw_pass_id();
+        // a draw left out: the serial stays, the picture is unfinished
+        cx.passes[p].painted(false, 7);
+        assert_eq!(cx.passes[p].painted_serial, 0);
+        assert!(cx.passes[p].incomplete);
+        // whole: the serial moves and the picture is final
+        cx.passes[p].painted(true, 8);
+        assert_eq!(cx.passes[p].painted_serial, 8);
+        assert!(!cx.passes[p].incomplete);
+        // kept its older picture for a compiling pipeline: nothing to paint
+        // until the answer, and unfinished for whoever samples it
+        cx.passes[p].paint_dirty = true;
+        cx.passes[p].hold_picture();
+        assert!(!cx.passes[p].paint_dirty);
+        assert!(cx.passes[p].incomplete);
+        assert_eq!(cx.passes[p].painted_serial, 8);
+    }
+
+    #[test]
+    fn a_drawing_is_one_draw_event_however_many_draw_contexts_it_makes() {
+        let mut cx = Cx::new(Box::new(|cx, event| {
+            if let Event::Draw(_) = event {
+                // a main window's draw context, then a second window's
+                cx.begin_draw_context();
+                cx.begin_draw_context();
+            }
+        }));
+        let first = cx.drawing_id();
+        cx.call_draw_event(0.0);
+        assert_eq!(cx.drawing_id(), first + 1);
+        assert_eq!(cx.redraw_id, cx.drawing_start + 2, "both draw contexts belong to it");
+        // a draw context made outside a draw event (an offscreen bake) is a drawing of its own
+        cx.begin_draw_context();
+        assert_eq!(cx.drawing_id(), first + 2);
+        cx.begin_draw_context();
+        assert_eq!(cx.drawing_id(), first + 3);
+    }
+
+    /// The scripted drawing of the redraw tests: a main window's draw context
+    /// records the UI, then a second window's (an output window) records a
+    /// host list that attaches a history pass every drawing and a ring's
+    /// tile write when a tile is due. `tile_in_first_context` records the
+    /// tile under the first context instead.
+    struct RedrawScript {
+        ui: DrawListId,
+        host_list: DrawListId,
+        host: DrawPassId,
+        ring: (DrawPassId, DrawListId),
+        history: (DrawPassId, DrawListId),
+        newer: Option<(DrawPassId, DrawListId)>,
+        tile_due: bool,
+        tile_in_first_context: bool,
+    }
+
+    fn scripted_cx() -> (Cx, Rc<std::cell::RefCell<Option<RedrawScript>>>) {
+        let script: Rc<std::cell::RefCell<Option<RedrawScript>>> = Rc::new(std::cell::RefCell::new(None));
+        let s = script.clone();
+        let cx = Cx::new(Box::new(move |cx, event| {
+            if !matches!(event, Event::Draw(_)) {
+                return;
+            }
+            let s = s.borrow();
+            let Some(s) = s.as_ref() else { return };
+            let record = |cx: &mut Cx, list: DrawListId| {
+                let recording_gen = cx.next_uniform_gen();
+                let uniforms_gen = cx.next_uniform_gen();
+                let redraw = cx.redraw_id;
+                cx.draw_lists[list].clear_draw_items(redraw, recording_gen, uniforms_gen);
+            };
+            let tile = |cx: &mut Cx| {
+                record(cx, s.ring.1);
+                cx.passes[s.ring.0].paint_dirty = true;
+            };
+            cx.begin_draw_context();
+            record(cx, s.ui);
+            if s.tile_due && s.tile_in_first_context {
+                tile(cx);
+            }
+            cx.begin_draw_context();
+            record(cx, s.host_list);
+            record(cx, s.history.1);
+            cx.passes[s.history.0].paint_dirty = true;
+            cx.attach_child_pass(s.history.0, s.host, Some(s.host_list));
+            if s.tile_due {
+                if !s.tile_in_first_context {
+                    tile(cx);
+                }
+                cx.attach_child_pass(s.ring.0, s.host, Some(s.host_list));
+            }
+            if let Some((newer, list)) = s.newer {
+                record(cx, list);
+                cx.passes[newer].paint_dirty = true;
+                cx.attach_child_pass(newer, s.host, Some(s.host_list));
+            }
+        }));
+        (cx, script)
+    }
+
+    #[test]
+    fn a_frame_drawn_again_paints_what_an_earlier_drawing_of_it_recorded() {
+        let (mut cx, script) = scripted_cx();
+        let host = DrawPass::new(&mut cx);
+        let (ui, host_list) = (DrawList::new(&mut cx), DrawList::new(&mut cx));
+        let (ring, ring_list) = pass_with_current_list(&mut cx);
+        let (history, history_list) = pass_with_current_list(&mut cx);
+        let (ring_id, history_id) = (ring.draw_pass_id(), history.draw_pass_id());
+        *script.borrow_mut() = Some(RedrawScript {
+            ui: ui.id(), host_list: host_list.id(), host: host.draw_pass_id(),
+            ring: (ring_id, ring_list.id()), history: (history_id, history_list.id()),
+            newer: None, tile_due: true, tile_in_first_context: true,
+        });
+        let set = |f: &dyn Fn(&mut RedrawScript)| f(script.borrow_mut().as_mut().unwrap());
+        let mut todo = Vec::new();
+
+        // The first drawing records the tile, under the first of its two
+        // draw contexts; its glyphs are not there yet.
+        cx.call_draw_event(0.0);
+        cx.frame_drawn_again();
+        set(&|s| s.tile_due = false);
+        // Drawn again (no tile due) and still waiting for glyphs: drawn a
+        // third time.
+        cx.call_draw_event(0.0);
+        assert!(cx.pass_attachment_is_stale(ring_id), "the later drawing dropped the tile");
+        cx.frame_drawn_again();
+        cx.call_draw_event(0.0);
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(todo.contains(&ring_id), "the tile the first drawing recorded paints");
+        assert!(todo.contains(&history_id));
+        assert!(cx.pass_attachment_is_stale(ring_id), "kept, its attachment stamp as it was recorded");
+
+        // A build that could not paint it (a window that took no frame):
+        // kept through the next frame, which records no tile either.
+        cx.release_painted_recordings();
+        cx.call_draw_event(0.0);
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(todo.contains(&ring_id), "kept until it paints whole");
+        // Painted whole: an orphan again, as any pass a frame does not record.
+        cx.repaint_id += 1;
+        let repaint = cx.repaint_id;
+        cx.passes[ring_id].painted(true, repaint);
+        cx.passes[ring_id].paint_dirty = false;
+        cx.release_painted_recordings();
+        cx.call_draw_event(0.0);
+        cx.passes[ring_id].paint_dirty = true;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(!todo.contains(&ring_id));
+        assert!(!cx.passes[ring_id].kept_recording);
+
+        // A pass the later drawing records again is its own.
+        set(&|s| s.tile_due = true);
+        cx.call_draw_event(0.0);
+        cx.frame_drawn_again();
+        cx.call_draw_event(0.0);
+        assert!(!cx.passes[ring_id].kept_recording);
+    }
+
+    #[test]
+    fn a_draw_context_made_while_the_wait_pumps_does_not_hide_the_drawing_taken() {
+        let (mut cx, script) = scripted_cx();
+        let host = DrawPass::new(&mut cx);
+        let (ui, host_list) = (DrawList::new(&mut cx), DrawList::new(&mut cx));
+        let (ring, ring_list) = pass_with_current_list(&mut cx);
+        let (history, history_list) = pass_with_current_list(&mut cx);
+        let ring_id = ring.draw_pass_id();
+        *script.borrow_mut() = Some(RedrawScript {
+            ui: ui.id(), host_list: host_list.id(), host: host.draw_pass_id(),
+            ring: (ring_id, ring_list.id()), history: (history.draw_pass_id(), history_list.id()),
+            newer: None, tile_due: true, tile_in_first_context: false,
+        });
+        cx.call_draw_event(0.0);
+        // the glyph wait pumps events, and something makes a draw context
+        // outside a draw event (a drawing of its own) before the take
+        cx.begin_draw_context();
+        cx.frame_drawn_again();
+        script.borrow_mut().as_mut().unwrap().tile_due = false;
+        cx.call_draw_event(0.0);
+        assert!(cx.passes[ring_id].kept_recording, "the tile the first drawing recorded is kept");
+    }
+
+    #[test]
+    fn a_frame_drawn_again_keeps_a_pass_whose_depth_buffer_a_newer_pass_shares() {
+        use crate::draw_pass::{DrawPassClearColor, DrawPassClearDepth};
+        use crate::makepad_math::vec4;
+        use crate::texture::{Texture, TextureFormat, TextureSize};
+        let (mut cx, script) = scripted_cx();
+        let host = DrawPass::new(&mut cx);
+        let (ui, host_list) = (DrawList::new(&mut cx), DrawList::new(&mut cx));
+        let (ring, ring_list) = pass_with_current_list(&mut cx);
+        let (history, history_list) = pass_with_current_list(&mut cx);
+        let (newer, newer_list) = pass_with_current_list(&mut cx);
+        let size = TextureSize::Fixed { width: 4, height: 4 };
+        let colour = |cx: &mut Cx| Texture::new_with_format(cx, TextureFormat::RenderBGRAu8 { size: size.clone(), initial: true });
+        let (ring_target, newer_target) = (colour(&mut cx), colour(&mut cx));
+        let depth = Texture::new_with_format(&mut cx, TextureFormat::DepthD32 { size: size.clone(), initial: true });
+        let clear = DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0));
+        ring.set_color_texture(&mut cx, &ring_target, clear.clone());
+        newer.set_color_texture(&mut cx, &newer_target, clear);
+        ring.set_depth_texture(&mut cx, &depth, DrawPassClearDepth::ClearWith(1.0));
+        newer.set_depth_texture(&mut cx, &depth, DrawPassClearDepth::ClearWith(1.0));
+        let ring_id = ring.draw_pass_id();
+        *script.borrow_mut() = Some(RedrawScript {
+            ui: ui.id(), host_list: host_list.id(), host: host.draw_pass_id(),
+            ring: (ring_id, ring_list.id()), history: (history.draw_pass_id(), history_list.id()),
+            newer: None, tile_due: true, tile_in_first_context: false,
+        });
+        cx.call_draw_event(0.0);
+        cx.frame_drawn_again();
+        {
+            let mut s = script.borrow_mut();
+            let s = s.as_mut().unwrap();
+            s.tile_due = false;
+            s.newer = Some((newer.draw_pass_id(), newer_list.id()));
+        }
+        cx.call_draw_event(0.0);
+        assert!(cx.passes[ring_id].kept_recording, "a shared depth buffer is scratch, not a contested picture");
+    }
+
+    #[test]
+    fn a_frame_drawn_again_does_not_keep_a_pass_over_a_newer_recording_of_its_target() {
+        use crate::draw_pass::DrawPassClearColor;
+        use crate::makepad_math::vec4;
+        use crate::texture::{Texture, TextureFormat, TextureSize};
+        let (mut cx, script) = scripted_cx();
+        let host = DrawPass::new(&mut cx);
+        let (ui, host_list) = (DrawList::new(&mut cx), DrawList::new(&mut cx));
+        let (ring, ring_list) = pass_with_current_list(&mut cx);
+        let (history, history_list) = pass_with_current_list(&mut cx);
+        let (newer, newer_list) = pass_with_current_list(&mut cx);
+        let target = Texture::new_with_format(&mut cx, TextureFormat::RenderBGRAu8 {
+            size: TextureSize::Fixed { width: 4, height: 4 },
+            initial: true,
+        });
+        let clear = DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0));
+        ring.set_color_texture(&mut cx, &target, clear.clone());
+        newer.set_color_texture(&mut cx, &target, clear);
+        let ring_id = ring.draw_pass_id();
+        *script.borrow_mut() = Some(RedrawScript {
+            ui: ui.id(), host_list: host_list.id(), host: host.draw_pass_id(),
+            ring: (ring_id, ring_list.id()), history: (history.draw_pass_id(), history_list.id()),
+            newer: None, tile_due: true, tile_in_first_context: false,
+        });
+        cx.call_draw_event(0.0);
+        cx.frame_drawn_again();
+        {
+            let mut s = script.borrow_mut();
+            let s = s.as_mut().unwrap();
+            s.tile_due = false;
+            s.newer = Some((newer.draw_pass_id(), newer_list.id()));
+        }
+        cx.call_draw_event(0.0);
+        assert!(!cx.passes[ring_id].kept_recording, "the newer recording owns the target");
     }
 
     #[test]

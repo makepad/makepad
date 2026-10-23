@@ -279,7 +279,9 @@ impl Cx {
                         tw.gpu_info.vendor,
                         tw.gpu_info.renderer,
                     );
-                    self.os_type = tw.browser_info.into();
+                    let mut browser_info = tw.browser_info;
+                    browser_info.search = super::web_embed::page_query(browser_info.search);
+                    self.os_type = browser_info.into();
                     self.xr_capabilities = tw.xr_capabilities.into();
                     let mut new_geom: WindowGeom = tw.window_info.into();
                     self.os.native_window_geom = new_geom.clone();

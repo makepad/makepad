@@ -25,6 +25,11 @@
     "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": true
   },
   {
+    "id": "flow", "label": "Flow", "package": "makepad-app-flow",
+    "dir": "apps/flow", "bin": "makepad-app-flow", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false
+  },
+  {
     "id": "code", "label": "Code", "package": "makepad-app-code",
     "dir": "apps/code", "bin": "makepad-app-code", "manifest": null, "args": [],
     "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false

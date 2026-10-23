@@ -19,7 +19,44 @@ const RUN_PREFIX: &str = "front_run";
 static RUNS: Mutex<Vec<Arc<RunStore>>> = Mutex::new(Vec::new());
 static SINKS: Mutex<Option<HashMap<PathBuf, Arc<FrontSink>>>> = Mutex::new(None);
 /// Run stores opened to resolve references, and keys found missing in them.
-static OPEN: Mutex<Option<(HashMap<PathBuf, Arc<Store>>, HashSet<(PathBuf, u128)>)>> = Mutex::new(None);
+static OPEN: Mutex<Option<Open>> = Mutex::new(None);
+type Open = (HashMap<PathBuf, Arc<Store>>, HashSet<(PathBuf, u128)>);
+
+thread_local! {
+    /// OPEN of a restore ahead of the swap's pause (relax_session::phase::ahead): generation g's
+    /// memo names g's stores, so the restore starts its own; a deferred write joins it to OPEN
+    /// after the swap's take (an aborted swap drops it with the deferred writes).
+    static OPEN_AHEAD: std::cell::RefCell<Option<std::rc::Rc<std::cell::RefCell<Open>>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Ends this thread's restore ahead of a swap's pause: its OPEN lives on only in its deferred write.
+pub(crate) fn ahead_end() {
+    OPEN_AHEAD.with(|a| a.borrow_mut().take());
+}
+
+/// `f` over OPEN, or over the restore's own memo ahead of a swap's pause.
+fn with_open<R>(f: impl FnOnce(&mut HashMap<PathBuf, Arc<Store>>, &mut HashSet<(PathBuf, u128)>) -> R) -> R {
+    if !relax_session::phase::ahead() {
+        let mut guard = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+        let (open, missing) = guard.get_or_insert_with(Default::default);
+        return f(open, missing);
+    }
+    let memo = OPEN_AHEAD.with(|a| a.borrow_mut().get_or_insert_with(|| {
+        let memo = std::rc::Rc::new(std::cell::RefCell::new(Open::default()));
+        let joined = memo.clone();
+        relax_session::phase::defer(move || {
+            let (o, m) = std::mem::take(&mut *joined.borrow_mut());
+            let mut guard = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+            let (open, missing) = guard.get_or_insert_with(Default::default);
+            open.extend(o);
+            missing.extend(m);
+        });
+        memo
+    }).clone());
+    let mut memo = memo.borrow_mut();
+    let (open, missing) = &mut *memo;
+    f(open, missing)
+}
 
 pub(super) struct ZoneTaken {
     runs: Vec<Arc<RunStore>>,
@@ -84,6 +121,16 @@ pub struct FrontSink {
 impl FrontSink {
     /// The sink of the cache folder `dir` (one per folder and process).
     pub fn for_dir(dir: &Path) -> Arc<FrontSink> {
+        if relax_session::phase::ahead() {
+            // generation g's sink is the running program's: the restored one gets its own, which
+            // the swap registers after its take
+            let sink = Arc::new(FrontSink { dir: dir.to_path_buf(), cur: Mutex::new(None), off: Default::default() });
+            let (dir, registered) = (dir.to_path_buf(), sink.clone());
+            relax_session::phase::defer(move || {
+                SINKS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).entry(dir).or_insert(registered);
+            });
+            return sink;
+        }
         let mut g = SINKS.lock().unwrap_or_else(|e| e.into_inner());
         g.get_or_insert_with(HashMap::new).entry(dir.to_path_buf())
             .or_insert_with(|| Arc::new(FrontSink { dir: dir.to_path_buf(), cur: Mutex::new(None), off: Default::default() })).clone()
@@ -197,13 +244,11 @@ pub(super) fn resolve(dir: &Path, b: &[u8], check: bool) -> Option<(ImageLoc, &'
     }
     let path = dir.join(name);
     let find = |st: &Store| st.index.binary_search_by(|e| { let k = e.key; k.cmp(&key) }).ok();
-    let (st, i) = {
-        let mut guard = OPEN.lock().unwrap_or_else(|e| e.into_inner());
-        let (open, missing) = guard.get_or_insert_with(Default::default);
+    let (st, i) = with_open(|open, missing| {
         if missing.contains(&(path.clone(), key)) { return None; }
         let opened = open.get(&path).cloned();
         match opened.as_ref().and_then(|st| Some((st.clone(), find(st)?))) {
-            Some(x) => x,
+            Some(x) => Some(x),
             None => {
                 // A first open, or a key the opened index lacks: the store is mapped again
                 // only when its committed header changed since (a newer index); a key it still
@@ -212,7 +257,7 @@ pub(super) fn resolve(dir: &Path, b: &[u8], check: bool) -> Option<(ImageLoc, &'
                 let found = if changed {
                     Store::open(&path).map(Arc::new).and_then(|st| {
                         // FRONT_STORES keeps every opened mapping for the rest of the process
-                        FRONT_STORES.lock().unwrap_or_else(|x| x.into_inner()).push(st.clone());
+                        pin_front(&st, None);
                         open.insert(path.clone(), st.clone());
                         Some((st.clone(), find(&st)?))
                     })
@@ -220,15 +265,15 @@ pub(super) fn resolve(dir: &Path, b: &[u8], check: bool) -> Option<(ImageLoc, &'
                     None
                 };
                 match found {
-                    Some(x) => x,
-                    None => { missing.insert((path, key)); return None; }
+                    Some(x) => Some(x),
+                    None => { missing.insert((path, key)); None }
                 }
             }
         }
-    };
+    })?;
     let (kind, img) = st.get_at(i, key)?;
     if kind != KIND_FRONT || (check && !st.verify_at(i)) { return None; }
-    if !check { FRONT_USED.lock().unwrap_or_else(|x| x.into_inner()).push((st.clone(), i)); }
+    if !check { pin_front(&st, Some(i)); }
     // SAFETY: FRONT_STORES keeps the store (and its mapping) for the rest of the process, and a
     // committed payload never changes (store.rs)
     let img: &'static [u8] = unsafe { std::slice::from_raw_parts(img.as_ptr(), img.len()) };

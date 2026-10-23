@@ -72,6 +72,12 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &target::En
 
 fn compile_freq_inner(options: &relax_session::Options, f: &Func, env: &target::Env, freq: Option<&[f32]>) -> Result<target::Compiled, String> {
     install_probe();
+    // Keep the actual backend input alongside MAKEPAD_RUN_DUMP's source RIR,
+    // including baseline/O1 bodies transformed for W32 execution.
+    static DUMP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *DUMP.get_or_init(|| std::env::var_os("MAKEPAD_RUN_DUMP").is_some()) {
+        target::set_rir_map(true);
+    }
     // the wasm32 web target's program (web32.rs): pointers are offsets into its window
     if let Some(c) = crate::web32::applies(env.syms) {
         let mut g = f.clone();

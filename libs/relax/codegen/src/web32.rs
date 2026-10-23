@@ -14,7 +14,8 @@
 //! Host functions take and return offsets (the web import ABI): the runtime names their W32
 //! versions, so calls pass through unchanged.
 
-use relax_backend::rir::{Block, Callee, Cls, Cond, Conv, Func, IOp, Inst, Mem, Sym, SymClass, Term, VReg, U32, U64};
+use relax_backend::cabi::{self, ArgPlan, RetPlan};
+use relax_backend::rir::{Block, CArg, Callee, Cls, Cond, Conv, Func, IOp, Inst, Mem, Sym, SymClass, Term, VReg, U32, U64};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -52,6 +53,44 @@ pub fn cfg() -> Option<Cfg> {
 pub fn transform(f: &mut Func, c: &Cfg, sym_class: u64) -> Result<(), String> {
     let n = f.blocks.len() as u32;
     let pos0 = f.blocks.first().and_then(|b| b.pos.first().copied()).unwrap_or(0);
+    // Native C ABI lowering can make an aggregate's address on the native stack:
+    // register pieces rebuilt by the prologue, incoming byval stack arguments,
+    // and register-returned result buffers. Keep those addresses private to the
+    // ABI boundary. The body sees a shadow copy, just like every other local.
+    // By-reference arguments and sret already point into the caller's window;
+    // those only need converting back to offsets. Use the backend's actual plan
+    // (including register exhaustion), not an approximation based on size.
+    let mut incoming = Vec::new();
+    let mut outgoing = None;
+    if let Some(sig) = f.cabi.clone() {
+        let plan = cabi::plan(&sig, sig.conv.target());
+        let first = usize::from(sig.ret.is_some());
+        for (k, arg) in sig.args.iter().enumerate() {
+            if let CArg::Agg(ag) = arg {
+                let p = f.params[first + k];
+                let native = f.vreg(Cls::I);
+                f.params[first + k] = native;
+                let slot = match &plan.args[k] {
+                    ArgPlan::Parts(_) | ArgPlan::Stack(_, _) => Some(f.slot(ag.size, ag.align)),
+                    ArgPlan::ByRef(_) => None,
+                    ArgPlan::Scalar(_, _) => unreachable!("C aggregate classified as scalar"),
+                };
+                incoming.push((p, native, slot, ag.size));
+            }
+        }
+        if let Some(ag) = &sig.ret {
+            let p = f.params[0];
+            let native = f.vreg(Cls::I);
+            f.params[0] = native;
+            if matches!(plan.ret, RetPlan::Parts(_)) {
+                let slot = f.slot(ag.size, ag.align);
+                outgoing = Some((native, slot, ag.size));
+                incoming.push((p, native, Some(slot), 0));
+            } else {
+                incoming.push((p, native, None, 0));
+            }
+        }
+    }
     // shadow frame: the slots laid out in order, 16-byte aligned in all
     let mut offs = Vec::with_capacity(f.slots.len());
     let mut frame: u64 = 0;
@@ -102,6 +141,23 @@ pub fn transform(f: &mut Func, c: &Cfg, sym_class: u64) -> Result<(), String> {
             count: -1.0,
         });
         extra.push(Block { insts: vec![Inst::Store(Mem::Int(8, false), t_ss, 0, nsp)], pos: vec![pos0], term: Term::Jump(1), term_pos: pos0, count: -1.0 });
+    }
+    // These copies deliberately use full native addresses and are not passed
+    // through the body-access masking below. No native-stack pointer reaches
+    // an original program vreg, including when the body takes &arg or casts it.
+    let entry = if has_frame { extra.last_mut().unwrap() } else { &mut b0 };
+    for (p, native, slot, size) in incoming {
+        let address = if let Some(slot) = slot {
+            let address = f.vreg(Cls::I);
+            push0(entry, Inst::IBinI(IOp::Add, U64, address, nsp, offs[slot as usize] as i64));
+            if size != 0 {
+                push0(entry, Inst::Copy(address, native, size));
+            }
+            address
+        } else {
+            native
+        };
+        push0(entry, Inst::Conv(Conv::IntToInt(U32), p, address));
     }
     let blocks = std::mem::take(&mut f.blocks);
     let mut out: Vec<Block> = Vec::with_capacity(blocks.len() + 3);
@@ -230,7 +286,21 @@ pub fn transform(f: &mut Func, c: &Cfg, sym_class: u64) -> Result<(), String> {
                     insts.push(Inst::Copy(dst, src, len));
                     pos.push(p);
                 }
-                Inst::Call(callee, args, rets) => {
+                Inst::Call(callee, mut args, rets) => {
+                    // The backend reads/writes aggregate buffers while packing
+                    // the native C ABI. Translate those implicit accesses too;
+                    // scalar pointer arguments retain the web import offset ABI.
+                    if let Callee::CFn(_, sig) | Callee::CHost(_, sig) | Callee::CIndirect(_, sig) = &callee {
+                        let first = usize::from(sig.ret.is_some());
+                        if first != 0 {
+                            args[0] = mask(f, &mut insts, &mut pos, args[0]);
+                        }
+                        for (k, arg) in sig.args.iter().enumerate() {
+                            if matches!(arg, CArg::Agg(_)) {
+                                args[first + k] = mask(f, &mut insts, &mut pos, args[first + k]);
+                            }
+                        }
+                    }
                     let callee = match callee {
                         Callee::Indirect(v) => Callee::Indirect(mask(f, &mut insts, &mut pos, v)),
                         Callee::CIndirect(v, sig) => Callee::CIndirect(mask(f, &mut insts, &mut pos, v), sig),
@@ -251,6 +321,13 @@ pub fn transform(f: &mut Func, c: &Cfg, sym_class: u64) -> Result<(), String> {
         // a return gives the shadow frame back
         if has_frame {
             if let Term::Ret(_) = b.term {
+                if let Some((native, slot, size)) = outgoing {
+                    let address = f.vreg(Cls::I);
+                    insts.push(Inst::IBinI(IOp::Add, U64, address, nsp, offs[slot as usize] as i64));
+                    pos.push(b.term_pos);
+                    insts.push(Inst::Copy(native, address, size));
+                    pos.push(b.term_pos);
+                }
                 insts.push(Inst::Store(Mem::Int(8, false), t_ss, 0, ssp0));
                 pos.push(b.term_pos);
             }

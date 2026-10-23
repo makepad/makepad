@@ -36,6 +36,15 @@ pub fn check_crate(prog: &Program, tcx: &crate::tcx::Tcx, krate: u32) -> Vec<Str
     let pf = &prog.files[root_file as usize];
     let items: Vec<ItemId> = pf.ast.root_items.iter().copied().collect();
     w.items(&items, Ctx::Free);
+    // the attributes written on macro calls the parser expanded (it records them under makepad check)
+    let mut seen = std::collections::HashSet::new();
+    for (path, pos, name) in crate::macros::uses::mac_call_attrs() {
+        let Some(file) = prog.file_paths.iter().position(|p| *p == path) else { continue };
+        if prog.file_crate.get(file).copied() != Some(krate) || !seen.insert((file, pos)) { continue; }
+        let mut g = w.in_file(file as u32);
+        g.gate_attr_name(&name, pos);
+        w.errors.append(&mut g.errors);
+    }
     w.errors
 }
 
@@ -246,6 +255,17 @@ impl<'a> Gates<'a> {
         }
     }
 
+    /// The gate of a built-in attribute by its (single-segment) name (rustc_feature builtin_attrs).
+    fn gate_attr_name(&mut self, name: &str, pos: u32) {
+        if let Ok(i) = GATED_ATTRS.binary_search_by(|(n, _, _)| (*n).cmp(name)) {
+            let (_, feature, msg) = GATED_ATTRS[i];
+            self.gate(feature, pos, msg);
+        } else if name.starts_with("rustc_") && crate::builtin_attrs::is_builtin_attr(name) {
+            // rustc_feature builtin_attrs: every `rustc_*` attribute is gated by `rustc_attrs`
+            self.gate("rustc_attrs", pos, "use of an internal attribute");
+        }
+    }
+
     /// feature_gate.rs `visit_attribute` and the stability-attribute check E0734.
     fn check_attr(&mut self, a: &Attr) {
         let (lo, hi) = (a.toks.lo as usize, a.toks.hi as usize);
@@ -266,13 +286,7 @@ impl<'a> Gates<'a> {
         if first + 1 < hi && self.src.tok(first + 1).kind == T::PathSep { return; }
         let name = String::from_utf8_lossy(cfg::tok_str(self.src, first)).into_owned();
         let pos = self.tok_pos(lo);
-        if let Ok(i) = GATED_ATTRS.binary_search_by(|(n, _, _)| (*n).cmp(name.as_str())) {
-            let (_, feature, msg) = GATED_ATTRS[i];
-            self.gate(feature, pos, msg);
-        } else if name.starts_with("rustc_") && crate::builtin_attrs::is_builtin_attr(&name) {
-            // rustc_feature builtin_attrs: every `rustc_*` attribute is gated by `rustc_attrs`
-            self.gate("rustc_attrs", pos, "use of an internal attribute");
-        }
+        self.gate_attr_name(&name, pos);
         match name.as_str() {
             "stable" | "unstable" | "rustc_const_stable" | "rustc_const_unstable" | "rustc_default_body_unstable"
             | "unstable_feature_bound" | "unstable_removed" | "rustc_allow_const_fn_unstable" | "allow_internal_unstable" => {

@@ -1,0 +1,274 @@
+mod.theme = mod.themes.dark
+
+// Art deco, black and gold. The window is a cabinet of black lacquer framed
+// in polished gold: thin double gold lines run round every pane, the panes
+// stepped at their corners like a ziggurat, and the panes themselves are dark
+// macassar ebony with a fine straight figure under a lacquer sheen. A stepped
+// crest with mother-of-pearl inlays and a gold sunburst stand in the caption
+// band; small sunburst fans, studs and pearl wedges sit only in the corners
+// and on the frames of the big surfaces. Buttons are satin metal plates with
+// rounded corners (antique brass, polished gold, champagne, ivory-cream,
+// copper) read in dark ink; the quiet plates of a strip are black lacquer in
+// a gold rim read in cream. Knobs are ivory with fluted skirts under spun
+// gold caps, slider thumbs gold streamline wings, screens black glass in gold
+// frames with warm amber figures. Captions and legends are a very wide
+// geometric sans, the reading text a high-contrast serif in cream. The faces
+// are drawn in widgets.splash; this file holds the tokens every face and
+// every stock widget reads.
+use mod.res.*
+use mod.text.*
+
+// The ebony of the panes, and the lacquer of the frame.
+mod.theme.color_bg_app = #1f1810
+mod.theme.color_fg_app = #261d13
+mod.theme.color_bg_container = #1f1810
+// The plain surface: a deep bronze-brown lacquer a step over the ebony.
+mod.theme.color_surface_container = #33271a
+mod.theme.color_surface_container_lowest = #0b0807
+mod.theme.color_bg_even = #00000000
+mod.theme.color_bg_odd = #00000000
+mod.theme.color_highlight = #c4a76c
+mod.theme.color_bg_highlight = #33271a
+mod.theme.color_bg_highlight_inline = #c4a76c40
+
+// Raised faces the sheet does not redraw: black lacquer, its top a little
+// lighter where it catches the room's light.
+mod.theme.color_outset = #1b1714
+mod.theme.color_outset_1 = #26211c
+mod.theme.color_outset_2 = #100e0c
+mod.theme.color_outset_hover = #221d19
+mod.theme.color_outset_1_hover = #2e2822
+mod.theme.color_outset_2_hover = #151210
+mod.theme.color_outset_focus = #1b1714
+mod.theme.color_outset_1_focus = #26211c
+mod.theme.color_outset_2_focus = #100e0c
+mod.theme.color_outset_active = #2a1f15
+mod.theme.color_outset_1_active = #2a1f15
+mod.theme.color_outset_2_active = #2a1f15
+mod.theme.color_outset_down = #100e0c
+mod.theme.color_outset_1_down = #100e0c
+mod.theme.color_outset_2_down = #1b1714
+mod.theme.color_outset_drag = #100e0c
+mod.theme.color_outset_1_drag = #100e0c
+mod.theme.color_outset_2_drag = #1b1714
+mod.theme.color_outset_disabled = #1a1714
+mod.theme.color_outset_1_disabled = #1a1714
+mod.theme.color_outset_2_disabled = #1a1714
+
+// Wells: black lacquer, opaque in every state.
+mod.theme.color_inset = #0a0908
+mod.theme.color_inset_1 = #0a0908
+mod.theme.color_inset_2 = #0d0b0a
+mod.theme.color_inset_hover = #0f0d0b
+mod.theme.color_inset_1_hover = #0f0d0b
+mod.theme.color_inset_2_hover = #110f0d
+mod.theme.color_inset_focus = #0f0d0b
+mod.theme.color_inset_1_focus = #0f0d0b
+mod.theme.color_inset_2_focus = #110f0d
+mod.theme.color_inset_active = #0a0908
+mod.theme.color_inset_1_active = #0a0908
+mod.theme.color_inset_2_active = #0d0b0a
+mod.theme.color_inset_down = #080706
+mod.theme.color_inset_1_down = #080706
+mod.theme.color_inset_2_down = #080706
+mod.theme.color_inset_drag = #080706
+mod.theme.color_inset_1_drag = #080706
+mod.theme.color_inset_2_drag = #080706
+mod.theme.color_inset_empty = #0a0908
+mod.theme.color_inset_1_empty = #0a0908
+mod.theme.color_inset_2_empty = #0d0b0a
+mod.theme.color_inset_disabled = #15120f
+mod.theme.color_inset_1_disabled = #15120f
+mod.theme.color_inset_2_disabled = #15120f
+
+// One edge on every stock part the faces do not redraw: the gold of the
+// frames.
+mod.theme.beveling = 0.5
+mod.theme.color_bevel = #a88c58
+mod.theme.color_bevel_hover = #c79c4e
+mod.theme.color_bevel_focus = #e8c46a
+mod.theme.color_bevel_active = #8a6a32
+mod.theme.color_bevel_empty = #a8823f
+mod.theme.color_bevel_down = #8a6a32
+mod.theme.color_bevel_drag = #8a6a32
+mod.theme.color_bevel_disabled = #4a3d2a
+mod.theme.color_bevel_inset_1 = #8a6a32
+mod.theme.color_bevel_inset_2 = #a8823f
+mod.theme.color_bevel_outset_1 = #d8b469
+mod.theme.color_bevel_outset_2 = #6e5226
+mod.theme.color_bevel_inset_1_hover = #a8823f
+mod.theme.color_bevel_inset_2_hover = #c79c4e
+mod.theme.color_bevel_outset_1_hover = #e2c27e
+mod.theme.color_bevel_outset_2_hover = #7a5c2a
+mod.theme.color_bevel_inset_1_focus = #e8c46a
+mod.theme.color_bevel_inset_2_focus = #e8c46a
+mod.theme.color_bevel_outset_1_focus = #e8c46a
+mod.theme.color_bevel_outset_2_focus = #e8c46a
+mod.theme.color_bevel_inset_1_down = #8a6a32
+mod.theme.color_bevel_inset_2_down = #8a6a32
+mod.theme.color_bevel_outset_1_down = #8a6a32
+mod.theme.color_bevel_outset_2_down = #8a6a32
+mod.theme.color_bevel_inset_1_disabled = #4a3d2a
+mod.theme.color_bevel_inset_2_disabled = #4a3d2a
+mod.theme.color_bevel_outset_1_disabled = #4a3d2a
+mod.theme.color_bevel_outset_2_disabled = #4a3d2a
+
+// Working ink: cream ivory, about 14:1 on the ebony. Second voice and
+// captions are gold, about 8:1.
+mod.theme.color_text = #ede2c6
+mod.theme.color_text_hover = #fbf2da
+mod.theme.color_text_focus = #fbf2da
+mod.theme.color_text_active = #fbf2da
+mod.theme.color_text_down = #e4d8ba
+mod.theme.color_text_disabled = #776b58
+mod.theme.color_text_placeholder = #a08f70
+mod.theme.color_text_placeholder_hover = #b19f7e
+mod.theme.color_text_val = #ede2c6
+mod.theme.color_text_meta = #bfae8c
+mod.theme.color_text_hl = #ede2c6
+mod.theme.color_text_cursor = #f2d07c
+mod.theme.color_cursor = #f2d07c
+mod.theme.color_label = #ede2c6
+mod.theme.color_label_hover = #fbf2da
+mod.theme.color_label_focus = #fbf2da
+mod.theme.color_label_active = #fbf2da
+mod.theme.color_label_down = #e4d8ba
+mod.theme.color_label_disabled = #776b58
+mod.theme.color_label_inner = #ede2c6
+mod.theme.color_label_inner_hover = #fbf2da
+mod.theme.color_label_inner_focus = #ede2c6
+mod.theme.color_label_inner_down = #e4d8ba
+mod.theme.color_label_inner_drag = #e4d8ba
+mod.theme.color_label_inner_active = #fbf2da
+mod.theme.color_label_inner_inactive = #bfae8c
+mod.theme.color_label_inner_disabled = #776b58
+mod.theme.color_label_outer = #ede2c6
+mod.theme.color_label_outer_off = #d9cdb0
+mod.theme.color_label_outer_hover = #fbf2da
+mod.theme.color_label_outer_down = #e4d8ba
+mod.theme.color_label_outer_drag = #e4d8ba
+mod.theme.color_label_outer_focus = #fbf2da
+mod.theme.color_label_outer_active = #fbf2da
+mod.theme.color_label_outer_active_focus = #fbf2da
+mod.theme.color_label_outer_disabled = #776b58
+mod.theme.color_icon = #d8c08c
+mod.theme.color_icon_hover = #ecd8aa
+mod.theme.color_icon_focus = #d8c08c
+mod.theme.color_icon_active = #f2e0b4
+mod.theme.color_icon_down = #c4ac78
+mod.theme.color_icon_disabled = #6a5c44
+// The inks on the surface ladder: cream for reading, gold for the second
+// voice; both hold 5:1 even on the plain bronze surface.
+mod.theme.color_on_surface = #ede2c6
+mod.theme.color_on_surface_variant = #d8c08c
+
+// The accent seed: the primary, secondary and tertiary families are grown
+// from it. Polished gold, read with dark ink.
+mod.theme.color_ctrl_selected = #b39150
+mod.theme.color_focus = #e6cc8a
+mod.theme.color_ctrl_active = #d4b679
+mod.theme.color_text_on_accent = #1c1306
+// Fills are gold.
+mod.theme.color_val = #ceb07a
+mod.theme.color_val_hover = #d8bc88
+mod.theme.color_val_focus = #d8bc88
+mod.theme.color_val_drag = #c2a46c
+mod.theme.color_val_disabled = #4a3d2a
+mod.theme.color_mark = #1c1306
+mod.theme.color_mark_active = #d4b679
+mod.theme.color_mark_active_hover = #e0c48c
+mod.theme.color_mark_focus = #e0c48c
+mod.theme.color_mark_disabled = #5a4c36
+mod.theme.color_selection = #00000000
+mod.theme.color_selection_hover = #c4a76c33
+mod.theme.color_selection_focus = #c4a76c59
+mod.theme.color_selection_down = #c4a76c59
+mod.theme.color_handle = #c4a76c
+mod.theme.color_handle_hover = #d6bc88
+mod.theme.color_handle_1 = #ecd08e
+mod.theme.color_handle_2 = #7a5a22
+
+// Screens: black glass with warm amber figures.
+mod.theme.color_screen = #0b0907
+mod.theme.color_screen_ink = #ffb648
+mod.theme.screen_ghost = 0.07
+mod.theme.color_lamp_plain = #fff4dc
+mod.theme.color_lamp_off = #1c1712
+mod.theme.color_terminal_bg = #0b0907
+mod.theme.color_terminal_text = #ffb648
+
+// SPACING. Rows of 26, gaps of 8, a panel's padding 12. The rungs below were
+// frozen as numbers when the base was read, so they are stated again here.
+mod.theme.space_factor = 6.0
+mod.theme.space_1 = 4.0
+mod.theme.space_2 = 8.0
+mod.theme.space_3 = 12.0
+mod.theme.space_4 = 16.0
+mod.theme.space_5 = 20.0
+mod.theme.space_6 = 24.0
+mod.theme.mspace_1 = mod.turtle.Inset{top: 4.0 right: 4.0 bottom: 4.0 left: 4.0}
+mod.theme.mspace_h_1 = mod.turtle.Inset{top: 0.0 right: 4.0 bottom: 0.0 left: 4.0}
+mod.theme.mspace_v_1 = mod.turtle.Inset{top: 4.0 right: 0.0 bottom: 4.0 left: 0.0}
+mod.theme.mspace_2 = mod.turtle.Inset{top: 8.0 right: 8.0 bottom: 8.0 left: 8.0}
+mod.theme.mspace_h_2 = mod.turtle.Inset{top: 0.0 right: 8.0 bottom: 0.0 left: 8.0}
+mod.theme.mspace_v_2 = mod.turtle.Inset{top: 8.0 right: 0.0 bottom: 8.0 left: 0.0}
+mod.theme.mspace_3 = mod.turtle.Inset{top: 12.0 right: 12.0 bottom: 12.0 left: 12.0}
+mod.theme.mspace_h_3 = mod.turtle.Inset{top: 0.0 right: 12.0 bottom: 0.0 left: 12.0}
+mod.theme.mspace_v_3 = mod.turtle.Inset{top: 12.0 right: 0.0 bottom: 12.0 left: 0.0}
+mod.theme.size_control_s = 22.0
+mod.theme.size_control_m = 26.0
+mod.theme.size_control_l = 32.0
+mod.theme.tab_height = 26.0
+mod.theme.tab_flat_height = 26.0
+mod.theme.data_item_height = 22.0
+// Corners are small: plaques are cut at their corners rather than rounded.
+mod.theme.corner_radius = 1.5
+mod.theme.container_corner_radius = 2.0
+mod.theme.textselection_corner_radius = 1.0
+mod.theme.radius_xs = 1.0
+mod.theme.radius_s = 2.0
+mod.theme.radius_m = 3.0
+mod.theme.radius_l = 4.0
+
+// TYPE. Lexend Zetta, a very wide geometric sans, for the captions, the
+// titles and the short legends on plaques (font_bold and font_label);
+// Playfair Display, a high-contrast serif of the fashion pages of the
+// period, for everything one reads (font_regular). A font size draws 1.333
+// layout points per unit.
+mod.theme.font_size_p = 9.5
+mod.theme.font_size_base = 9.5
+mod.theme.type_title_l_size = 12.0
+mod.theme.type_title_m_size = 10.5
+mod.theme.type_title_s_size = 9.5
+mod.theme.type_body_l_size = 10.0
+mod.theme.type_body_m_size = 9.5
+mod.theme.type_body_s_size = 9.0
+mod.theme.type_label_l_size = 8.0
+mod.theme.type_label_m_size = 7.5
+mod.theme.type_label_s_size = 7.0
+mod.theme.font_size_4 = 10.5
+mod.theme.font_regular = mod.theme.font_regular{font_size: 9.0 font_family: mod.theme.font_regular.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/PlayfairDisplay-Variable.ttf") weight: 430.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_label = mod.theme.font_label{font_size: 7.0 font_family: mod.theme.font_label.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/LexendZetta-Variable.ttf") weight: 480.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_bold = mod.theme.font_bold{font_size: 7.5 font_family: mod.theme.font_bold.font_family{ibm_plex_semibold := FontMember{res: crate_resource("self:resources/LexendZetta-Variable.ttf") weight: 520.0 asc: 0.0 desc: 0.0}}}
+// Italics are the serif's own italic, upright and slanted bold its bold.
+mod.theme.font_italic = mod.theme.font_italic{font_size: 9.0 font_family: mod.theme.font_italic.font_family{ibm_plex_italic := FontMember{res: crate_resource("self:resources/PlayfairDisplay-Italic-Variable.ttf") weight: 430.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_bold_italic = mod.theme.font_bold_italic{font_size: 9.0 font_family: mod.theme.font_bold_italic.font_family{ibm_plex_bold_italic := FontMember{res: crate_resource("self:resources/PlayfairDisplay-Italic-Variable.ttf") weight: 700.0 asc: 0.0 desc: 0.0}}}
+// The type roles were frozen from the base's faces; stated again so every
+// role reads in its family.
+mod.theme.font_title_l = mod.theme.font_bold{font_size: 12.0 line_spacing: 1.15}
+mod.theme.font_title_m = mod.theme.font_bold{font_size: 10.5 line_spacing: 1.15}
+mod.theme.font_title_s = mod.theme.font_bold{font_size: 9.5 line_spacing: 1.15}
+mod.theme.font_body_l = mod.theme.font_regular{font_size: 10.0 line_spacing: 1.35}
+mod.theme.font_body_m = mod.theme.font_regular{font_size: 9.5 line_spacing: 1.35}
+mod.theme.font_body_s = mod.theme.font_regular{font_size: 9.0 line_spacing: 1.35}
+mod.theme.font_label_l = mod.theme.font_bold{font_size: 8.0 line_spacing: 1.2}
+mod.theme.font_label_m = mod.theme.font_bold{font_size: 7.5 line_spacing: 1.2}
+mod.theme.font_label_s = mod.theme.font_bold{font_size: 7.0 line_spacing: 1.2}
+
+// No surface material: every face that matters is drawn by the sheet.
+mod.theme.material_level = 0.0
+mod.theme.material_margin = 0.0
+mod.theme.material_glow = 0.0
+mod.theme.material_ink_glow = 0.0
+mod.theme.color_material_glow = #ceb07a
+true

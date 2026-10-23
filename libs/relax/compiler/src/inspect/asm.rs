@@ -205,8 +205,11 @@ pub(crate) fn plain_name(n: &str) -> String {
     while k < b.len() {
         let c = b[k] as char;
         if c == '<' {
-            // `<T as Trait>::` at depth 0: keep T
-            if depth == 0 && (k == 0 || n[..k].ends_with("::") || n[..k].ends_with(' ')) {
+            // `<T as Trait>::` / rustc's `<T>::` at depth 0: keep T. After `::` it is the JIT's
+            // `module::<T as Trait>::m` only with an ` as ` in it: rustc's `f::<T>` is a turbofish
+            // (generic arguments, dropped)
+            let qualified = k == 0 || n[..k].ends_with(' ') || (n[..k].ends_with("::") && matching_angle(n, k).is_some_and(|end| top_level_as(&n[k + 1..end])));
+            if depth == 0 && qualified {
                 if let Some(end) = matching_angle(n, k) {
                     let inner = &n[k + 1..end];
                     let ty = inner.split(" as ").next().unwrap_or(inner);
@@ -224,10 +227,67 @@ pub(crate) fn plain_name(n: &str) -> String {
         k += 1;
     }
     let out = out.replace("::::", "::");
+    let out = out.trim_end_matches("::").to_string();
     match out.rsplit_once("::h") {
         Some((a, h)) if h.len() == 16 && h.bytes().all(|c| c.is_ascii_hexdigit()) => a.to_string(),
         _ => out,
     }
+}
+
+/// `T as Trait` (an ` as ` outside nested angle brackets): a qualified path's inside, not a list
+/// of generic arguments.
+fn top_level_as(inner: &str) -> bool {
+    let mut d = 0i32;
+    let b = inner.as_bytes();
+    for k in 0..b.len() {
+        match b[k] {
+            b'<' => d += 1,
+            b'>' => d -= 1,
+            b' ' if d == 0 && inner[k..].starts_with(" as ") => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// A fn name in the segments both sides spell alike: generic arguments dropped, `<T as Trait>::m`
+/// and rustc's `<T>::m` as `T::m`, the JIT's `{closure} in f` as rustc's `f::{closure#k}`, every
+/// closure as `{closure}`, Relax's `__relax_crate_core` as `core`.
+pub(crate) fn match_segs(n: &str) -> Vec<String> {
+    // a SPEC-V twin is its fn's code
+    let n = n.trim().trim_end_matches(" [unverified]").trim_start_matches("::");
+    if let Some(rest) = n.strip_prefix("{closure").and_then(|r| r.find("} in ").map(|k| &r[k + 5..])) {
+        let mut v = match_segs(rest);
+        v.push("{closure}".into());
+        return v;
+    }
+    plain_name(n)
+        .split("::")
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let s = s.strip_prefix("__relax_crate_").unwrap_or(s);
+            if s.starts_with("{closure") { "{closure}".to_string() } else { s.to_string() }
+        })
+        .collect()
+}
+
+/// How a JIT fn and a rustc symbol are matched when their full paths differ (the JIT names a
+/// method by its impl's module and the self type as written, rustc by the type's own path): the
+/// last two segments (`Cx::event_loop`), three for a closure (`Cx::draw::{closure}`).
+pub(crate) fn match_key(n: &str) -> String {
+    let s = match_segs(n);
+    let k = if s.last().is_some_and(|x| x == "{closure}") { 3 } else { 2 };
+    s[s.len().saturating_sub(k)..].join("::")
+}
+
+/// rustc's symbols of the fn the JIT calls `ours`: the same path, else the same match key (the
+/// same crate first).
+fn rustc_fns<'a>(nb: &'a NativeBin, ours: &str) -> Vec<&'a super::natbin::NativeFn> {
+    let c = nb.find(&plain_name(ours));
+    if !c.is_empty() {
+        return c;
+    }
+    nb.find_like(ours)
 }
 
 fn matching_angle(s: &str, open: usize) -> Option<usize> {
@@ -247,13 +307,6 @@ fn matching_angle(s: &str, open: usize) -> Option<usize> {
     None
 }
 
-/// The last two path segments of a plain name (`Vec::push`): how callees are matched across
-/// sides (crate paths differ between the JIT's std and rustc's).
-fn callee_key(n: &str) -> String {
-    let p = plain_name(n);
-    let segs: Vec<&str> = p.rsplit("::").take(2).collect();
-    segs.into_iter().rev().collect::<Vec<_>>().join("::")
-}
 
 // ------------------------------------------------------------------ our side (on the owner)
 
@@ -587,21 +640,21 @@ fn with_native<R>(path: &str, f: impl FnOnce(&NativeBin) -> R) -> Result<R, Stri
 /// instance whose generic arguments match, else the one closest in size; and how many others.
 fn rustc_side(nb: &NativeBin, ours: &str, our_bytes: usize, callers: &[String]) -> Result<(Side, usize), String> {
     let plain = plain_name(ours);
-    let mut cands = nb.find(&plain);
-    if cands.is_empty() {
-        // a trait method: rustc names it `<T as Trait>::m`, the query form is `T::m`
-        let tail = callee_key(ours);
-        cands = nb.find(&tail);
-    }
+    let cands = rustc_fns(nb, ours);
     if cands.is_empty() {
         // rustc inlined every call: its copy inside a caller (the callers the samples saw first)
+        let key = match_key(ours);
+        let last_seg = match_segs(ours).pop().unwrap_or_default();
         for c in callers {
-            let Some(cf) = nb.find(&plain_name(c)).into_iter().next() else { continue };
+            let Some(cf) = rustc_fns(nb, c).into_iter().next() else { continue };
             let ranges: Vec<(u64, u64)> = nb.inlined(cf.addr, cf.addr + cf.size).into_iter().filter(|i| {
                 // the inline tree may name the fn by its last segment only
-                let p = plain_name(&i.name);
-                let last = |x: &str| x.rsplit("::").next().unwrap_or("").to_string();
-                p == plain || last(&p) == last(&plain) && (!p.contains("::") || callee_key(&p) == callee_key(&plain))
+                let segs = match_segs(&i.name);
+                if segs.len() <= 1 {
+                    segs.last() == Some(&last_seg)
+                } else {
+                    match_key(&i.name) == key
+                }
             }).flat_map(|i| i.ranges).collect();
             if !ranges.is_empty() {
                 let mut s = native_side(nb, cf, Some(&ranges));
@@ -963,8 +1016,8 @@ fn findings(a: &Side, b: &Side, j: &Joined) -> Vec<(f64, String)> {
             let why: Vec<String> = a.loop_notes.iter().filter(|x| keys.contains(&x.0)).map(|x| x.1.clone()).collect();
             what.push(format!("not vectorised (rustc: {} vector instr){}", theirs.get(Class::Vector), if why.is_empty() { "; no vectoriser looked at it (not a candidate shape)".to_string() } else { format!("; {}", why.join("; ")) }));
         }
-        let ours_calls: Vec<String> = ours.calls.iter().map(|c| callee_key(c)).collect();
-        let their_calls: std::collections::HashSet<String> = theirs.calls.iter().map(|c| callee_key(c)).collect();
+        let ours_calls: Vec<String> = ours.calls.iter().map(|c| match_key(c)).collect();
+        let their_calls: std::collections::HashSet<String> = theirs.calls.iter().map(|c| match_key(c)).collect();
         let mut extra_calls: Vec<String> = ours_calls.iter().filter(|c| !their_calls.contains(*c) && check_kind(c).is_none()).cloned().collect();
         extra_calls.sort();
         extra_calls.dedup();
@@ -976,14 +1029,14 @@ fn findings(a: &Side, b: &Side, j: &Joined) -> Vec<(f64, String)> {
         out.push((share * (d.max(0) as f64 + 1.0), text));
     }
     // calls not inlined (whole fn): our direct calls to fns rustc's code never calls
-    let their_calls: std::collections::HashSet<String> = b.callee.iter().flatten().map(|c| callee_key(c)).collect();
+    let their_calls: std::collections::HashSet<String> = b.callee.iter().flatten().map(|c| match_key(c)).collect();
     let mut calls: HashMap<String, (u32, u64, Vec<String>, String, Option<String>)> = HashMap::new();
     for k in 0..a.insns.len() {
         let Some(c) = &a.callee[k] else { continue };
-        if check_kind(c).is_some() || their_calls.contains(&callee_key(c)) {
+        if check_kind(c).is_some() || their_calls.contains(&match_key(c)) {
             continue;
         }
-        let e = calls.entry(callee_key(c)).or_insert((0, 0, Vec::new(), c.clone(), None));
+        let e = calls.entry(match_key(c)).or_insert((0, 0, Vec::new(), c.clone(), None));
         e.0 += 1;
         if e.4.is_none() {
             e.4 = a.why[k].clone();
@@ -1391,14 +1444,14 @@ fn cmd_top(req: &Req, out: &mut Out) {
     let mut inlined_into = |r: u32, m: u32| -> bool {
         let set = inl_names.entry(r).or_insert_with(|| {
             let Some(p) = native_ok.as_deref() else { return Default::default() };
-            let name = plain_name(&slots[&r].0);
+            let name = slots[&r].0.clone();
             with_native(p, |nb| {
-                let f = nb.find(&name).into_iter().next().cloned();
-                f.map(|f| nb.inlined(f.addr, f.addr + f.size).into_iter().map(|c| plain_name(&c.name).rsplit("::").next().unwrap_or("").to_string()).collect()).unwrap_or_default()
+                let f = rustc_fns(nb, &name).into_iter().next().cloned();
+                f.map(|f| nb.inlined(f.addr, f.addr + f.size).into_iter().filter_map(|c| match_segs(&c.name).pop()).collect()).unwrap_or_default()
             })
             .unwrap_or_default()
         });
-        set.contains(plain_name(&slots[&m].0).rsplit("::").next().unwrap_or(""))
+        set.contains(&match_segs(&slots[&m].0).pop().unwrap_or_default())
     };
     // root per sample: the innermost JIT fn rustc has a symbol of (vs=rustc), when every JIT fn
     // under it is one rustc inlined into it; else the leaf slot on its own (rustc: ?)
@@ -1519,7 +1572,38 @@ mod tests {
         assert_eq!(plain_name("<alloc::vec::Vec<T> as core::ops::Drop>::drop"), "alloc::vec::Vec::drop");
         assert_eq!(plain_name("core::ptr::drop_in_place<alloc::string::String>"), "core::ptr::drop_in_place");
         assert_eq!(plain_name("foo::bar::h0123456789abcdef"), "foo::bar");
-        assert_eq!(callee_key("<alloc::vec::Vec<T> as core::ops::Drop>::drop"), "Vec::drop");
+        assert_eq!(match_key("<alloc::vec::Vec<T> as core::ops::Drop>::drop"), "Vec::drop");
+        // rustc v0 turbofish: generic arguments, not a qualified path
+        assert_eq!(plain_name("makepad_platform::cx::hal_guarded::<makepad_x::A>"), "makepad_platform::cx::hal_guarded");
+        assert_eq!(plain_name("a::f::<u8>::{closure#0}"), "a::f::{closure#0}");
+        // the JIT's trait-impl form after a module path
+        assert_eq!(plain_name("makepad_widgets::view::<View as Widget>::draw_walk"), "makepad_widgets::view::View::draw_walk");
+    }
+
+    #[test]
+    fn jit_and_rustc_names_meet() {
+        // (JIT display name, rustc v0 demangled name) of the same fn
+        let pairs = [
+            // inherent method: the impl's module + the type as written vs the type's own path
+            ("makepad_platform::os::hal::event_loop::Cx::hal_pump_events", "<makepad_platform::cx::Cx>::hal_pump_events"),
+            ("makepad_platform::os::hal::event_loop::Cx::hal_guarded<{closure}>", "<makepad_platform::cx::Cx>::hal_guarded::<<makepad_platform::cx::Cx>::hal_beat::{closure#0}>"),
+            // trait method
+            ("makepad_widgets::view::<View as Widget>::draw_walk", "<makepad_widgets::view::View as makepad_widgets::widget::Widget>::draw_walk"),
+            ("std::option::<Option<T> as ::__relax_crate_core::cmp::PartialOrd>::partial_cmp", "<core::option::Option<u32> as core::cmp::PartialOrd>::partial_cmp"),
+            // closures
+            ("{closure} in makepad_sandbox::app_main", "makepad_sandbox::app_main::{closure#0}"),
+            ("{closure} in makepad_platform::os::hal::event_loop::Cx::call_draw_event", "<makepad_platform::cx::Cx>::call_draw_event::{closure#2}"),
+            ("{closure} in {closure} in a::f", "a::f::{closure#0}::{closure#1}"),
+            // free fn with generics
+            ("core::ptr::drop_in_place<alloc::string::String>", "core::ptr::drop_in_place::<alloc::string::String>"),
+        ];
+        for (jit, rustc) in pairs {
+            assert_eq!(match_key(jit), match_key(rustc), "{} vs {}", jit, rustc);
+        }
+        assert_eq!(match_key("{closure} in makepad_sandbox::app_main"), "makepad_sandbox::app_main::{closure}");
+        assert_eq!(match_segs("<makepad_platform::cx::Cx>::hal_pump_events")[0], "makepad_platform");
+        assert_ne!(match_key("a::Foo::new"), match_key("a::Bar::new"));
+        assert_eq!(match_key("makepad_render::clustered::ClusteredLights::build [unverified]"), "ClusteredLights::build");
     }
 
     #[test]

@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 #[cfg(target_family = "wasm")]
 extern "C" {
@@ -61,6 +62,26 @@ thread_local! {
 fn dbl(x: u32) -> u32 { x * 2 }
 fn sqr(x: u32) -> u32 { x * x }
 
+struct OnceState<const N: usize>([u8; N]);
+impl<const N: usize> Drop for OnceState<N> {
+    fn drop(&mut self) { ONCE_DROPS.fetch_add(1, Ordering::SeqCst); }
+}
+static ONCE_DROPS: AtomicUsize = AtomicUsize::new(0);
+#[inline(never)]
+fn take_once<const N: usize>(state: OnceState<N>) -> usize {
+    state.0.iter().map(|&x| x as usize).sum()
+}
+#[inline(never)]
+fn call_once_box(f: Box<dyn FnOnce() -> usize>) -> usize { f() }
+fn once_size<const N: usize>() -> usize {
+    let state = OnceState([3; N]);
+    call_once_box(Box::new(move || take_once(state)))
+}
+#[repr(align(256))]
+struct OnceAligned(OnceState<24>);
+#[inline(never)]
+fn take_aligned(state: OnceAligned) -> usize { take_once(state.0) }
+
 #[derive(Debug, Clone, PartialEq)]
 enum Node {
     Leaf(i64),
@@ -98,7 +119,150 @@ fn walk(h: &Header) -> String {
     s
 }
 
+// C-unwind callbacks have the ScriptProtoPropsFn shape. Keep the table and its
+// invocation out of line so these exercise the indirect C ABI, including taking
+// the address of a by-value argument and returning an aggregate by value.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Object8 { index: u32, generation: u16 }
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Object12 { a: u32, b: u32, c: u32 }
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Object24 { a: u64, b: u64, c: u64 }
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ObjectMixed { a: f64, b: u32 }
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ObjectFloat24 { a: f64, b: f64, c: f64 }
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct ObjectPacked { a: u8, b: u32 }
+#[repr(C)]
+struct Vm { words: [u64; 96] }
+#[repr(C)]
+struct Props { sum: u64, calls: u32 }
+
+trait Object: Copy {
+    fn sum(&self) -> u64;
+    fn changed(self) -> Self;
+}
+impl Object for Object8 {
+    fn sum(&self) -> u64 { self.index as u64 + self.generation as u64 }
+    fn changed(self) -> Self { Self { index: self.index + 7, generation: self.generation + 3 } }
+}
+impl Object for Object12 {
+    fn sum(&self) -> u64 { self.a as u64 + self.b as u64 + self.c as u64 }
+    fn changed(self) -> Self { Self { a: self.a + 1, b: self.b + 2, c: self.c + 3 } }
+}
+impl Object for Object24 {
+    fn sum(&self) -> u64 { self.a + self.b + self.c }
+    fn changed(self) -> Self { Self { a: self.a + 4, b: self.b + 5, c: self.c + 6 } }
+}
+impl Object for ObjectMixed {
+    fn sum(&self) -> u64 { self.a as u64 + self.b as u64 }
+    fn changed(self) -> Self { Self { a: self.a + 0.5, b: self.b + 9 } }
+}
+impl Object for ObjectFloat24 {
+    fn sum(&self) -> u64 { (self.a + self.b + self.c) as u64 }
+    fn changed(self) -> Self { Self { a: self.a + 0.25, b: self.b + 0.5, c: self.c + 0.75 } }
+}
+impl Object for ObjectPacked {
+    fn sum(&self) -> u64 { self.a as u64 + self.b as u64 }
+    fn changed(self) -> Self { Self { a: self.a + 1, b: self.b + 19 } }
+}
+struct Callbacks<T> {
+    props: extern "C-unwind" fn(&mut Vm, T, &mut Props),
+    result: extern "C-unwind" fn(&mut Vm, T, &mut Props) -> T,
+}
+#[inline(never)]
+fn object_sum<T: Object>(object: &T) -> u64 { object.sum() }
+#[inline(never)]
+extern "C-unwind" fn proto_props_c<T: Object>(vm: &mut Vm, object: T, props: &mut Props) {
+    let n = object_sum(&object);
+    vm.words[83] += n;
+    props.sum += n * 3;
+    props.calls += 1;
+}
+#[inline(never)]
+extern "C-unwind" fn proto_return_c<T: Object>(vm: &mut Vm, object: T, props: &mut Props) -> T {
+    proto_props_c(vm, object, props);
+    object.changed()
+}
+#[inline(never)]
+fn call_callbacks<T: Object>(table: &Callbacks<T>, vm: &mut Vm, object: T, props: &mut Props) -> T {
+    (table.props)(vm, object, props);
+    (table.result)(vm, object, props)
+}
+struct SpillCallback {
+    f: extern "C-unwind" fn(&mut Vm, u64, u64, u64, u64, u64, Object12, &mut Props) -> Object12,
+}
+#[inline(never)]
+extern "C-unwind" fn proto_spill_c(vm: &mut Vm, a: u64, b: u64, c: u64, d: u64, e: u64, object: Object12, props: &mut Props) -> Object12 {
+    // All six SysV integer registers are occupied before the 12-byte object.
+    vm.words[7] = a + b + c + d + e;
+    proto_return_c(vm, object, props)
+}
+#[inline(never)]
+fn call_spill(table: &SpillCallback, vm: &mut Vm, object: Object12, props: &mut Props) -> Object12 {
+    (table.f)(vm, 101, 203, 307, 409, 503, object, props)
+}
+fn c_aggregates() {
+    let mut vm = Vm { words: [0; 96] };
+    let mut props = Props { sum: 0, calls: 0 };
+    let a = call_callbacks(&Callbacks { props: proto_props_c, result: proto_return_c }, &mut vm,
+        Object8 { index: 0x12345678, generation: 0x4321 }, &mut props);
+    say!("c8 {} {} {} {} {}", a.index, a.generation, vm.words[83], props.sum, props.calls);
+    let b = call_callbacks(&Callbacks { props: proto_props_c, result: proto_return_c }, &mut vm,
+        Object12 { a: 11, b: 23, c: 47 }, &mut props);
+    say!("c12 {} {} {} {} {} {}", b.a, b.b, b.c, vm.words[83], props.sum, props.calls);
+    let c = call_callbacks(&Callbacks { props: proto_props_c, result: proto_return_c }, &mut vm,
+        Object24 { a: 1 << 40, b: 101, c: 203 }, &mut props);
+    say!("c24 {} {} {} {} {} {}", c.a, c.b, c.c, vm.words[83], props.sum, props.calls);
+    let m = call_callbacks(&Callbacks { props: proto_props_c, result: proto_return_c }, &mut vm,
+        ObjectMixed { a: 17.25, b: 31 }, &mut props);
+    say!("c_mixed {} {} {} {} {}", m.a, m.b, vm.words[83], props.sum, props.calls);
+    let f = call_callbacks(&Callbacks { props: proto_props_c, result: proto_return_c }, &mut vm,
+        ObjectFloat24 { a: 1.5, b: 2.25, c: 3.75 }, &mut props);
+    say!("c_float24 {} {} {} {} {} {}", f.a, f.b, f.c, vm.words[83], props.sum, props.calls);
+    let p = call_callbacks(&Callbacks { props: proto_props_c, result: proto_return_c }, &mut vm,
+        ObjectPacked { a: 3, b: 98765 }, &mut props);
+    let pb = p.b;
+    say!("c_packed {} {} {} {} {}", p.a, pb, vm.words[83], props.sum, props.calls);
+    let s = call_spill(&SpillCallback { f: proto_spill_c }, &mut vm,
+        Object12 { a: 17, b: 37, c: 73 }, &mut props);
+    say!("c_spill {} {} {} {} {} {} {}", s.a, s.b, s.c, vm.words[7], vm.words[83], props.sum, props.calls);
+}
+
+// Coverage probes execute between pointer uses in these small callees and in
+// the string/lock implementations. Keep them hot and cross call boundaries.
+#[inline(never)]
+fn coverage_chars(text: &str, total: &Mutex<u64>, count: &AtomicUsize) -> u64 {
+    let mut sum = 0u64;
+    for (offset, ch) in text.char_indices() {
+        sum = sum.wrapping_add(ch as u64 + offset as u64);
+        count.fetch_or(1 << (offset % 16), Ordering::Relaxed);
+    }
+    *total.lock().unwrap() += sum;
+    sum + count.load(Ordering::Acquire) as u64
+}
+
+fn coverage_hot() {
+    let total = Mutex::new(0u64);
+    let count = AtomicUsize::new(0);
+    let texts = [String::from("ASCII"), String::from("Grüße ✓ 🦀"), String::new()];
+    let mut sum = 0u64;
+    for i in 0..4096 {
+        sum += coverage_chars(&texts[i % texts.len()], &total, &count);
+    }
+    say!("coverage {} {} {}", sum, *total.lock().unwrap(), count.load(Ordering::Relaxed));
+}
+
 fn body() {
+    coverage_hot();
+    c_aggregates();
     say!("usize {} ptr {} fat {} dyn {} opt_box {} vec {} string {}",
         std::mem::size_of::<usize>(), std::mem::size_of::<*const u8>(), std::mem::size_of::<&[u8]>(),
         std::mem::size_of::<&dyn Shape>(), std::mem::size_of::<Option<Box<u8>>>(), std::mem::size_of::<Vec<u8>>(),
@@ -140,6 +304,12 @@ fn body() {
     fs.push(Box::new(move |x| { st += x; st }));
     let r: Vec<u64> = (0..3).map(|i| { let a = fs[0](i); fs[1](a) }).collect();
     say!("closures {} {:?}", acc, r);
+    // Box<dyn FnOnce> moves its environment out before freeing the allocation. Its
+    // compiler-called free helper must retain the vtable on both wasm pointer widths.
+    let state = OnceAligned(OnceState([7; 24]));
+    let aligned = call_once_box(Box::new(move || take_aligned(state)));
+    say!("box once {} {} {} {} {} drops {}", once_size::<0>(), once_size::<1>(),
+        once_size::<24>(), once_size::<4096>(), aligned, ONCE_DROPS.load(Ordering::SeqCst));
     // strings, chars, formatting
     let mut s = String::from("Grüße, wasm32!");
     s.push_str(" ✓");

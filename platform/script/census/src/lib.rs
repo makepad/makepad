@@ -9,5 +9,5 @@ pub mod census;
 pub mod top_use;
 
 pub use census::{census_record, census_used, census_used_from, census_used_into, Census, ModuleUse, ModuleUseOut};
-pub use top_use::{top_statements, top_use, top_use_into, BlockReachOut, BlockUse, TopStatement};
+pub use top_use::{top_statements, top_use, top_use_into, touch_record, touch_use, touch_use_into, BlockReachOut, BlockUse, TopStatement};
 

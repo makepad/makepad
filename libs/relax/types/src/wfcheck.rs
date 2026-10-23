@@ -634,6 +634,14 @@ pub mod obligations {
                 for p in crate::borrowck::implied_bounds::ImpliedBounds::inferred_outlives(tcx, self.prog, self.def) {
                     match p {
                         OutlivesPredicate::Region(a, b) => bounds.push(OutlivesBound::RegionSubRegion(b, a)),
+                        // (rustc's param env is normalized: normalize_param_env_or_error turns an inferred
+                        // `<X as Tr>::A: 'a` into the bound its normalization names)
+                        OutlivesPredicate::Type(t, r) if tys.flags(t).intersects(crate::types::TypeFlags::HAS_ALIAS) => {
+                            let normalized = self.infcx.probe(|_| crate::next_solver::fulfill::ObligationCtxt::new(self.infcx, self.prog).deeply_normalize_ty(&self.env, t).ok()).unwrap_or(t);
+                            let mut parts = Vec::new();
+                            crate::infer::outlives::components::push_outlives_components(tcx, self.prog, normalized, &mut parts);
+                            crate::next_solver::implied_outlives_bounds::push_component_bounds(&mut pairs, r, parts);
+                        }
                         OutlivesPredicate::Type(t, r) => pairs.push(if matches!(tys.kind(t), TyKind::Alias(..)) { OutlivesBound::RegionSubAlias(r, t) } else { OutlivesBound::RegionSubParam(r, t) }),
                     }
                 }
@@ -808,7 +816,15 @@ pub mod obligations {
         let ast = &prog.files[def.file as usize].ast;
         let item = ast.item(def.item);
         match def.kind {
-            DefKind::Struct | DefKind::Enum | DefKind::Union => with_wfcx(prog, tcx, did, |w| { check_type_defn(w, ast, item); check_defaults(w, ast, item); }),
+            DefKind::Struct | DefKind::Enum | DefKind::Union => {
+                // rustc implicit_infer.rs `infer_predicates`: a set of inferred outlives predicates that
+                // still grows at the recursion limit is a fatal error at the ADT
+                let _ = crate::borrowck::implied_bounds::ImpliedBounds::inferred_outlives(tcx, prog, did);
+                if tcx.inferred_outlives_overflow.contains_key(&did) {
+                    return vec![prog.record_error(def.file, item.lo, "typeck", format!("overflow computing implied lifetime bounds for `{}`", tcx.def_path_str(prog, did)))];
+                }
+                with_wfcx(prog, tcx, did, |w| { check_type_defn(w, ast, item); check_defaults(w, ast, item); })
+            }
             DefKind::Fn | DefKind::AssocFn | DefKind::ForeignFn => {
                 // wfcheck.rs check_trait_item: the associated types a trait method's `impl Trait`s
                 // become (ImplTraitInTraitData::Trait) are checked as associated items of their own
@@ -1039,7 +1055,13 @@ pub mod obligations {
                 if matches!(&q.kind, PredicateKind::Clause(ClauseKind::Trait(u)) if matches!(u.trait_ref.args.first(), Some(GenericArg::Type(t)) if matches!(w.tcx.tys.kind(*t), TyKind::Alias(..)))) { continue; }
                 let q = w.tcx.instantiate_predicate(w.prog, def, &tc.trait_ref.args, &q);
                 if crate::next_solver::wf::predicate_has_escaping_bound_vars(&w.tcx.tys, &q) { continue; }
-                if matches!(&q.kind, PredicateKind::Clause(ClauseKind::Trait(u)) if u.trait_ref.def_id == def) { continue; }
+                // rustc predicates_of adds `Self: Trait` to a trait's predicates: the impl's own trait
+                // ref is proven (with the impl's where clauses as the environment). Its elaboration is
+                // the trait's supertrait clauses, which this loop registers by themselves.
+                if matches!(&q.kind, PredicateKind::Clause(ClauseKind::Trait(u)) if u.trait_ref.def_id == def) {
+                    w.register(Goal { param_env: w.env.clone(), predicate: q }, self_pos);
+                    continue;
+                }
                 // Elaborate::All: what the trait's bounds imply holds too
                 for e in w.tcx.supertraits(w.prog, q) {
                     if matches!(&e.kind, PredicateKind::Clause(ClauseKind::Trait(u)) if u.trait_ref.def_id == def) { continue; }
@@ -1059,6 +1081,21 @@ pub mod obligations {
     fn check_static(w: &mut Wfcx<'_, '_>, ast: &ast::Ast, item: &ast::Item) {
         let ItemKind::Static(mutable, _, _) = &item.kind else { return };
         let Some(ty) = w.tcx.const_ty(w.prog, w.def) else { return };
+        if w.prog.def(w.def).kind == DefKind::ForeignStatic {
+            // rustc check.rs check_static_inhabited: an `extern` static whose layout is a SizeOverflow
+            let env = crate::tcx::TypingEnv::fully_monomorphized(w.prog);
+            let bad = crate::types::TypeFlags::HAS_PARAM | crate::types::TypeFlags::HAS_ERROR | crate::types::TypeFlags::HAS_INFER | crate::types::TypeFlags::HAS_ALIAS;
+            if let Ok(t) = w.tcx.try_normalize_erasing_regions(w.prog, env, ty) {
+                // (a field type that does not normalize has no layout: rustc's layout_of fails with
+                // NormalizationFailure, which this check leaves to the well-formedness errors)
+                if !w.tcx.tys.flags(t).intersects(bad) && fields_normalize(w.prog, w.tcx, env, t, &mut Default::default())
+                    && crate::layout::Layouts::new().size_overflows(&crate::layout::LayoutCx::new(w.prog), w.tcx, t) {
+                    let file = w.prog.def(w.def).file;
+                    w.extra.push(w.prog.record_uncoded_error(file, item.lo, "typeck", "extern static is too large for the target architecture".to_string()));
+                    return;
+                }
+            }
+        }
         // (a type with an unevaluated constant, `[u8; len(NAME)]`, is evaluated by the constant check)
         if w.tcx.tys.flags(ty).contains(crate::types::TypeFlags::HAS_ALIAS) { return; }
         let ty = w.normalize(ty);
@@ -1073,6 +1110,29 @@ pub mod obligations {
         if !*mutable && !thread_local {
             let sync = w.tcx.lang_items.get(crate::lang_items::LangItem::Sync);
             w.register_bound(ty, sync, item.name.lo);
+        }
+    }
+
+    /// Do the field types a layout of `t` reads normalize?
+    fn fields_normalize(prog: &Program, tcx: &Tcx, env: crate::tcx::TypingEnv, t: TyId, seen: &mut crate::fxhash::HashSet<TyId>) -> bool {
+        if !seen.insert(t) { return true; }
+        match tcx.tys.kind(t).clone() {
+            TyKind::Adt(d, args, _) => {
+                let Some(adt) = tcx.adts.get(&d) else { return true };
+                let args = tcx.tys.list(args).to_vec();
+                for v in &adt.variants {
+                    for f in &v.fields {
+                        match tcx.try_normalize_erasing_regions(prog, env, tcx.tys.subst(f.ty, &args)) {
+                            Ok(ft) => { if !fields_normalize(prog, tcx, env, ft, seen) { return false; } }
+                            Err(_) => return false,
+                        }
+                    }
+                }
+                true
+            }
+            TyKind::Array(e, _) | TyKind::Slice(e) => fields_normalize(prog, tcx, env, e, seen),
+            TyKind::Tuple(ts) => tcx.tys.list(ts).to_vec().into_iter().all(|x| fields_normalize(prog, tcx, env, x, seen)),
+            _ => true,
         }
     }
 
@@ -1178,7 +1238,7 @@ pub mod obligations {
     }
 
     /// Where a written type starts: types carry no span of their own, a path its position.
-    fn ty_pos(ast: &ast::Ast, t: ast::TyId) -> Option<u32> {
+    pub(crate) fn ty_pos(ast: &ast::Ast, t: ast::TyId) -> Option<u32> {
         match ast.ty(t) {
             ast::Ty::Path(p) => Some(p.lo),
             ast::Ty::Ref(_, _, i) | ast::Ty::Ptr(_, i) | ast::Ty::Slice(i) | ast::Ty::Array(i, _) | ast::Ty::Paren(i) => ty_pos(ast, *i),
@@ -1215,8 +1275,20 @@ pub mod obligations {
         let ret = ocx.normalize_ty(&env, sig.ret);
         ocx.register_obligation(Goal { param_env: env.clone(), predicate: collect::trait_predicate(term, vec![GenericArg::Type(ret)]) });
         let bad = ocx.try_evaluate_obligations().into_iter().any(|e| matches!(e, NextSolverError::TrueError(_)));
-        if !bad { return Vec::new(); }
         let pos = ast.fn_sig(*s).ret.and_then(|t| ty_pos(ast, t)).unwrap_or(item.name.lo);
+        if !bad {
+            // the region constraints of the `Termination` proof hold too (resolve_regions; a
+            // placeholder one is "implementation of `..` is not general enough")
+            let errors = infcx.resolve_regions(prog, env, &[]);
+            if errors.is_empty() { return Vec::new(); }
+            let placeholder = errors.iter().any(|e| matches!(e, crate::infer::lexical_region_resolve::RegionResolutionError::UpperBoundUniverseConflict(..)))
+                || errors.iter().any(|e| match e {
+                    crate::infer::lexical_region_resolve::RegionResolutionError::ConcreteFailure(_, a, b) => [a, b].iter().any(|r| matches!(tcx.tys.region_kind(**r), crate::types::RegionKind::RePlaceholder { .. })),
+                    _ => false,
+                });
+            let msg = if placeholder { "higher-ranked lifetime error" } else { "lifetime may not live long enough" };
+            return vec![prog.record_uncoded_error(def.file, pos, "typeck", msg.to_string())];
+        }
         let shown = crate::typeck::ty_to_string(false, prog, tcx, infcx.deeply_resolve_ignoring_regions(ret));
         vec![prog.record_error(def.file, pos, "typeck", format!("E0277: `main` has invalid return type `{}`", shown))]
     }

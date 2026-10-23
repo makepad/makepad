@@ -300,6 +300,9 @@ unsafe impl GlobalAlloc for Counting {
         sites::on_alloc(b.add(h), l.size());
         add(t, l.size() as i64);
         add_block(t, l.size(), 1);
+        if TRACK.load(Relaxed) {
+            track_alloc(b.add(h), l.size());
+        }
         b.add(h)
     }
 
@@ -322,6 +325,9 @@ unsafe impl GlobalAlloc for Counting {
         sites::on_alloc(b.add(h), l.size());
         add(t, l.size() as i64);
         add_block(t, l.size(), 1);
+        if TRACK.load(Relaxed) {
+            track_alloc(b.add(h), l.size());
+        }
         b.add(h)
     }
 
@@ -336,6 +342,9 @@ unsafe impl GlobalAlloc for Counting {
                 track_free(p);
             }
             return System.dealloc(p, l);
+        }
+        if TRACK.load(Relaxed) {
+            track_free(p);
         }
         let h = hdr(l.align());
         let b = p.sub(h);
@@ -360,6 +369,20 @@ unsafe impl GlobalAlloc for Counting {
             }
             return System.realloc(p, l, new);
         }
+        if TRACK.load(Relaxed) {
+            track_free(p);
+            let q = self.realloc_counted(p, l, new);
+            track_alloc(q, new);
+            return q;
+        }
+        self.realloc_counted(p, l, new)
+    }
+}
+
+impl Counting {
+    /// `realloc` with accounting on (MAKEPAD_RUN_MEM_REPORT).
+    #[inline(always)]
+    unsafe fn realloc_counted(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
         let h = hdr(l.align());
         let b = p.sub(h);
         let t = *b.add(h - 1);
@@ -801,9 +824,17 @@ pub fn tune_malloc() {
 
 /// Returns the malloc allocator's free pages to the system (glibc malloc_trim; macOS zone
 /// pressure relief).
+/// Trims so far and the clock (ms since start) of the last one (`memory` shows them).
+pub static TRIMS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static LAST_TRIM_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub fn trim() {
+    TRIMS.fetch_add(1, Relaxed);
+    LAST_TRIM_MS.store(crate::clock::ms_since_start() as u64, Relaxed);
     crate::zone_alloc::burst_trim();
     crate::zone_alloc::compiler_trim();
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android", windows))]
+    crate::zone_alloc::domain::trim_all();
     #[cfg(target_os = "linux")]
     {
         extern "C" {

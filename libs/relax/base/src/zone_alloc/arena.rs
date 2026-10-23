@@ -620,6 +620,16 @@ mod os {
         crate::memstat::name_mapping(base, size, label);
         base
     }
+    /// Linux with transparent huge pages "always": the first touch of a 2 MB-aligned chunk
+    /// faults in a whole huge page, so a chunk with a few KB carved (or a few survivors after
+    /// `release`) stays 2 MB resident. Relax's own arenas opt out (Scope cold, x64: 2 GB of
+    /// AnonHugePages; the compiler mapping 1.36 GB resident for 254 MB carved). Other targets: nothing.
+    pub unsafe fn no_huge_pages(base: usize, size: usize) {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        madvise(base as *mut c_void, size, 15); // MADV_NOHUGEPAGE
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let _ = (base, size);
+    }
     /// Reserves exactly `[at, at + size)`, or nothing (0): never moved, never over a mapping.
     pub unsafe fn reserve_at(at: usize, size: usize, label: &'static std::ffi::CStr) -> usize {
         // Linux: MAP_FIXED_NOREPLACE; macOS has none: the hint, kept only when it was honoured
@@ -685,6 +695,7 @@ mod os {
 #[cfg(windows)]
 mod os {
     use relax_session::win32::{MemoryBasicInformation, VirtualAlloc, VirtualFree, VirtualQuery};
+    pub unsafe fn no_huge_pages(_base: usize, _size: usize) {}
     pub unsafe fn reserve(size: usize, align: usize, _label: &'static std::ffi::CStr) -> usize {
         let raw = VirtualAlloc(std::ptr::null_mut(), size + align, 0x2000, 1) as usize;
         if raw == 0 {
@@ -1026,16 +1037,21 @@ impl Arena {
             let mut tried = lock(&self.init);
             if !*tried {
                 *tried = true;
-                self.base.store(
-                    unsafe {
-                        if WEB_AT != 0 {
-                            os::reserve_at(WEB_AT, RESERVE, LABEL)
-                        } else {
-                            os::reserve(RESERVE, CHUNK, if self.dynamic { c"makepad-run-domain" } else { LABEL })
-                        }
-                    },
-                    Ordering::Release,
-                );
+                let base = unsafe {
+                    if WEB_AT != 0 {
+                        os::reserve_at(WEB_AT, RESERVE, LABEL)
+                    } else {
+                        os::reserve(RESERVE, CHUNK, if self.dynamic { c"makepad-run-domain" } else { LABEL })
+                    }
+                };
+                // the compiler and burst arenas. A domain heap (the program's heap, as its malloc
+                // would be) keeps them: without, Sandbox race warm frames took +4% UI-thread CPU
+                // and cold start +5 s on 217 (timed A/B, JITMEM.REPORT.md); Scope's domain heap is
+                // then ~1 GB resident for 100 MB in use on such a Linux box
+                if base != 0 && !self.dynamic {
+                    unsafe { os::no_huge_pages(base, RESERVE) };
+                }
+                self.base.store(base, Ordering::Release);
             }
         }
         self.base.load(Ordering::Relaxed) != 0
@@ -1083,6 +1099,44 @@ impl Arena {
             }
         }
         (touched, slots, large, listed)
+    }
+    /// Where the committed bytes are (`memory`'s arena census): [small chunks, their touched bytes,
+    /// their live blocks, their live slot bytes, touched bytes of small chunks with <= 4 live
+    /// blocks (pinned by a few survivors), large runs, large committed bytes, the 4 largest runs].
+    pub fn census(&self) -> [usize; 11] {
+        let mut c = [0usize; 11];
+        for h in self.headers.iter() {
+            let s = lock(&h.state);
+            if s.committed == 0 {
+                continue;
+            }
+            if s.stride == 0 {
+                c[5] += 1;
+                c[6] += s.committed;
+                let mut v = s.committed;
+                for k in 7..11 {
+                    if v > c[k] {
+                        std::mem::swap(&mut v, &mut c[k]);
+                    }
+                }
+                continue;
+            }
+            let (bump, live) = if COMPILER && s.attached {
+                // the owner thread updates these without the lock: a racy, approximate read
+                let o = h.owned.get();
+                unsafe { ((*o).bump.load(Ordering::Relaxed).min(CHUNK), (*o).live.load(Ordering::Relaxed)) }
+            } else {
+                (s.bump.min(CHUNK), h.live.load(Ordering::Relaxed))
+            };
+            c[0] += 1;
+            c[1] += bump;
+            c[2] += live;
+            c[3] += live * s.stride;
+            if live <= 4 {
+                c[4] += bump;
+            }
+        }
+        c
     }
     fn partial_push(&self, i: usize, class: usize) {
         let mut p = lock(&self.partial);
@@ -1834,9 +1888,10 @@ impl Arena {
             self.detach_thread();
         }
         self.warm_drain();
-        if COMPILER {
-            self.release_free_pages();
-        }
+        // burst arena too: blocks that outlived their compile pin the chunks they were carved
+        // in (Sandbox race: 925 MB touched in 636 chunks held 6.5 MB of live blocks); the free
+        // granules around them go back
+        self.release_free_pages();
     }
     fn warm_drain(&self) {
         loop {
@@ -1880,7 +1935,7 @@ impl Arena {
             lock(&self.pool).release(run, order);
         }
     }
-    /// Compiler arena: gives the OS every granule of a small chunk whose slots are all free. Such a
+    /// Gives the OS every granule of a small chunk whose slots are all free. Such a
     /// granule's slots leave the free list for good (the chunk stays attached to its live blocks and
     /// is released whole when they are gone); the rest of the free list is relinked. What malloc_trim
     /// does for the system heap.
@@ -2008,6 +2063,21 @@ impl Arena {
         }
         let (chunks, touched, _) = self.destroy_generations(g, g + 1);
         (chunks, touched)
+    }
+    /// Requested live bytes in the chunks and runs carved for generation `g` (a diagnostic: one
+    /// header walk taking each chunk lock; MAKEPAD_RUN_ZONE_TRACE only).
+    fn generation_live(&self, g: u64) -> usize {
+        if !self.gen_on() || self.base.load(Ordering::Relaxed) == 0 {
+            return 0;
+        }
+        let mut n = 0usize;
+        for h in self.headers.iter() {
+            let s = lock(&h.state);
+            if s.committed != 0 && s.epoch == g {
+                n = n.wrapping_add(h.account.load(Ordering::Relaxed).wrapping_sub(h.remote_bytes.load(Ordering::Relaxed)));
+            }
+        }
+        (n as isize).max(0) as usize
     }
     fn destroy_older(&self) -> (usize, usize) {
         if !self.gen_on() {
@@ -2304,6 +2374,9 @@ pub fn stats() -> (usize, usize, usize) {
 pub fn detail() -> (usize, usize, usize, usize) {
     DEFAULT.detail()
 }
+pub fn census() -> [usize; 11] {
+    DEFAULT.census()
+}
 #[inline(always)]
 pub unsafe fn alloc(l: Layout) -> *mut u8 {
     DEFAULT.alloc(l)
@@ -2475,4 +2548,8 @@ pub fn destroy_generation(g: u64) -> (usize, usize) {
 /// those generations must be quiesced. Retained chunks keep their generation eligible to retry.
 pub fn destroy_older() -> (usize, usize) {
     DEFAULT.destroy_older()
+}
+/// See `Arena::generation_live`.
+pub fn generation_live(g: u64) -> usize {
+    DEFAULT.generation_live(g)
 }

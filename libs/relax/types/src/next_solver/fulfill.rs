@@ -45,6 +45,15 @@ impl FulfillmentCtxt {
                     }
                     obligation.recursion_depth += 1; any_changed = true;
                 }
+                // Goals may depend on structural identity of their regions: the uniquification of
+                // regions in MIR borrowck may make them fail. HIR typeck records them, unless the
+                // fast path (which does not depend on region identity) proves them. (Relax's HIR
+                // typeck has erased regions where rustc has region variables.)
+                if result.certainty.is_yes() && infcx.in_hir_typeck
+                    && obligation.goal.predicate.flags(&infcx.tcx.tys) & (crate::types::TypeFlags::HAS_NON_REGION_INFER.bits() | crate::types::TypeFlags::HAS_FREE_REGIONS.bits() | crate::types::TypeFlags::HAS_RE_ERASED.bits()) != 0
+                    && !infcx.probe(|_| super::eval_ctxt::fast_path::compute_goal_fast_path(infcx, prog, &obligation.goal).is_some_and(|r| r.certainty.is_yes())) {
+                    infcx.push_hir_typeck_potentially_region_dependent_goal(obligation.clone());
+                }
                 !result.certainty.is_yes()
             });
             if !any_changed { break; }

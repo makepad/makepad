@@ -1,0 +1,56 @@
+// Modal instrument: eight exactly decaying partials, each a damped-sine
+// recurrence (two multiplies per sample). One knob walks the string ->
+// bar -> bell continuum (stiffness bends the partials sharp), another sets
+// where it is struck; high partials die faster. Marimba, vibes, kalimba
+// and bells are settings of the same model.
+let N = 8
+let stiffness = param(0.35, 0, 1)
+let strike = param(0.28, 0.01, 0.5)
+let t60 = param(3.0, 0.1, 15)
+let hardness = param(6, 1, 16)
+let gain = param(0.35, 0, 1)
+
+struct Mode {
+    y1: 0.0
+    y2: 0.0
+    c1: 0.0
+    c2: 0.0
+}
+
+var modes = [Mode{}; N]
+var amp = 1.0
+
+fn voice() {
+    if trigger {
+        for k in 0..N {
+            let n = k + 1.0
+            let ratio = sqrt((1.0 - stiffness) * n * n + stiffness * n * n * n * n)
+            let w = TAU * freq * ratio / sample_rate
+            let a = if w < PI * 0.95 { sin(n * PI * strike) * min(1.0, hardness / ratio) / n } else { 0.0 }
+            let g = 6.9078 / t60 * sqrt(ratio)
+            let r = exp(-g / sample_rate)
+            let m = modes[k]
+            m.c1 = 2.0 * r * cos(w)
+            m.c2 = r * r
+            // Start the recurrence as a sine of amplitude a.
+            m.y1 = a * velocity * sin(w)
+            m.y2 = 0.0
+        }
+        amp = 1.0
+    }
+    let s = 0.0
+    for k in 0..N {
+        let m = modes[k]
+        let y = m.c1 * m.y1 - m.c2 * m.y2
+        m.y2 = m.y1
+        m.y1 = y
+        s = s + y
+    }
+    if gate == 0.0 {
+        amp = amp * exp(-1.0 / (0.4 * sample_rate))
+        if amp < 0.0001 {
+            stop()
+        }
+    }
+    s * amp * gain
+}

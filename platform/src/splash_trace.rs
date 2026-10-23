@@ -13,7 +13,9 @@
 //! among its module's statements, `makepad_widgets::button#0.3`), with its
 //! bytes, its byte range in the block's text (a whole top-level statement:
 //! blanking it to spaces leaves a block that still parses), the block's text
-//! hash (FNV-1a 64), and whether the run used it ([`makepad_script_census::top_use`]),
+//! hash (FNV-1a 64), and whether the run used it: read it outside a
+//! registration, in any of its VMs (a document's own among them), not merely
+//! held it ([`makepad_script::touch`], [`makepad_script_census::touch_use`]),
 //! and the modules the census saw registered and used. Nothing is
 //! rewritten: the record names the original source.
 
@@ -49,6 +51,14 @@ impl Cx {
         if let Err(e) = std::fs::write(&path, json) {
             crate::error!("MAKEPAD_SPLASH_TRACE {}: {e}", path.display());
         }
+        // `MAKEPAD_SPLASH_TRACE_BLANK=<file>`: the record as a blank list too, for a check run
+        // with `MAKEPAD_SPLASH_BLANK=<file>` (the shaken Splash, natively).
+        if let Some(blank) = std::env::var_os("MAKEPAD_SPLASH_TRACE_BLANK").filter(|p| !p.is_empty()) {
+            let list = crate::splash_blank::blank_list_of(self.with_vm(|vm| makepad_script_census::touch_use(vm)));
+            if let Err(e) = std::fs::write(&blank, list.write()) {
+                crate::error!("MAKEPAD_SPLASH_TRACE_BLANK {}: {e}", std::path::Path::new(&blank).display());
+            }
+        }
     }
 }
 
@@ -73,13 +83,13 @@ fn esc(s: &str) -> String {
 }
 
 /// The record as JSON:
-/// `{"modules": {"registered": [..], "used": {module: by}}, "blocks": [{"module", "crate", "file",
+/// `{"basis": "touch", "modules": {"registered": [..], "used": {module: by}}, "blocks": [{"module", "crate", "file",
 /// "line", "column", "bytes", "hash", "items": [{"id", "path", "start", "end", "bytes", "used": true|false|null}]}]}`
 /// (`start`/`end`: byte offsets in the block's text; `hash`: FNV-1a 64 of that text; `used` null: the
 /// statement defines no object, a `use` or a registration, and stays).
 pub fn splash_use_json(cx: &mut Cx) -> String {
-    let (blocks, modules) = cx.with_vm(|vm| (makepad_script_census::top_use::top_use(vm), makepad_script_census::census_used_from(vm, &[])));
-    let mut out = String::from("{\"modules\": ");
+    let (blocks, modules) = cx.with_vm(|vm| (makepad_script_census::touch_use(vm), makepad_script_census::census_used_from(vm, &[])));
+    let mut out = String::from("{\"basis\": \"touch\", \"modules\": ");
     match modules {
         Some(m) => {
             out.push_str("{\"registered\": [");

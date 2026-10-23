@@ -155,6 +155,13 @@ impl<'a> Writer<'a> {
         self.secs.push((id, 1, vec![Chunk::Image(image)], n));
     }
 
+    /// `add_image` at section position `at`: a section built after the ones that follow it
+    /// (relax-types Tcx::collected_writer_with encodes the type interner last).
+    pub fn insert_image(&mut self, at: usize, id: u32, image: std::sync::Arc<Writer<'a>>) {
+        let n = image.len() as u64;
+        self.secs.insert(at, (id, 1, vec![Chunk::Image(image)], n));
+    }
+
     /// Freeze borrowed arrays while keeping generated sections and nested images intact.
     pub fn into_owned(self) -> Writer<'static> {
         Writer { secs: self.secs.into_iter().map(|(id, es, chunks, n)| {

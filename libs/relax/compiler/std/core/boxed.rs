@@ -142,8 +142,10 @@ unsafe impl<#[may_dangle] T: ?Sized> Drop for Box<T> {
 /// Frees a Box's allocation whose contents were moved out (partly, the rest already dropped):
 /// rustc's box_free after a move out of `*b`. Called by the compiler only.
 #[doc(hidden)]
-pub unsafe fn box_free_after_move<T>(p: *mut T) {
-    heap::free(p as *mut u8, Layout::new::<T>());
+pub unsafe fn box_free_after_move<T: ?Sized>(p: *mut T) {
+    // The pointee has been moved out: inspect its metadata, never form a reference to it.
+    // heap::free skips zero-sized layouts, as alloc::boxed::Box::drop does.
+    heap::free(p as *mut u8, Layout::for_value_raw(p));
 }
 
 impl<T: ?Sized> crate::ops::LegacyReceiver for Box<T> {}

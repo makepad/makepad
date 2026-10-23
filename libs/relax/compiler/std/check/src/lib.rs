@@ -10,6 +10,7 @@
 #![allow(dangerous_implicit_autorefs)]
 // Relax core's fmt traits are `: PointeeSized` as nightly's (library/core/src/fmt/mod.rs:1053-1593).
 #![feature(sized_hierarchy)]
+#![feature(layout_for_ptr)]
 
 extern crate alloc;
 
@@ -61,8 +62,8 @@ pub mod intrinsics {
 pub mod intrinsics_mem {
     pub unsafe fn size_of<T>() -> usize { core::mem::size_of::<T>() }
     pub unsafe fn align_of<T>() -> usize { core::mem::align_of::<T>() }
-    pub unsafe fn size_of_val<T: ?Sized>(v: &T) -> usize { core::mem::size_of_val(v) }
-    pub unsafe fn align_of_val<T: ?Sized>(v: &T) -> usize { core::mem::align_of_val(v) }
+    pub const unsafe fn size_of_val<T: ?Sized>(v: *const T) -> usize { core::mem::size_of_val_raw(v) }
+    pub const unsafe fn align_of_val<T: ?Sized>(v: *const T) -> usize { core::mem::align_of_val_raw(v) }
     pub unsafe fn needs_drop<T>() -> bool { core::mem::needs_drop::<T>() }
     /// rustc cannot ask whether T: Copy without specialization: the shim takes the Clone paths.
     pub unsafe fn is_copy<T>() -> bool { false }

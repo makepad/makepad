@@ -651,14 +651,56 @@ impl Interp<'_> {
                 let n = self.int_of(&vals[2])? as u64;
                 return self.copy(s, d, elem, n, name == "copy_nonoverlapping");
             }
-            "offset" | "ptr_add" | "ptr_add_mut" | "arith_offset" => {
+            "offset" | "ptr_add" | "ptr_add_mut" | "arith_offset" | "ptr_sub" => {
                 let elem = match self.tcx.tys.kind(tys[0]) { TyKind::Ptr(_, t) => *t, _ => return unsupported("offset pointee") };
                 let (size, _) = self.size_align(elem)?;
                 let p = self.ptr_of(&vals[0], 0)?;
                 let n = self.int_of(&vals[1])? as u64 as i64;
-                if name == "arith_offset" { return unsupported("wrapping offset"); }
-                let q = self.offset_inbounds(p, n, size)?;
+                let n = if name == "ptr_sub" { n.wrapping_neg() } else { n };
+                // (arith_offset: wrapping, provenance kept, no bounds)
+                let q = if name == "arith_offset" { Ptr { off: p.off.wrapping_add((n as u64).wrapping_mul(size)), ..p } } else { self.offset_inbounds(p, n, size)? };
                 self.ptr_val(q, None)
+            }
+            // fat pointers from their parts and back
+            "slice_from_raw" | "slice_from_raw_mut" | "str_from_raw" => { let p = self.ptr_of(&vals[0], 0)?; let n = self.int_of(&vals[1])? as u64; self.ptr_val(p, Some(n)) }
+            "slice_ptr" => { let p = self.ptr_of(&vals[0], 0)?; self.ptr_val(p, None) }
+            "slice_len" => { if vals[0].size() != 2 * ps { return unsupported("slice_len"); } vals[0].slice(ps, ps, ps) }
+            "ptr_offset_from" => {
+                let elem = t0.unwrap();
+                let (size, _) = self.size_align(elem)?;
+                let (a, b) = (self.ptr_of(&vals[0], 0)?, self.ptr_of(&vals[1], 0)?);
+                // intrinsics.rs ptr_offset_from: two integers, or two pointers into one allocation
+                let bad = "`ptr_offset_from` called on two different pointers that are not both derived from the same allocation";
+                match (a.prov, b.prov) {
+                    (None, None) => {}
+                    (Some(x), Some(y)) if x.alloc == y.alloc => {
+                        let len = self.allocs[x.alloc as usize].size();
+                        if !self.allocs[x.alloc as usize].live { return ub(bad); }
+                        if a.off > len || b.off > len { return ub("`ptr_offset_from` called on two different pointers where the memory range between them is not in-bounds of an allocation"); }
+                    }
+                    _ => return ub(bad),
+                }
+                let dist = a.off.wrapping_sub(b.off) as i64;
+                if a.off < b.off && dist >= 0 { return ub("`ptr_offset_from` called when first pointer is too far before second"); }
+                if a.off >= b.off && dist < 0 { return ub("`ptr_offset_from` called when first pointer is too far ahead of second"); }
+                let size = size as i64;
+                if size == 0 || dist % size != 0 { return ub(format!("exact_div: {dist}_isize cannot be divided by {size}_isize without remainder")); }
+                val_bytes((dist / size) as u64 as u128, ps)
+            }
+            "ptr_is_null" => {
+                // machine.rs guaranteed_cmp(p, null) -> memory.rs scalar_may_be_null; is_null's const branch
+                // panics when it cannot tell
+                let p = self.ptr_of(&vals[0], 0)?;
+                let null = match p.prov {
+                    None => p.off == 0,
+                    Some(pr) => {
+                        let a = &self.allocs[pr.alloc as usize];
+                        // in bounds (or at the end), or misaligned against the allocation: not null
+                        if p.off <= a.size() || p.off % a.align != 0 { false }
+                        else { return ub("evaluation panicked: null-ness of this pointer cannot be determined in const context"); }
+                    }
+                };
+                val_bytes(null as u128, 1)
             }
             "caller_location" => { let loc = self.caller_location(dest.ty)?; self.ptr_val(Ptr { prov: Some(Prov { alloc: loc, shared: true }), off: 0 }, None) }
             "unreachable" => return ub("entering unreachable code"),

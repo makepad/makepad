@@ -1036,8 +1036,11 @@ impl<'a> TypeChecker<'a> {
         if let Const::Unevaluated { def, args, promoted: None, .. } = &constant.const_ {
             // Inline consts are closures of their parent: prove their bounds here.
             if self.infcx.is_inline_const(*def) {
-                let args = self.prove_closure_bounds(ClauseOwner::Def(*def), args, location);
-                self.infcx.normalize_and_prove_instantiated_clauses(&mut self.constraints, ClauseOwner::Def(*def), &args, to_locations(location));
+                // InlineConstArgs: the root's arguments, then the constant's type
+                let mut inline_args = args.to_vec();
+                inline_args.push(GenericArg::Type(self.const_ty(constant)));
+                self.prove_closure_bounds(ClauseOwner::Def(*def), &inline_args, location);
+                self.infcx.normalize_and_prove_instantiated_clauses(&mut self.constraints, ClauseOwner::Def(*def), args, to_locations(location));
             }
         }
     }

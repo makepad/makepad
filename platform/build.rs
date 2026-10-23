@@ -87,7 +87,7 @@ fn main() {
     }
     std::fs::write(Path::new(&out_dir).join("app_icon_gen.rs"), icons.source).unwrap();
 
-    println!("cargo:rustc-check-cfg=cfg(apple_bundle,apple_sim,lines,makepad_precompiled_shaders,makepad_shader_pack,makepad_no_studio)");
+    println!("cargo:rustc-check-cfg=cfg(apple_bundle,apple_sim,lines,makepad_precompiled_shaders,makepad_shader_pack,makepad_embed,makepad_no_studio)");
     // Every variable declared here rebuilds this crate and everything that
     // depends on it (draw, widgets, every app) when its value changes: keep
     // per-app inputs out (see src/app_meta.rs). MAKEPAD_BUILD selects build

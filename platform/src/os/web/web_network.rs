@@ -252,6 +252,10 @@ impl NetworkBackend for WasmNetworkShimBackend {
         request: HttpRequest,
         sink: EventSink,
     ) -> Result<(), NetworkError> {
+        // An embedded file is answered here: it never reaches the page.
+        if let Some(response) = embedded_response(&request) {
+            return sink.emit(NetworkResponse::HttpResponse { request_id, response });
+        }
         let internal_request_id = self.next_internal_id();
         {
             let mut state = self
@@ -404,6 +408,25 @@ impl NetworkBackend for WasmNetworkShimBackend {
 
 static INIT: Once = Once::new();
 static SHIM_BACKEND: OnceLock<Arc<WasmNetworkShimBackend>> = OnceLock::new();
+
+/// The answer to `request` from the build's embed (`web_embed`): a GET or
+/// HEAD of an embedded URL, 200 whole or 206 for its `Range`.
+fn embedded_response(request: &HttpRequest) -> Option<HttpResponse> {
+    use crate::makepad_network::HttpMethod;
+    let head = match request.method {
+        HttpMethod::GET => false,
+        HttpMethod::HEAD => true,
+        _ => return None,
+    };
+    let body = super::web_embed::embedded()?.get(&request.url)?;
+    let range = request.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("range")).and_then(|(_, v)| v.first()).map(String::as_str);
+    let (status, content_range, sent) = makepad_web_manifest::embed::range(body, range);
+    let mut headers = format!("content-length: {}\r\naccept-ranges: bytes\r\n", sent.len());
+    if let Some(content_range) = content_range {
+        headers.push_str(&format!("content-range: {content_range}\r\n"));
+    }
+    Some(HttpResponse::from_header_string(request.metadata_id, status, headers, Some(if head { Vec::new() } else { sent.to_vec() })))
+}
 
 fn shim_backend() -> Option<&'static Arc<WasmNetworkShimBackend>> {
     SHIM_BACKEND.get()

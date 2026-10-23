@@ -38,6 +38,9 @@ makepad-zune-jpeg = { path = "../libs/zune/zune-jpeg", version = "0.5.15" }
 makepad-tsdf = { path = "../libs/tsdf", version = "0.1.0" }
 smallvec = { version = "1.15", path = "../libs/smallvec" }
 bitflags = { version = "2.10", path = "../libs/bitflags" }
+# The collect-web run mode writes its manifest in this format; a web build
+# reads the export's embedded files (os/web/web_embed.rs) in it. No dependencies.
+makepad-web-manifest = { path = "../libs/web_manifest", version = "0.1.0" }
 foldhash = { version = "0.2", path = "../libs/vulkan/foldhash" }
 
 # The process's remote endpoint (`--remote`, `makepad inspect <pid> gpu`); it does not exist on
@@ -45,8 +48,6 @@ foldhash = { version = "0.2", path = "../libs/vulkan/foldhash" }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 makepad-remote = { path = "../libs/remote", version = "0.1.0" }
 makepad-prof-stream = { path = "../libs/prof_stream", version = "1.0.0" }
-# The collect-web run mode writes its manifest in this format.
-makepad-web-manifest = { path = "../libs/web_manifest", version = "0.1.0" }
 # Every native target uses the HAL; web retains its browser backend.
 makepad-hal = { path = "./hal", version = "1.0.0" }
 # the web backend's messages for a host that plays the page (feature web-protocol)
@@ -95,5 +96,5 @@ version = "0.1.0"
 
 [features]
 # The web backend's message types built for this machine (src/web_protocol.rs): the web trace
-# host (tools/web_trace) plays the page's side of them.
+# host (apps/commercial/tools/wasm-export/trace) plays the page's side of them.
 web-protocol = ["dep:makepad-wasm-bridge"]

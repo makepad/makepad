@@ -1,10 +1,10 @@
 // node relax_host.js <module.wasm>: runs Relax's wasm export of web_diff.rs (relax_backend::wasm,
 // MAKEPAD_RUN_WASM_EXPORT) as the page would: the root export `t0` is main; the imports are the
-// export's runtime entries (r.*) and C symbols (c.*), given here with their Relax semantics.
+// export's runtime entries (r.*) and web imports (env.*), given here with their Relax semantics.
 const fs = require('fs');
 const m = new WebAssembly.Module(fs.readFileSync(process.argv[2]));
 let x = null;
-const u8 = () => new Uint8Array(x.m.buffer);
+const u8 = () => new Uint8Array(x.memory.buffer);
 let top = 0;
 const sizes = new Map();
 function alloc(size, align) {
@@ -12,8 +12,8 @@ function alloc(size, align) {
     top = Math.ceil(top / a) * a;
     const p = top;
     top += Math.max(Number(size), 1);
-    const need = top - x.m.buffer.byteLength;
-    if (need > 0) x.m.grow(Math.ceil(need / 65536));
+    const need = top - x.memory.buffer.byteLength;
+    if (need > 0) x.memory.grow(Math.ceil(need / 65536));
     sizes.set(p, Number(size));
     return BigInt(p);
 }
@@ -35,7 +35,7 @@ const imports = {
             return [BigInt.asIntN(64, r & M), BigInt.asIntN(64, r >> 64n)];
         },
     },
-    c: {
+    env: {
         relax_web_print: (p, n) => process.stderr.write(Buffer.from(u8().subarray(Number(p), Number(p) + Number(n)))),
         relax_alloc: (size, align) => alloc(size, align),
         relax_dealloc: () => {},

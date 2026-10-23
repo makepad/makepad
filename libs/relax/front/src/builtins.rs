@@ -783,7 +783,25 @@ pub fn expand(p: &crate::parser::Parser, id: u8, lo: usize, hi: usize, call_lo: 
         }
         return Ok(Expansion { text, toks, origins });
     }
-    Ok(Expansion::from_buf(expand_buf(p, id, lo, hi, call_lo, call_hi)?))
+    let g = expand_buf(p, id, lo, hi, call_lo, call_hi)?;
+    if g.origins.is_empty() { return Ok(Expansion::from_buf(g)); }
+    // tokens copied from the input (TokBuf::put_at) keep their source; the others are the call's
+    // (an empty span: no hygiene of their own)
+    let call = p.source_span(call_lo);
+    let call = SourceSpan { hi: call.lo, ..call };
+    let mut origins = Vec::with_capacity(g.toks.len());
+    let mut at = g.origins.iter().peekable();
+    for t in &g.toks {
+        while at.peek().is_some_and(|o| o.0 < t.lo) { at.next(); }
+        let source = match at.peek() {
+            Some(&&(off, o, _)) if off == t.lo => { at.next(); p.source_span(o) }
+            _ => call,
+        };
+        origins.push(TokenOrigin { lo: t.lo, hi: t.hi, source });
+    }
+    let mut x = Expansion::from_buf(g);
+    x.origins = origins;
+    Ok(x)
 }
 
 impl Expansion {
@@ -907,10 +925,10 @@ fn expand_buf(p: &crate::parser::Parser, id: u8, lo: usize, hi: usize, call_lo: 
             return Ok(one_str(&parts.concat()));
         }
         Builtin::ThreadLocal => {
-            let mut v: Vec<(T, &[u8])> = Vec::new();
+            let mut v: Vec<(T, &[u8], u32)> = Vec::new();
             for i in lo..hi {
                 let t = p.toks.at(i);
-                v.push((t.kind, p.tok_text(t)));
+                v.push((t.kind, p.tok_text(t), t.lo));
             }
             return crate::thread_local_mac::expand(&v, p.edition);
         }

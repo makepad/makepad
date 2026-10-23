@@ -4300,6 +4300,20 @@ impl<'a> Gen<'a> {
                     o += 1;
                 }
             }
+            Inst::Coverage { word, mask } => {
+                // Reserved scratch registers: coverage adds no program live
+                // ranges or spills. The NOP is patched only after this bit
+                // has been observed set; an in-flight old probe is harmless.
+                assert!(mask.is_power_of_two());
+                let at = (self.a.pos() * 4) as u32;
+                self.a.e(0xD503_201F);
+                self.a.mov_imm64_fixed(IP0, *word);
+                self.a.mov_imm(IP1, *mask as i64);
+                // stset x17, [x16] (the unused old value goes to xzr).
+                self.a.e(0xF820_3000 | (IP1 as u32) << 16 | (IP0 as u32) << 5 | ZR as u32);
+                assert_eq!(self.a.pos() * 4, at as usize + 28);
+                self.relocs.push(RelocAt { at, kind: RelocKind::A64CoverageBit(mask.trailing_zeros() as u8), target: Reloc::Value(*word) });
+            }
             Inst::AtomicLoad(..) | Inst::AtomicStore(..) | Inst::AtomicRmw(..) | Inst::AtomicCas(..) | Inst::Fence(..) => self.atomic(i),
             Inst::TlsAddr(d, off) => self.tls_addr(*d, *off),
             // static TLS is placed for x86-64 Linux only (compiler os/tls.rs)

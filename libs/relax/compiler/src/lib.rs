@@ -97,7 +97,6 @@ pub mod registry_net;
 
 /// Compiler statics held for rollback; forget them before destroying their generations.
 pub struct ZoneTaken {
-    owner: owner::ZoneTaken,
     native_macros: native_macros::ZoneTaken,
     cache: cache::ZoneTaken,
     jit: jit::ZoneTaken,
@@ -108,9 +107,10 @@ pub struct ZoneTaken {
 /// Takes this crate's compiler statics while every compiler thread is quiesced.
 /// None, taking nothing, when the owner has requests queued.
 pub fn zone_take() -> Option<ZoneTaken> {
-    let owner = owner::zone_take()?;
+    if !owner::queue_empty() {
+        return None;
+    }
     Some(ZoneTaken {
-        owner,
         native_macros: native_macros::zone_take(),
         cache: cache::zone_take(),
         jit: jit::zone_take(),
@@ -121,7 +121,6 @@ pub fn zone_take() -> Option<ZoneTaken> {
 
 /// Restores the statics after an aborted swap, forgetting the new generation's values.
 pub fn zone_put_back(taken: ZoneTaken) {
-    owner::zone_put_back(taken.owner);
     native_macros::zone_put_back(taken.native_macros);
     cache::zone_put_back(taken.cache);
     jit::zone_put_back(taken.jit);
@@ -437,6 +436,17 @@ pub fn cli_main(sess: &std::sync::Arc<crate::Session>) {
         // what each edit invalidates
         "check" => {
             crate::lexer::set_validation(true);
+            // rustc_interface util.rs `init_stack_size`: a batch compiler rejects a RUST_MIN_STACK that
+            // is set (not blank) but no number of bytes, before it reads any input
+            if let Some(v) = std::env::var_os("RUST_MIN_STACK") {
+                let v = v.to_string_lossy();
+                let s = v.trim();
+                if !s.is_empty() && s.parse::<usize>().is_err() {
+                    eprintln!("error: `RUST_MIN_STACK` should be a number of bytes, but was \"{s}\"");
+                    eprintln!("  = note: you can also unset `RUST_MIN_STACK` to use the default stack size");
+                    os::proc::exit(1);
+                }
+            }
             os::proc::exit(serve_rpc::check(sess, &args[2..]));
         }
         // `makepad selftest [--root-only] <package>`: a test of Relax itself -- every fn of the
@@ -805,6 +815,16 @@ pub fn std_pre_crates(sess: &std::sync::Arc<crate::Session>, simd: bool) -> Vec<
     v
 }
 
+/// Program crates use the target's cfgs. Web traces must capture the code shipped to the
+/// browser, where there is no Relax session; native programs retain the Relax runtime paths.
+pub(crate) fn program_cfg(sess: &std::sync::Arc<crate::Session>, features: &[String]) -> cfg::CfgSet {
+    let mut cfg = cfg::CfgSet::host(sess, features);
+    if sess.options.check_target.web().is_none() {
+        cfg.set.push("relax".to_string());
+    }
+    cfg
+}
+
 /// The cfg set of the std crates: the host's, plus relax_portable_simd when the program uses
 /// core::simd.
 pub fn std_cfg(sess: &std::sync::Arc<crate::Session>, simd: bool) -> cfg::CfgSet {
@@ -872,11 +892,10 @@ pub fn load_with_std(sess: &std::sync::Arc<crate::Session>, root: &str, name: &s
     let mut prog = program::Program::new(sess);
     prog.std_simd = std_simd_wanted([root]);
     let (core, deps) = load_std_crates(sess, &mut prog).map_err(|e| vec![e])?;
-    let mut cfgset = cfg::CfgSet::host(sess, &[]);
+    let mut cfgset = program_cfg(sess, &[]);
     if test {
         cfgset.set.push("test".to_string());
     }
-    cfgset.set.push("relax".to_string());
     // a single file is edition 2021 unless its header says otherwise (`//@ edition: 2024`,
     // the compiletest directive; rustc takes it as --edition)
     let edition = std::fs::read_to_string(root).ok().and_then(|src| {
@@ -1074,8 +1093,7 @@ fn cmd_resolve(sess: &std::sync::Arc<crate::Session>, units_path: &str) {
             let s = prog.syms.intern(n);
             deps.push((s, crate_of[*i]));
         }
-        let mut cs = cfg::CfgSet::host(sess, &c.features);
-        cs.set.push("relax".to_string());
+        let cs = program_cfg(sess, &c.features);
         match prog.load_crate_deferred(&c.name, &c.src_path, c.edition, cs, deps) {
             Ok(k) => {
                 prog.crates[k as usize].proc_macro = c.proc_macro;
@@ -1163,6 +1181,9 @@ mod calls_tests;
 
 #[cfg(test)]
 mod vfs_bind_tests;
+
+#[cfg(test)]
+mod warm_zone_tests;
 
 #[cfg(test)]
 #[test]

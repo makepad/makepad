@@ -86,8 +86,14 @@ impl BlankList {
 /// top-level definitions whose objects the heap no longer reaches from
 /// what Rust holds ([`makepad_script_census::top_use`]).
 pub fn compute_blank_list(vm: &mut crate::makepad_script::vm::ScriptVm) -> BlankList {
+    blank_list_of(makepad_script_census::top_use::top_use(vm))
+}
+
+/// The blank list of a use record's blocks: each block's unused statements blanked. Only the
+/// `script_mod!` blocks (with a module path): those a blank list can replace.
+pub fn blank_list_of(blocks: Vec<makepad_script_census::BlockUse>) -> BlankList {
     let mut list = BlankList::default();
-    for block in makepad_script_census::top_use::top_use(vm) {
+    for block in blocks.into_iter().filter(|b| !b.module_path.is_empty()) {
         let unused: Vec<&TopStatement> = block.statements.iter().filter(|(_, used)| *used == Some(false)).map(|(s, _)| s).collect();
         if unused.is_empty() {
             continue;

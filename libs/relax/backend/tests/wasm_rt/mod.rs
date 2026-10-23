@@ -39,6 +39,8 @@ pub struct Instance {
     pub funcs: Vec<Func>,
     pub table: Vec<Option<u32>>,
     pub mem: Vec<u8>,
+    /// memory64 (limits flag 0x04): addresses are i64
+    pub mem64: bool,
     pub globals: Vec<u64>,
     pub exports: HashMap<String, (u8, u32)>,
     pub host: Vec<Option<HostFn>>,
@@ -215,7 +217,7 @@ impl Instance {
         if r.bytes(8)? != [0, 0x61, 0x73, 0x6D, 1, 0, 0, 0] {
             return t("magic");
         }
-        let mut inst = Instance { types: vec![], imports: vec![], funcs: vec![], table: vec![], mem: vec![], globals: vec![], exports: HashMap::new(), host: vec![], steps: 0, max_steps: 50_000_000, depth: 0 };
+        let mut inst = Instance { types: vec![], imports: vec![], funcs: vec![], table: vec![], mem: vec![], mem64: false, globals: vec![], exports: HashMap::new(), host: vec![], steps: 0, max_steps: 50_000_000, depth: 0 };
         let mut fty: Vec<u32> = vec![];
         let mut last_id = 0u8;
         let mut datas: Vec<(Option<u64>, Vec<u8>)> = vec![];
@@ -289,7 +291,11 @@ impl Instance {
                 }
                 5 => {
                     s.u()?;
-                    let _fl = s.u8()?;
+                    let fl = s.u8()?;
+                    if fl & !0x04 != 0 {
+                        return t("memory limits flags");
+                    }
+                    inst.mem64 = fl & 0x04 != 0;
                     let pages = s.u()? as usize;
                     inst.mem = vec![0; pages * 65536];
                 }
@@ -442,9 +448,14 @@ impl Instance {
         Ok(())
     }
 
+    /// An address operand (i32, or i64 under memory64) as an index.
+    fn addr(&self, v: u128) -> u64 {
+        if self.mem64 { v as u64 } else { v as u64 as u32 as u64 }
+    }
+
     fn ea(&self, base: u128, off: u64, n: usize) -> Result<usize, Trap> {
-        let a = (base as u64 as u32 as u64).wrapping_add(off) as usize;
-        if a + n > self.mem.len() {
+        let a = self.addr(base).checked_add(off).ok_or(Trap::Trap("address overflow".into()))? as usize;
+        if a.checked_add(n).map_or(true, |e| e > self.mem.len()) {
             return t("out of bounds memory access");
         }
         Ok(a)
@@ -991,9 +1002,9 @@ impl Instance {
                         10 => {
                             r.u8()?;
                             r.u8()?;
-                            let n = pop!() as u32 as usize;
-                            let s = pop!() as u32 as usize;
-                            let d = pop!() as u32 as usize;
+                            let n = self.addr(pop!()) as usize;
+                            let s = self.addr(pop!()) as usize;
+                            let d = self.addr(pop!()) as usize;
                             if s + n > self.mem.len() || d + n > self.mem.len() {
                                 return t("out of bounds memory access");
                             }
@@ -1001,9 +1012,9 @@ impl Instance {
                         }
                         11 => {
                             r.u8()?;
-                            let n = pop!() as u32 as usize;
+                            let n = self.addr(pop!()) as usize;
                             let v = pop!() as u8;
-                            let d = pop!() as u32 as usize;
+                            let d = self.addr(pop!()) as usize;
                             if d + n > self.mem.len() {
                                 return t("out of bounds memory access");
                             }

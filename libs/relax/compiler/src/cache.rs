@@ -46,6 +46,7 @@ mod items;
 mod demand;
 mod front_run;
 pub use front_run::FrontSink;
+pub(crate) use front_run::ahead_end;
 #[cfg(test)]
 use front_run::commit_runs;
 
@@ -153,6 +154,23 @@ static FRONT_STORES: relax_session::sync::Mutex<Vec<std::sync::Arc<Store>>> = re
 /// front images this run mapped (store, index entry): checksummed in the background
 static FRONT_USED: relax_session::sync::Mutex<Vec<(std::sync::Arc<Store>, usize)>> = relax_session::sync::Mutex::new(Vec::new());
 
+/// Pins a store a front image or collected image was mapped from (FRONT_STORES), and with `used`
+/// queues that entry's background checksum (FRONT_USED). A restore ahead of the swap's pause
+/// defers it to after the swap's take (relax_session::phase::defer).
+fn pin_front(st: &std::sync::Arc<Store>, used: Option<usize>) {
+    let st = st.clone();
+    relax_session::phase::defer(move || {
+        let mut keep = FRONT_STORES.lock().unwrap_or_else(|x| x.into_inner());
+        if !keep.iter().any(|k| std::sync::Arc::ptr_eq(k, &st)) {
+            keep.push(st.clone());
+        }
+        drop(keep);
+        if let Some(i) = used {
+            FRONT_USED.lock().unwrap_or_else(|x| x.into_inner()).push((st, i));
+        }
+    });
+}
+
 pub(crate) struct ZoneTaken {
     front_run: front_run::ZoneTaken,
     stores: Vec<std::sync::Arc<Store>>,
@@ -254,6 +272,78 @@ pub fn mode_from_env(options: &crate::options::Options) -> Option<Mode> {
         Some("readonly") => Some(Mode::ReadOnly),
         _ => Some(Mode::On),
     }
+}
+
+/// This process's warm-cache outcomes, readable without the unit (`makepad inspect cache`, flight
+/// recordings' `jit.cache` event): code lookups by outcome, the startup image, the stores opened.
+pub mod warm_count {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    /// a lookup linked the cached entry
+    pub const HIT: usize = 0;
+    /// the fn has no storable key (nothing can be cached for it)
+    pub const NO_KEY: usize = 1;
+    /// no entry under the fn's key: never recorded, recorded under another key (a source or
+    /// dependency changed), or not written (the session that compiled it did not flush)
+    pub const NO_ENTRY: usize = 2;
+    /// an entry, invalidated: a slot its code took in has another key now (certificate)
+    pub const INVALIDATED: usize = 3;
+    /// an entry that did not decode or link
+    pub const LINK_FAIL: usize = 4;
+    /// startup image: slots placed, stale (their crate changed or the cache has newer code),
+    /// failed (an identity did not resolve / link), had code already
+    pub const IMG_PLACED: usize = 5;
+    pub const IMG_STALE: usize = 6;
+    pub const IMG_FAILED: usize = 7;
+    pub const IMG_HAD_CODE: usize = 8;
+    /// code stores opened, crate stores rejected (changed include!/env! inputs, a re-parsed crate)
+    pub const STORES: usize = 9;
+    pub const STORES_REJECTED: usize = 10;
+    /// entries recorded this session (written by the batched record writes)
+    pub const RECORDED: usize = 11;
+    /// strict runs (MAKEPAD_RUN_WARM_STRICT=1) split NO_ENTRY by the cold run's ledger: recorded
+    /// under another key, recorded but its entry unavailable, never recorded (with a reason)
+    pub const KEY_CHANGED: usize = 12;
+    pub const ENTRY_GONE: usize = 13;
+    pub const NOT_RECORDED: usize = 14;
+    pub static N: [AtomicU64; 15] = [const { AtomicU64::new(0) }; 15];
+    #[inline]
+    pub fn add(k: usize, n: u64) {
+        N[k].fetch_add(n, Relaxed);
+    }
+    pub fn get(k: usize) -> u64 {
+        N[k].load(Relaxed)
+    }
+}
+
+/// The warm cache this session in one paragraph (answer first: hits vs misses by reason).
+pub fn warm_summary() -> String {
+    use warm_count::*;
+    let g = |k| get(k);
+    let k = |n: u64| if n >= 10_000 { format!("{:.1}k", n as f64 / 1e3) } else { n.to_string() };
+    let miss = g(NO_KEY) + g(NO_ENTRY) + g(INVALIDATED) + g(LINK_FAIL);
+    let mut s = if g(STORES) == 0 && g(HIT) == 0 {
+        "warm cache: no code store opened for this build (the first run of this loader build, the cache off, or another cache home): every fn compiled fresh".to_string()
+    } else {
+        format!("warm cache: {} lookups linked cached code, {} missed", k(g(HIT)), k(miss))
+    };
+    if miss > 0 {
+        let mut why = vec![format!("no entry for the key {}", k(g(NO_ENTRY)))];
+        if g(KEY_CHANGED) + g(ENTRY_GONE) + g(NOT_RECORDED) > 0 {
+            why.push(format!("of them (strict ledger) recorded under another key {}, recorded but gone {}, never recorded {}", k(g(KEY_CHANGED)), k(g(ENTRY_GONE)), k(g(NOT_RECORDED))));
+        }
+        why.push(format!("invalidated (a slot its code took in changed) {}", k(g(INVALIDATED))));
+        why.push(format!("did not decode/link {}", k(g(LINK_FAIL))));
+        why.push(format!("fn not storable {}", k(g(NO_KEY))));
+        s.push_str(&format!(" ({})", why.join(", ")));
+    }
+    if g(IMG_PLACED) + g(IMG_STALE) + g(IMG_FAILED) > 0 {
+        s.push_str(&format!("; startup image: {} slots placed, {} stale, {} failed, {} had code", k(g(IMG_PLACED)), k(g(IMG_STALE)), k(g(IMG_FAILED)), k(g(IMG_HAD_CODE))));
+    }
+    s.push_str(&format!("; {} code stores opened, {} crate stores rejected; {} entries recorded this session", g(STORES), g(STORES_REJECTED), k(g(RECORDED))));
+    if g(NO_ENTRY) > 0 && g(KEY_CHANGED) + g(ENTRY_GONE) + g(NOT_RECORDED) == 0 {
+        s.push_str(" (why an entry is missing -- key changed, never recorded, not flushed -- needs a MAKEPAD_RUN_WARM_STRICT=1 cold run then warm run)");
+    }
+    s
 }
 
 #[derive(Default, Debug, Clone)]
@@ -866,12 +956,14 @@ impl Cache {
             if prog.record_front && !restored(ci) && deps_restored && st.index.iter().any(|e| e.kind == KIND_FRONT_CRATE) {
                 c.stale[ci] = true;
                 c.stats.packs_rejected += 1;
+                warm_count::add(warm_count::STORES_REJECTED, 1);
                 continue;
             }
             // a changed include!/env! input: the crate's whole file is stale
             if !ledger_current(&st, &present, &mut late) {
                 c.stale[ci] = true;
                 c.stats.packs_rejected += 1;
+                warm_count::add(warm_count::STORES_REJECTED, 1);
                 continue;
             }
             let si = c.stores.len() as u32;
@@ -942,6 +1034,7 @@ impl Cache {
             }
             c.stores.push(st);
             c.stats.code_stores += 1;
+            warm_count::add(warm_count::STORES, 1);
         }
         c.stats.index_entries = (c.index.len() + c.mapped_index.as_ref().map_or(0, |m| m.len())) as u64;
         let t_packs = t0.elapsed();
@@ -2380,6 +2473,7 @@ impl Cache {
         let kc = self.cur_crate;
         self.push_pending(kc, NewEntry { key, kind: KIND_CODE, payload });
         self.stats.recorded += 1;
+        warm_count::add(warm_count::RECORDED, 1);
         if o3.is_none() { self.remember_outcome(u, id, Some(key), "recorded"); }
     }
 
@@ -3729,8 +3823,8 @@ impl Cache {
 
 /// MAKEPAD_RUN_CACHE_DUMP=<name substring>: link details of matching entries (read once).
 fn dump_filter() -> Option<&'static str> {
-    static F: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    F.get_or_init(|| crate::zone_alloc::kept_with(|| std::env::var("MAKEPAD_RUN_CACHE_DUMP").ok())).as_deref()
+    static F: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    relax_session::phase::env_once(&F, "MAKEPAD_RUN_CACHE_DUMP")
 }
 
 fn kind_code(k: RelocKind) -> u8 {
@@ -3742,6 +3836,7 @@ fn kind_code(k: RelocKind) -> u8 {
         RelocKind::A64LdrLo12X => 4,
         RelocKind::Imm32 => 5,
         RelocKind::A64MovzMovk => 6,
+        RelocKind::A64CoverageBit(_) => unreachable!("coverage disables the code cache"),
         RelocKind::X64Branch32 => 7,
         RelocKind::A64Branch26 => 8,
     }
@@ -4795,12 +4890,7 @@ fn front_entry(st: &std::sync::Arc<Store>, e: usize, key: u128, check: bool) -> 
             Some((Some(loc), img))
         }
         KIND_FRONT => {
-            let mut keep = FRONT_STORES.lock().unwrap_or_else(|x| x.into_inner());
-            if !keep.iter().any(|k| std::sync::Arc::ptr_eq(k, st)) {
-                keep.push(st.clone());
-            }
-            drop(keep);
-            if !check { FRONT_USED.lock().unwrap_or_else(|x| x.into_inner()).push((st.clone(), e)); }
+            pin_front(st, (!check).then_some(e));
             // SAFETY: the store (and its mapping) is kept alive above for the rest of the
             // process, and a committed payload never changes (store.rs)
             Some((None, unsafe { std::slice::from_raw_parts(b.as_ptr(), b.len()) }))
@@ -6950,6 +7040,7 @@ impl Linker {
         let t0 = crate::jit::wall_ns();
         let Some(key0) = self.cache().slot_key(u, id) else {
             relax_codegen::warm::reason(id, "unstorable:fn key");
+            warm_count::add(warm_count::NO_KEY, 1);
             return None;
         };
         let key = key0;
@@ -6964,6 +7055,7 @@ impl Linker {
             if self.cert_valid(u, payload) == Some(false) {
                 self.cache().cert_rejected.insert(key);
                 self.cache().stats.cert_rejects += 1;
+                warm_count::add(warm_count::INVALIDATED, 1);
                 trace_lookup(u, id, "cert:stale");
             } else {
                 found = true;
@@ -6974,10 +7066,14 @@ impl Linker {
         if !found {
             if relax_codegen::warm::enabled() {
                 let reason = self.cache().miss_reason(u, id, key0);
+                warm_count::add(if reason.starts_with("cold record exists; lookup key changed") { warm_count::KEY_CHANGED } else if reason.starts_with("cold record exists") { warm_count::ENTRY_GONE } else { warm_count::NOT_RECORDED }, 1);
                 relax_codegen::warm::reason(id, &reason);
             }
             self.cache().missed.insert(id);
             self.cache().stats.misses += 1;
+            if !self.cache().cert_rejected.contains(&key) {
+                warm_count::add(warm_count::NO_ENTRY, 1);
+            }
             trace_lookup(u, id, "miss");
             return None;
         }
@@ -6985,6 +7081,7 @@ impl Linker {
         match r {
             Some(x) => {
                 self.cache().stats.hits += 1;
+                warm_count::add(warm_count::HIT, 1);
                 if std::mem::take(&mut self.cache().last_base) {
                     self.cache().base_linked.insert(id);
                 }
@@ -6995,6 +7092,7 @@ impl Linker {
             None => {
                 self.cache().missed.insert(id);
                 self.cache().stats.link_fail += 1;
+                warm_count::add(warm_count::LINK_FAIL, 1);
                 trace_lookup(u, id, "linkfail");
                 relax_codegen::warm::reason(id, "cached entry could not decode/link");
                 None

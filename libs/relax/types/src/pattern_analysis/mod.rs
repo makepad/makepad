@@ -564,17 +564,28 @@ impl<'a> Cx<'a> {
                     // non-generic constant) fails on a union, a function pointer or a raw pointer
                     // that is not an integer
                     if self.prog.def(d).kind == DefKind::Const && self.tcx.generic_indices_of(self.prog, d).types_consts.is_empty() {
-                        if let Some(bad) = crate::const_eval::interp::valtree_failure(self.prog, self.tcx, d) {
-                            let msg = match self.kind(bad) {
-                                TyKind::FnPtr(..) | TyKind::Ptr(..) => Some(POINTER_PATTERN),
-                                TyKind::Adt(a, ..) if self.tcx.adts.get(&a).is_some_and(|a| a.is_union) => Some("cannot use unions in constant patterns"),
-                                _ => None,
-                            };
-                            if let (Some(msg), Some(lo)) = (msg, pos) {
-                                let e = self.prog.record_uncoded_error(self.body.file, lo, "typeck", msg.to_string());
-                                self.const_errors.push(e);
-                                return Some(self.opaque(t, pos));
+                        match crate::const_eval::interp::valtree_of_const(self.prog, self.tcx, d) {
+                            crate::const_eval::interp::ValtreeWalk::NoValtree(bad) => {
+                                let msg = match self.kind(bad) {
+                                    TyKind::FnPtr(..) | TyKind::Ptr(..) => Some(POINTER_PATTERN),
+                                    TyKind::Adt(a, ..) if self.tcx.adts.get(&a).is_some_and(|a| a.is_union) => Some("cannot use unions in constant patterns"),
+                                    _ => None,
+                                };
+                                if let (Some(msg), Some(lo)) = (msg, pos) {
+                                    let e = self.prog.record_uncoded_error(self.body.file, lo, "typeck", msg.to_string());
+                                    self.const_errors.push(e);
+                                    return Some(self.opaque(t, pos));
+                                }
                             }
+                            // valtree_to_pat: every ADT of the value must be structural (issue-89088:
+                            // a `Cow` inside a derived enum)
+                            crate::const_eval::interp::ValtreeWalk::Adts(adts) => {
+                                if let Some(&bad) = adts.iter().find(|&&a| !self.type_marked_structural(a)) {
+                                    self.not_structural(bad, pos);
+                                    return Some(self.opaque(t, pos));
+                                }
+                            }
+                            crate::const_eval::interp::ValtreeWalk::Unknown => {}
                         }
                     }
                     let mut seen = Vec::new();

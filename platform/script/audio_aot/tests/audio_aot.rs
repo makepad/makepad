@@ -726,7 +726,7 @@ fn fnv(bits: impl Iterator<Item = u32>) -> u64 {
 /// Every example and shipped library shader, rendered through the scripted
 /// performance on both backends, hashed.
 fn golden_sources() -> Vec<(String, String)> {
-    let lib_dir = format!("{}/../../../apps/commercial/engine/score_player/shaders", env!("CARGO_MANIFEST_DIR"));
+    let lib_dir = format!("{}/../../../libs/score_player/shaders", env!("CARGO_MANIFEST_DIR"));
     let mut sources: Vec<(String, String)> = INSTRUMENTS.iter().chain(EFFECTS).map(|n| (n.to_string(), shader_src(n))).collect();
     if let Ok(dir) = std::fs::read_dir(&lib_dir) {
         let mut names: Vec<_> = dir.filter_map(|e| e.ok()).map(|e| e.path()).collect();

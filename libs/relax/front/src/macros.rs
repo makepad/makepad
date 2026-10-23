@@ -1948,6 +1948,25 @@ pub mod uses {
         SYNTH.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|s| s.contains(&(file.to_string(), pos)))
     }
 
+    /// rustc_resolve ident.rs `resolve_ident_in_module_non_globs_unadjusted` (Shadowing::Unrestricted):
+    /// a call through a module path (`crate::m!`) of a `#[macro_export]` macro_rules! of the calling
+    /// crate: (calling file, call position, defining file, definition position). Whether the
+    /// definition is macro-expanded is answered with the program's files (lint_early).
+    static ABS_PATH_MACRO_CALLS: Mutex<Vec<(String, u32, String, u32)>> = Mutex::new(Vec::new());
+    pub fn abs_path_macro_call(file: &str, pos: u32, d: &MacroDef) {
+        if !recording() { return; }
+        ABS_PATH_MACRO_CALLS.lock().unwrap_or_else(|e| e.into_inner()).push((file.to_string(), pos, d.def_file.clone(), d.def_pos));
+    }
+    pub fn take_abs_path_macro_calls() -> Vec<(String, u32, String, u32)> { std::mem::take(&mut *ABS_PATH_MACRO_CALLS.lock().unwrap_or_else(|e| e.into_inner())) }
+    /// The single-name bang macro calls written in the checked crates (calling file, position, name):
+    /// rustc resolves them in the lexical scopes (`early_resolve_ident_in_lexical_scope`), where a glob
+    /// import's macro that an outer scope also provides is ambiguous (Program::macro_call_ambiguities).
+    static PLAIN_MACRO_CALLS: Mutex<Vec<(String, u32, String)>> = Mutex::new(Vec::new());
+    pub fn plain_macro_call(file: &str, pos: u32, name: &str) {
+        if !recording() { return; }
+        PLAIN_MACRO_CALLS.lock().unwrap_or_else(|e| e.into_inner()).push((file.to_string(), pos, name.to_string()));
+    }
+    pub fn take_plain_macro_calls() -> Vec<(String, u32, String)> { std::mem::take(&mut *PLAIN_MACRO_CALLS.lock().unwrap_or_else(|e| e.into_inner())) }
     static NAMED_POSITIONAL: Mutex<Vec<(String, u32, String)>> = Mutex::new(Vec::new());
     pub fn named_arg_positional(file: &str, pos: u32, name: &str) { NAMED_POSITIONAL.lock().unwrap_or_else(|e| e.into_inner()).push((file.to_string(), pos, name.to_string())); }
     pub fn take_named_arg_positional() -> Vec<(String, u32, String)> { std::mem::take(&mut *NAMED_POSITIONAL.lock().unwrap_or_else(|e| e.into_inner())) }
@@ -1957,6 +1976,16 @@ pub mod uses {
     static INCOMPLETE_INCLUDE: Mutex<Vec<(String, u32)>> = Mutex::new(Vec::new());
     pub fn incomplete_include(file: &str, call: u32) { INCOMPLETE_INCLUDE.lock().unwrap_or_else(|e| e.into_inner()).push((file.to_string(), call)); }
     pub fn take_incomplete_include() -> Vec<(String, u32)> { std::mem::take(&mut *INCOMPLETE_INCLUDE.lock().unwrap_or_else(|e| e.into_inner())) }
+    /// rustc_parse parse_param_general: a C-variadic `...` without a pattern where the parameter needs
+    /// one (lint varargs_without_pattern, buffered for the crate root): the file and the `...`.
+    static VARARGS_WITHOUT_PATTERN: Mutex<Vec<(String, u32)>> = Mutex::new(Vec::new());
+    pub fn varargs_without_pattern(file: &str, pos: u32) { VARARGS_WITHOUT_PATTERN.lock().unwrap_or_else(|e| e.into_inner()).push((file.to_string(), pos)); }
+    pub fn take_varargs_without_pattern() -> Vec<(String, u32)> { std::mem::take(&mut *VARARGS_WITHOUT_PATTERN.lock().unwrap_or_else(|e| e.into_inner())) }
+    /// rustc_expand InvocationCollector::check_attributes: the attributes written on a macro call (the
+    /// file, the attribute's position, its name), whose feature gates are judged as an item's are.
+    static MAC_CALL_ATTRS: Mutex<Vec<(String, u32, String)>> = Mutex::new(Vec::new());
+    pub fn mac_call_attr(file: &str, pos: u32, name: &str) { MAC_CALL_ATTRS.lock().unwrap_or_else(|e| e.into_inner()).push((file.to_string(), pos, name.to_string())); }
+    pub fn mac_call_attrs() -> Vec<(String, u32, String)> { MAC_CALL_ATTRS.lock().unwrap_or_else(|e| e.into_inner()).clone() }
     static CFG_ATTR_EMPTY: Mutex<Vec<(String, u32)>> = Mutex::new(Vec::new());
     pub fn cfg_attr_empty(file: &str, pos: u32) { CFG_ATTR_EMPTY.lock().unwrap_or_else(|e| e.into_inner()).push((file.to_string(), pos)); }
     pub fn take_cfg_attr_empty() -> Vec<(String, u32)> { std::mem::take(&mut *CFG_ATTR_EMPTY.lock().unwrap_or_else(|e| e.into_inner())) }

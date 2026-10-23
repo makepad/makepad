@@ -222,6 +222,11 @@ struct FrameLog {
     wait_ns: u64,
     owner_ns: u64,
     waits: u32,
+    /// the open wait began inside a lazy compile; the frame's waits inside lazy compiles (of them
+    /// on the owner): the summary's compile and wait times overlap by this much
+    wait_in_compile: bool,
+    cwait_ns: u64,
+    cowner_ns: u64,
 }
 
 thread_local! {
@@ -248,7 +253,7 @@ fn frame_watch(begin: bool, name: &'static str) {
     let done = FL.try_with(|c| {
         let Ok(mut g) = c.try_borrow_mut() else { return None };
         let l = g.get_or_insert_with(|| {
-            Box::new(FrameLog { depth: 0, start: 0, avg: 0, last_root_end: 0, idle: 0, recs: Vec::with_capacity(FRAME_RECS), dropped: 0, compile_depth: 0, compile_t0: 0, compile_ns: 0, compiles: 0, probes0: Vec::new(), wait_depth: 0, wait_t0: 0, wait_owner: false, wait_ns: 0, owner_ns: 0, waits: 0 })
+            Box::new(FrameLog { depth: 0, start: 0, avg: 0, last_root_end: 0, idle: 0, recs: Vec::with_capacity(FRAME_RECS), dropped: 0, compile_depth: 0, compile_t0: 0, compile_ns: 0, compiles: 0, probes0: Vec::new(), wait_depth: 0, wait_t0: 0, wait_owner: false, wait_ns: 0, owner_ns: 0, waits: 0, wait_in_compile: false, cwait_ns: 0, cowner_ns: 0 })
         });
         if begin {
             if l.start == 0 {
@@ -262,6 +267,8 @@ fn frame_watch(begin: bool, name: &'static str) {
                 l.wait_ns = 0;
                 l.owner_ns = 0;
                 l.waits = 0;
+                l.cwait_ns = 0;
+                l.cowner_ns = 0;
                 if l.wait_depth > 0 {
                     l.wait_t0 = now;
                 }
@@ -293,7 +300,19 @@ fn frame_watch(begin: bool, name: &'static str) {
         let ms = now.saturating_sub(l.start).saturating_sub(l.idle);
         // a wait still open at the frame's end counts up to it
         let (open_w, open_o) = if l.wait_depth > 0 { let w = now.saturating_sub(l.wait_t0.max(l.start)); (w, if l.wait_owner { w } else { 0 }) } else { (0, 0) };
-        super::flightrec::frame(l.start, now, l.idle, l.compile_ns, l.compiles, l.wait_ns + open_w, l.owner_ns + open_o, l.waits);
+        let (open_cw, open_co) = if l.wait_in_compile { (open_w, open_o) } else { (0, 0) };
+        super::flightrec::frame(super::flightrec::Fr {
+            t0: l.start,
+            t1: now,
+            idle: l.idle,
+            compile_ns: l.compile_ns,
+            compiles: l.compiles,
+            wait_ns: l.wait_ns + open_w,
+            owner_ns: l.owner_ns + open_o,
+            waits: l.waits,
+            cwait_ns: l.cwait_ns + open_cw,
+            cowner_ns: l.cowner_ns + open_co,
+        });
         let avg = l.avg;
         l.avg = if avg == 0 { ms } else { (avg * 15 + ms) / 16 };
         let start = l.start;
@@ -583,6 +602,7 @@ fn wait_trace(begin: bool, kind: &'static str, detail: &'static str, object: u64
                     if l.wait_depth == 0 {
                         l.wait_t0 = crate::clock::wall_ns();
                         l.wait_owner = kind == "owner";
+                        l.wait_in_compile = l.compile_depth > 0;
                     }
                     l.wait_depth += 1;
                 } else if l.wait_depth > 0 {
@@ -592,6 +612,12 @@ fn wait_trace(begin: bool, kind: &'static str, detail: &'static str, object: u64
                         l.wait_ns += w;
                         if l.wait_owner {
                             l.owner_ns += w;
+                        }
+                        if l.wait_in_compile {
+                            l.cwait_ns += w;
+                            if l.wait_owner {
+                                l.cowner_ns += w;
+                            }
                         }
                         l.waits += 1;
                     }
@@ -1258,6 +1284,9 @@ mod tests {
             wait_ns: 0,
             owner_ns: 0,
             waits: 0,
+            wait_in_compile: false,
+            cwait_ns: 0,
+            cowner_ns: 0,
         };
         let s = super::analyse(&l, 0, 10_000_000);
         assert!(s.contains("\"owner_waits\":[{\"wait\":\"owner (main)\",\"at_ms\":0.0,\"ms\":3.00,"), "{s}");

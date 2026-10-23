@@ -97,8 +97,19 @@ fn unmodule(source: &str) -> String {
 /// The runtime as one module for an app whose wasm is `<wasm_name>.wasm`
 /// (and `.wasm.br`), without the sections in `stripped`.
 pub fn runtime_js(source_root: &Path, stripped: &[&str], wasm_name: &str) -> Result<String, String> {
-    let read = |rel: &str| std::fs::read_to_string(source_root.join(rel)).map_err(|e| format!("{}: {e}", source_root.join(rel).display()));
     let mut js = format!("// {wasm_name}.js: Makepad's web runtime and the app's start (packed by makepad-web-pack).\n");
+    js.push_str(&runtime_body(source_root, stripped)?);
+    js.push_str(&START_JS.replace("__WASM__", wasm_name));
+    Ok(js)
+}
+
+/// The runtime without an app's start: the wasm bridge, the browser host,
+/// its WebGL backend, the audio worklet and the threads' worker (as blob
+/// sources). A packer appends its own start (`relax export-web`'s fetches
+/// one deflated wasm).
+pub fn runtime_body(source_root: &Path, stripped: &[&str]) -> Result<String, String> {
+    let read = |rel: &str| std::fs::read_to_string(source_root.join(rel)).map_err(|e| format!("{}: {e}", source_root.join(rel).display()));
+    let mut js = String::new();
     for rel in RUNTIME_JS {
         let source = strip_sections(&read(rel)?, stripped, rel)?;
         js.push_str(&format!("\n// ---- {rel}\n"));
@@ -110,9 +121,38 @@ pub fn runtime_js(source_root: &Path, stripped: &[&str], wasm_name: &str) -> Res
     let worker = read(WEB_WORKER_JS)?;
     js.push_str("\n// ---- the threads' worker, loaded from a blob (threaded builds)\n");
     js.push_str(&format!("const MAKEPAD_WEB_WORKER_SOURCE = {};\n", js_string(&worker)));
-    js.push_str(&START_JS.replace("__WASM__", wasm_name));
     Ok(js)
 }
+
+/// The runtime and the start of a page whose ONE `<wasm_name>.wasm` is
+/// deflated (zlib; `wasm-export`): fetched once and inflated by the
+/// browser's `DecompressionStream("deflate")`, unless the host already
+/// decoded it (the bytes begin with the wasm magic). The rest of the start
+/// is [`runtime_js`]'s.
+pub fn one_wasm_js(source_root: &Path, stripped: &[&str], wasm_name: &str) -> Result<String, String> {
+    let from = START_JS.find(FETCH_START).ok_or("web_pack: START_JS lost its fetch")?;
+    let to = START_JS.find(APP_START).ok_or("web_pack: START_JS lost start_app")?;
+    let start = format!("{}{}{}", &START_JS[..from], ONE_WASM_FETCH_JS, &START_JS[to..]);
+    let mut js = format!("// {wasm_name}.js: Makepad's web runtime and the page's start (one deflated wasm).\n");
+    js.push_str(&runtime_body(source_root, stripped)?);
+    js.push_str(&start.replace("__WASM__", wasm_name));
+    Ok(js)
+}
+
+const FETCH_START: &str = "// The wasm's bytes: __WASM__.wasm.br";
+const APP_START: &str = "export async function start_app";
+
+const ONE_WASM_FETCH_JS: &str = r#"// The wasm's bytes: __WASM__.wasm, deflated (zlib), or already decoded by the host.
+async function pack_fetch_wasm(sizes, on_progress) {
+    const response = await fetch("__WASM__.wasm");
+    if (!response.ok) throw new Error(`__WASM__.wasm: ${response.status}`);
+    const bytes = await pack_read(response, got => on_progress(got / (sizes.deflated || sizes.raw)));
+    if (pack_is_wasm(bytes)) return bytes;
+    const inflated = new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate")));
+    return new Uint8Array(await inflated.arrayBuffer());
+}
+
+"#;
 
 /// A JavaScript string literal.
 fn js_string(s: &str) -> String {
@@ -224,6 +264,14 @@ mod tests {
         let src = "a\n// @section midi\nmidi()\n// @end midi\nb\n// @section xr\nxr()\n// @end xr\n";
         assert_eq!(strip_sections(src, &["midi"], "t.js").unwrap(), "a\nb\n// @section xr\nxr()\n// @end xr\n");
         assert!(strip_sections("// @section midi\nx\n", &["midi"], "t.js").is_err());
+    }
+
+    #[test]
+    fn the_one_wasm_start_fetches_one_file() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let js = one_wasm_js(&root, &SECTIONS, "app").unwrap();
+        assert!(js.contains("export async function start_app") && js.contains("fetch(\"app.wasm\")") && js.contains("DecompressionStream(\"deflate\")"));
+        assert!(!js.contains("app.wasm.br"));
     }
 
     #[test]

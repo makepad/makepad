@@ -176,8 +176,11 @@ pub fn late_hash(content: Option<&[u8]>) -> u128 {
 
 pub fn note_late_input(krate: &str, kind: u8, name: &str, content: Option<&[u8]>) {
     let v = late_hash(content);
-    let mut g = LATE.lock().unwrap_or_else(|e| e.into_inner());
-    g.get_or_insert_with(Default::default).insert((krate.to_string(), kind, name.to_string()), v);
+    let key = (krate.to_string(), kind, name.to_string());
+    crate::phase::defer(move || {
+        let mut g = LATE.lock().unwrap_or_else(|e| e.into_inner());
+        g.get_or_insert_with(Default::default).insert(key, v);
+    });
 }
 
 /// The late inputs seen so far, sorted: (crate, kind, name, content hash).

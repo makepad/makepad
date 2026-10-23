@@ -501,11 +501,17 @@ impl Environment {
             )
         }
     }
+    /// The features `release` builds with under `vars` (see
+    /// [`build_features`]).
+    fn features(&self, release: &Release, vars: &BTreeMap<String, String>) -> Vec<String> {
+        build_features(&release.features, &self.cwd.join("Cargo.toml"), vars)
+    }
     pub fn build_command(&self, release: &Release, remote: bool) -> String {
         let binary = self.app_binary(release);
+        let features = self.features(release, &self.vars);
         let command = format!(
             "cargo build --release -p {} --bin {} --no-default-features{}",
-            release.package, release.binary, if release.features.is_empty() { String::new() } else { format!(" --features {}", release.features.join(",")) }
+            release.package, release.binary, if features.is_empty() { String::new() } else { format!(" --features {}", features.join(",")) }
         );
         if cfg!(windows) {
             format!(
@@ -553,9 +559,11 @@ impl Environment {
             // resolving them needs their registry entries, which a new private
             // CARGO_HOME does not have yet. Once cached, Cargo stays off the network.
             // A release is the app without its development defaults (the design
-            // overlay, `tweaker`); the catalog names every feature it ships with.
+            // overlay, `tweaker`); the catalog names the features it ships
+            // with, and a build with the GPU kernels adds the app's `localai`.
             cmd.arg("--no-default-features");
-            if !release.features.is_empty() { cmd.args(["--features", &release.features.join(",")]); }
+            let features = self.features(release, vars);
+            if !features.is_empty() { cmd.args(["--features", &features.join(",")]); }
             if let Some(resources) = &resources {
                 cmd.args(["--", "-C"]).arg(format!("link-arg={}", resources.display()));
                 // A windowed program: started from Explorer it opens no console
@@ -570,7 +578,8 @@ impl Environment {
             cmd
         };
         let mut features = vec!["--no-default-features".to_owned()];
-        if !release.features.is_empty() { features.extend(["--features".to_owned(), release.features.join(",")]); }
+        let wanted = self.features(release, &self.vars);
+        if !wanted.is_empty() { features.extend(["--features".to_owned(), wanted.join(",")]); }
         let record = self.build.join(format!("{}.crates", release.binary));
         // The build starts at once; without a count from an earlier build
         // the total is worked out beside it (cargo tree and metadata can take
@@ -985,6 +994,39 @@ fn cuda_kernels_failure(log: &Path) -> Option<String> {
         .find(|line| line.contains("nvcc:") && (line.contains("error") || line.contains("fatal")))
         .map(|line| line.split("nvcc:").nth(1).unwrap_or(line).trim().to_owned());
     Some(crate::plain_paths(&diagnostic.unwrap_or_else(|| "nvcc failed".into())).chars().take(200).collect())
+}
+
+/// The feature an app turns its local AI on with.
+const LOCAL_AI_FEATURE: &str = "localai";
+
+/// The features a release builds with: the catalog's, and, when the build
+/// runs the GPU kernels (local AI on and its kernels compiling here:
+/// `MAKEPAD_GGML_REQUIRE_CUDA=1` in `vars`), the app's own `localai`
+/// feature when its manifest declares one, as makepad-builder.sh does on
+/// Linux. Otherwise (local AI off, no GPU for it, the build again without
+/// the kernels) the app builds without it.
+fn build_features(catalog: &[String], manifest: &Path, vars: &BTreeMap<String, String>) -> Vec<String> {
+    let mut features = catalog.to_vec();
+    let cuda = vars.get("MAKEPAD_GGML_REQUIRE_CUDA").is_some_and(|v| v == "1");
+    if cuda && !features.iter().any(|f| f == LOCAL_AI_FEATURE) && fs::read_to_string(manifest).is_ok_and(|text| declares_feature(&text, LOCAL_AI_FEATURE)) {
+        features.push(LOCAL_AI_FEATURE.to_owned());
+    }
+    features
+}
+
+/// Whether a Cargo manifest's `[features]` table declares `feature` (a
+/// `feature = ...` line in it), read as text: the Builder links no TOML
+/// reader, and makepad-builder.sh greps for the same line.
+fn declares_feature(manifest: &str, feature: &str) -> bool {
+    let mut in_features = false;
+    for line in manifest.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_features = line == "[features]";
+        } else if in_features && line.strip_prefix(feature).is_some_and(|rest| rest.trim_start().starts_with('=')) {
+            return true;
+        }
+    }
+    false
 }
 
 /// A line for the activity log (the plain output of the CLI).
@@ -1641,4 +1683,32 @@ pub fn cli_main() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_build_with_the_gpu_kernels_adds_the_apps_own_localai() {
+        let dir = std::env::temp_dir().join(format!("builder-features-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let manifest = dir.join("Cargo.toml");
+        let vars = |cuda: &str| BTreeMap::from([("MAKEPAD_GGML_REQUIRE_CUDA".to_owned(), cuda.to_owned())]);
+        let catalog = vec!["gen".to_owned()];
+        fs::write(&manifest, "[package]\nname = \"app\"\n\n[features]\ndefault = [\"tweaker\"]\nlocalai = [\"dep:model\"]\n\n[dependencies]\n").unwrap();
+        assert_eq!(build_features(&catalog, &manifest, &vars("1")), ["gen", "localai"]);
+        // Without the kernels (local AI off, or the build again after they
+        // failed): none.
+        assert_eq!(build_features(&catalog, &manifest, &vars("0")), ["gen"]);
+        assert_eq!(build_features(&catalog, &manifest, &BTreeMap::new()), ["gen"]);
+        // Named by the catalog already: once.
+        assert_eq!(build_features(&["localai".to_owned()], &manifest, &vars("1")), ["localai"]);
+        // An app without the feature, or a name that only starts with it,
+        // or a `localai` key outside [features]: nothing added.
+        fs::write(&manifest, "[features]\nlocalai_extra = []\n\n[dependencies]\nlocalai = { path = \"x\" }\n").unwrap();
+        assert_eq!(build_features(&catalog, &manifest, &vars("1")), ["gen"]);
+        assert_eq!(build_features(&catalog, &dir.join("missing.toml"), &vars("1")), ["gen"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

@@ -1,0 +1,24 @@
+use mod.flow.*
+
+// Restored from the ComfyUI workflow examples/comfyui/flux_schnell_split.json
+// (removed from Makepad in 1d5770fd5): FLUX.1 schnell, 1024 square, four
+// steps, seed 42. The hub's image lane replaces its UNET/CLIP/VAE loaders.
+
+/** What to paint. */
+let prompt = Input{ type: @text  default: "a neon koi circling a flooded arcade, reflections, night"  at: vec2(40, 120) }
+
+let image = Image{
+    prompt: prompt.text()
+    width: 1024  height: 1024  steps: 4  seed: 42
+    model: "flux1-schnell-q4"
+    at: vec2(360, 120)
+}
+
+/** The picture, into the library's IMAGE lane. */
+let published = Publish{ value: image.image()  namespace: "flows"  tags: ["flow", "image"]  at: vec2(680, 120) }
+
+Flow{
+    label: "Flux schnell · fast"
+    brief: "FLUX.1 schnell at four steps: a quick 1024-square sketch of the prompt."
+    prompt, image, published
+}

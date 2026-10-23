@@ -584,6 +584,19 @@ mod ffi {
             op: i32,
             stream: Stream,
         ) -> CudaError;
+        pub fn mkllm_im2col_1d_f32(
+            src: *const c_void,
+            dst: *mut c_void,
+            iw: i32,
+            ic: i32,
+            n: i32,
+            kw: i32,
+            ow: i32,
+            s0: i32,
+            p0: i32,
+            d0: i32,
+            stream: Stream,
+        ) -> CudaError;
         pub fn mkllm_unary_mul(
             x: *const c_void,
             g: *const c_void,
@@ -1240,6 +1253,26 @@ cuda_forward!(unary(
     op: i32,
     stream: Stream,
 ) -> CudaError { mkllm_unary });
+
+/// Codes for the standalone ggml ops `SIN`/`COS`/`SQR`, which run on the
+/// `unary` kernel above the ggml unary range (`kernels.cu`).
+pub const UNARY_SIN: i32 = 64;
+pub const UNARY_COS: i32 = 65;
+pub const UNARY_SQR: i32 = 66;
+
+cuda_forward!(im2col_1d_f32(
+    src: *const c_void,
+    dst: *mut c_void,
+    iw: i32,
+    ic: i32,
+    n: i32,
+    kw: i32,
+    ow: i32,
+    s0: i32,
+    p0: i32,
+    d0: i32,
+    stream: Stream,
+) -> CudaError { mkllm_im2col_1d_f32 });
 
 cuda_forward!(unary_mul(
     x: *const c_void,

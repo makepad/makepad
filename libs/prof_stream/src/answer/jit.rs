@@ -8,6 +8,7 @@ pub fn versions(a: &mut Answer) {
     let vers = a.take("version");
     let into = a.take("inlined_into");
     let inl = a.take1("inliners");
+    let why = a.take("tier_why");
     if slots.is_empty() {
         return;
     }
@@ -53,8 +54,13 @@ pub fn versions(a: &mut Answer) {
         if let Some(l) = sl.get("line") {
             a.line(&format!("matched line {}", super::num(Some(l)).unwrap_or(0.0)));
         }
+        // why it is (not) at O3
+        for w in why.iter().filter(|w| super::num(w.get("tier_why")).map(|x| x as i64) == Some(id)) {
+            a.line(&format!("tier: {}", s(w, "verdict")));
+        }
         a.more(format!("count S{}", id));
         a.more(format!("tier S{} o1|o3|auto", id));
+        a.more(format!("why-tier @{}", id));
     }
     a.head = format!("{}.", head.join(". "));
     let n = inl.as_ref().map_or(0.0, |x| f(x, "inliners"));

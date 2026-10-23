@@ -163,8 +163,13 @@ fn in_window(t: u64) -> bool {
     fp != 0 && t >= fp && t < fp + WINDOW_NS
 }
 
+/// The lines are `--verbose` (MAKEPAD_RUN_VERBOSE=1) diagnostics; the counters always run.
+fn verbose() -> bool {
+    crate::run::VERBOSE.load(Relaxed)
+}
+
 fn may_log() -> bool {
-    LOGGED.fetch_add(1, Relaxed) < if owner_long_all() { 20 * LOG_MAX } else { LOG_MAX }
+    verbose() && LOGGED.fetch_add(1, Relaxed) < if owner_long_all() { 20 * LOG_MAX } else { LOG_MAX }
 }
 
 /// MAKEPAD_RUN_OWNER_LONG=1: every long owner request of the run is logged, not only the first
@@ -327,7 +332,7 @@ pub(crate) extern "C" fn relax_frame_done() {
 
 fn summary_due(now: u64) {
     let fp = present_ns();
-    if fp != 0 && now >= fp + WINDOW_NS && !SUMMARY_DONE.swap(true, Relaxed) {
+    if fp != 0 && now >= fp + WINDOW_NS && !SUMMARY_DONE.swap(true, Relaxed) && verbose() {
         eprintln!("{}", summary());
     }
 }
@@ -345,7 +350,7 @@ pub(crate) fn ahead_over() {
     let n = crate::jit::AHEAD_STATS[0].load(Relaxed);
     let now = wall_ns();
     // (at most one line per 5 s)
-    if fp == 0 || crate::jit::QUIT_SEEN.load(Relaxed) || LAST.load(Relaxed) == n || now < LAST_AT.load(Relaxed) + 5_000_000_000 {
+    if fp == 0 || !verbose() || crate::jit::QUIT_SEEN.load(Relaxed) || LAST.load(Relaxed) == n || now < LAST_AT.load(Relaxed) + 5_000_000_000 {
         return;
     }
     LAST.store(n, Relaxed);

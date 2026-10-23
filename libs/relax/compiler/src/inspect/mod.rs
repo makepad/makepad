@@ -35,6 +35,7 @@ pub mod pstream;
 pub mod reliability;
 pub mod remarks;
 pub mod replay;
+pub mod tierlog;
 pub mod timeline;
 pub mod vars;
 pub mod vsnative;
@@ -139,8 +140,8 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("resume", "<panic id> panic|retry|restart|return <v>[,<v>]", "decide a parked panic: unwind, retry, restart the hosted app domain (otherwise its restartable fn), or return the values"),
     ("memory", "[compiler=1] [n=24]", "where the memory is and why: RSS by mapping kind, malloc in use vs held free, makepad run's own parts, findings, growth since the last `memory`"),
     ("diff", "<snap a> <snap b|now>", "memory growth between two snapshots, largest first"),
-    ("mem", "snap <name> | timeline [from_ms= to_ms=]", "keep a named memory snapshot; resident size over time with phase markers and the peak's phase"),
-    ("heap", "start [rate=65536] [ttl_s=600] | top [by=live|alloc|freed|peak] | frame [s=2] [n=12] | snap <name> | diff <a> <b|now> | path H<id> | stop | status", "program heap by allocation stack (JIT-patched allocator hooks, byte-sampled): live, allocated, freed; growth and leaks between snapshots"),
+    ("mem", "snap <name> | timeline [from_ms= to_ms=] | trim", "keep a named memory snapshot; resident size over time with phase markers and the peak's phase; trim: return the allocators' free pages now (RSS before/after)"),
+    ("heap", "start [rate=65536] [ttl_s=600] | top [by=live|alloc|freed|peak] [zone=burst|compiler|other] | frame [s=2] [n=12] | snap <name> | diff <a> <b|now> | path H<id> | stop | status", "program heap by allocation stack (JIT-patched allocator hooks, byte-sampled): live, allocated, freed; growth and leaks between snapshots"),
     ("top", "by=time|alloc|bytes|live [s=3] [n=15]", "the top functions by CPU time (prof) or allocation sites by allocated / live bytes (heap)"),
     ("frame", "<n|slowest>", "one frame of the last timeline: UI phases, critical path, waits and who ended them (alias of timeline frame)"),
     ("path", "<H<n>|R<n>>", "the full stack of a heap site id"),
@@ -151,7 +152,9 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("contention", "[s=3] [n=15]", "lock / condvar / park / owner waits grouped by what was waited on: total and longest wait, per frame, waiting threads, who ended them (records s seconds of timeline first; alias of timeline waits)"),
     ("counters", "[s=1] [n=12]", "hardware counters over a window: Linux per thread (cycles, instructions, IPC, branch and cache misses); macOS the process's instructions and cycles (all a non-root process gets)"),
     ("remarks", "<fn|@slot> [n=20]", "the O3 tier's optimisation remarks for the fn: every call its last O3 build kept (hot sites first) and why (no rule, budget, growth ceiling, cold, recursive, no body) with the numbers, and the tiers of its code"),
+    ("cache", "", "where this session's code came from: the warm cache's lookups (hits; misses by reason: no entry for the key, invalidated, did not link, not storable), the startup image (placed / stale / failed), stores opened, entries recorded, and the installed code by tier and origin (fresh / warm-cache / warm-image / live-patch / inspect)"),
     ("versions", "<fn|file:line>", "every code version of the fn: per slot its installed, replaced and retired code (tier baseline/O1/O2/O3/O3-guarded/instrumented, origin fresh/warm-cache/warm-image/live-patch/inspect, address, patch generation, cache key and build), which threads run in which, and the slots whose code holds an inlined copy of it"),
+    ("why-tier", "<fn|file:line|@slot>", "why a fn is (not) at O3, answer first: per slot its count stub (armed / retired after slow windows, re-arms), calls left in the count window, the loop counter, count windows by code version, the O3 queue (position, reason, age), the counted (PGO) window, the verdict, O3 builds installed / dropped / refused with reasons, retiers left, pins, and its last tier-up decisions"),
     ("tier", "<fn|file:line> o1|o3|auto [fresh=1] | (none: the pins)", "pins the fn and every slot that inlined it to a tier in the live process (A/B a suspected miscompile): o1 = O1 code generation, kept until `tier <fn> auto`; o3 = the o1 pin goes and they get O3 builds now (fresh=1: rebuild O3 code even where it runs, e.g. warm-cache code)"),
     ("break", "<fn>|<file>:<line> [tier=o1]", "breakpoint: a hit parks the thread at the call (stack intact) and raises a `break` event K<n>"),
     ("restartable", "<fn>", "a panic through the fn can be resumed with `restart` (the fn runs again from its entry with its original arguments) or `return <value>` (the call returns the value; integer-class returns)"),
@@ -236,6 +239,8 @@ fn dispatch_command(req: &Req, out: &mut Out) {
         "heap" => heap::cmd_heap(req, out),
         "vms" => cmd_vms(out),
         "versions" => codever::cmd_versions(req, out),
+        "why-tier" => tierlog::cmd_why_tier(req, out),
+        "cache" => codever::cmd_cache(req, out),
         "asm" => asm::cmd_asm(req, out),
         "remarks" => remarks::cmd_remarks(req, out),
         "counters" => counters::cmd_counters(req, out),
@@ -698,6 +703,9 @@ fn display_name(u: &crate::jit::Unit, id: u32, depth: u32) -> String {
             s
         }
         crate::jit::FnKey::Closure(_, _, p) if depth < 8 && (*p as usize) < u.fns.len() => format!("{{closure}} in {}", display_name(u, *p, depth + 1)),
+        // a SPEC-V twin: its base slot's name now (the twin's own copy was taken when it was made, before
+        // the base had one: `[unverified]` alone)
+        crate::jit::FnKey::Plain(b) if depth < 8 && (*b as usize) < u.fns.len() => format!("{} [unverified]", display_name(u, *b, depth + 1)),
         _ => f.name.to_string(),
     }
 }

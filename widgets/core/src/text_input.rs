@@ -862,6 +862,10 @@ pub struct TextInput {
     layout: Layout,
     #[walk]
     walk: Walk,
+
+    #[live(true)]
+    #[visible]
+    visible: bool,
     #[live]
     label_align: Align,
 
@@ -2863,6 +2867,9 @@ impl Widget for TextInput {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
         self.draw_bg.begin(cx, walk, self.layout);
         // The selection band's call goes in now, before the text: the band is
         // drawn after the text and caret (it needs their layout) and lands here
@@ -2932,6 +2939,10 @@ impl Widget for TextInput {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
             self.draw_cursor.redraw(cx);
+        }
+        // Hidden: no hits, and no typing into a field that kept the key focus.
+        if !self.visible {
+            return;
         }
 
         if self.blink_timer.is_event(event).is_some() {
