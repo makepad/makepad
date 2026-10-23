@@ -176,6 +176,16 @@ pub fn why_hung(req: &Req, out: &mut Out) {
             let hot: Vec<String> = count.iter().take(3).map(|(k, n)| format!("{} ({} of {} samples)", super::short(k, 160), n, tops.len())).collect();
             findings.push(("busy", format!("main runs ({}% CPU over {} ms): {}", busy, probe, hot.join("; "))));
         } else {
+            // an idle main may still leave the app waiting: an answer its loop never read, a
+            // request the server has not answered (the program's `net` ledger)
+            let net = super::program_reply("net").unwrap_or_default();
+            for l in net.lines().filter(|l| l.starts_with("runtime ")) {
+                if l.contains(": STUCK:") {
+                    findings.push(("unread network answer", format!("main is idle but the app has not read its network events: {} -- see `net`", super::short(l, 300))));
+                } else if l.contains(": WAITING:") {
+                    findings.push(("network wait", format!("the app waits for the network: {} -- see `net`", super::short(l, 300))));
+                }
+            }
             let top = syms[m].first().map(|f| f.name.clone()).unwrap_or_default();
             findings.push(("idle", format!("main is not stuck: {}% CPU, waiting for events or sleeping in {}", busy, super::short(&top, 100))));
         }

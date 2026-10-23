@@ -53,11 +53,16 @@ impl NetworkRuntime {
     }
 
     pub fn http_start(&self, request_id: LiveId, request: HttpRequest) -> Result<(), NetworkError> {
-        self.backend
-            .http_start(request_id, request, self.sink.clone())
+        self.sink.ledger.http_started(request_id, &request);
+        let started = self.backend.http_start(request_id, request, self.sink.clone());
+        if let Err(e) = &started {
+            self.sink.ledger.ended(request_id, &format!("refused by the backend: {e:?}"));
+        }
+        started
     }
 
     pub fn http_cancel(&self, request_id: LiveId) -> Result<(), NetworkError> {
+        self.sink.ledger.ended(request_id, "cancelled by the app");
         self.backend.http_cancel(request_id)
     }
 
@@ -81,15 +86,20 @@ impl NetworkRuntime {
     }
 
     pub fn try_recv(&self) -> Option<NetworkResponse> {
-        self.receiver.lock().ok()?.try_recv().ok()
+        let event = self.receiver.lock().ok()?.try_recv().ok();
+        self.sink.ledger.polled(event.as_ref());
+        event
     }
 
     pub fn recv(&self) -> Result<NetworkResponse, NetworkError> {
-        self.receiver
+        let event = self
+            .receiver
             .lock()
             .map_err(|_| NetworkError::ChannelClosed)?
             .recv()
-            .map_err(|_| NetworkError::ChannelClosed)
+            .map_err(|_| NetworkError::ChannelClosed)?;
+        self.sink.ledger.polled(Some(&event));
+        Ok(event)
     }
 
     // Timed std channel waits read an unavailable clock on wasm workers.
@@ -97,7 +107,9 @@ impl NetworkRuntime {
     pub fn recv_timeout(&self, duration: Duration) -> Option<NetworkResponse> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.receiver.lock().ok()?.recv_timeout(duration).ok()
+            let event = self.receiver.lock().ok()?.recv_timeout(duration).ok();
+            self.sink.ledger.polled(event.as_ref());
+            event
         }
         #[cfg(target_arch = "wasm32")]
         {

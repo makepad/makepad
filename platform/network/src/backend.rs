@@ -35,6 +35,8 @@ pub struct EventSink {
     /// A websocket the platform's own event loop reads (a HAL hosted
     /// child's host socket): its events wake the loop, never the app.
     loop_socket: Arc<Mutex<Option<LiveId>>>,
+    /// what is in flight and unread (`makepad inspect <pid> net`)
+    pub(crate) ledger: Arc<crate::ledger::Ledger>,
 }
 
 /// What an event of the sink does besides being queued.
@@ -70,6 +72,7 @@ impl EventSink {
             wake_fn: Arc::new(Mutex::new(None)),
             quiet_socket: Arc::new(Mutex::new(None)),
             loop_socket: Arc::new(Mutex::new(None)),
+            ledger: crate::ledger::Ledger::new(),
         }
     }
 
@@ -95,6 +98,7 @@ impl EventSink {
         let quiet = self.quiet_socket.lock().ok().and_then(|guard| *guard);
         let own = self.loop_socket.lock().ok().and_then(|guard| *guard);
         let delivery = delivery(&event, quiet, own);
+        self.ledger.emitted(&event);
         self.sender
             .send(event)
             .map_err(|_| NetworkError::ChannelClosed)?;

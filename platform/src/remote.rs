@@ -154,6 +154,8 @@ mod imp {
             "text" => route_text(p),
             "drop" => route_drop(p),
             "trace" => route_trace(p),
+            // read from the runtimes' ledgers, never through the UI thread: a stuck loop is what it shows
+            "net" => Answer::Text(crate::makepad_network::ledger::report()),
             "dump" => {
                 let paths = p.flag(&["paths"]);
                 match ask(move |tx| Cmd::Dump { paths, tx }, 4) {

@@ -6,6 +6,25 @@ pub mod digest;
 // The embedded TCP server is native-only; browsers cannot listen on sockets.
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod http_server;
+// In-flight requests and the unread queue for `makepad inspect <pid> net` (std clock: native only).
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+pub mod ledger;
+#[cfg(target_arch = "wasm32")]
+pub mod ledger {
+    use crate::types::{HttpRequest, NetworkResponse};
+    use makepad_live_id::LiveId;
+    use std::sync::Arc;
+    pub struct Ledger;
+    impl Ledger {
+        pub(crate) fn new() -> Arc<Self> { Arc::new(Ledger) }
+        pub(crate) fn http_started(&self, _id: LiveId, _request: &HttpRequest) {}
+        pub(crate) fn emitted(&self, _event: &NetworkResponse) {}
+        pub(crate) fn polled(&self, _event: Option<&NetworkResponse>) {}
+        pub(crate) fn ended(&self, _id: LiveId, _what: &str) {}
+    }
+    pub fn report() -> String { "net: not recorded on the web\n".to_string() }
+}
 // `recv_timeout` reads the std clock, as std's does (callers are linted).
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod mpsc;

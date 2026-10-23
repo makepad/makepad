@@ -1116,8 +1116,8 @@ impl Cx {
         self.fingers.process_touch_update_end(&e.touches);
     }
 
-    /// Signals, actions and script tasks the loop services on a wake and on every beat (the
-    /// work macOS did on its timer-0 beat).
+    /// Signals, actions, script tasks and network events the loop services on a wake and on
+    /// every beat (the work macOS did on its timer-0 beat).
     pub(crate) fn hal_service_signals(&mut self) -> bool {
         let internal_signal = SignalToUI::check_and_clear_internal_signal();
         let ui_signal = SignalToUI::check_and_clear_ui_signal();
@@ -1135,6 +1135,10 @@ impl Cx {
             self.handle_action_receiver();
             did = true;
         }
+        // A network answer wakes the loop (the runtime's wake fn) with no frame to draw: read
+        // here it reaches the app now. Read only on a beat, an idle app (a login page waiting
+        // for its answer) left it unread until something else asked for a frame.
+        self.handle_networking_events();
         self.poll_control_channel();
         self.poll_texture_readbacks();
         self.handle_actions();

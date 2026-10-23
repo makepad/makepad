@@ -11990,64 +11990,84 @@ fn await_verdict(id: u32, w: Await) {
 /// verified, and the promotions that waited for them run. A no-op until `lazy::RECORDED` or the patch
 /// epoch changes. Any thread; the unit is read under a unit call.
 pub fn sweep_verdicts() {
+    // at most once per TIER1_POLL: the first O3 worker calls it on every wake, and an idle worker
+    // wakes on every push (step 5 screen: 189 sweeps in front of the UI, 208 ms)
+    static SWEEP_AT: AtomicU64 = AtomicU64::new(0);
+    let t = wall_ns();
+    if t.saturating_sub(SWEEP_AT.load(Ordering::Relaxed)) < TIER1_POLL.as_nanos() as u64 {
+        return;
+    }
     // (the pending patches too: unverified O3 builds wait for none to be pending)
     let now = crate::borrowck::lazy::RECORDED.load(Ordering::Acquire).wrapping_mul(1 << 20).wrapping_add(PATCH_EPOCH.load(Ordering::SeqCst))
         .wrapping_add((crate::reload::UNVERIFIED_PATCHES.load(Ordering::Acquire) as u64) << 48);
     if SWEPT.swap(now, Ordering::Relaxed) == now {
         return;
     }
+    SWEEP_AT.store(t, Ordering::Relaxed);
+    // one job across the chunks: what they collect lives in the compiler zone, which a swap
+    // replaces only between jobs
+    let _job = compile_job();
     let up = TIER_UNIT.load(Ordering::Acquire);
     if up.is_null() {
         return;
     }
     let patches = PATCH_EPOCH.load(Ordering::SeqCst).wrapping_add((crate::reload::UNVERIFIED_PATCHES.load(Ordering::Acquire) as u64) << 48);
-    let verified = owner::publish(|| unsafe {
+    let live = || (TIER_UNIT.load(Ordering::Acquire) == up).then_some(up);
+    // what to look at: every slot (None) or the slots flagged since the last sweep plus the
+    // flagged slots whose verdict owner recorded (rule I-PUB: the scans are chunked publishes)
+    let Some((look, owners, n)) = owner::publish(|| unsafe {
+        let up = live()?;
         let u = &*up;
-        let mut n = 0u32;
-        let mut relower = Vec::new();
-        let mut verified = Vec::new();
-        // A flagged slot's verdict turns clean only when its owner's verdict is recorded, or with a
-        // patch / a new collect epoch (then every flagged slot is looked at again). Its flag may be
-        // raised after its owner's record was taken: a slot flagged since the last sweep is looked at.
         let owners = crate::borrowck::lazy::take_recorded_owners();
         let epoch = u.tcx.collect_epoch.load(Ordering::SeqCst);
-        let fresh = {
-            let mut st = SWEEP_STATE.lock().unwrap_or_else(|e| e.into_inner());
-            let full = owners.is_none() || st.unit != up as usize || st.patches != patches || st.epoch != epoch;
-            st.unit = up as usize;
-            st.patches = patches;
-            st.epoch = epoch;
-            let fresh = std::mem::take(&mut st.flagged);
-            if full { None } else { Some(fresh) }
-        };
-        let look: Option<crate::fxhash::HashSet<u32>> = fresh.map(|fresh| {
-            let owners: crate::fxhash::HashSet<DefId> = owners.unwrap_or_default().into_iter().collect();
-            let mut look: crate::fxhash::HashSet<u32> = fresh.into_iter().filter(|&(unit, _)| unit == up as usize).map(|(_, id)| id).collect();
-            if !owners.is_empty() {
-                for id in 0..u.fns.len() {
-                    if u.fns[id].unverified.load(Ordering::Relaxed) && u.verdict_owner(id as u32).is_some_and(|d| owners.contains(&d)) {
-                        look.insert(id as u32);
+        let mut st = SWEEP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let full = owners.is_none() || st.unit != up as usize || st.patches != patches || st.epoch != epoch;
+        st.unit = up as usize;
+        st.patches = patches;
+        st.epoch = epoch;
+        let fresh = std::mem::take(&mut st.flagged);
+        let look: Option<crate::fxhash::HashSet<u32>> = (!full).then(|| fresh.into_iter().filter(|&(unit, _)| unit == up as usize).map(|(_, id)| id).collect());
+        let owners: crate::fxhash::HashSet<DefId> = owners.unwrap_or_default().into_iter().collect();
+        Some((look, owners, u.fns.len()))
+    }) else { return };
+    let mut relower = Vec::new();
+    let mut verified = Vec::new();
+    let mut at = 0;
+    while at < n {
+        let end = (at + SWEEP_CHUNK).min(n);
+        let alive = owner::publish(|| unsafe {
+            let Some(up) = live() else { return false };
+            let u = &*up;
+            for id in at..end {
+                let f = &u.fns[id];
+                if !f.unverified.load(Ordering::Relaxed) { continue; }
+                // A flagged slot's verdict turns clean only when its owner's verdict is recorded, or with
+                // a patch / a new collect epoch (then every flagged slot is looked at again). Its flag may
+                // be raised after its owner's record was taken: a slot flagged since the last sweep is
+                // looked at.
+                let looked = look.as_ref().is_none_or(|l| l.contains(&(id as u32)))
+                    || !owners.is_empty() && u.verdict_owner(id as u32).is_some_and(|d| owners.contains(&d));
+                if looked && u.refresh_verified(id as u32) {
+                    // D3: the installed code lacks the verdict's disjoint-index checks; O3 code built
+                    // while unverified lacks its noalias facts: built again
+                    if f.compiled && (f.o3.load(Ordering::Relaxed) || !f.d3_lowered.load(Ordering::Relaxed) && u.disjoint_checks(id as u32).is_some()) {
+                        relower.push(id as u32);
+                    } else {
+                        verified.push(id as u32);
                     }
                 }
             }
-            look
+            true
         });
-        for id in 0..u.fns.len() {
-            if look.as_ref().is_some_and(|l| !l.contains(&(id as u32))) { continue; }
-            if u.fns[id].unverified.load(Ordering::Relaxed) && u.refresh_verified(id as u32) {
-                n += 1;
-                // D3: the installed code lacks the verdict's disjoint-index checks; O3 code built
-                // while unverified lacks its noalias facts: built again
-                if u.fns[id].compiled && (u.fns[id].o3.load(Ordering::Relaxed) || !u.fns[id].d3_lowered.load(Ordering::Relaxed) && u.disjoint_checks(id as u32).is_some()) {
-                    relower.push(id as u32);
-                } else {
-                    verified.push(id as u32);
-                }
-            }
-        }
+        if !alive { return; }
+        at = end;
+    }
+    owner::publish(|| unsafe {
+        let Some(up) = live() else { return };
+        let u = &*up;
         // ... and warm ones whose unverified lowering calls hot twins
         relower.extend(hot_twin_callers(u, Some(&verified), None));
-        for id in relower { tier_push(id, Q_RETIER, 0); }
+        for &id in &relower { tier_push(id, Q_RETIER, 0); }
         let released: Vec<(u32, Await)> = {
             let mut a = AWAIT_VERDICT.lock().unwrap_or_else(|e| e.into_inner());
             // the list outlives the compiler zone (a swap destroys it): the kept part is allocated
@@ -12071,10 +12091,11 @@ pub fn sweep_verdicts() {
                 }
             }
         }
-        n
     });
-    let _ = verified;
 }
+
+/// slots one publish of sweep_verdicts looks at
+const SWEEP_CHUNK: usize = 4096;
 
 /// SPEC-V: the slots among `cands` (None: every slot the sampler saw lately) that are verified, warm
 /// (in HEAT) and still run an unverified lowering whose calls go to `twin` (None: to any twin that is

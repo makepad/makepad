@@ -1097,6 +1097,21 @@ fn cmd_provided(req: &Req, out: &mut Out) {
     }
 }
 
+/// The reply of the program's own command `cmd` (one it registered), for host commands that add
+/// what the program knows to their answer (`why-hung` reads `net`). None: the program has no such
+/// command or its domain is not running.
+pub(crate) fn program_reply(cmd: &str) -> Option<String> {
+    let (query, scope) = provider(cmd)?;
+    let line = makepad_remote::app::request_line(&[cmd.to_string()], &[]);
+    extern "C" fn sink(p: *const u8, len: usize, ctx: *mut std::ffi::c_void) {
+        let reply = unsafe { &mut *(ctx as *mut Vec<u8>) };
+        reply.extend_from_slice(unsafe { std::slice::from_raw_parts(p, len) });
+    }
+    let mut reply: Vec<u8> = Vec::new();
+    scope.call(|| query(line.as_ptr(), line.len(), sink, &mut reply as *mut Vec<u8> as *mut std::ffi::c_void))?;
+    Some(String::from_utf8_lossy(&reply).into_owned())
+}
+
 // ------------------------------------------------------------------ program services
 
 /// `sink(ctx, kind, ptr, len)` of a service channel: kind 0 sends `ptr..len` as one message (false:

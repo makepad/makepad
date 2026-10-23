@@ -504,7 +504,6 @@ impl Cx {
         if !self.hosted_frames_held() {
             self.hal_poll_software_videos();
         }
-        self.handle_networking_events();
         self.run_live_edit_if_needed("hal");
         if !self.hosted_frames_held() {
             if !self.hal_draw_frame() {
