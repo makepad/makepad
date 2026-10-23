@@ -393,7 +393,8 @@ script_mod! {
             }
             // by day the body is lit by the ambient and the sun (no normal: by its height)
             let day = self.day_lit(vec3(0.18, 0.18, 0.18), 1.0, 0.35 + 0.65 * max(sin(self.sun_el), 0.0))
-            self.fb0 = vec4(self.tone(if h1.w > 0.0 { h1.w } else { fd }, hzc, day) * m, m); self.fb1 = vec4(em, m)
+            // at the instance's distance (m) there: a plane's, or the line's point the pixel sees
+            self.fb0 = vec4(self.tone(if h1.w > 0.0 { h1.w } else { fd }, hzc, day) * m, m); self.fb1 = vec4(em, m); self.fb2 = self.at_dist(m, fd)
         }
     }
 
@@ -404,11 +405,13 @@ script_mod! {
         ..mod.draw.SkyScene,
         pl_c: texture_2d(float)
         pl_e: texture_2d(float)
+        // the layer's distance (`SceneTarget::dist_in`)
+        pl_d: texture_2d(float)
         fragment: fn(){
             let pp = self.frag(); let c = self.pl_c.sample_nearest(pp / self.view_size); let e = self.pl_e.sample_nearest(pp / self.view_size)
             let g = self.col_row(pp.x, 6.0); let ang = self.ang_raw(pp.y) * g.z; let px = self.px0() * g.z
             let wp = self.cover(g.y - ang, px) * (1.0 - self.cover(g.y - min(0.03, self.sea_edge) * (1.0 - smoothstep(0.0, 0.35, g.x)) - ang, px))
-            self.fb0 = c * wp; self.fb1 = vec4(e.xyz * wp, c.w * wp)
+            self.fb0 = c * wp; self.fb1 = vec4(e.xyz * wp, c.w * wp); self.fb2 = self.pl_d.sample_nearest(pp / self.view_size) * wp
         }
     }
 }

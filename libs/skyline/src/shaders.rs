@@ -1,10 +1,12 @@
 //! The scene's own draw shaders: the city glow, the mountain ranges (and the front treeline) and the
 //! ground band, plus the sky backdrop the app shows behind a view.
 //!
-//! Every scene shader writes the scene pass's two RGBA16F targets, both blending premultiplied-over:
-//! `fb0` the premultiplied colour and coverage, `fb1` the light and the same coverage. So a nearer
-//! silhouette hides the lights behind it, and the final pass adds the light back on top. Shaders
-//! of other stages (the city, the parts, the final pass) join the scene with `..mod.draw.SkyScene`,
+//! Every scene shader writes the scene pass's RGBA16F targets, all blending premultiplied-over:
+//! `fb0` the premultiplied colour and coverage, `fb1` the light and the same coverage, and for a band
+//! `fb2` the distance (m) of what it draws premultiplied by that coverage, (a D, 0, 0, a). So a nearer
+//! silhouette hides the lights behind it, and the final pass adds the light back on top; and the
+//! third target holds the coverage-weighted distance of what each pixel shows. Shaders of other
+//! stages (the city, the parts, the final pass) join the scene with `..mod.draw.SkyScene`,
 //! which also gives them the off-centre view, the city camera and the page's integer hashes
 //! (checked against `rng.rs` on the GPU by `tests/checks.rs`).
 use makepad_widgets::makepad_draw::*;
@@ -15,10 +17,13 @@ script_mod! {
     use mod.shader.*
     use mod.draw
 
-    // What every scene shader shares: the second output, the view, the column data and helpers.
+    // What every scene shader shares: the second and third outputs, the view, the column data and helpers.
     // The view uniforms are set by `SceneCtx::set_uniforms`; a parameter's uniform has its key's name.
     mod.draw.SkyScene = {
         fb1: fragment_output(1, vec4f)
+        // the distance (`SceneTarget::dist`, a band's alone; another pass drops it): written by every shader of the
+        // scene, `at_dist`; the passes after the scene hand it on in their second output
+        fb2: fragment_output(2, vec4f)
         // the scene pass's size in pixels
         view_size: uniform(vec2(1.0, 1.0))
         // the first azimuth and the span the view shows (0..1 = 0..360 degrees)
@@ -148,6 +153,9 @@ script_mod! {
         // the daylight's aerial perspective: the share of the haze in front of a surface d m away, by the city march's
         // extinction (per 70 m block); 0 at night, where the night's own haze terms stand in
         aerial: fn(d: float) -> float { return self.day() * (1.0 - exp(0.0 - d * (0.0015 + 0.0075 * self.haze) / 70.0)) }
+        // the distance output (fb2) of a surface d m away drawn at coverage a: premultiplied, so the target holds the
+        // coverage-weighted distance of the visible surfaces, the nearest winning where it is opaque
+        at_dist: fn(a: float, d: float) -> vec4 { return vec4(a * d, 0.0, 0.0, a) }
         // the fragment's raw view: azimuth u (0..1), raw elevation (rad), radians per pixel
         view_raw: fn() -> vec3 {
             let pp = self.frag()
@@ -218,9 +226,11 @@ script_mod! {
             // the city's own light: fades with the lights by day
             return vec4(vec3(1.0, 0.55, 0.25) * (dome * 0.10) * (self.lit * self.design_gain), 0.0)
         }
+        // no coverage, so no distance
         fragment: fn(){
             self.fb0 = vec4(0.0, 0.0, 0.0, 0.0)
             self.fb1 = self.pixel()
+            self.fb2 = vec4(0.0, 0.0, 0.0, 0.0)
         }
     }
 
@@ -233,6 +243,7 @@ script_mod! {
         ..mod.draw.SkyScene,
         k: 0.0
         hk: 0.2
+        dk: 5000.0
         pixel: fn(){
             let pp = self.frag(); let g = self.col_row(pp.x, 6.0); let k = self.k; let sil = self.sil
             let ang = self.ang_raw(pp.y) * g.z; let px = self.px0() * g.z; let r = self.col_row(pp.x, min(k, 5.0))
@@ -262,7 +273,8 @@ script_mod! {
             // by day the air between: toward the haze by the range's distance (none at night, the night's haze is above)
             return vec4(c.xyz + (hz * c.w - c.xyz) * self.aerial(5000.0 * pow(6.0, (4.0 - k) * 0.25)), c.w)
         }
-        fragment: fn(){ let c = self.pixel(); self.fb0 = c; self.fb1 = vec4(0.0, 0.0, 0.0, c.w) }
+        // at the range's distance, its trees' too (`dk`)
+        fragment: fn(){ let c = self.pixel(); self.fb0 = c; self.fb1 = vec4(0.0, 0.0, 0.0, c.w); self.fb2 = self.at_dist(c.w, self.dk) }
     }
 
     // The ground band: the near ground rise over land, flat sea below the horizon.
@@ -292,7 +304,15 @@ script_mod! {
             }
             return vec4(c * gm, gm)
         }
-        fragment: fn(){ let c = self.pixel(); self.fb0 = c; self.fb1 = vec4(0.0, 0.0, 0.0, c.w) }
+        // the ground's distance (m): below the horizon the ground point the pixel sees, EYE x Size / tan(al) (al its
+        // depression as `pixel` takes it, the column's off-centre factor applied), at most `FAR_M`; at and above it the
+        // near rise (`NEAR_RISE_M`)
+        ground_d: fn() -> float {
+            let pp = self.frag(); let al = 0.0 - self.ang_raw(pp.y) * self.col_row(pp.x, 6.0).z
+            if al <= 0.0 { return 500.0 }
+            return min(self.lake_eye / tan(al), 60000.0)
+        }
+        fragment: fn(){ let c = self.pixel(); self.fb0 = c; self.fb1 = vec4(0.0, 0.0, 0.0, c.w); self.fb2 = self.at_dist(c.w, self.ground_d()) }
     }
 
     // The night sky behind a view (the page's CSS gradient), with a hard step to the sea at the horizon.
@@ -312,7 +332,9 @@ script_mod! {
 
 #[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyGlow { #[deref] pub draw_super: DrawQuad }
 
-/// `k`: the range (0 farthest .. 4 nearest; 5 the front treeline); `hk`: its peak height (rad).
-#[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyRange { #[deref] pub draw_super: DrawQuad, #[live] pub k: f32, #[live] pub hk: f32 }
+/// `k`: the range (0 farthest .. 4 nearest; 5 the front treeline); `hk`: its peak height (rad); `dk`: its distance (m), the
+/// one its air is taken over (`zones::mt_dist`; the treeline's `NEAR_RISE_M`). Handed in rather than worked out in the
+/// shader, where sharing the air's own arithmetic moved a texel of the colour by an ulp (fxc).
+#[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyRange { #[deref] pub draw_super: DrawQuad, #[live] pub k: f32, #[live] pub hk: f32, #[live] pub dk: f32 }
 #[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyGround { #[deref] pub draw_super: DrawQuad }
 #[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyBackdrop { #[deref] pub draw_super: DrawQuad }

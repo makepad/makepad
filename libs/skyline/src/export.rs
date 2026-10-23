@@ -4,18 +4,23 @@
 //! A job runs on a `Skyline` of its own, so the views are never disturbed. Tile k is drawn in frame k and read as soon
 //! as that frame has been built (the next event, `job_event`; at the latest the next frame's draw), two targets in turn; its scene has the blur's and the water's margins (`draw_view`), so tiles meet without a
 //! seam. Metal leaves out the first draw into a new target layout while it builds the pipeline (and a tile can be the first
-//! to draw the water or a props layer), so there every tile is read until two reads agree.
+//! to draw the water or a props layer), so there every tile is read until two reads agree. A band's tiles also keep the
+//! distance of what each texel shows (`SceneTarget::dist`), read back beside the colour; a file's do not.
 use crate::light::SkyLight;
 use crate::params::Params;
 use crate::render::{SceneTarget, Skyline, ViewSpec};
 use makepad_widgets::makepad_draw::{makepad_platform::SignalToUI, *};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExportKind { Png, Exr }
 
-/// The strip as premultiplied linear HDR texels, `w` x `h`, top row first.
-pub struct Band { pub w: usize, pub h: usize, pub texels: Vec<[f32; 4]> }
+/// The strip as premultiplied linear HDR texels, `w` x `h`, top row first; and the distance (m) of what each texel shows,
+/// the coverage-weighted mean of its surfaces (the strip's own metres: a range's 5000 x 6^((4 - k) / 4), the city's march
+/// depth, a prop's distance, the ground point seen, what the water mirrors), 0 where the coverage is 0. A band a host
+/// builds by hand may leave `dist` empty (no distance plane).
+pub struct Band { pub w: usize, pub h: usize, pub texels: Vec<[f32; 4]>, pub dist: Vec<f32> }
 
 /// Receives a requested band once, on a worker thread.
 pub type BandDone = Box<dyn FnOnce(Result<Band, String>) + Send>;
@@ -35,17 +40,19 @@ pub fn f16_to_f32(h: u16) -> f32 {
     }
 }
 type Texels = Vec<[f32; 4]>;
+/// A tile read back: its texels and its distances (m; empty for a file's tile).
+type Tile = (Texels, Vec<f32>);
 /// Where a job's result goes.
 enum Sink { File(ExportKind, std::path::PathBuf), Band(BandDone) }
-/// From the workers: tile i's texels, or the job's end (its message).
-enum News { Tile(usize, Result<Texels, String>), Done(Result<String, String>) }
+/// From the workers: tile i's texels and distances, or the job's end (its message).
+enum News { Tile(usize, Result<Tile, String>), Done(Result<String, String>) }
 
 /// A running job: the strip `w` x `h` at `p`, lit by `light`; the next tile to draw, the one drawn and not yet read
 /// (with `Cx::frame_submission_serial` as it was when it was drawn), the reads in flight, the tiles done; whether each
-/// tile is read until two reads agree (`first`: its last read, `rounds`).
+/// tile is read until two reads agree (`first`: its last read, `rounds`); the texels and (a band's) distances so far.
 pub struct Job {
     p: Params, light: SkyLight, w: usize, h: usize, next: usize, drawn: Option<usize>, drawn_serial: u64, reads: usize, done: usize, check: bool,
-    first: Option<Texels>, rounds: usize, out: Texels, sink: Option<Sink>, t0: f64, targets: Vec<SceneTarget>, tx: Sender<News>, rx: Receiver<News>,
+    first: Option<Tile>, rounds: usize, out: Texels, dist: Vec<f32>, sink: Option<Sink>, t0: f64, targets: Vec<SceneTarget>, tx: Sender<News>, rx: Receiver<News>,
 }
 
 impl Job {
@@ -55,20 +62,58 @@ impl Job {
         let (cw, w) = (TILE.min(self.w - i * TILE), self.w as f64);
         ViewSpec { u0: (i * TILE) as f64 / w, span: cw as f64 / w, w: cw, h: self.h, horizon: crate::band_geom(&self.p).horizon, pad: 0 }
     }
+    /// Whether the job hands a band (its tiles keep the distance).
+    fn band(&self) -> bool { matches!(self.sink, Some(Sink::Band(_))) }
 
-    /// Asks for the read of the tile drawn last; its texels come back on a worker as `News::Tile`.
+    /// Asks for the read of the tile drawn last, its colour and (a band's) its distance; the tile comes back on a worker
+    /// as one `News::Tile` once both are in (`TileReads`).
     fn read_drawn(&mut self, cx: &mut Cx) {
         let Some(i) = self.drawn.take() else { return };
-        let (tx, size) = (self.tx.clone(), (self.view(i).w, self.h));
-        let read = cx.read_render_texture(&self.targets[i % 2].color, move |r| {
-            let lut = half_table();
-            let f = |b: &[u8]| lut[u16::from_le_bytes([b[0], b[1]]) as usize];
-            let decode = |(w, h, b): (usize, usize, std::sync::Arc<[u8]>)| if (w, h) != size { Err(format!("tile {i} read back {w} x {h}, not {} x {}", size.0, size.1)) }
-                else { Ok(par(b.as_chunks::<8>().0, |t| [f(&t[0..]), f(&t[2..]), f(&t[4..]), f(&t[6..])])) };
-            send(&tx, News::Tile(i, r.map_err(|e| format!("{e:?}")).and_then(decode)));
-        });
-        if let Err(e) = read { send(&self.tx, News::Tile(i, Err(format!("{e:?}")))); }
+        let (target, size) = (&self.targets[i % 2], (self.view(i).w, self.h));
+        let parts = TileReads::new(i, self.tx.clone(), target.dist.is_some());
+        let reads = std::iter::once((&target.color, false)).chain(target.dist.as_ref().map(|d| (d, true)));
+        for (tex, dist) in reads {
+            let back = parts.clone();
+            let read = cx.read_render_texture(tex, move |r| {
+                let lut = half_table();
+                let f = |b: &[u8]| lut[u16::from_le_bytes([b[0], b[1]]) as usize];
+                let bytes = r.map_err(|e| format!("{e:?}")).and_then(|(w, h, b)| if (w, h) == size { Ok(b) } else { Err(format!("tile {i} read back {w} x {h}, not {} x {}", size.0, size.1)) });
+                back.put(bytes.map(|b| if dist {
+                    // (a D, 0, 0, a): the distance, 0 where nothing covers
+                    Part::Dist(par(b.as_chunks::<8>().0, |t| { let a = f(&t[6..]); if a > 0.0 { f(&t[0..]) / a } else { 0.0 } }))
+                } else { Part::Colour(par(b.as_chunks::<8>().0, |t| [f(&t[0..]), f(&t[2..]), f(&t[4..]), f(&t[6..])])) }));
+            });
+            if let Err(e) = read { parts.put(Err(format!("{e:?}"))); }
+        }
         self.reads += 1;
+    }
+}
+
+/// One read of a tile, decoded.
+enum Part { Colour(Texels), Dist(Vec<f32>) }
+
+/// A tile's reads as they come back on the workers, its colour and (a band's) its distance: the tile's news goes out
+/// once both are in, or at the first failure, once.
+struct TileReads { i: usize, tx: Sender<News>, parts: Mutex<(Option<Texels>, Option<Vec<f32>>, bool)> }
+
+impl TileReads {
+    fn new(i: usize, tx: Sender<News>, dist: bool) -> Arc<TileReads> {
+        Arc::new(TileReads { i, tx, parts: Mutex::new((None, (!dist).then(Vec::new), false)) })
+    }
+
+    fn put(&self, part: Result<Part, String>) {
+        let mut p = self.parts.lock().unwrap_or_else(|e| e.into_inner());
+        if p.2 { return; }
+        match part {
+            Ok(Part::Colour(t)) => p.0 = Some(t),
+            Ok(Part::Dist(d)) => p.1 = Some(d),
+            Err(e) => { p.2 = true; return send(&self.tx, News::Tile(self.i, Err(e))); }
+        }
+        if p.0.is_some() && p.1.is_some() {
+            p.2 = true;
+            let tile = (p.0.take().unwrap(), p.1.take().unwrap());
+            send(&self.tx, News::Tile(self.i, Ok(tile)));
+        }
     }
 }
 
@@ -100,9 +145,11 @@ impl Skyline {
         let (v, (tx, rx)) = (ViewSpec::strip(p, w), channel());
         let check = cfg!(any(target_os = "macos", target_os = "ios"));
         let out = vec![[0.0; 4]; v.w * v.h];
+        // only a band reads the distance back
+        let dist = if matches!(sink, Sink::Band(_)) { vec![0.0; v.w * v.h] } else { Vec::new() };
         let t0 = Cx::monotonic_now();
         let (p, light, sink) = (p.clone(), light.clone(), Some(sink));
-        self.job = Some(Job { p, light, w: v.w, h: v.h, next: 0, drawn: None, drawn_serial: 0, reads: 0, done: 0, check, first: None, rounds: 0, out, sink, t0, targets: vec![], tx, rx });
+        self.job = Some(Job { p, light, w: v.w, h: v.h, next: 0, drawn: None, drawn_serial: 0, reads: 0, done: 0, check, first: None, rounds: 0, out, dist, sink, t0, targets: vec![], tx, rx });
         Ok(())
     }
 
@@ -113,13 +160,13 @@ impl Skyline {
         let Some(mut job) = self.job.take() else { return false };
         job.read_drawn(cx);
         if job.next < job.tiles() && (!job.check || job.reads == 0) {
-            let (i, view) = (job.next, job.view(job.next));
-            if job.targets.len() <= i % 2 { job.targets.push(SceneTarget::new(cx, "skyline_export", false)); }
+            let (i, view, band) = (job.next, job.view(job.next), job.band());
+            if job.targets.len() <= i % 2 { job.targets.push(SceneTarget::with_dist(cx, "skyline_export", false, band)); }
             let rect = Rect { pos: dvec2(0.0, 0.0), size: dvec2(view.w as f64, view.h as f64) };
             let tone = matches!(job.sink, Some(Sink::File(ExportKind::Png, _)));
             let t = &mut job.targets[i % 2];
             cx.make_child_pass(&t.pass);
-            t.record(cx, view.w, view.h, |cx| self.draw_view(cx, rect, &view, &job.p, tone, &job.light));
+            t.record(cx, view.w, view.h, |cx| self.draw_view_with(cx, rect, &view, &job.p, tone, &job.light, band));
             (job.drawn, job.drawn_serial, job.next) = (Some(i), cx.frame_submission_serial(), i + 1);
             // The tile's pass is built into this frame's commands after the Draw event: the next event (this signal
             // is its wake) finds the submission serial past `drawn_serial` and asks for the read then, ordered after
@@ -147,17 +194,19 @@ impl Skyline {
                     }
                     let cw = job.view(i).w;
                     (job.first, job.rounds, job.done) = (None, 0, job.done + 1);
-                    for (y, row) in t.chunks(cw).enumerate() { job.out[y * job.w + i * TILE..][..cw].copy_from_slice(row); }
+                    for (y, row) in t.0.chunks(cw).enumerate() { job.out[y * job.w + i * TILE..][..cw].copy_from_slice(row); }
+                    if !job.dist.is_empty() { for (y, row) in t.1.chunks(cw).enumerate() { job.dist[y * job.w + i * TILE..][..cw].copy_from_slice(row); } }
                     if job.done < job.tiles() { continue; }
-                    let (w, h, mut out, sink, tx) = (job.w, job.h, std::mem::take(&mut job.out), job.sink.take(), job.tx.clone());
+                    let (w, h, mut out, dist, sink, tx) = (job.w, job.h, std::mem::take(&mut job.out), std::mem::take(&mut job.dist), job.sink.take(), job.tx.clone());
                     let (light, horizon) = (job.light.clone(), crate::band_geom(&job.p).horizon);
                     std::thread::spawn(move || send(&tx, News::Done(match sink {
                         Some(Sink::File(kind, path)) => if kind == ExportKind::Png { png(w, h, &out) } else { Ok(exr(w, h, &out)) }
                             .and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string())).map(|_| format!("Saved {}", path.display())),
                         Some(Sink::Band(done)) => {
-                            // a host that shows the night as the example's display does gets it decoded (`SkyLight::to_host`)
+                            // a host that shows the night as the example's display does gets it decoded (`SkyLight::to_host`); the
+                            // distances stay as they are
                             light.to_host(&mut out, w, h, horizon);
-                            done(Ok(Band { w, h, texels: out })); Ok(format!("Band {w} x {h} handed over"))
+                            done(Ok(Band { w, h, texels: out, dist })); Ok(format!("Band {w} x {h} handed over"))
                         }
                         None => Err("no destination".into()),
                     })));

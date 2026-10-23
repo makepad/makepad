@@ -289,18 +289,19 @@ script_mod! {
                     nb += 1.0; if nb >= 24.0 { break }
                 }
             }
-            self.fb0 = vec4(pc, 1.0 - tr); self.fb1 = vec4(em, depth)
+            // (the march's pass keeps no distance target: its depth is fb1's w)
+            self.fb0 = vec4(pc, 1.0 - tr); self.fb1 = vec4(em, depth); self.fb2 = vec4(0.0, 0.0, 0.0, 0.0)
         }
     }
 
-    // The march's result in the scene list (and mirrored in the reflection run).
+    // The march's result in the scene list (and mirrored in the reflection run), at the march's depth.
     mod.draw.DrawSkyCityBlit = mod.std.set_type_default() do #(DrawSkyCityBlit::script_shader(vm)){
         ..mod.draw.DrawQuad,
         ..mod.draw.SkyScene,
         ..mod.draw.SkyCityDepth,
         fragment: fn(){
-            let uv = self.up_uv(); let c = self.city_col.sample_nearest(uv)
-            self.fb0 = c; self.fb1 = vec4(self.city_lit.sample_nearest(uv).xyz, c.w)
+            let uv = self.up_uv(); let c = self.city_col.sample_nearest(uv); let lit = self.city_lit.sample_nearest(uv)
+            self.fb0 = c; self.fb1 = vec4(lit.xyz, c.w); self.fb2 = self.at_dist(c.w, lit.w)
         }
     }
 

@@ -39,6 +39,10 @@ pub struct SkylineBand {
     pub h: usize,
     /// Premultiplied linear RGBA, top row first, in the strip frame (Turn 0).
     pub texels: Vec<[f32; 4]>,
+    /// The distance (m) of what each texel shows, in the layout of `texels`: the coverage-weighted mean of its surfaces
+    /// (makepad_skyline's `Band::dist`), 0 where its coverage is 0. Empty: a band without a distance plane, whose every
+    /// read has no distance (`sample_skirted_far`).
+    pub dist: Vec<f32>,
     /// Elevation of the top row's top edge and the bottom row's bottom edge, degrees.
     pub top_deg: f32,
     pub bottom_deg: f32,
@@ -52,11 +56,12 @@ impl std::fmt::Debug for SkylineBand {
 }
 
 impl SkylineBand {
-    /// A band from a renderer's texels (the app's handoff, `to_skyline_band`), made safe for the map: a channel that
-    /// is not finite (NaN, an infinity) is 0, and alpha is held to 0..1. One such texel in the bottom row would
-    /// otherwise poison the skirt's running sum all the way round (`BandSkirt`), and a bilinear read would carry it
-    /// into the bake and its IBL.
-    pub fn new(w: usize, h: usize, mut texels: Vec<[f32; 4]>, top_deg: f32, bottom_deg: f32) -> SkylineBand {
+    /// A band from a renderer's texels and distances (the app's handoff, `to_skyline_band`), made safe for the map: a
+    /// channel that is not finite (NaN, an infinity) is 0, and alpha is held to 0..1; a distance that is not finite or
+    /// is negative is 0. One such texel in the bottom row would otherwise poison the skirt's running sum all the way
+    /// round (`BandSkirt`), and a bilinear read would carry it into the bake and its IBL. `dist` may be empty (no
+    /// distance plane).
+    pub fn new(w: usize, h: usize, mut texels: Vec<[f32; 4]>, mut dist: Vec<f32>, top_deg: f32, bottom_deg: f32) -> SkylineBand {
         for t in texels.iter_mut() {
             for c in t.iter_mut() {
                 if !c.is_finite() {
@@ -65,7 +70,12 @@ impl SkylineBand {
             }
             t[3] = t[3].clamp(0.0, 1.0);
         }
-        SkylineBand { w, h, texels, top_deg, bottom_deg }
+        for d in dist.iter_mut() {
+            if !(d.is_finite() && *d >= 0.0) {
+                *d = 0.0;
+            }
+        }
+        SkylineBand { w, h, texels, dist, top_deg, bottom_deg }
     }
 
     /// Bilinear premultiplied sample at map direction `d`, turned by `turn_deg`; 0 outside the band.
@@ -84,6 +94,19 @@ impl SkylineBand {
     /// it the skirt fading out over SKIRT_DEG (smoothstep), continuous across the band's bottom
     /// edge. `skirt` is this band's own (`skirt()`).
     pub fn sample_skirted(&self, skirt: &BandSkirt, d: Vec3f, turn_deg: f32) -> [f32; 4] {
+        self.skirted::<false>(skirt, d, turn_deg).0
+    }
+
+    /// `sample_skirted` with the distance (m) of what the texel shows: the coverage-weighted mean of its surfaces
+    /// (bilinear over the premultiplied distance, a D, over the bilinear alpha; in the skirt the bottom row's, blurred as
+    /// its colour, and the blend between the two over FADE_DEG). None where the coverage is 0 or the band has no
+    /// distance plane. The colour is `sample_skirted`'s, bit for bit.
+    pub fn sample_skirted_far(&self, skirt: &BandSkirt, d: Vec3f, turn_deg: f32) -> ([f32; 4], Option<f32>) {
+        self.skirted::<true>(skirt, d, turn_deg)
+    }
+
+    /// `sample_skirted`, and with `FAR` the distance (`sample_skirted_far`): one body, so the two colours are one.
+    fn skirted<const FAR: bool>(&self, skirt: &BandSkirt, d: Vec3f, turn_deg: f32) -> ([f32; 4], Option<f32>) {
         let bottom = self.bottom_deg;
         // Above the band or below its skirt, nothing (before the place's arcsine and
         // arctangent, which most of a map's texels would pay for nothing). The test
@@ -91,24 +114,34 @@ impl SkylineBand {
         let y_of = |deg: f32| if deg.abs() >= 89.0 { deg.signum() * f32::INFINITY } else { deg.to_radians().sin() };
         let (y_top, y_low) = (y_of(self.top_deg + 0.01), y_of(bottom - SKIRT_DEG - 0.01));
         if d.y > y_top || d.y < y_low {
-            return [0.0; 4];
+            return ([0.0; 4], None);
         }
-        let Some((el, u)) = self.place(d, turn_deg) else { return [0.0; 4] };
+        let Some((el, u)) = self.place(d, turn_deg) else { return ([0.0; 4], None) };
         // The negated tests also turn a NaN direction away.
         if !(el <= self.top_deg && el >= bottom - SKIRT_DEG) {
-            return [0.0; 4];
+            return ([0.0; 4], None);
         }
+        // The distance of premultiplied distance pd under alpha a.
+        let far = |pd: f32, a: f32| (FAR && self.has_dist() && a > 0.0).then(|| pd / a);
         if el >= bottom + FADE_DEG {
-            return self.bilinear(el, u);
+            let (c, pd) = self.bilinear_far::<FAR>(el, u);
+            return (c, far(pd, c[3]));
         }
-        let ground = skirt.at(u);
+        let (ground, gpd) = (skirt.at(u), if FAR { skirt.dist_at(u) } else { 0.0 });
         if el >= bottom {
-            let sharp = self.bilinear(el, u);
+            let (sharp, spd) = self.bilinear_far::<FAR>(el, u);
             let t = smooth((el - bottom) / FADE_DEG);
-            return std::array::from_fn(|c| ground[c] + (sharp[c] - ground[c]) * t);
+            let c: [f32; 4] = std::array::from_fn(|c| ground[c] + (sharp[c] - ground[c]) * t);
+            return (c, far(gpd + (spd - gpd) * t, c[3]));
         }
         let fade = smooth((el - (bottom - SKIRT_DEG)) / SKIRT_DEG);
-        ground.map(|c| c * fade)
+        let c = ground.map(|c| c * fade);
+        (c, far(gpd * fade, c[3]))
+    }
+
+    /// Whether the band has a distance plane (`dist`, one per texel).
+    fn has_dist(&self) -> bool {
+        self.dist.len() >= self.w * self.h
     }
 
     /// The band's skirt: its bottom row blurred (`BandSkirt`), built once with the map.
@@ -127,6 +160,12 @@ impl SkylineBand {
 
     /// The bilinear read at elevation `el` (inside the band) and strip u.
     fn bilinear(&self, el: f32, u: f32) -> [f32; 4] {
+        self.bilinear_far::<false>(el, u).0
+    }
+
+    /// The bilinear read at elevation `el` (inside the band) and strip u, and with `FAR` its premultiplied distance
+    /// (a D, read with the same lerps; 0 without a distance plane).
+    fn bilinear_far<const FAR: bool>(&self, el: f32, u: f32) -> ([f32; 4], f32) {
         let (w, h) = (self.w, self.h);
         let span = self.top_deg - self.bottom_deg;
         let x = u * w as f32 - 0.5;
@@ -138,7 +177,13 @@ impl SkylineBand {
         let (r0, r1) = (y0 as usize, (y0 as usize + 1).min(h - 1));
         let texel = |r: usize, c: usize| self.texels[r * w + c];
         // Lerps, not weights: four equal texels give exactly that texel back.
-        lerp4(lerp4(texel(r0, c0), texel(r0, c1), fx), lerp4(texel(r1, c0), texel(r1, c1), fx), fy)
+        let colour = lerp4(lerp4(texel(r0, c0), texel(r0, c1), fx), lerp4(texel(r1, c0), texel(r1, c1), fx), fy);
+        if !FAR || !self.has_dist() {
+            return (colour, 0.0);
+        }
+        let pd = |r: usize, c: usize| self.texels[r * w + c][3] * self.dist[r * w + c];
+        let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+        (colour, lerp(lerp(pd(r0, c0), pd(r0, c1), fx), lerp(pd(r1, c0), pd(r1, c1), fx), fy))
     }
 
     /// The largest RGB value in the band (for bloom's base_peak).
@@ -163,6 +208,8 @@ fn lerp4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
 /// band's `BandPeaks`, so a map built with the band and one it is attached to later read the same.
 pub struct BandSkirt {
     row: Vec<[f32; 4]>,
+    /// The bottom row's premultiplied distance (a D), blurred as `row`; empty for a band without a distance plane.
+    dist: Vec<f32>,
     /// The brightest channel of the row, for a caster's bloom (`BandPeaks::near`).
     peak: f32,
 }
@@ -171,7 +218,7 @@ impl BandSkirt {
     fn new(band: &SkylineBand) -> BandSkirt {
         let (w, h) = (band.w, band.h);
         if w == 0 || h == 0 || band.texels.len() < w * h {
-            return BandSkirt { row: Vec::new(), peak: 0.0 };
+            return BandSkirt { row: Vec::new(), dist: Vec::new(), peak: 0.0 };
         }
         let bottom = &band.texels[(h - 1) * w..h * w];
         // Texels either side: SKIRT_BLUR_DEG of the turn, at least the texel itself, at most the turn.
@@ -190,7 +237,18 @@ impl BandSkirt {
             for c in 0..4 { sum[c] += inn[c] as f64 - out[c] as f64; }
         }
         let peak = row.iter().fold(0.0f32, |peak, t| peak.max(t[0]).max(t[1]).max(t[2]));
-        BandSkirt { row, peak }
+        // the distance the same way, premultiplied
+        let mut dist = Vec::new();
+        if band.has_dist() {
+            let pd = |x: usize| (bottom[x][3] * band.dist[(h - 1) * w + x]) as f64;
+            let mut sum: f64 = (0..=2 * half).map(|i| pd((i + w - half) % w)).sum();
+            dist.reserve(w);
+            for x in 0..w {
+                dist.push((sum / n) as f32);
+                sum += pd((x + half + 1) % w) - pd((x + w - half) % w);
+            }
+        }
+        BandSkirt { row, dist, peak }
     }
 
     /// This skirt with each texel's light held to `bound(u)` times its alpha (luminance, Rec. 709),
@@ -220,6 +278,19 @@ impl BandSkirt {
         let x0 = x.floor();
         let column = |i: f32| (i as i64).rem_euclid(w as i64) as usize;
         lerp4(self.row[column(x0)], self.row[column(x0 + 1.0)], x - x0)
+    }
+
+    /// The skirt's premultiplied distance (a D) at strip u, read as `at` reads its colour; 0 without a distance plane.
+    fn dist_at(&self, u: f32) -> f32 {
+        let w = self.dist.len();
+        if w == 0 {
+            return 0.0;
+        }
+        let x = u * w as f32 - 0.5;
+        let x0 = x.floor();
+        let column = |i: f32| (i as i64).rem_euclid(w as i64) as usize;
+        let (a, b) = (self.dist[column(x0)], self.dist[column(x0 + 1.0)]);
+        a + (b - a) * (x - x0)
     }
 }
 
@@ -429,7 +500,7 @@ mod tests {
 
     fn band(top: f32, bottom: f32, rgba: [f32; 4]) -> SkylineBand {
         let (w, h) = (64, 16);
-        SkylineBand { w, h, texels: vec![rgba; w * h], top_deg: top, bottom_deg: bottom }
+        SkylineBand { w, h, texels: vec![rgba; w * h], dist: Vec::new(), top_deg: top, bottom_deg: bottom }
     }
     fn with_band(p: &HdriParams, b: SkylineBand) -> (HdriParams, ImageSet) {
         let mut p = p.clone();
@@ -521,7 +592,7 @@ mod tests {
                 if y < h - 1 { [0.1, 0.2, 0.3, 1.0] } else if x % 8 == 0 { [4.0, 3.0, 2.0, 1.0] } else { [0.05, 0.05, 0.1, 0.5] }
             })
             .collect();
-        SkylineBand { w, h, texels, top_deg: 12.0, bottom_deg: -4.0 }
+        SkylineBand { w, h, texels, dist: Vec::new(), top_deg: 12.0, bottom_deg: -4.0 }
     }
 
     /// The band runs on into its skirt: over its lowest FADE_DEG its texels blend into the skirt, which below the band's
@@ -636,7 +707,7 @@ mod tests {
         let (w, h) = (360, 8);
         let land = [0.02, 0.02, 0.02, 1.0];
         let texels = (0..w * h).map(|i| if i / w == h - 1 && (144..216).contains(&(i % w)) { [3.0, 3.2, 3.5, 1.0] } else { land }).collect();
-        let band = SkylineBand { w, h, texels, top_deg: 20.0, bottom_deg: -6.0 };
+        let band = SkylineBand { w, h, texels, dist: Vec::new(), top_deg: 20.0, bottom_deg: -6.0 };
         let light = |c: Vec3f| 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z;
         let mut night = HdriParams::default();
         night.sky.sun.mode = "manual".to_string();
@@ -700,7 +771,7 @@ mod tests {
         let (w, h) = (360, 4);
         let mut t = vec![[0.0; 4]; w * h];
         for y in 0..h { t[y * w + 90] = [1.0, 1.0, 1.0, 1.0]; } // a post at strip u = 90.5/360
-        let b = SkylineBand { w, h, texels: t, top_deg: 2.0, bottom_deg: -2.0 };
+        let b = SkylineBand { w, h, texels: t, dist: Vec::new(), top_deg: 2.0, bottom_deg: -2.0 };
         let u_post = 90.5 / 360.0;
         // direction whose equirect u is u_post (+ 30 deg after a 30-degree turn)
         assert!(b.sample(dir_at_u(u_post, 0.0), 0.0)[3] > 0.9);
@@ -716,7 +787,7 @@ mod tests {
         let (w, h) = (360, 4);
         let mut t = vec![[0.0; 4]; w * h];
         for y in 0..h { t[y * w + 180] = [1.0, 1.0, 1.0, 1.0]; }
-        let b = SkylineBand { w, h, texels: t, top_deg: 2.0, bottom_deg: -2.0 };
+        let b = SkylineBand { w, h, texels: t, dist: Vec::new(), top_deg: 2.0, bottom_deg: -2.0 };
         assert!(b.sample(dir(0.5, 0.0), 0.0)[3] > 0.9, "x/w = 0.5 is north");
         assert_eq!(b.sample(dir(0.5, 3.0), 0.0), [0.0; 4], "above the band");
         assert_eq!(b.sample(dir(0.5, -3.0), 0.0), [0.0; 4], "below the band");
@@ -916,7 +987,7 @@ mod tests {
         // Column c is x/w = (c + 0.5)/w, azimuth (x/w - 0.5) * 360; row r spans 10 - r t .. 10 - (r + 1) t.
         let (column, row) = ((210.0 / texel_deg) as usize, (5.0 / texel_deg) as usize - 1);
         texels[row * w + column] = [bright, bright, bright, 1.0];
-        let (q, images) = with_band(&p, SkylineBand { w, h, texels, top_deg: 10.0, bottom_deg: 0.0 });
+        let (q, images) = with_band(&p, SkylineBand { w, h, texels, dist: Vec::new(), top_deg: 10.0, bottom_deg: 0.0 });
         (q, images, 30.0 + 0.5 * texel_deg, 5.0 + 0.5 * texel_deg)
     }
 
@@ -980,7 +1051,7 @@ mod tests {
                 [c(), c(), c(), 1.0]
             })
             .collect();
-        let b = SkylineBand { w, h, texels, top_deg: 12.0, bottom_deg: -3.0 };
+        let b = SkylineBand { w, h, texels, dist: Vec::new(), top_deg: 12.0, bottom_deg: -3.0 };
         let (peaks, skirt) = (b.peaks(), b.skirt());
         for _ in 0..300 {
             // the band and its skirt: -40 to +20 degrees
@@ -1127,7 +1198,7 @@ mod tests {
         let el = top - (row as f32 + 0.5) * (top - bottom) / h as f32;
         let mut texels = vec![[0.0f32; 4]; w * h];
         texels[row * w + 90] = [40.0, 30.0, 20.0, 0.0];
-        let (q, images) = with_band(&p, SkylineBand { w, h, texels, top_deg: top, bottom_deg: bottom });
+        let (q, images) = with_band(&p, SkylineBand { w, h, texels, dist: Vec::new(), top_deg: top, bottom_deg: bottom });
         let (plain, city) = (Env::new(&p), Env::new_with(&q, &images));
         let u = 90.5 / w as f32;
         let (up, down) = (dir_at_u(u, el), dir_at_u(u, -el));
@@ -1156,7 +1227,7 @@ mod tests {
         let el = top - (row as f32 + 0.5) * (top - bottom) / h as f32;
         let mut texels = vec![[0.0f32; 4]; w * h];
         texels[row * w + 90] = [40.0, 30.0, 20.0, 0.0];
-        let (q, images) = with_band(&p, SkylineBand { w, h, texels, top_deg: top, bottom_deg: bottom });
+        let (q, images) = with_band(&p, SkylineBand { w, h, texels, dist: Vec::new(), top_deg: top, bottom_deg: bottom });
         let (plain, city) = (Env::new(&p), Env::new_with(&q, &images));
         let u = 90.5 / w as f32;
         let (up, down) = (dir_at_u(u, el), dir_at_u(u, -el));
@@ -1180,7 +1251,7 @@ mod tests {
         let mut texels = vec![[0.0f32; 4]; w * h];
         // a light 11.5 degrees up, as in `a_puddle_mirrors_a_city_light_above_it`
         texels[8 * w + 90] = [40.0, 30.0, 20.0, 0.0];
-        let band = SkylineBand { w, h, texels, top_deg: 20.0, bottom_deg: -4.0 };
+        let band = SkylineBand { w, h, texels, dist: Vec::new(), top_deg: 20.0, bottom_deg: -4.0 };
         let (u, radius) = (90.5 / w as f32, 0.5f32.to_radians());
         for wet in [0.0, 1.0] {
             let mut p = HdriParams { lights: vec![], ..HdriParams::default() };
@@ -1272,7 +1343,7 @@ mod tests {
             let c = if y <= 4 { l.ring_low[x] } else { l.ground_ring[x] };
             [c[0], c[1], c[2], 1.0]
         }).collect();
-        let (q, images) = with_band(&p, SkylineBand { w, h, texels, top_deg: top, bottom_deg: bottom });
+        let (q, images) = with_band(&p, SkylineBand { w, h, texels, dist: Vec::new(), top_deg: top, bottom_deg: bottom });
         let city = Env::new_with(&q, &images);
         let k = plain.scale();
         let light = |c: Vec3f| 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z;
@@ -1545,7 +1616,7 @@ mod tests {
         for k in 0..40 {
             texels[(4 + k % 16) * w + 100 + 3 * k] = [40.0, 30.0, 20.0, 1.0];
         }
-        let city = SkylineBand { w, h, texels, top_deg: 3.0, bottom_deg: -4.0 };
+        let city = SkylineBand { w, h, texels, dist: Vec::new(), top_deg: 3.0, bottom_deg: -4.0 };
         let (q, images) = with_band(&p, city.clone());
         let built = Env::new_with(&q, &images);
         let bloom = |env: &Env| env.studio.caster(0).and_then(|c| c.bloom()).map(|b| b.energy());
@@ -1598,11 +1669,11 @@ mod tests {
         texels[(h - 1) * w + 10] = [f32::NAN, 0.5, 0.5, 1.0];
         texels[(h - 1) * w + 70] = [0.5, f32::INFINITY, 0.5, f32::NEG_INFINITY];
         texels[2 * w + 40] = [0.5, 0.5, 0.5, 7.0];
-        let raw = SkylineBand { w, h, texels: texels.clone(), top_deg: 10.0, bottom_deg: -5.0 };
+        let raw = SkylineBand { w, h, texels: texels.clone(), dist: Vec::new(), top_deg: 10.0, bottom_deg: -5.0 };
         let below = |b: &SkylineBand, u: f32| b.sample_skirted(&b.skirt(), dir_at_u(u, -5.0 - 0.5 * SKIRT_DEG), 0.0);
         // the premise: far from both, half a turn round, the raw skirt is NaN
         assert!(below(&raw, 0.75).iter().any(|c| !c.is_finite()), "the premise: one NaN poisons the skirt round the turn");
-        let safe = SkylineBand::new(w, h, texels, 10.0, -5.0);
+        let safe = SkylineBand::new(w, h, texels, Vec::new(), 10.0, -5.0);
         assert_eq!(safe.texels[(h - 1) * w + 10], [0.0, 0.5, 0.5, 1.0]);
         assert_eq!(safe.texels[(h - 1) * w + 70], [0.5, 0.0, 0.5, 0.0]);
         assert_eq!(safe.texels[2 * w + 40], [0.5, 0.5, 0.5, 1.0]);
@@ -1626,5 +1697,75 @@ mod tests {
     fn a_band_prints_its_size_not_its_texels() {
         let text = format!("{:?}", band(20.0, -5.0, [0.5; 4]));
         assert!(text.contains("64") && text.contains("16") && text.contains("20") && text.len() < 200, "{text}");
+    }
+
+    /// Plan hdri-6 Task 8: the distance a read hands is the coverage-weighted mean of what the texels show (bilinear over
+    /// the premultiplied distance, a D, over the bilinear alpha). Two texels round the turn: one half covered at 1000 m,
+    /// one opaque at 4000 m. Half way between them (0.5 x 1000 + 1 x 4000) / 1.5 = 3000 m; at each centre its own; the
+    /// colour is `sample_skirted`'s bit for bit.
+    #[test]
+    fn the_distance_is_the_coverage_weighted_mean() {
+        let b = SkylineBand::new(2, 1, vec![[0.1, 0.1, 0.1, 0.5], [0.4, 0.3, 0.2, 1.0]], vec![1000.0, 4000.0], 10.0, -10.0);
+        let skirt = b.skirt();
+        for (u, want) in [(0.5, 3000.0f32), (0.25, 1000.0), (0.75, 4000.0)] {
+            let d = dir_at_u(u, 2.0);
+            let (c, far) = b.sample_skirted_far(&skirt, d, 0.0);
+            assert_eq!(c, b.sample_skirted(&skirt, d, 0.0), "u {u}: the colour is sample_skirted's");
+            let far = far.expect("a covered texel has a distance");
+            assert!((far - want).abs() < 1e-2, "u {u}: {far} m, not {want}");
+        }
+    }
+
+    /// A band without a distance plane (an empty `dist`, as hand-built bands and old callers have it) reads no distance
+    /// anywhere, its colour unchanged; a texel without coverage reads none either, whatever its plane holds.
+    #[test]
+    fn a_band_without_distances_reads_none() {
+        let b = band(20.0, -5.0, [0.2, 0.2, 0.2, 1.0]);
+        let skirt = b.skirt();
+        for el in [10.0, -4.5, -5.0 - 0.5 * SKIRT_DEG] {
+            let d = dir(30.0, el);
+            assert_eq!(b.sample_skirted_far(&skirt, d, 0.0), (b.sample_skirted(&skirt, d, 0.0), None), "at {el}");
+        }
+        let clear = SkylineBand::new(4, 1, vec![[0.3, 0.2, 0.1, 0.0]; 4], vec![2000.0; 4], 10.0, -10.0);
+        assert_eq!(clear.sample_skirted_far(&clear.skirt(), dir(30.0, 2.0), 0.0).1, None, "no coverage, no distance");
+        assert_eq!(band(20.0, -5.0, [0.2; 4]).sample_skirted_far(&skirt, dir(30.0, 40.0), 0.0), ([0.0; 4], None), "above the band");
+    }
+
+    /// The handoff (`SkylineBand::new`) makes the distance plane safe as it does the texels: a NaN, an infinity or a
+    /// negative distance is 0.
+    #[test]
+    fn a_bad_distance_is_made_safe_at_the_handoff() {
+        let b = SkylineBand::new(5, 1, vec![[0.1, 0.1, 0.1, 1.0]; 5], vec![f32::NAN, f32::INFINITY, -3.0, f32::NEG_INFINITY, 1500.0], 10.0, -10.0);
+        assert_eq!(b.dist, vec![0.0, 0.0, 0.0, 0.0, 1500.0]);
+    }
+
+    /// The skirt carries the bottom row's distance as it carries its colour: premultiplied (a D), box-blurred along the
+    /// turn, so below the band a read is the coverage-weighted mean of the bottom row's texels in the blur (brute force
+    /// here), and the blend into it just above the band's bottom edge meets it; the rows above (30 km) do not leak in. A
+    /// bottom row of 2400 m opaque and 800 m half covered, every other texel, at 1 degree a texel.
+    #[test]
+    fn the_skirts_distance_is_the_bottom_rows() {
+        let (w, h) = (360usize, 4usize);
+        let texels: Vec<[f32; 4]> = (0..w * h).map(|i| if i / w < h - 1 || i % 2 == 0 { [0.1, 0.1, 0.1, 1.0] } else { [0.1, 0.1, 0.1, 0.5] }).collect();
+        let dist: Vec<f32> = (0..w * h).map(|i| if i / w < h - 1 { 30000.0 } else if i % 2 == 0 { 2400.0 } else { 800.0 }).collect();
+        let b = SkylineBand::new(w, h, texels.clone(), dist.clone(), 6.0, -6.0);
+        let skirt = b.skirt();
+        let half = (SKIRT_BLUR_DEG / 360.0 * w as f32).round() as i64;
+        for x in [0usize, 1, 7, 180, 359] {
+            let (mut pd, mut a) = (0.0f64, 0.0f64);
+            for k in -half..=half {
+                let i = (h - 1) * w + (x as i64 + k).rem_euclid(w as i64) as usize;
+                pd += (texels[i][3] * dist[i]) as f64;
+                a += texels[i][3] as f64;
+            }
+            let want = (pd / a) as f32;
+            let u = (x as f32 + 0.5) / w as f32;
+            for el in [-6.0 - 1e-3, -6.0 - 0.5 * SKIRT_DEG, -6.0 - 0.9 * SKIRT_DEG] {
+                let far = b.sample_skirted_far(&skirt, dir_at_u(u, el), 0.0).1.expect("the skirt has a distance");
+                assert!((far - want).abs() < 1e-3 * want, "x {x}, {el} deg: {far} m, not {want}");
+            }
+            let above = b.sample_skirted_far(&skirt, dir_at_u(u, -6.0 + 1e-3), 0.0).1.expect("the band's bottom has a distance");
+            assert!((above - want).abs() < 1e-2 * want, "x {x}: just above the bottom edge {above} m, the skirt {want}");
+        }
     }
 }

@@ -86,6 +86,15 @@ pub fn sea_edge_rad(p: &Params) -> f64 {
 /// Whether a thing d m out stands on the open sea (beyond the sea distance; everywhere without a shore).
 pub fn at_sea(p: &Params, d: f64) -> bool { sea_distance_m(p).map_or(true, |s| d >= s) }
 
+/// The distance (m) the strip hands for its near ground rise and its front treeline (`Band::dist`; the shaders' literal
+/// 500). They stand where they stood at any Size, as a prop does, in front of what stands on the land behind them (the
+/// farms from 900 m, the power lines the treeline hides from 1 km); the treeline's tallest trees (Height 0.035 rad at the
+/// defaults) are then about 18 m tall.
+pub const NEAR_RISE_M: f64 = 500.0;
+/// The farthest distance (m) the strip hands for its ground, at the horizon: the city march's own far (`DrawSkyCity`'s
+/// 6e4; the shaders' literal 60000), inside the half float's range of the distance target.
+pub const FAR_M: f64 = 6e4;
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -202,12 +202,13 @@ impl Props {
         if b < 7 { return self.instances(cx, sc, lo..hi, 0.0, false); }
         let y0 = v.row_of(sc.rise() + 2.0 * v.px0()).floor().max(0.0);
         if y0 >= v.h as f64 { return; }
-        let mut pl = self.pl.take().unwrap_or_else(|| SceneTarget::new(cx, "skyline_props", true));
+        let mut pl = self.pl.take().unwrap_or_else(|| SceneTarget::with_dist(cx, "skyline_props", true, sc.dist));
         pl.record(cx, v.w, v.h, |cx| self.instances(cx, sc, lo..hi, y0, true));
         cx.make_child_pass(&pl.pass);
         for i in sc.inputs.into_iter().flatten() { cx.attach_child_pass(i, pl.pass.draw_pass_id(), None); } // it reads the trees and the city
         let dv = &mut self.draw_blit.draw_vars;
-        sc.set_uniforms(cx, dv); bind_texture(cx, dv, live_id!(pl_c), &pl.color); bind_texture(cx, dv, live_id!(pl_e), &pl.light);
+        sc.set_uniforms(cx, dv);
+        for (name, tex) in [(live_id!(pl_c), &pl.color), (live_id!(pl_e), &pl.light), (live_id!(pl_d), pl.dist_in())] { bind_texture(cx, dv, name, tex); }
         self.draw_blit.draw_abs(cx, Rect { pos: dvec2(0.0, y0), size: dvec2(v.w as f64, v.h as f64 - y0) });
         self.pl = Some(pl);
     }

@@ -2,6 +2,7 @@
 //! colour, then the display tone shoulder; an export keeps the raw HDR; over a host's wet ground it leaves the land below
 //! the horizon out, `DrawSkyFinalCut`). A stage that would do nothing is left out;
 //! the final samples the light target the chain ends in. The blur takes the reflections with the lights, as the page's.
+//! A band's distance (`SceneTarget::dist`) goes scene + mirror -> water (what the water mirrors) -> final, past the blur.
 use crate::light::SkyLight;
 use crate::params::{Params, P};
 use crate::render::{bind_texture, SceneCtx, SceneTarget, ViewSpec};
@@ -31,11 +32,15 @@ script_mod! {
     }
 
     // The final composite: the scene's colour plus its light (premultiplied, so light also shows over the sky; blurred
-    // vertically when `sigma` > 0), then the tone shoulder above 1.0 unless `tone` is 0.
+    // vertically when `sigma` > 0), then the tone shoulder above 1.0 unless `tone` is 0. Its second output is the
+    // distance, (a D, 0, 0, a), as the scene (or the water, which hands what it mirrors) holds it, premultiplied by the
+    // share it keeps (a band's tile has a target for it; a view's pass drops it).
     mod.draw.DrawSkyFinal = mod.std.set_type_default() do #(DrawSkyFinal::script_shader(vm)){
         ..mod.draw.DrawQuad,
         ..mod.draw.SkyBlur,
+        fb1: fragment_output(1, vec4f)
         scene_color: texture_2d(float)
+        scene_dist: texture_2d(float)
         tone: uniform(1.0)
         // the view inside the scene's targets (their margin cropped off): offset, size (uv)
         crop: uniform(vec4(0.0, 0.0, 1.0, 1.0))
@@ -47,6 +52,7 @@ script_mod! {
             var o = c.xyz + e.xyz; let one = vec3(1.0, 1.0, 1.0)
             if self.tone > 0.5 { o = min(o, one) + (one - exp(min(one - o, vec3(0.0, 0.0, 0.0)))) * 0.4 }
             let k = self.keep(uv)
+            self.fb1 = self.scene_dist.sample_nearest(uv) * k
             return vec4(o * k, c.w * k)
         }
     }
@@ -68,8 +74,9 @@ script_mod! {
             let ws = self.water_at(g, self.pix_view(vr).x, al, vr.z * g.z)
             return max(ws.x * (1.0 - self.coast_at(vr.x) * self.day()), ws.y)
         }
-        // one target, but SkyScene declares a second output: written too, so no backend leaves it undefined
-        fragment: fn(){ let c = self.pixel(); self.fb0 = c; self.fb1 = c }
+        // the colour, and the distance (DrawSkyFinal's `pixel` writes fb1); SkyScene's third output is written too, so no
+        // backend leaves it undefined
+        fragment: fn(){ let c = self.pixel(); self.fb0 = c; self.fb2 = self.fb1 }
     }
 
     // The horizontal step of the blur.
@@ -82,12 +89,17 @@ script_mod! {
     // The scene's light plus what the visible water mirrors, the page's propReflSample and propReflLight: a pixel al
     // below the horizon mirrors elevation al, shifted by its wave row (logarithmic in depth) and its cell around the
     // circle; calm water stretches lights into smears, ripple breaks them into streaks. Strength x Fresnel x depth fade.
-    // By day it also mirrors the sky by Fresnel, and (DrawSkyWaterDay) the scene's colour.
+    // By day it also mirrors the sky by Fresnel, and (DrawSkyWaterDay) the scene's colour. Its second output is the
+    // distance (fb1, a band's): the scene's own, but where the water mirrors and the mirror run covers the point it
+    // mirrors, that point's distance (read as its light is), so a mirrored light is never nearer than the light itself.
     mod.draw.DrawSkyWater = mod.std.set_type_default() do #(DrawSkyWater::script_shader(vm)){
         ..mod.draw.DrawQuad,
         ..mod.draw.SkyScene,
         scene_light: texture_2d(float)
         mirror_light: texture_2d(float)
+        // the scene's and the mirror's distance targets (`SceneTarget::dist_in`)
+        scene_dist: texture_2d(float)
+        mirror_dist: texture_2d(float)
         // the sky the day's sea mirrors (`SkyLight::sea_texels`: row 0 at +1 degree, row 1 at +15), the rings' first two
         // rows unless the host hands the sky as its weather shows it (`SkyLight::sea_sky`)
         sea_tex: texture_2d(float)
@@ -142,10 +154,14 @@ script_mod! {
             let x = ((fract(vr.x + du - self.view_span.x - 0.5 * self.view_span.y + 0.5) - 0.5) / self.view_span.y + 0.5) * self.view_in().x + self.view_pad
             let y = self.mirror_horizon * self.view_size.y - vr.y * el / max(al, 0.00001) / vr.z
             let mq = clamp(vec2(x, y), vec2(0.5, 0.5), self.view_size - vec2(0.5, 0.5)) / self.view_size; let m = self.mirror_light.sample(mq)
+            // the distance of what it mirrors, where the mirror covers it (`fragment` set the scene's own)
+            let md = self.mirror_dist.sample(mq)
+            if md.w > 0.0 { self.fb1 = vec4(e.w * md.x / md.w, 0.0, 0.0, e.w) }
             return vec4(e.xyz + m.xyz * (wk * sqrt(dc) * mix(1.0, 0.85, rip) * self.cover(g.y - v.y, v.z)) + sky * (1.0 - m.w) + self.mirror_day(mq, kd, vr.x, al), e.w)
         }
-        // one target, but SkyScene declares a second output: written too, so no backend leaves it undefined
-        fragment: fn(){ let c = self.pixel(); self.fb0 = c; self.fb1 = c }
+        // one colour target and the distance's (fb1: the scene's own unless `pixel` hands what the water mirrors); SkyScene's
+        // third output is written too, so no backend leaves it undefined
+        fragment: fn(){ self.fb1 = self.scene_dist.sample_nearest(self.pos); let c = self.pixel(); self.fb0 = c; self.fb2 = self.fb1 }
     }
 
     // The water by day (silhouettes by day): DrawSkyWater mirroring the scene's colour as well, over the sky by the sky's
@@ -237,11 +253,12 @@ impl Post {
         if let Some(mirror) = out.mirror {
             // by day the water mirrors the scene's colour too (DrawSkyWaterDay); in full night only its lights, with the
             // night's own shader
-            let t = self.water.get_or_insert_with(|| SceneTarget::new(cx, "skyline_water", false));
+            let t = self.water.get_or_insert_with(|| SceneTarget::with_dist(cx, "skyline_water", false, sc.dist));
             let d: &mut DrawQuad = if sc.light.night_share() < 1.0 { &mut self.draw_water_day } else { &mut self.draw_water };
             sc.set_uniforms(cx, &mut d.draw_vars);
             d.draw_vars.set_uniform(cx, live_id!(mirror_horizon), &[v.mirrored().horizon as f32]);
-            for (name, tex) in [(live_id!(scene_light), &light), (live_id!(mirror_light), &mirror.light), (live_id!(mirror_color), &mirror.color), (live_id!(sea_tex), sc.sea)] {
+            for (name, tex) in [(live_id!(scene_light), &light), (live_id!(mirror_light), &mirror.light), (live_id!(mirror_color), &mirror.color), (live_id!(sea_tex), sc.sea),
+                (live_id!(scene_dist), out.scene.dist_in()), (live_id!(mirror_dist), mirror.dist_in())] {
                 bind_texture(cx, &mut d.draw_vars, name, tex);
             }
             t.record(cx, v.w, v.h, |cx| d.draw_abs(cx, full));
@@ -264,15 +281,17 @@ impl Post {
     }
 
     /// The final composite into `rect` of the current pass, every draw; it attaches the pass chain it samples to the
-    /// current pass (so it paints first and stays alive).
+    /// current pass (so it paints first and stays alive). Its second output, the distance, comes from the water when
+    /// it ran (it hands what it mirrors), else from the scene: the blur leaves it alone.
     pub fn draw_final(&mut self, cx: &mut Cx2d, rect: Rect, out: &SceneOut, tone: bool) {
         let (water, sigma) = self.ran;
         let t = if sigma > 0.0 { self.blur.as_ref() } else if water { self.water.as_ref() } else { None };
         let (pass, light) = t.map_or((&out.scene.pass, &out.scene.light), |t| (&t.pass, &t.light));
+        let dist = if water { self.water.as_ref().unwrap_or(out.scene) } else { out.scene }.dist_in();
         cx.make_child_pass(pass);
         let d: &mut DrawQuad = if self.cut { &mut self.draw_final_cut } else { &mut self.draw_final };
         let vars = &mut d.draw_vars;
-        for (name, tex) in [(live_id!(scene_color), &out.scene.color), (live_id!(scene_light), light)] { bind_texture(cx, vars, name, tex); }
+        for (name, tex) in [(live_id!(scene_color), &out.scene.color), (live_id!(scene_light), light), (live_id!(scene_dist), dist)] { bind_texture(cx, vars, name, tex); }
         vars.set_uniform(cx, live_id!(tone), &[if tone { 1.0 } else { 0.0 }]);
         vars.set_uniform(cx, live_id!(sigma), &[sigma as f32]);
         let (m, w, h) = (self.margin as f32, out.view.w as f32, out.view.h as f32);

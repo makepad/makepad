@@ -3,7 +3,7 @@
 //! ```text
 //!   producers        trees (coverage, one channel per tree layer)    stage B
 //!                    city  (march: colour+alpha, emission+depth)      stage A
-//!   scene pass       two RGBA16F targets, every instance premultiplied-over in painter's order:
+//!   scene pass       two RGBA16F targets (a band's three: the distance), every instance premultiplied-over in painter's order:
 //!                      glow, [props before range k, range k] k = 0..4, props behind the city,
 //!                      the city, props in front of it, the front treeline, the ground band,
 //!                      the props again over the sea band
@@ -22,7 +22,7 @@ use crate::props::{Bucket, Props};
 use crate::rng::TAU;
 use crate::shaders::*;
 use crate::terrain::{self, Trees, ROWS, TEX_W};
-use crate::zones::{mt_scale, Zones};
+use crate::zones::{mt_dist, mt_scale, Zones};
 use makepad_widgets::makepad_draw::*;
 
 script_mod! {
@@ -73,11 +73,16 @@ impl ViewSpec {
 }
 
 /// A pass with RGBA16F targets cleared to transparent: two (colour + coverage, light + coverage), or one (`color` and
-/// `light` are the same texture).
-pub struct SceneTarget { pub pass: DrawPass, pub list: DrawList2d, pub color: Texture, pub light: Texture }
+/// `light` are the same texture); for a band (`Skyline::draw_job`), one more after them, `dist`: the distance (m) of what
+/// each pixel shows premultiplied by its coverage, (a D, 0, 0, a), the shaders' next output (the scene's fb2; the water's
+/// and the final's fb1).
+pub struct SceneTarget { pub pass: DrawPass, pub list: DrawList2d, pub color: Texture, pub light: Texture, pub dist: Option<Texture> }
 
 impl SceneTarget {
-    pub fn new(cx: &mut Cx, name: &str, two: bool) -> Self {
+    pub fn new(cx: &mut Cx, name: &str, two: bool) -> Self { Self::with_dist(cx, name, two, false) }
+
+    /// `new`, and with `dist` the distance target after the others.
+    pub fn with_dist(cx: &mut Cx, name: &str, two: bool, dist: bool) -> Self {
         let pass = DrawPass::new_with_name(cx, name);
         let target = |cx: &mut Cx| {
             let t = Texture::new_with_format(cx, TextureFormat::RenderRGBAf16 { size: TextureSize::Auto, initial: true });
@@ -86,8 +91,14 @@ impl SceneTarget {
         };
         let color = target(cx);
         let light = if two { target(cx) } else { color.clone() };
-        Self { list: DrawList2d::new(cx), pass, color, light }
+        let dist = dist.then(|| target(cx));
+        Self { list: DrawList2d::new(cx), pass, color, light, dist }
     }
+
+    /// What a reader of this pass's distance binds: the distance target, or without one the light target in its place.
+    /// Every pass of a view (or a file export) is without one, the readers' own passes too, so their distance output is
+    /// dropped and what they read there goes nowhere.
+    pub fn dist_in(&self) -> &Texture { self.dist.as_ref().unwrap_or(&self.light) }
 
     /// Records the pass at `size`; `body` draws into it.
     pub fn record(&mut self, cx: &mut Cx2d, w: usize, h: usize, body: impl FnOnce(&mut Cx2d)) {
@@ -123,6 +134,8 @@ pub struct SceneCtx<'a> {
     /// The reflection run: everything seen mirrored about the horizon (or its own waterline); the upright run's horizon
     /// row less this run's (px; see [`ViewSpec::mirrored`]).
     pub mirror: bool, pub up_dy: f64,
+    /// A band's picture: the passes keep the distance target (`SceneTarget::dist`).
+    pub dist: bool,
 }
 
 impl SceneCtx<'_> {
@@ -231,6 +244,13 @@ impl Skyline {
     /// then the final composite (`tone`: the display tone shoulder; an export keeps the raw HDR).
     /// The scene has the blur's margin, so lights at the edges blur with their real neighbours; the final crops it.
     pub fn draw_view(&mut self, cx: &mut Cx2d, rect: Rect, shown: &ViewSpec, p: &Params, tone: bool, light: &SkyLight) {
+        self.draw_view_with(cx, rect, shown, p, tone, light, false);
+    }
+
+    /// `draw_view`; with `dist` (a band's tile, `draw_job`) the passes keep the distance of what each pixel shows
+    /// (`SceneTarget::dist`), and the final writes it as its second output. Targets made without it are made again.
+    pub(crate) fn draw_view_with(&mut self, cx: &mut Cx2d, rect: Rect, shown: &ViewSpec, p: &Params, tone: bool, light: &SkyLight, dist: bool) {
+        if self.scene.as_ref().is_some_and(|s| s.dist.is_some() != dist) { self.release(); }
         let view = &self.post.scene_view(p, shown, light);
         self.update_inputs(cx, view, p, light);
         // the picture: every parameter but the view's own (pan, zoom and the field of view only
@@ -239,7 +259,7 @@ impl Skyline {
         let mut picture: Vec<f64> = p.v.iter().enumerate().filter(|(i, _)| !view_only.contains(i)).map(|(_, x)| *x).collect();
         picture.extend([view.u0, view.span, view.w as f64, view.h as f64, view.horizon, f64::from_bits(light.hash())]);
         let key = p.hash(&[], &picture);
-        if self.scene.is_none() { self.scene = Some(SceneTarget::new(cx, "skyline_scene", true)); }
+        if self.scene.is_none() { self.scene = Some(SceneTarget::with_dist(cx, "skyline_scene", true, dist)); }
         if self.drawn != Some(key) {
             let t1 = Cx::monotonic_now();
             self.record(cx, view, p, light);
@@ -325,9 +345,9 @@ impl Skyline {
         let sea = self.sea_tex.as_ref().unwrap();
         let lakes = &self.lake_tex.as_ref().unwrap().1;
         let mut scene = self.scene.take().unwrap();
-        let scene_id = scene.pass.draw_pass_id();
+        let (scene_id, dist) = (scene.pass.draw_pass_id(), scene.dist.is_some());
         let mv = view.mirrored();
-        let mut sc = SceneCtx { view, p, light, ring, sea, lakes, z, cols: &cols.tex, col_geom: cols.geom, col_data: &cols.data, tree_cov: blank.clone(), city: None, inputs: [None; 2], mirror: false, up_dy: 0.0 };
+        let mut sc = SceneCtx { view, p, light, ring, sea, lakes, z, cols: &cols.tex, col_geom: cols.geom, col_data: &cols.data, tree_cov: blank.clone(), city: None, inputs: [None; 2], mirror: false, up_dy: 0.0, dist };
         // producers: children of the scene pass, which samples them
         self.trees.draw_pass(cx, &sc, scene_id);
         self.city.draw_pass(cx, &sc, scene_id);
@@ -341,7 +361,7 @@ impl Skyline {
         scene.record(cx, view.w, view.h, |cx| draw_scene(cx, &sc, &mut parts));
         let sea = (0..view.w).any(|x| sc.col(x, 6)[0] < 0.35) || !z.lakes.is_empty() || light.own_wet() > 0.0;
         self.mirror = (self.post.wants_mirror(p, light) && sea).then(|| {
-            let mut mirror = self.mirror.take().unwrap_or_else(|| SceneTarget::new(cx, "skyline_mirror", true));
+            let mut mirror = self.mirror.take().unwrap_or_else(|| SceneTarget::with_dist(cx, "skyline_mirror", true, dist));
             (sc.mirror, sc.view, sc.up_dy) = (true, &mv, (view.horizon - mv.horizon) * view.h as f64);
             mirror.record(cx, view.w, view.h, |cx| draw_scene(cx, &sc, &mut parts));
             (sc.mirror, sc.view, sc.up_dy) = (false, view, 0.0);
@@ -374,8 +394,8 @@ fn draw_scene(cx: &mut Cx2d, sc: &SceneCtx, (sp, props, city): &mut (ScenePainte
     for k in 0..5 {
         props.draw(cx, sc, Bucket::Range(k));
         if let Some(r) = sc.band(band_top(sc, k), -2.0 * px0) {
-            // the range's own height (Size times the base's): its valley haze keeps to the same share of it
-            (sp.range.k, sp.range.hk) = (k as f32, (p[P::MtH] * mt_scale(k) * p[P::Size]) as f32);
+            // the range's own height (Size times the base's): its valley haze keeps to the same share of it; its distance
+            (sp.range.k, sp.range.hk, sp.range.dk) = (k as f32, (p[P::MtH] * mt_scale(k) * p[P::Size]) as f32, mt_dist(k as f64) as f32);
             sp.range.draw_abs(cx, r);
         }
     }
@@ -388,7 +408,7 @@ fn draw_scene(cx: &mut Cx2d, sc: &SceneCtx, (sp, props, city): &mut (ScenePainte
     // holds its water: `SkyLight::own_wet`)
     let wet = sc.mirror && sc.light.own_wet() > 0.0;
     if sc.mirror && !wet { return; }
-    if let Some(r) = sc.band(band_top(sc, 5), -2.0 * px0) { sp.range.k = 5.0; sp.range.draw_abs(cx, r); }
+    if let Some(r) = sc.band(band_top(sc, 5), -2.0 * px0) { (sp.range.k, sp.range.dk) = (5.0, crate::NEAR_RISE_M as f32); sp.range.draw_abs(cx, r); }
     // the ground band: from the top of the near rise (raw elevation) down; the sea is all below the horizon
     if let Some(r) = sc.band(sc.rise() + 2.0 * px0, if wet { -2.0 * px0 } else { -10.0 }) {
         sc.set_uniforms(cx, &mut sp.ground.draw_vars);

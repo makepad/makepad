@@ -67,7 +67,7 @@ fn render_band_lit(p: &Params, w: usize, light: &SkyLight) -> Band {
             assert!(Cx::monotonic_now() - t0 < 300.0, "band timed out");
         };
         let Ok(b) = got else { last = None; continue }; // the warm-up rounds can fail
-        if last.as_ref().is_some_and(|l| (l.w, l.h) == (b.w, b.h) && l.texels == b.texels) { break b; }
+        if last.as_ref().is_some_and(|l| (l.w, l.h) == (b.w, b.h) && l.texels == b.texels && l.dist == b.dist) { break b; }
         last = Some(b);
     };
     hal.close(info.session);
@@ -144,7 +144,7 @@ fn baseline(name: &str) -> Option<(Params, Band)> {
     p.load_web_json(&json).unwrap();
     assert_eq!(bytes.len(), w * h * 16, "{name}: baseline size");
     let texels = bytes.chunks_exact(16).map(|t| std::array::from_fn(|c| f32::from_le_bytes(t[c * 4..c * 4 + 4].try_into().unwrap()))).collect();
-    Some((p, Band { w, h, texels }))
+    Some((p, Band { w, h, texels, dist: Vec::new() }))
 }
 
 /// A half-exact value `v` as the platform's `pod_heap::f16_to_f32` decoded it when the baselines were recorded: a subnormal
@@ -253,7 +253,7 @@ fn a_band_is_read_back_from_the_frame_that_drew_it() {
     let got = bands_from_one_draw(&[(a.clone(), 512), (a.clone(), 512), (a.clone(), 512), (b.clone(), 512), (a.clone(), 512), (b.clone(), 512), (a.clone(), 512)]);
     assert!(got.iter().all(Option::is_some), "a band waited for a second draw: {:?}", got.iter().map(Option::is_some).collect::<Vec<_>>());
     assert!(got.iter().all(|g| g.as_ref().is_some_and(|g| g.2 == 1)), "a band took more than its one draw: {:?}", got.iter().map(|g| g.as_ref().map(|g| g.2)).collect::<Vec<_>>());
-    let got: Vec<Band> = got.into_iter().map(|g| g.map_or(Band { w: 0, h: 0, texels: vec![] }, |g| g.0)).collect();
+    let got: Vec<Band> = got.into_iter().map(|g| g.map_or(Band { w: 0, h: 0, texels: vec![], dist: vec![] }, |g| g.0)).collect();
     let (want_a, want_b) = (render_band(&a, 512), render_band(&b, 512));
     assert!(got[4].texels == want_a.texels && got[6].texels == want_a.texels, "the defaults' band read from one draw is not the rig's");
     assert!(got[3].texels == want_b.texels && got[5].texels == want_b.texels, "the denser city's band read from one draw is not the rig's (a stale read?)");
@@ -303,6 +303,16 @@ fn excess(a: &Band, b: &Band, m: &[usize]) -> f32 { m.iter().map(|&i| lum(&a.tex
 /// 1-4, the canopies and their tallest trees, the front treeline, the ground rise; two pixels of margin), outside the
 /// city's sector (with 0.05 of the turn of margin).
 fn farthest_range_texels(p: &Params, b: &Band) -> Vec<usize> {
+    let out = range_texels(p, b, 0);
+    // the defaults at 1024 px: 41 texels
+    assert!(out.len() > 20, "the farthest range shows only {} texels", out.len());
+    out
+}
+
+/// Range k's (0 farthest .. 4 nearest) own texels: opaque, below its ridge and above everything nearer in that column
+/// (the nearer ridges, their canopies and tallest trees, the front treeline, the ground rise; two pixels of margin),
+/// outside the city's sector (with 0.05 of the turn of margin). At Off-centre 0.
+fn range_texels(p: &Params, b: &Band, k: usize) -> Vec<usize> {
     let z = Zones::new(p);
     let m = terrain::margin(p, 1.0, b.w);
     let cols = terrain::columns(&z, p, 0.0, 1.0, b.w, m);
@@ -313,18 +323,16 @@ fn farthest_range_texels(p: &Params, b: &Band) -> Vec<usize> {
         let du = ((x as f64 + 0.5) / b.w as f64 - p[P::CtC] + 0.5).rem_euclid(1.0) - 0.5;
         if du.abs() < p[P::CtW] * 0.5 + 0.05 { continue; }
         let mut near = c(6)[1] as f64;
-        for k in 1..6 {
-            let r = c(k);
+        for j in k + 1..6 {
+            let r = c(j);
             near = near.max(r[0] as f64);
-            if k >= 2 && r[3] > 0.0 { near = near.max(r[2] as f64).max(r[1] as f64 + terrain::tree_hmax(p, k - 2)); }
+            if j >= 2 && r[3] > 0.0 { near = near.max(r[2] as f64).max(r[1] as f64 + terrain::tree_hmax(p, j - 2)); }
         }
         for y in 0..b.h {
             let (el, i) = (row_el(p, b, y), y * b.w + x);
-            if el < c(0)[0] as f64 - 2.0 * px && el > near + 2.0 * px && b.texels[i][3] > 0.9 { out.push(i); }
+            if el < c(k)[0] as f64 - 2.0 * px && el > near + 2.0 * px && b.texels[i][3] > 0.9 { out.push(i); }
         }
     }
-    // the defaults at 1024 px: 41 texels
-    assert!(out.len() > 20, "the farthest range shows only {} texels", out.len());
     out
 }
 
@@ -1570,4 +1578,150 @@ fn nothing_is_cut_at_the_fitted_top() {
         if fit.top_deg >= makepad_skyline::fit::MAX_TOP_DEG - 1e-9 { println!("{name}: stopped at 85 degrees"); continue; }
         assert!(alpha <= 0.02 && light <= 0.01 * most, "{name}: the top rows hold alpha {alpha}, light {light} (of {most})");
     }
+}
+
+/// `p` with every prop off (the lakes too), the water's reflections kept.
+fn without_props(p: &Params) -> Params {
+    let mut q = p.clone();
+    for (i, d) in makepad_skyline::PARAMS.iter().enumerate() { if d.group == "Props" && i != P::PrRefl as usize && i != P::PrRipple as usize { q.set(i, 0.0); } }
+    q
+}
+
+/// Plan hdri-6 Task 8 (owner ruling R1): beside its colour the strip hands each texel's distance (`Band::dist`, m), the
+/// coverage-weighted distance of what it shows, so a host can veil it over that distance. The defaults with a sea (Sea
+/// distance 0.3) and lakes (Lakes 1), at night, 4096 px; the same without props (where a texel is the same in both, no prop
+/// stands in front of it); and the city alone:
+/// - transparent texels read 0, every distance is finite, and every texel has one;
+/// - an opaque city texel reads the march's depth there (`march_city`, the same view) within 20 %;
+/// - an opaque texel of range k alone reads 5000 x 6^((4 - k) / 4) m within 1 %; the near rise and the front treeline
+///   NEAR_RISE_M;
+/// - an opaque texel of land at depression al reads EYE x Size / tan(al) within 5 % (also at Size 2);
+/// - with no ripple (the mirrored elevation is `mirrored_el`, in the same column) and no props, a sea texel that mirrors a
+///   lit window (its light changes with Lit windows) reads at least the distance the band shows at the elevation it
+///   mirrors: a mirrored light is never handed a shorter distance than the light itself, though the water stands nearer.
+#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn the_band_hands_each_texels_distance() {
+    use makepad_skyline::{props::kit::EYE, NEAR_RISE_M};
+    let w = 4096;
+    let mut p = Params::default();
+    for (k, v) in [(P::SeaD, 0.3), (P::PrLake, 1.0)] { p.set(k as usize, v); }
+    let bare = without_props(&p);
+    let (full, none) = (render_band(&p, w), render_band(&bare, w));
+    let (march, lit, _) = march_city(&p, render::ViewSpec::strip(&p, w));
+    assert_eq!(full.dist.len(), full.w * full.h, "a band hands a distance per texel");
+    let (z, m, px) = (Zones::new(&p), terrain::margin(&p, 1.0, w), std::f64::consts::TAU / w as f64);
+    let cols = terrain::columns(&z, &p, 0.0, 1.0, w, m);
+    let col = |x: usize, r: usize| cols[(x + m) * terrain::ROWS + r];
+    // opaque, and no prop in front
+    let clean = |i: usize| full.texels[i][3] >= 0.999 && full.texels[i] == none.texels[i];
+    let off = |d: f32, want: f64| (d as f64 / want - 1.0).abs();
+    // the sky
+    let mut clear = 0;
+    for (i, (t, d)) in full.texels.iter().zip(&full.dist).enumerate() {
+        assert!(d.is_finite() && *d >= 0.0, "texel {i}: distance {d}");
+        if t[3] == 0.0 { assert_eq!(*d, 0.0, "texel {i}: transparent, at {d} m"); clear += 1; }
+        if t[3] > 0.0 { assert!(*d > 0.0, "texel {i}: covered {}, no distance", t[3]); }
+    }
+    // the city: its texels above the front treeline and the near rise
+    let (mut n_city, mut worst_city) = (0usize, 0.0f64);
+    for x in 0..w {
+        let c5 = col(x, 5);
+        let near = (col(x, 6)[1] as f64).max(if c5[3] > 0.0 { (c5[2] as f64).max(c5[1] as f64 + terrain::tree_hmax(&p, 3)) } else { 0.0 });
+        for y in 0..full.h {
+            let i = y * w + x;
+            if row_el(&p, &full, y) <= near + 2.0 * px || !clean(i) || march[i][3] < 0.999 { continue; }
+            n_city += 1;
+            worst_city = worst_city.max(off(full.dist[i], lit[i][3] as f64));
+        }
+    }
+    // the ranges, each alone
+    let mut ranges = vec![];
+    for k in 0..5 {
+        let want = 5000.0 * 6f64.powf((4.0 - k as f64) / 4.0);
+        let t: Vec<usize> = range_texels(&p, &full, k).into_iter().filter(|&i| clean(i)).collect();
+        let worst = t.iter().map(|&i| off(full.dist[i], want)).fold(0.0, f64::max);
+        ranges.push((k, t.len(), worst));
+    }
+    // the near rise and the front treeline, over land
+    let (mut n_near, mut worst_near) = (0usize, 0.0f64);
+    for x in 0..w {
+        let (g, c5) = (col(x, 6), col(x, 5));
+        if g[0] < 0.999 { continue; }
+        let rise = g[1] as f64;
+        // (where the forest is dense: a thinner one is see-through, and its texels mix in what stands behind)
+        let treeline = if c5[3] >= 0.999 { c5[2] as f64 } else { 0.0 };
+        for y in 0..full.h {
+            let (el, i) = (row_el(&p, &full, y), y * w + x);
+            let on_rise = el > 0.0 && el <= rise - 0.5 * px;
+            let on_treeline = el > rise + 2.0 * px && el < treeline - 2.0 * px;
+            if !(on_rise || on_treeline) || !clean(i) { continue; }
+            n_near += 1;
+            worst_near = worst_near.max(off(full.dist[i], NEAR_RISE_M));
+        }
+    }
+    // the ground over land, deeper than a pixel and a half
+    let ground = |p: &Params, b: &Band, clean: &dyn Fn(usize) -> bool| -> (usize, f64) {
+        let (z, m) = (Zones::new(p), terrain::margin(p, 1.0, b.w));
+        let cols = terrain::columns(&z, p, 0.0, 1.0, b.w, m);
+        let (px, eye) = (std::f64::consts::TAU / b.w as f64, EYE * p[P::Size]);
+        let (mut n, mut worst) = (0usize, 0.0f64);
+        for x in 0..b.w {
+            if cols[(x + m) * terrain::ROWS + 6][0] < 0.999 { continue; }
+            for y in 0..b.h {
+                let (al, i) = (-row_el(p, b, y), y * b.w + x);
+                if al < 1.5 * px || !clean(i) { continue; }
+                n += 1;
+                worst = worst.max((b.dist[i] as f64 / (eye / al.tan()).min(makepad_skyline::FAR_M) - 1.0).abs());
+            }
+        }
+        (n, worst)
+    };
+    let (n_ground, worst_ground) = ground(&p, &full, &clean);
+    let two = sized(&bare, 2.0);
+    let b2 = render_band(&two, 1024);
+    let (n_ground2, worst_ground2) = ground(&two, &b2, &|i| b2.texels[i][3] >= 0.999);
+    // the sea's reflections of the lit windows: the city across the open sea (its sector over the widest run of sea
+    // columns), no ripple and no props
+    let zs = Zones::new(&bare);
+    let sea_at: Vec<bool> = (0..w).map(|x| zs.land((x as f64 + 0.5) / w as f64) < 0.05).collect();
+    let (mut best, mut run) = ((0usize, 0usize), 0usize);
+    for x in 0..2 * w { if sea_at[x % w] { run += 1; if run > best.1 && run <= w { best = ((x + 1 - run) % w, run); } } else { run = 0; } }
+    let mut calm = bare.clone();
+    calm.set(P::PrRipple as usize, 0.0);
+    calm.set(P::CtC as usize, ((best.0 as f64 + 0.5 * best.1 as f64) / w as f64).fract());
+    calm.set(P::CtW as usize, (0.6 * best.1 as f64 / w as f64).min(0.3));
+    let mut dark = calm.clone();
+    dark.set(P::WinD as usize, 0.0);
+    let (sea, unlit) = (render_band(&calm, w), render_band(&dark, w));
+    let (zc, edge) = (Zones::new(&calm), makepad_skyline::sea_edge_rad(&calm));
+    let (mut n_sea, mut nearer_water, mut worst_sea) = (0usize, 0usize, f64::MAX);
+    for y in 0..sea.h {
+        let al = -row_el(&calm, &sea, y);
+        if al < 1.5 * px || al > edge - 1.5 * px { continue; }
+        let (el, amp) = (mirrored_el(al), 0.004 * makepad_skyline::rng::smooth(0.0, 0.012, al) * makepad_skyline::rng::smooth(0.5, 1.4, (al + 0.004) / (22.0 * px)));
+        let yf = |e: f64| calm[P::Horizon] * sea.h as f64 - e / px - 0.5;
+        let rows = (yf(el + amp).floor().max(0.0) as usize)..=((yf(el - amp).floor() as usize + 1).min(sea.h - 1));
+        for x in 0..w {
+            let i = y * w + x;
+            if zc.land((x as f64 + 0.5) / w as f64) >= 0.05 || lum(&sea.texels[i]) - lum(&unlit.texels[i]) < 1e-3 { continue; }
+            // the nearest the band shows at the elevations this texel can mirror
+            let Some(light) = rows.clone().map(|r| r * w + x).filter(|&j| sea.texels[j][3] > 0.0).map(|j| sea.dist[j] as f64).reduce(f64::min) else { continue };
+            n_sea += 1;
+            worst_sea = worst_sea.min(sea.dist[i] as f64 / light);
+            if EYE / al.tan() < 0.9 * light { nearer_water += 1; }
+        }
+    }
+    println!("{clear} transparent texels; the city: {n_city} texels, worst {:.2} % off the march's depth", 100.0 * worst_city);
+    for (k, n, worst) in &ranges { println!("range {k}: {n} texels, worst {:.3} % off {:.0} m", 100.0 * worst, 5000.0 * 6f64.powf((4.0 - *k as f64) / 4.0)); }
+    println!("the near rise and the treeline: {n_near} texels, worst {:.3} % off {NEAR_RISE_M} m", 100.0 * worst_near);
+    println!("the ground: {n_ground} texels, worst {:.3} % off EYE / tan(al); at Size 2 {n_ground2} texels, worst {:.3} %", 100.0 * worst_ground, 100.0 * worst_ground2);
+    println!("the sea's mirrored windows (the city at {:.3} over {} sea columns): {n_sea} texels ({nearer_water} where the water stands nearer than the light), the least distance over the light's x{worst_sea:.4}", calm[P::CtC], best.1);
+    assert!(clear > 1000, "the premise: sky ({clear} texels)");
+    assert!(n_city > 200 && worst_city <= 0.2, "the city: {n_city} texels, worst {worst_city}");
+    assert!(ranges.iter().filter(|r| r.1 >= 20).count() >= 4, "the premise: four ranges show alone {ranges:?}");
+    for (k, n, worst) in &ranges { assert!(*n < 20 || *worst <= 0.01, "range {k}: {n} texels, worst {worst}"); }
+    assert!(n_near > 100 && worst_near <= 0.01, "the near rise and treeline: {n_near} texels, worst {worst_near}");
+    assert!(n_ground > 1000 && worst_ground <= 0.05, "the ground: {n_ground} texels, worst {worst_ground}");
+    assert!(n_ground2 > 1000 && worst_ground2 <= 0.05, "the ground at Size 2: {n_ground2} texels, worst {worst_ground2}");
+    assert!(nearer_water > 20 && worst_sea >= 0.99, "the sea: {n_sea} texels mirror windows ({nearer_water} with the water nearer), the least x{worst_sea}");
 }
