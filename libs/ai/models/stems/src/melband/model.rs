@@ -269,6 +269,75 @@ pub fn instrumental(mix: &StereoBuf, vocals: &StereoBuf) -> StereoBuf {
     }
 }
 
+/// A loaded, compiled de-reverb separator: the vocals model's graph over
+/// anvuew's de-reverb weights, whose one target is the dry voice.
+///
+/// The checkpoint is a fine-tune of the vocals checkpoint and has every one
+/// of its tensors at the same extent, so everything [`VocalsModel`] does —
+/// the chunk, the band masks, the DC bin, the stream — is this model's too.
+/// What differs is what the target means. Feed it a vocal (a separated vocal
+/// stem, or a dry-ish vocal take), not a full mix: it was trained on vocals.
+pub struct DereverbModel {
+    inner: VocalsModel,
+}
+
+impl DereverbModel {
+    /// Loads the de-reverb checkpoint and compiles the forward graph for the
+    /// device runtime, at the trained chunk. Expensive (seconds): do it once,
+    /// off any latency-sensitive thread.
+    pub fn load(checkpoint: impl AsRef<Path>) -> Result<Self> {
+        Self::load_with_geometry(checkpoint, CHUNK)
+    }
+
+    /// As [`load`](Self::load), compiled for `geometry` instead of the
+    /// trained chunk.
+    pub fn load_with_geometry(
+        checkpoint: impl AsRef<Path>,
+        geometry: ChunkGeometry,
+    ) -> Result<Self> {
+        Ok(Self {
+            inner: VocalsModel::load_with_geometry(checkpoint, geometry)?,
+        })
+    }
+
+    pub fn checkpoint_path(&self) -> &Path {
+        self.inner.checkpoint_path()
+    }
+
+    /// The chunk this model was compiled for.
+    pub fn geometry(&self) -> ChunkGeometry {
+        self.inner.geometry()
+    }
+
+    /// The dry voice of exactly one chunk of [`geometry`](Self::geometry)
+    /// samples, padded by the caller as for [`VocalsModel::separate_chunk`].
+    pub fn separate_chunk(&mut self, chunk: &StereoBuf) -> Result<StereoBuf> {
+        self.inner.separate_chunk(chunk)
+    }
+}
+
+impl ChunkSeparator for DereverbModel {
+    fn geometry(&self) -> ChunkGeometry {
+        DereverbModel::geometry(self)
+    }
+
+    fn targets(&self) -> usize {
+        NUM_TARGETS
+    }
+
+    fn separate(&mut self, chunk: &StereoBuf) -> Result<Vec<StereoBuf>> {
+        Ok(vec![self.separate_chunk(chunk)?])
+    }
+}
+
+/// The reverb of a de-reverb separation: the vocal less its dry voice, the
+/// second instrument of the reference's single-target model. The two sum back
+/// to the input as [`instrumental`] and the vocal do, so any blend of them is
+/// just "how much reverb".
+pub fn reverb(vocal: &StereoBuf, dry: &StereoBuf) -> StereoBuf {
+    instrumental(vocal, dry)
+}
+
 /// A forward built only as far as one [`Stage`], for holding that stage
 /// against a reference. It is a whole separate load and compile, so it costs
 /// the separator nothing; it is a fault-finding tool and no part of a
