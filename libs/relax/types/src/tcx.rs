@@ -1749,12 +1749,16 @@ impl Tcx {
         let state = EvalState::new();
         state.errors.replace(Some(Vec::new()));
         let cx = EvalCx::new(prog, self, TypingEnv::fully_monomorphized(prog), &state);
+        let mut param_wf = Vec::new();
         for param in ast.list(generics.params) {
             match param.kind {
                 GenericParamKind::Type(_, Some(ty)) => { self.lower_ty(&cx, prog, def.file, def.scope, &env, ty); }
                 GenericParamKind::Const(ty, default) => {
                     let ty = self.lower_ty(&cx, prog, def.file, def.scope, &env, ty);
                     if let Some(value) = default { self.lower_const_arg(prog, def.file, &env, value, ty); }
+                    if self.validates(prog, def.file) {
+                        param_wf.extend(self.const_param_ty_wf(prog, d, param.name.lo, ty));
+                    }
                 }
                 _ => {}
             }
@@ -1783,7 +1787,30 @@ impl Tcx {
             }
         }
         found.extend(state.errors.take().unwrap_or_default());
+        found.extend(param_wf);
         found
+    }
+
+    /// rustc_hir_analysis wfcheck.rs check_param_wf without `adt_const_params` /
+    /// `min_adt_const_params` / `const_param_ty_unchecked`: a const parameter's type is an
+    /// integer, `bool` or `char`. (Types carry no span: the error is at the parameter.)
+    fn const_param_ty_wf(&self, prog: &Program, d: DefId, pos: u32, ty: TyId) -> Option<String> {
+        let def = prog.def(d);
+        let features = prog.crates[def.krate as usize].features(prog);
+        if features.has("adt_const_params") || features.has("min_adt_const_params") || features.has("const_param_ty_unchecked") {
+            return None;
+        }
+        let msg = match self.tys.kind(ty) {
+            // (a parameter type that names another parameter is E0770, reported by resolution)
+            TyKind::Bool | TyKind::Char | TyKind::Int(_) | TyKind::Error | TyKind::Param(_) => return None,
+            TyKind::FnPtr(..) => "using function pointers as const generic parameters is forbidden".to_string(),
+            TyKind::Ptr(..) => "using raw pointers as const generic parameters is forbidden".to_string(),
+            _ => {
+                if self.tys.has_error(ty) { return None; }
+                format!("`{}` is forbidden as the type of a const generic parameter", crate::typeck::ty_to_string(false, prog, self, ty))
+            }
+        };
+        Some(prog.record_uncoded_error(def.file, pos, "signature", msg))
     }
 
     pub fn signature_count(&self) -> usize {

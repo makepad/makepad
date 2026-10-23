@@ -201,6 +201,12 @@ static NOW_CLASS: AtomicU8 = AtomicU8::new(u8::MAX);
 static NOW_FROM: AtomicU64 = AtomicU64::new(0);
 /// the call site of the request being served (null: none)
 static NOW_SITE: std::sync::atomic::AtomicPtr<std::panic::Location<'static>> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+/// (owner) the line of the request being served (0: none)
+pub fn serving_line() -> u32 {
+    let p = NOW_SITE.load(Ordering::Relaxed);
+    if p.is_null() { 0 } else { unsafe { (*p).line() } }
+}
 /// when the request being served began (wall ns; 0: idle)
 static NOW_T0: AtomicU64 = AtomicU64::new(0);
 

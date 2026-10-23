@@ -680,38 +680,10 @@ pub fn generic_param_rules(prog: &Program, d: DefId) -> Vec<String> {
             _ => seen_non_lifetime = true,
         }
     }
-    // a const parameter's type is an integer, bool or char (adt_const_params lifts the rule)
     if let ItemKind::Fn(s, _, _) = item.kind {
         let sig = ast.fn_sig(s);
         if sig.konst && sig.asyncness {
             errors.push(prog.record_error(def.file, item.lo, "parse", "functions cannot be both `const` and `async`".to_string()));
-        }
-    }
-    let krate = &prog.crates[def.krate as usize];
-    if !krate.features(prog).has("adt_const_params") && !krate.features(prog).has("unsized_const_params") {
-        let f = &prog.files[def.file as usize];
-        for p in params {
-            let GenericParamKind::Const(ty, _) = p.kind else { continue };
-            let forbidden = match ast.ty(ty) {
-                ast::Ty::Path(path) if path.no_qself() && path.segs.len() == 1 => {
-                    let n = f.text(ast.segs(path.segs)[0].name);
-                    match n {
-                        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "bool" | "char" => false,
-                        "f32" | "f64" | "str" => true,
-                        _ => {
-                            let sym = prog.syms.get(n).unwrap_or(u32::MAX);
-                            !params.iter().any(|q| f.text(q.name) == n)
-                                && prog.lookup_in_scope(prog.mods[def.scope as usize].normal, sym, true).is_some_and(|t| matches!(prog.def(t).kind, DefKind::Struct | DefKind::Enum | DefKind::Union))
-                        }
-                    }
-                }
-                ast::Ty::Ref(..) | ast::Ty::Tuple(_) | ast::Ty::Slice(_) | ast::Ty::Array(..) => true,
-                _ => false,
-            };
-            if forbidden {
-                let n = match ast.ty(ty) { ast::Ty::Path(path) => f.text(ast.segs(path.segs)[0].name).to_string(), _ => "this type".to_string() };
-                errors.push(prog.record_error(def.file, p.name.lo, "parse", format!("`{}` is forbidden as the type of a const generic parameter", n)));
-            }
         }
     }
     let has_default = |p: &crate::ast::GenericParam| matches!(p.kind, GenericParamKind::Type(_, Some(_)) | GenericParamKind::Const(_, Some(_)));

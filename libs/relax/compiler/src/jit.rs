@@ -8269,11 +8269,57 @@ unsafe fn build_rir_body(up: *mut Unit, id: u32, lowered: Option<relax_backend::
     let _census = relax_codegen::exec_census::Record::new(id, 0, "ahead", true);
     let session = unsafe { (*std::ptr::addr_of!((*up).prog.session)).clone() };
     let options = &session.options;
+    let given = lowered.is_some();
     let prep = prepare_rir_from(up, id, false, lowered, mode)?;
     let t0 = cpu_ns();
     let (func, inlined) = optimize_rir(options, id, prep.0)?;
-    store_rir(up, id, func, inlined, (cpu_ns() - t0) + prep.1);
+    let dt = cpu_ns() - t0;
+    if owner::is_owner() && owner::serving().0 == owner::Class::Publish {
+        let k = match (&*up).fns[id as usize].key { FnKey::Shim(_) => 0, FnKey::Inst(..) => 1, FnKey::Closure(..) => 2, FnKey::Glue(..) => 3, FnKey::Sandbox(_) => 4, FnKey::Plain(_) => 5 };
+        let i = (k * 2 + given as usize) * 3 + mode as usize;
+        let mut m = PUB_OPT.lock().unwrap_or_else(|e| e.into_inner());
+        let e = crate::zone_alloc::kept_with(|| m.get_or_insert_with(Default::default).entry((owner::serving_line(), BUILD_WHY.with(|w| w.get()) as usize * 100 + i)).or_insert((0, 0)) as *mut (u64, u64));
+        unsafe { (*e).0 += 1; (*e).1 += dt; }
+    }
+    store_rir(up, id, func, inlined, dt + prep.1);
     Ok(())
+}
+
+/// O1 optimisation run on the owner inside publishes (takes), by slot kind x RIR given (lowered
+/// off the owner) or lowered on the owner x mode: (count, ns). The run summary's `publish O1` line.
+static PUB_OPT: relax_session::sync::Mutex<Option<HashMap<(u32, usize), (u64, u64)>>> = relax_session::sync::Mutex::new(None);
+
+thread_local! {
+    /// (instrument) why the owner is building RIR: 1 build_rir_or_skip, 2 rir_for_fact, 3 a prepare's
+    /// candidate, 4 its upgrade (the outermost wins)
+    static BUILD_WHY: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+struct BuildWhy(bool);
+impl BuildWhy {
+    fn enter(w: u8) -> Self {
+        BuildWhy(BUILD_WHY.with(|c| if c.get() == 0 { c.set(w); true } else { false }))
+    }
+}
+impl Drop for BuildWhy {
+    fn drop(&mut self) {
+        if self.0 { BUILD_WHY.with(|c| c.set(0)); }
+    }
+}
+
+/// The run summary's line for PUB_OPT.
+pub(crate) fn publish_opt_summary() -> String {
+    const KINDS: [&str; 6] = ["shim", "inst", "closure", "glue", "sandbox", "plain"];
+    const MODES: [&str; 3] = ["tier0", "baseline", "normal"];
+    let mut rows: Vec<(u64, String)> = Vec::new();
+    let m = PUB_OPT.lock().unwrap_or_else(|e| e.into_inner());
+    for (&(line, i), &(n, ns)) in m.iter().flatten() {
+        let (why, i) = (i / 100, i % 100);
+        let (k, g, md) = (i / 6, (i / 3) % 2, i % 3);
+        rows.push((ns, format!("jit.rs:{} {} {} {} {} {}x {:.0} ms", line, ["other", "or_skip", "fact", "cand", "cand-up"][why], KINDS[k], if g == 1 { "given" } else { "taken" }, MODES[md], n, ns as f64 / 1e6)));
+    }
+    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    rows.truncate(12);
+    rows.into_iter().map(|r| r.1).collect::<Vec<_>>().join("; ")
 }
 
 /// What the optimisation of one function needs, taken under the unit lock: its lowered RIR,
@@ -8559,6 +8605,7 @@ unsafe fn prepare_rir_from(up: *mut Unit, id: u32, defer: bool, lowered: Option<
                         deferred.push((*c, attrs, p));
                     }
                 } else {
+                    let _w = BuildWhy::enter(3);
                     let _ = collect_fronts(&mut needs, || build_rir(up, *c));
                 }
                 nested_ns += cpu_ns() - tn;
@@ -8574,6 +8621,7 @@ unsafe fn prepare_rir_from(up: *mut Unit, id: u32, defer: bool, lowered: Option<
                         deferred.push((*c, attrs, p));
                     }
                 } else {
+                    let _w = BuildWhy::enter(4);
                     let _ = collect_fronts(&mut needs, || build_rir_mode(up, *c, RirMode::Normal));
                 }
                 nested_ns += cpu_ns() - tn;
@@ -8805,6 +8853,7 @@ unsafe fn rir_for_fact(up: *mut Unit, c: u32, mode: RirMode) -> Option<std::sync
             }
             return None;
         }
+        let _w = BuildWhy::enter(2);
         if e.rir.is_none() && build_rir_mode(up, c, mode).is_err() {
             return None;
         }
@@ -12713,6 +12762,16 @@ unsafe fn counted_build(up: *mut Unit, id: u32) -> bool {
         }
         prefront_slot(&front, id);
     }
+    // its O1 build (or the upgrade of baseline RIR it starts from) here, not in the take
+    if !owner::is_owner() {
+        let mode = owner::publish(|| if needs_rir(up) { Some(RirMode::Tier0) } else { (&*up).fns[id as usize].rir.as_ref().is_some_and(|r| upgradable(r)).then_some(RirMode::Normal) });
+        if let Some(m) = mode {
+            build_off_owner(up, &[(id, m)]);
+            if m == RirMode::Tier0 && owner::publish(|| (&*up).fns[id as usize].rir.as_ref().is_some_and(|r| upgradable(r))) {
+                build_off_owner(up, &[(id, RirMode::Normal)]);
+            }
+        }
+    }
     let begin = take_prefronted(&front, || {
         if needs_rir(up) {
             let _ = build_rir(up, id);
@@ -13360,7 +13419,8 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
     // normal RIR (the root's and the candidates'), and the root's own RIR. Each slot once per
     // snapshot; one tried already is built by the snapshot as before.
     let splits: std::cell::RefCell<Vec<(u32, RirMode)>> = Default::default();
-    let split_tried: std::cell::RefCell<std::collections::HashSet<u32>> = Default::default();
+    // (slot, upgrade): a slot's fresh O1 build and its upgrade are each tried once
+    let split_tried: std::cell::RefCell<std::collections::HashSet<(u32, bool)>> = Default::default();
     let splittable = |up: *mut Unit, c: u32| prefront && matches!(&(&*up).fns[c as usize].key, FnKey::Inst(d, _) if matches!((&*up).prog.def(*d).kind, DefKind::Fn | DefKind::AssocFn));
     // candidates a round left out (their build needed fronts): tried once more after those fronts,
     // then left out of this snapshot (every round walks the whole frontier again)
@@ -13390,7 +13450,7 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
         cost_name(up, id);
         compile_watch(Some((&format!("tier1 locked: {}", (&*up).fns[id as usize].name), 0)));
         if needs_rir(up) {
-            if splittable(up, id) && split_tried.borrow_mut().insert(id) {
+            if splittable(up, id) && split_tried.borrow_mut().insert((id, false)) {
                 splits.borrow_mut().push((id, RirMode::Tier0));
                 owner_ns.set(owner_ns.get() + cpu_ns() - s0);
                 return None;
@@ -13401,7 +13461,7 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
             TIER1_RIR_REBUILT[1].fetch_add(wall_ns() - t, Ordering::Relaxed);
         }
         if (&*up).fns[id as usize].rir.as_ref().is_some_and(|r| upgradable(r)) {
-            if splittable(up, id) && split_tried.borrow_mut().insert(id) {
+            if splittable(up, id) && split_tried.borrow_mut().insert((id, true)) {
                 splits.borrow_mut().push((id, RirMode::Normal));
                 owner_ns.set(owner_ns.get() + cpu_ns() - s0);
                 return None;
@@ -13495,7 +13555,7 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
         let u = &mut *up;
         u.sync_entry_ref(c);
         if u.fns[c as usize].rir.as_ref().is_some_and(|r| upgradable(r)) {
-            if splittable(up, c) && split_tried.borrow_mut().insert(c) {
+            if splittable(up, c) && split_tried.borrow_mut().insert((c, true)) {
                 splits.borrow_mut().push((c, RirMode::Normal));
             } else {
                 let _ = build_rir_or_skip(up, c, RirMode::Normal);
@@ -13542,6 +13602,11 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                         return;
                     }
                 }
+            }
+            // fronted already (a take's needs) but not built: its O1 build on this thread too
+            if splittable(up, c) && split_tried.borrow_mut().insert((c, false)) {
+                splits.borrow_mut().push((c, RirMode::Tier0));
+                return;
             }
             let t = wall_ns();
             compile_watch(Some((&format!("O3 snapshot: build_rir {}", u.fns[c as usize].name), 0)));
@@ -13795,6 +13860,7 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
     let mut ids = Vec::with_capacity(more.len() + ups.len());
     for (c, d, args) in more {
         fronted.insert(c);
+        split_tried.borrow_mut().insert((c, false));
         ids.push((c, RirMode::Tier0));
         let _preemptible = crate::preempt::Preemptible::on();
         typeck_ahead(&front, d, args, 1, false, true);
@@ -15300,6 +15366,28 @@ unsafe fn o3_candidates_begin(up: *mut Unit, ids: &[(u32, RirMode)]) -> (Vec<(u3
     (preps, gave)
 }
 
+/// O1 builds of `ids` off the owner (their fronts made ahead): prepared in a take (a publish), optimised on
+/// this thread, stored by a finish (a publish). Rule I-PUB: a background build's O1 optimisation never
+/// runs on the owner. What the take left out is left to the caller's own take.
+unsafe fn build_off_owner(up: *mut Unit, ids: &[(u32, RirMode)]) {
+    if owner::is_owner() || ids.is_empty() {
+        return;
+    }
+    let session = unsafe { (*std::ptr::addr_of!((*up).prog.session)).clone() };
+    let options = &session.options;
+    let epoch0 = PATCH_EPOCH.load(Ordering::SeqCst);
+    let Ok((preps, _)) = owner::publish_or_bail(|| o3_candidates_begin(up, ids)) else { return };
+    if preps.is_empty() {
+        return;
+    }
+    let mut done: Vec<Deferred> = Vec::new();
+    for (c, prep) in preps {
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| optimize_tree(options, c, prep, &mut done)));
+        if let Ok(r) = r { done.push((c, r)); }
+    }
+    owner::publish(|| o3_candidates_finish(up, epoch0, done));
+}
+
 /// Stores the RIR o3_candidates_begin's builds made off the owner (a publish), where nobody built
 /// it meanwhile and no patch landed since `epoch`: a fresh build where the slot still has no RIR,
 /// an upgrade where the slot's RIR is still upgradable (upgrade_replaces).
@@ -16685,6 +16773,7 @@ thread_local! {
 /// `build_rir_mode` inside a background build's take: a candidate whose front only the owner could
 /// run is left out (None; rule I-PURE: an O2/O3/PGO build goes on without it).
 unsafe fn build_rir_or_skip(up: *mut Unit, id: u32, mode: RirMode) -> Option<Result<(), String>> {
+    let _w = BuildWhy::enter(1);
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build_rir_mode(up, id, mode))) {
         Ok(r) => Some(r),
         Err(p) => match p.downcast::<crate::preempt::PublishBail>() {

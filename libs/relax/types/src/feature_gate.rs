@@ -1087,6 +1087,12 @@ impl<'a> Gates<'a> {
                 if segs.len() == 1 && self.pf.text(segs[0].name) == "cfg" {
                     self.cfg_gates(m.toks.lo as usize, m.toks.hi as usize);
                 }
+                // rustc_ast_lowering asm.rs lower_inline_asm: `options(may_unwind)` needs asm_unwind
+                if m.args != crate::ast::NO_MAC_ARGS {
+                    if let Some(asm) = ast.mac_arg(m.args).asm {
+                        if asm.options & crate::ast::ASM_MAY_UNWIND != 0 { self.gate("asm_unwind", ex.lo, "the `may_unwind` option is unstable"); }
+                    }
+                }
             }
             ExprKind::Continue(_) | ExprKind::Underscore => {}
             ExprKind::Closure(r) => {

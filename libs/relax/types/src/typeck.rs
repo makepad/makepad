@@ -5171,11 +5171,10 @@ impl<'a> Fcx<'a> {
                         unit
                     }
                     Some(x) => {
-                        // a diverging then-branch (`!`) is no hint for the else branch (F26)
-                        let stt = self.shallow(tt);
-                        // (a fn item / closure type is no hint: branches meet at a fn pointer)
-                        let fnish = matches!(self.tcx.tys.kind(stt), TyKind::FnDef(..) | TyKind::Closure(..));
-                        let hint = if stt == self.tcx.tys.never || fnish { expected } else { expected.or(Some(tt)) };
+                        // _match.rs check_then_else: the else branch has the `if`'s own expectation
+                        // (try_structurally_resolve_and_adjust_for_branches: none for a type
+                        // variable), not the then-branch's type; the branches meet in CoerceMany
+                        let hint = expected.filter(|t| !matches!(self.tcx.tys.kind(self.shallow(*t)), TyKind::Infer(_)));
                         self.soft = soft || expected.is_none();
                         let et = self.check_expr(*x, hint);
                         let else_div = self.diverges;
@@ -5196,7 +5195,12 @@ impl<'a> Fcx<'a> {
                             Some(crate::ast::Stmt::Expr(t2, false)) => vec![*t2],
                             _ => Vec::new(),
                         };
-                        self.coerce_many(&tail, tt, *x, et, lo)
+                        // (the error is at the else branch's value: its block's tail, rustc if_cause)
+                        let at = match self.ast().expr(*x).kind {
+                            ExprKind::Block(b, _) => match self.ast().stmts(b).last() { Some(crate::ast::Stmt::Expr(t2, false)) => self.ast().expr(*t2).lo, _ => self.ast().expr(*x).lo },
+                            _ => self.ast().expr(*x).lo,
+                        };
+                        self.coerce_many(&tail, tt, *x, et, at)
                     }
                 }
             }

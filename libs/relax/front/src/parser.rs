@@ -816,19 +816,26 @@ impl<'a> Parser<'a> {
                 self.pos += 2;
                 while self.kind() != T::CloseParen {
                     let t = self.bump();
-                    match self.text_of(t) {
-                        b"noreturn" => spec.options |= ASM_NORETURN,
-                        b"raw" => spec.options |= ASM_RAW,
-                        b"att_syntax" => spec.options |= ASM_ATT_SYNTAX,
-                        b"pure" => spec.options |= ASM_PURE,
-                        b"nomem" => spec.options |= ASM_NOMEM,
-                        b"readonly" => spec.options |= ASM_READONLY,
-                        b"preserves_flags" => spec.options |= ASM_PRESERVES_FLAGS,
-                        b"nostack" => spec.options |= ASM_NOSTACK,
-                        b"may_unwind" => spec.options |= ASM_MAY_UNWIND,
-                        b"," => {}
+                    let option = match self.text_of(t) {
+                        b"noreturn" => ASM_NORETURN,
+                        b"raw" => ASM_RAW,
+                        b"att_syntax" => ASM_ATT_SYNTAX,
+                        b"pure" => ASM_PURE,
+                        b"nomem" => ASM_NOMEM,
+                        b"readonly" => ASM_READONLY,
+                        b"preserves_flags" => ASM_PRESERVES_FLAGS,
+                        b"nostack" => ASM_NOSTACK,
+                        b"may_unwind" => ASM_MAY_UNWIND,
+                        b"," => continue,
                         _ => return self.err("unknown asm! option"),
+                    };
+                    // rustc_builtin_macros asm.rs validate_asm_args: an option given twice (in one
+                    // `options(..)` or across several)
+                    if spec.options & option != 0 && crate::lexer::validation_enabled() {
+                        let name = String::from_utf8_lossy(self.text_of(t)).into_owned();
+                        return Err(PErr { pos: t.lo, msg: format!("the `{}` option was already provided", name) });
                     }
+                    spec.options |= option;
                 }
                 self.expect(T::CloseParen)?;
             } else if self.is_word(0, b"clobber_abi") && self.nth(1) == T::OpenParen {
@@ -4911,6 +4918,10 @@ impl<'a> Parser<'a> {
             T::Ident | T::RawIdent | T::PathSep | T::Lt | T::Shl | T::KwSelfValue | T::KwSelfType | T::KwSuper | T::KwCrate => {
                 let path = self.path(true)?;
                 if self.kind() == T::Not && matches!(self.nth(1), T::OpenParen | T::OpenBracket | T::OpenBrace) {
+                    // rustc_parse expr.rs parse_expr_path_start: MacroInvocationWithQualifiedPath
+                    if !path.no_qself() && crate::lexer::validation_enabled() {
+                        return Err(PErr { pos: lo, msg: "macros cannot use qualified paths".to_string() });
+                    }
                     self.pos += 1;
                     let (delim, toks) = self.delim_tt()?;
                     if let Some(def) = self.rules_macro(&path) {
