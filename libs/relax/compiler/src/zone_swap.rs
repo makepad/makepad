@@ -372,7 +372,7 @@ fn swap(up: *mut Unit, n: u32) -> Outcome {
 
     // 3. the front images the store does not have yet
     let t = Instant::now();
-    let prepared = owner::call(owner::Class::App, || unsafe { prepare(up) });
+    let prepared = owner::call(owner::Class::Program, || unsafe { prepare(up) });
     let (spill, now) = match prepared {
         Ok(s) => s,
         Err(e) => return abort(format!("prepare: {e}")),
@@ -400,7 +400,7 @@ fn swap(up: *mut Unit, n: u32) -> Outcome {
         trace("the collected image is current: not encoded again");
     } else {
         let t = Instant::now();
-        let encoded = owner::call(owner::Class::App, || unsafe { encode(up, &pre, &extra) });
+        let encoded = owner::call(owner::Class::Program, || unsafe { encode(up, &pre, &extra) });
         let (dest, payload, _) = match encoded {
             Ok(x) => x,
             Err(e) => return abort(format!("encode: {e}")),
@@ -466,7 +466,7 @@ fn swap(up: *mut Unit, n: u32) -> Outcome {
     let t = Instant::now();
     // The snapshot owns old-arena pointers: forget it on this thread before commit destroys them.
     taken.forget();
-    let (chunks, touched, specs) = owner::call(owner::Class::App, || unsafe { commit(up, fresh) });
+    let (chunks, touched, specs) = owner::call(owner::Class::Program, || unsafe { commit(up, fresh) });
     tl.commit = ms(t);
     trace("commit done");
     crate::zone_alloc::kept_with(|| {

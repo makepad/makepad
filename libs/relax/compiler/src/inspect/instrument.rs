@@ -1028,7 +1028,7 @@ fn add_to(kind: Kind, target: Target, time: bool, low: bool) -> Result<(u32, Vec
         Target::Slot(id) => format!("slot#{}", id),
     };
     let group = NEXT_GROUP.fetch_add(1, SeqCst) as u32;
-    let r = crate::owner::call_within(crate::owner::Class::App, 10_000, move || -> Result<(u32, Vec<(u64, String, u32, String)>, Vec<String>), String> {
+    let r = crate::owner::call_within(crate::owner::Class::Program, 10_000, move || -> Result<(u32, Vec<(u64, String, u32, String)>, Vec<String>), String> {
         // the sites, groups and patch edits are kept state (the instrumented code calls into them
         // after a settle swap destroyed the compiler arena); patches::rebuild compiles in the
         // compiler phase
@@ -1122,7 +1122,7 @@ fn remove_rows(group: Option<u32>) -> Result<(usize, Vec<String>), String> {
     }
     let n = groups.len();
     let ids: Vec<u32> = groups.iter().map(|g| g.0).collect();
-    let r = crate::owner::call_within(crate::owner::Class::App, 10_000, move || {
+    let r = crate::owner::call_within(crate::owner::Class::Program, 10_000, move || {
         let _kept = crate::zone_alloc::kept();
         let mut rows = Vec::new();
         for g in ids {

@@ -263,7 +263,7 @@ fn eval_tokens(req: &Req, src: &str, expr: TokenStream, mutate: bool) -> Result<
     }
     let req2 = Req { cmd: req.cmd.clone(), pos: Vec::new(), kv: req.kv.clone() };
     let text = src.to_string();
-    let r = crate::owner::call_within(crate::owner::Class::App, 30_000, move || -> Result<(u64, bool, Place), String> {
+    let r = crate::owner::call_within(crate::owner::Class::Program, 30_000, move || -> Result<(u64, bool, Place), String> {
         let u = unsafe { &*up };
         let p = place(u, &req2)?;
         let (entry, raw) = compile(up, p.module, &text, &expr)?;
@@ -385,7 +385,7 @@ pub fn cmd_static(req: &Req, out: &mut Out) {
         return;
     }
     let req2 = Req { cmd: req.cmd.clone(), pos: Vec::new(), kv: req.kv.clone() };
-    let info = crate::owner::call_within(crate::owner::Class::App, 10_000, move || -> Result<StaticInfo, String> {
+    let info = crate::owner::call_within(crate::owner::Class::Program, 10_000, move || -> Result<StaticInfo, String> {
         use crate::types::TyKind;
         let u = unsafe { &mut *up };
         let d = static_named(u, &req2, &path)?;
@@ -529,7 +529,7 @@ pub fn cmd_locals(req: &Req, out: &mut Out) {
     let want: Option<usize> = req.get("frame").and_then(|f| f.parse().ok());
     // on the owner: frames, levels, the locals' bytes; Debug fns for their types
     let lab = label.clone();
-    let r = crate::owner::call_within(crate::owner::Class::App, 30_000, move || -> Result<(Vec<String>, Vec<(String, Vec<super::vars::Local>, Vec<Option<u64>>)>), String> {
+    let r = crate::owner::call_within(crate::owner::Class::Program, 30_000, move || -> Result<(Vec<String>, Vec<(String, Vec<super::vars::Local>, Vec<Option<u64>>)>), String> {
         let u = unsafe { &*up };
         let stop = match src {
             Src::Block(b) => super::vars::Stop::from_block(u, &b).ok_or("the register block is short")?,

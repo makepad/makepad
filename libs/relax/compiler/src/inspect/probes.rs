@@ -539,7 +539,7 @@ fn add(hook: &str, src: Vec<u8>, mutate: bool, low: bool) -> Result<(Arc<Probe>,
     let _ = std::fs::write(&path, &src);
     let hook = hook.to_string();
     let src_text = String::from_utf8_lossy(&src).into_owned();
-    let r = crate::owner::call_within(crate::owner::Class::App, 30_000, move || -> Result<(Arc<Probe>, Vec<String>, Vec<String>), String> {
+    let r = crate::owner::call_within(crate::owner::Class::Program, 30_000, move || -> Result<(Arc<Probe>, Vec<String>, Vec<String>), String> {
         let u = unsafe { &mut *up };
         let found = super::instrument::find_all(u, &hook, 8);
         if found.is_empty() {
@@ -719,7 +719,7 @@ fn remove_rows(id: Option<u32>) -> (usize, Vec<String>) {
         p.on.store(false, SeqCst);
     }
     let ids: Vec<u32> = take.iter().map(|p| p.id).collect();
-    let rows = crate::owner::call_within(crate::owner::Class::App, 10_000, move || {
+    let rows = crate::owner::call_within(crate::owner::Class::Program, 10_000, move || {
         let mut rows = Vec::new();
         for id in ids {
             let owner = super::patches::Owner::Probe(id);

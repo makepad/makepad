@@ -143,7 +143,7 @@ fn gandalf_live_edit_guard_and_reporting() {
     crate::borrowck::event::set_app_scope(roots);
     let mut u = crate::jit::Unit::new(prog, tcx, core);
     let up = &mut *u as *mut crate::jit::Unit;
-    let entry = crate::owner::call(crate::owner::Class::App, || {
+    let entry = crate::owner::call(crate::owner::Class::Program, || {
         let id = u.fn_id(crate::jit::FnKey::Inst(def, vec![]));
         u.entry(id)
     });
@@ -238,7 +238,7 @@ fn specv_patch_before_verdict() {
     crate::borrowck::event::set_app_scope(roots);
     let mut u = crate::jit::Unit::new(prog, tcx, core);
     let up = &mut *u as *mut crate::jit::Unit;
-    let (id, entry) = crate::owner::call(crate::owner::Class::App, || {
+    let (id, entry) = crate::owner::call(crate::owner::Class::Program, || {
         let id = u.fn_id(crate::jit::FnKey::Inst(def, vec![]));
         (id, u.entry(id))
     });
@@ -359,7 +359,7 @@ fn specv_aliased_call_from_unverified_body() {
     let mut u = crate::jit::Unit::new(prog, tcx, core);
     let up = &mut *u as *mut crate::jit::Unit;
     crate::syms::set_unit(up);
-    let ids = crate::owner::call(crate::owner::Class::App, || {
+    let ids = crate::owner::call(crate::owner::Class::Program, || {
         let c = u.fn_id(crate::jit::FnKey::Inst(callee_def, vec![]));
         let r = u.fn_id(crate::jit::FnKey::Inst(raw_def, vec![]));
         let v = u.fn_id(crate::jit::FnKey::Inst(value_def, vec![]));
@@ -367,10 +367,10 @@ fn specv_aliased_call_from_unverified_body() {
         (c, r, v, u.entry(r), u.entry(v), e, u.entry(e))
     });
     let (callee, raw, value, raw_entry, value_entry, early, early_entry) = ids;
-    let (value_ptr, value_dyn) = crate::owner::call(crate::owner::Class::App, || {
+    let (value_ptr, value_dyn) = crate::owner::call(crate::owner::Class::Program, || {
         (u.fn_id(crate::jit::FnKey::Inst(ptr_def, vec![])), u.fn_id(crate::jit::FnKey::Inst(dyn_def, vec![])))
     });
-    let (ptr_entry, dyn_entry) = crate::owner::call(crate::owner::Class::App, || (u.entry(value_ptr), u.entry(value_dyn)));
+    let (ptr_entry, dyn_entry) = crate::owner::call(crate::owner::Class::Program, || (u.entry(value_ptr), u.entry(value_dyn)));
     let run = |label: &str, entry, expected| {
         let mut result = 0u32;
         unsafe { crate::jit::call_jit(up, entry, &mut result as *mut u32 as u64) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
@@ -492,7 +492,7 @@ fn d3_disjoint_check_lowered_from_the_verdict() {
     let mut u = crate::jit::Unit::new(prog, tcx, core);
     let up = &mut *u as *mut crate::jit::Unit;
     for def in defs {
-    let (id, entry) = crate::owner::call(crate::owner::Class::App, || {
+    let (id, entry) = crate::owner::call(crate::owner::Class::Program, || {
         let id = u.fn_id(crate::jit::FnKey::Inst(def, vec![]));
         (id, u.entry(id))
     });
@@ -652,7 +652,7 @@ fn app_scope_live_layout_edits() {
     let mut u = jit::Unit::new(prog, tcx, core);
     let up = &mut *u as *mut jit::Unit;
     let entry = |u: &mut jit::Unit, d| {
-        crate::owner::call(crate::owner::Class::App, || {
+        crate::owner::call(crate::owner::Class::Program, || {
             let id = u.fn_id(FnKey::Inst(d, vec![]));
             u.entry(id)
         })
@@ -667,7 +667,7 @@ fn app_scope_live_layout_edits() {
     call(init, old_value.as_mut_ptr() as u64);
     call(value, old_value.as_mut_ptr() as u64);
     assert_eq!(old_value[layout.fields[0] as usize / 8], 42);
-    let (drop_id, drop_entry) = crate::owner::call(crate::owner::Class::App, || {
+    let (drop_id, drop_entry) = crate::owner::call(crate::owner::Class::Program, || {
         let drop_id = u.fn_id(FnKey::Glue(crate::jit::GLUE_DROP, ty));
         (drop_id, u.entry(drop_id))
     });
@@ -800,7 +800,7 @@ fn restored_images_take_live_edits() {
     drop(prog);
     let mut u = crate::jit::Unit::new(restored, restored_tcx, core);
     let up = &mut *u as *mut crate::jit::Unit;
-    let entry = crate::owner::call(crate::owner::Class::App, || {
+    let entry = crate::owner::call(crate::owner::Class::Program, || {
         let id = u.fn_id(crate::jit::FnKey::Inst(def, vec![]));
         u.entry(id)
     });

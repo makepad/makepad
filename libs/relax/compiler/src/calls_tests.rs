@@ -83,7 +83,7 @@ fn patched_callee_while_callers_run() {
     tcx.collect(&prog);
     let mut u = crate::jit::Unit::new(prog, tcx, core);
     let up = &mut *u as *mut crate::jit::Unit;
-    let (leaf, start, twos, finish) = crate::owner::call(crate::owner::Class::App, || {
+    let (leaf, start, twos, finish) = crate::owner::call(crate::owner::Class::Program, || {
         let leaf = u.fn_id(crate::jit::FnKey::Inst(d_leaf, vec![]));
         let e = |d| { let id = u.fn_id(crate::jit::FnKey::Inst(d, vec![])); u.entry(id) };
         (leaf, e(d_start), e(d_twos), e(d_finish))

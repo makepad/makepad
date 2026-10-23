@@ -424,7 +424,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     // of malloc free pages held after it)
     if compile { unsafe {
         let _job = jit::compile_job();
-        let mut d = crate::owner::call(crate::owner::Class::App, || jit::settle_drop(up));
+        let mut d = crate::owner::call(crate::owner::Class::Program, || jit::settle_drop(up));
         d.release_rir();
     } crate::memstat::trim(); }
     if crate::memstat::enabled() {
@@ -555,7 +555,7 @@ unsafe fn compile_all(up: *mut Unit, seeds: &[crate::program::DefId]) -> Vec<(u3
     // (and the run's speculative callee builds)
     jit::enable_pipelining(&(*up).prog.session.clone().options);
     // (slots made before the seeds -- the root's main, constants' readers -- are compiled too)
-    crate::owner::call(crate::owner::Class::App, || {
+    crate::owner::call(crate::owner::Class::Program, || {
         for &d in seeds {
             (&mut *up).fn_id(FnKey::Inst(d, Vec::new()));
         }
@@ -587,7 +587,7 @@ unsafe fn compile_all(up: *mut Unit, seeds: &[crate::program::DefId]) -> Vec<(u3
                     active.fetch_add(1, Ordering::SeqCst);
                     let pick = {
                         let _job = jit::compile_job();
-                        crate::owner::call(crate::owner::Class::App, || {
+                        crate::owner::call(crate::owner::Class::Program, || {
                             let n = (&(*up).fns).len();
                             let mut pick = None;
                             loop {
@@ -606,7 +606,7 @@ unsafe fn compile_all(up: *mut Unit, seeds: &[crate::program::DefId]) -> Vec<(u3
                     };
                     let Some(id) = pick else {
                         active.fetch_sub(1, Ordering::SeqCst);
-                        if active.load(Ordering::SeqCst) == 0 && next.load(Ordering::SeqCst) >= crate::owner::call(crate::owner::Class::App, || (&(*up).fns).len()) {
+                        if active.load(Ordering::SeqCst) == 0 && next.load(Ordering::SeqCst) >= crate::owner::call(crate::owner::Class::Program, || (&(*up).fns).len()) {
                             break;
                         }
                         std::thread::sleep(std::time::Duration::from_millis(2));
@@ -623,7 +623,7 @@ unsafe fn compile_all(up: *mut Unit, seeds: &[crate::program::DefId]) -> Vec<(u3
                     if n >= at + 2_000 && settled_at.compare_exchange(at, n, Ordering::AcqRel, Ordering::Relaxed).is_ok()
                         && crate::memstat::resident() as u64 > settled_rss.load(Ordering::Relaxed) + SETTLE_GROWTH {
                         let _job = jit::compile_job();
-                        let mut d = crate::owner::call(crate::owner::Class::App, || jit::settle_drop(up));
+                        let mut d = crate::owner::call(crate::owner::Class::Program, || jit::settle_drop(up));
                         d.release_rir();
                         crate::memstat::trim();
                         settled_rss.store(crate::memstat::resident() as u64, Ordering::Relaxed);
@@ -772,7 +772,7 @@ fn eval_items(up: *mut Unit, own: &[bool], tainted: &std::collections::HashSet<c
     for (d, is_static) in items {
         if tainted.contains(&d) || !u.tcx.typeck(&u.prog, d).errors.is_empty() { continue; }
         let before = unsafe { (&*up).errors.len() };
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::owner::call(crate::owner::Class::App, || unsafe {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::owner::call(crate::owner::Class::Program, || unsafe {
             let u = &mut *up;
             if is_static { u.static_addr(d); } else { u.const_addr(d, Vec::new()); }
         })));
@@ -803,7 +803,7 @@ fn mono_check(up: *mut Unit, own: &[bool], root: u32) {
     let limit = u.prog.crates[root as usize].recursion_limit as usize;
     let _job = jit::compile_job();
     // (instance, the instance it was reached from): the chain of a reached instance is its DFS stack
-    let mut work: Vec<(u32, Option<u32>)> = vec![(crate::owner::call(crate::owner::Class::App, || unsafe { (&mut *up).fn_id(FnKey::Inst(main, Vec::new())) }), None)];
+    let mut work: Vec<(u32, Option<u32>)> = vec![(crate::owner::call(crate::owner::Class::Program, || unsafe { (&mut *up).fn_id(FnKey::Inst(main, Vec::new())) }), None)];
     let mut parents: std::collections::HashMap<u32, Option<u32>> = std::collections::HashMap::new();
     while let Some((id, parent)) = work.pop() {
         if parents.contains_key(&id) { continue; }
@@ -831,7 +831,7 @@ fn mono_check(up: *mut Unit, own: &[bool], root: u32) {
                 continue;
             }
         }
-        let callees = crate::owner::call(crate::owner::Class::App, || unsafe {
+        let callees = crate::owner::call(crate::owner::Class::Program, || unsafe {
             if !mine { return Vec::new(); }
             // (a fn taking or returning a value of hundreds of MB is not lowered: its frame would
             // be allocated for real)

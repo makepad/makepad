@@ -268,8 +268,15 @@ pub fn set_ranks(src: usize, epoch: u64, ranks: &[(DefId, Vec<TyId>, u32)]) {
     let q = guard.get_or_insert_with(Queue::default);
     let epoch = q.canon(src, epoch);
     if !q.advance(src, epoch) { return; }
+    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let trace = *TRACE.get_or_init(|| std::env::var_os("MAKEPAD_RUN_SPECV_TRACE").is_some());
     for (def, _, rank) in ranks {
         let key = (src, *def, epoch);
+        if trace {
+            let state = if q.rank_of.contains_key(&key) { "queued" } else if q.seen.contains_key(&key) { "seen" } else { "not queued" };
+            let v = VERDICTS.lock().unwrap_or_else(|e| e.into_inner()).get(def).map(|m| m.len()).unwrap_or(0);
+            eprintln!("gandalf: rank {} for {:?} epoch {}: {} ({} verdict entries, {} items queued)", rank, def, epoch, state, v, q.order.len());
+        }
         if let Some(at) = q.rank_of.remove(&key) {
             q.order.remove(&at);
             let item = q.items.remove(&at).unwrap();
@@ -563,7 +570,9 @@ fn worker(src: Arc<dyn FrontSource>, verbose: bool) {
     loop {
         if stopping() { return; }
         let quiet = src.quiet_ns();
-        if quiet < QUIET_NS {
+        // rank 0 (hot code waiting for its verdict, set_ranks) runs while compiles go on
+        let urgent = || QUEUE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|q| q.order.first()).is_some_and(|a| a.0 == 0);
+        if quiet < QUIET_NS && !urgent() {
             std::thread::sleep(std::time::Duration::from_millis(((QUIET_NS - quiet) / 1_000_000).clamp(20, 500)));
             continue;
         }

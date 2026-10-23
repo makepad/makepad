@@ -195,7 +195,7 @@ fn owner_front_write_serves_waiting_readers() {
     ready_rx.recv().unwrap();
     // without the pump the two wait for each other forever (the test hangs, which the harness
     // reports); how long the serving takes is the machine's (a JIT-run test compiles on first use)
-    crate::owner::call(crate::owner::Class::App, || {
+    crate::owner::call(crate::owner::Class::Program, || {
         let _writer = front_write();
     });
     reader.join().unwrap();
@@ -207,7 +207,7 @@ fn allocator_swap_serves_background_finish() {
     // A background build's job (O2, speculation, O3) that reaches its finish while an allocator
     // swap pauses the jobs: the finish keeps the job running (Class::keeps_job), so the owner
     // serves it for the job's thread and the swap's wait ends. Held back, the swap waited forever.
-    crate::owner::call(crate::owner::Class::App, || {});
+    crate::owner::call(crate::owner::Class::Program, || {});
     let (began_tx, began_rx) = std::sync::mpsc::channel();
     let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
     let job = std::thread::spawn(move || {
@@ -280,7 +280,7 @@ fn main() {}
     let mut entry = None;
     let mut first_slot = None;
     let mut initial_slot = None;
-    let id = crate::owner::call(crate::owner::Class::App, || {
+    let id = crate::owner::call(crate::owner::Class::Program, || {
         let id = u.fn_id(FnKey::Inst(def, Vec::new()));
         assert!(relax_level(&u, id) < 3, "the fixture must be unmarked");
         let mut cache = crate::cache::Cache::open(&u, crate::cache::Mode::ReadOnly).unwrap();
@@ -314,13 +314,16 @@ fn main() {}
             .unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
         assert_eq!(result, 19900);
         assert!(unsafe { compile_tier1(up, id) });
-        let recorded = crate::owner::call(crate::owner::Class::App, || {
+        let recorded = crate::owner::call(crate::owner::Class::Program, || {
+            // (an O3 install's record is encoded in the record batches)
+            u.flush_cache_records();
             let recorded = u.cache.as_ref().unwrap().stats.recorded;
             // A retier replaces the first O3 entry too.
             recorded
         });
         assert!(unsafe { compile_tier1(up, id) });
-        let spill = crate::owner::call(crate::owner::Class::App, || {
+        let spill = crate::owner::call(crate::owner::Class::Program, || {
+            u.flush_cache_records();
             assert_eq!(u.cache.as_ref().unwrap().stats.recorded, recorded + 1);
             let mut cache = u.cache.take().unwrap();
             let recorded = cache.stats.recorded;
@@ -388,7 +391,7 @@ fn unrelated(x: u32) -> u32 { x + 1 }
     assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
     let mut u = Unit::new(prog, tcx, core);
     let up = &mut *u as *mut Unit;
-    let (id, file, first, spill) = crate::owner::call(crate::owner::Class::App, || {
+    let (id, file, first, spill) = crate::owner::call(crate::owner::Class::Program, || {
         let id = u.fn_id(FnKey::Inst(def, Vec::new()));
         let file = u.prog.def(def).file;
         let first = unsafe { compile_fn(up, id) }.unwrap();
@@ -435,7 +438,7 @@ fn unrelated(x: u32) -> u32 { x + 1 }
         (id, file, first, spill)
     });
     assert!(spill.write().unwrap() > 0);
-    let (mut verify, rir, calls, closure, closure_rir, mut dropped, retired) = crate::owner::call(crate::owner::Class::App, || {
+    let (mut verify, rir, calls, closure, closure_rir, mut dropped, retired) = crate::owner::call(crate::owner::Class::Program, || {
         let mut verify = crate::cache::Cache::open(&u, crate::cache::Mode::Verify).unwrap();
         assert!(matches!(verify.lookup(&mut u, id), Some(_)), "verification must have a real disk entry");
         let rir = u.fns[id as usize].rir.as_ref().unwrap().dump();
@@ -504,7 +507,7 @@ fn unrelated(x: u32) -> u32 { x + 1 }
         (verify, rir, calls, closure, closure_rir, dropped, retired)
     });
     dropped.release_rir();
-    crate::owner::call(crate::owner::Class::App, || {
+    crate::owner::call(crate::owner::Class::Program, || {
         assert!(retired.upgrade().is_none(), "retired RIR must actually be released off the unit lock");
         assert_eq!(u.fns[id as usize].calls, calls);
         assert!(!u.has_body(id, file));
@@ -518,7 +521,7 @@ fn unrelated(x: u32) -> u32 { x + 1 }
         unsafe { settle_drop(up) };
     });
     assert!(unsafe { compile_tier1(up, id) }, "O3 must rebuild settled RIR");
-    crate::owner::call(crate::owner::Class::App, || {
+    crate::owner::call(crate::owner::Class::Program, || {
         unsafe { settle_drop(up) };
         assert!(!u.has_body(id, file));
     });
@@ -527,7 +530,7 @@ fn unrelated(x: u32) -> u32 { x + 1 }
         file, path: path.to_str().unwrap().to_string(), src: source.replace("*v + 7", "*v + 9").into_bytes(),
     }]) };
     assert_eq!(outcome.rung, crate::reload::Rung::Patch, "{:?}", outcome.lines);
-    crate::owner::call(crate::owner::Class::App, || {
+    crate::owner::call(crate::owner::Class::Program, || {
         assert!(u.has_body(id, file), "reload must preserve the old closure owner");
         u.fns[closure as usize].rir = None;
         unsafe { build_rir(up, closure) }.unwrap();
@@ -598,12 +601,12 @@ fn round42_const_and_build_cancellation_are_retryable() {
             assert!(u.errors.is_empty());
         };
         // depth 0: no unit call; depth 2: two nested ones
-        if depth == 0 { body() } else { crate::owner::call(crate::owner::Class::App, || crate::owner::call(crate::owner::Class::App, body)) }
+        if depth == 0 { body() } else { crate::owner::call(crate::owner::Class::Program, || crate::owner::call(crate::owner::Class::Program, body)) }
     }
     u.tcx.const_eval_provider = Some(original);
     let value = u.tcx.const_eval_resolve(&u.prog, env, value, &[]).unwrap();
     assert_eq!(value.try_to_leaf().unwrap().to_bits(4), 3);
-    crate::owner::call(crate::owner::Class::App, || {
+    crate::owner::call(crate::owner::Class::Program, || {
         let id = u.fn_id(FnKey::Inst(target, vec![]));
         let writer = crate::preempt::WriterWaiting::new();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -830,7 +833,7 @@ fn deferred_cache_record_is_dropped_when_a_source_changed() {
     tcx.collect(&prog);
     let mut u = Unit::new(prog, tcx, core);
     let up = &mut *u as *mut Unit;
-    crate::owner::call(crate::owner::Class::App, || {
+    crate::owner::call(crate::owner::Class::Program, || {
         let id = u.fn_id(FnKey::Inst(def, Vec::new()));
         let mut cache = crate::cache::Cache::open(&u, crate::cache::Mode::ReadOnly).unwrap();
         cache.mode = crate::cache::Mode::On;

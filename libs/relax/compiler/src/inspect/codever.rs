@@ -777,7 +777,7 @@ pub fn cmd_tier(req: &Req, out: &mut Out) {
     }
     let qq = q.clone();
     // on the owner: the targets, the old pins gone, the o1 pin's rebuilds; for o3 the slots to build
-    let r = crate::owner::call_within(crate::owner::Class::App, 30_000, move || -> Result<(Vec<String>, Vec<u32>), String> {
+    let r = crate::owner::call_within(crate::owner::Class::Program, 30_000, move || -> Result<(Vec<String>, Vec<u32>), String> {
         let _kept = crate::zone_alloc::kept();
         let u = unsafe { &mut *up };
         let mut found: Vec<(u32, Option<u32>)> = super::instrument::find_all(u, &qq, 16).into_iter().map(|x| (x.0, x.1)).collect();
@@ -891,9 +891,9 @@ pub fn cmd_tier(req: &Req, out: &mut Out) {
                 let up = upv as *mut Unit;
                 let mut rows = Vec::new();
                 for id in list {
-                    let before = crate::owner::call(crate::owner::Class::App, || snapshot(unsafe { &*up }, id));
+                    let before = crate::owner::call(crate::owner::Class::Program, || snapshot(unsafe { &*up }, id));
                     let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { crate::jit::compile_tier1(up, id) })).unwrap_or(false);
-                    let row = crate::owner::call(crate::owner::Class::App, || {
+                    let row = crate::owner::call(crate::owner::Class::Program, || {
                         let u = unsafe { &*up };
                         let r: Result<bool, String> = if ok { Ok(true) } else { Err("the O3 build was dropped (not verified, instrumented by a probe, outdated, or failed: MAKEPAD_RUN_TIER1_TRACE=1 says why)".into()) };
                         let mut s = format!("{{\"o3\":{},\"slot\":{},\"installed\":{},{}", json_str(&short(&super::display_name(u, id, 0), 160)), id, ok, patched_row(u, id, &before, &r));

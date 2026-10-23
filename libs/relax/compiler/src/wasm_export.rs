@@ -964,7 +964,7 @@ fn keep_closure(funcs: &mut BTreeMap<u32, Func>, u: &Unit) -> (std::collections:
         if funcs.contains_key(&id) || (id as usize) >= u.fns.len() {
             continue;
         }
-        let r = crate::owner::call(crate::owner::Class::App, || crate::zone_alloc::kept_with(|| unsafe { crate::jit::export_rir(up, id) }));
+        let r = crate::owner::call(crate::owner::Class::Program, || crate::zone_alloc::kept_with(|| unsafe { crate::jit::export_rir(up, id) }));
         match r {
             Ok(f) => {
                 callees(&f, &mut work);

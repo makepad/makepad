@@ -348,6 +348,8 @@ pub(crate) struct PendingRecord {
     deps: Vec<u32>,
     /// jit::patch_epoch() at the install: a record is encoded only against the sources it was built from
     epoch: u64,
+    /// O3 code: its inlined slots and nounwind inputs (`record_o3`)
+    o3: Option<(Vec<u32>, Vec<(u32, bool)>)>,
 }
 
 /// Is a deferred record still describing the sources its code was built from?
@@ -2267,6 +2269,27 @@ impl Cache {
             baseline: rir.is_some_and(|r| r.baseline),
             deps: record_deps(u, id, &[]),
             epoch: crate::jit::patch_epoch(),
+            o3: None,
+        })
+    }
+
+    /// `record_o3`'s inputs for an encoding later (the O3 install is a publish: the record's key and
+    /// certificate encoding runs in the bounded record batches instead). None: it would store nothing.
+    pub(crate) fn defer_record_o3(&self, u: &Unit, id: u32, code: &[u8], relocs: &[RelocAt], pc_map: &[(u32, u64)], inlined: &[u32], nounwind: &[(u32, bool)]) -> Option<PendingRecord> {
+        if self.mode == Mode::ReadOnly || u.fns[id as usize].patch_gen != 0 {
+            return None;
+        }
+        let extra: Vec<u32> = inlined.iter().copied().chain(nounwind.iter().filter(|x| x.1).map(|x| x.0)).collect();
+        Some(PendingRecord {
+            id,
+            code: code.to_vec(),
+            relocs: relocs.to_vec(),
+            pc_map: pc_map.to_vec(),
+            nounwind: nounwind.to_vec(),
+            baseline: false,
+            deps: record_deps(u, id, &extra),
+            epoch: crate::jit::patch_epoch(),
+            o3: Some((inlined.to_vec(), nounwind.to_vec())),
         })
     }
 
@@ -2278,7 +2301,8 @@ impl Cache {
             return;
         }
         let previous = std::mem::replace(&mut self.recording_pending, true);
-        self.record_entry(u, p.id, &p.code, &p.relocs, &p.pc_map, None, false, Some(p));
+        let o3 = p.o3.as_ref().map(|(i, n)| (i.as_slice(), n.as_slice()));
+        self.record_entry(u, p.id, &p.code, &p.relocs, &p.pc_map, o3, false, Some(p));
         self.recording_pending = previous;
     }
 
@@ -2291,15 +2315,6 @@ impl Cache {
         // downgrade its entry, even when that O3 build itself was too large to cache.
         if u.fns[id as usize].o3.load(std::sync::atomic::Ordering::Relaxed) { return; }
         self.record_entry(u, id, code, relocs, pc_map, None, true, None)
-    }
-
-    /// Records installed O3 code (marked or hot) as the slot's ordinary entry (its O1 key,
-    /// replacing O1/O2 or an earlier O3 build), with its inlined slots and nounwind inputs.
-    /// A warm launch links O3 code at the first call. Not a deferred (big-frame) build: it must not run
-    /// from the first call (jit.rs keeps it out). Like O2, it rewrites the startup image and
-    /// buffers the entry for the monitor's spill / exit flush; no store write on this thread.
-    pub fn record_o3(&mut self, u: &Unit, id: u32, code: &[u8], relocs: &[RelocAt], pc_map: &[(u32, u64)], inlined: &[u32], nounwind: &[(u32, bool)]) {
-        self.record_entry(u, id, code, relocs, pc_map, Some((inlined, nounwind)), false, None)
     }
 
     #[allow(clippy::too_many_arguments)]

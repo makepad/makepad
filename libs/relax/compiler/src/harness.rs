@@ -112,7 +112,7 @@ fn run_crate(u: &mut Unit, up: *mut Unit, krate: u32) -> Result<i32, String> {
     let found = collect(&u.prog, &[krate]);
     let main = find_fn(u, "std::relax::test::main").ok_or("std has no relax::test::main (the test harness)")?;
     let start = find_fn(u, "std::relax::test::__relax_test_start");
-    let (addrs, main_entry) = crate::owner::call(crate::owner::Class::App, || -> Result<_, String> {
+    let (addrs, main_entry) = crate::owner::call(crate::owner::Class::Program, || -> Result<_, String> {
         let mut addrs = Vec::with_capacity(found.len());
         for t in &found {
             let ret = u.tcx.fn_sig(&u.prog, t.def).map(|s| s.ret);

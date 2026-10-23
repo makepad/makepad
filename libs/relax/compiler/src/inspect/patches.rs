@@ -236,7 +236,7 @@ pub fn code_installed(u: &crate::jit::Unit, id: u32) {
         first
     };
     if first {
-        crate::owner::post(crate::owner::Class::App, || {
+        crate::owner::post(crate::owner::Class::Program, || {
             let up = crate::jit::current_unit();
             if !up.is_null() {
                 unsafe { cover_new_inliners(up) };
@@ -295,7 +295,7 @@ pub fn replaced(id: u32, sibling: Option<u32>) {
         first
     };
     if first {
-        crate::owner::post(crate::owner::Class::App, || {
+        crate::owner::post(crate::owner::Class::Program, || {
             let up = crate::jit::current_unit();
             if !up.is_null() {
                 unsafe { reinstrument_replaced(up) };

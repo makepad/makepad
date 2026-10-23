@@ -87,7 +87,7 @@ fn inlined_fn_versions_probes_and_pins() {
     assert!(u.tier1.is_some(), "the fixture needs O3");
 
     // ---- O1: every slot gets fresh O1 code; the callers' O1 code inlines leaf
-    let (leaf, caller, caller2, caller3, pre3) = crate::owner::call(crate::owner::Class::App, || {
+    let (leaf, caller, caller2, caller3, pre3) = crate::owner::call(crate::owner::Class::Program, || {
         let ids: Vec<u32> = [leaf_d, caller_d, caller2_d].iter().map(|d| u.fn_id(FnKey::Inst(*d, Vec::new()))).collect();
         for &id in &ids {
             let c = unsafe { compile_fn(up, id) }.unwrap();
@@ -102,13 +102,13 @@ fn inlined_fn_versions_probes_and_pins() {
         (ids[0], ids[1], ids[2], c3, pre3)
     });
     assert_eq!(unsafe { run(up, caller) }, 9984);
-    let o1_inlines = crate::owner::call(crate::owner::Class::App, || holds_leaf(&u, caller, leaf));
+    let o1_inlines = crate::owner::call(crate::owner::Class::Program, || holds_leaf(&u, caller, leaf));
     eprintln!("inspect-tiers: caller's O1 code {} leaf", if o1_inlines { "inlines" } else { "calls" });
 
     // ---- O3: the caller's O3 code inlines leaf; its O1 body is retired, still described as O1
     let o1_start = u.fns[caller as usize].code;
     assert!(unsafe { compile_tier1(up, caller) }, "O3 build of caller");
-    let o3_start = crate::owner::call(crate::owner::Class::App, || {
+    let o3_start = crate::owner::call(crate::owner::Class::Program, || {
         let k = kind_now(&u, caller);
         assert_eq!((k.tier_name(), k.origin_name()), ("O3", "fresh"));
         assert_eq!(codever::kind_at(&u, o1_start).tier_name(), "O1", "the retired body keeps its kind");
@@ -158,7 +158,7 @@ fn inlined_fn_versions_probes_and_pins() {
     let (group, sites, inliners) = crate::inspect::instrument::count_for_test("inspect_tiers::leaf").unwrap();
     eprintln!("inspect-tiers count rows: {:?} {:?}", sites, inliners);
     let site = sites.iter().find(|s| s.2 == leaf).expect("leaf's site").0;
-    crate::owner::call(crate::owner::Class::App, || {
+    crate::owner::call(crate::owner::Class::Program, || {
         let k = kind_now(&u, leaf);
         assert_eq!((k.tier_name(), k.origin_name()), ("instrumented", "inspect"));
         let k = kind_now(&u, caller);
@@ -178,7 +178,7 @@ fn inlined_fn_versions_probes_and_pins() {
     assert_eq!(crate::inspect::instrument::site_hits_for_test(site), 110);
 
     // ---- a later build (O1, then O3) of another caller does not inline the counted fn
-    let caller4 = crate::owner::call(crate::owner::Class::App, || {
+    let caller4 = crate::owner::call(crate::owner::Class::Program, || {
         let id = u.fn_id(FnKey::Inst(caller4_d, Vec::new()));
         let c = unsafe { compile_fn(up, id) }.unwrap();
         u.install(id, &c.0, &c.2, c.1, 0).unwrap();
@@ -186,7 +186,7 @@ fn inlined_fn_versions_probes_and_pins() {
         id
     });
     assert!(unsafe { compile_tier1(up, caller4) }, "O3 build of caller4");
-    crate::owner::call(crate::owner::Class::App, || {
+    crate::owner::call(crate::owner::Class::Program, || {
         assert_eq!(kind_now(&u, caller4).tier_name(), "O3");
         assert!(!holds_leaf(&u, caller4, leaf), "new O3 code calls the counted leaf");
     });
@@ -196,7 +196,7 @@ fn inlined_fn_versions_probes_and_pins() {
     assert!(!unsafe { compile_tier1(up, caller) }, "caller stays as inspect rebuilt it");
 
     // ---- an install that brings an inlined copy (built before the probe) is rebuilt too
-    let had_copy = crate::owner::call(crate::owner::Class::App, || {
+    let had_copy = crate::owner::call(crate::owner::Class::Program, || {
         let map = PcMap::new(&pre3.1);
         let lines = codever::target_lines(&u, &[(leaf, None)]);
         let had = codever::map_holds(&u, &map, &lines);
@@ -204,8 +204,8 @@ fn inlined_fn_versions_probes_and_pins() {
         had
     });
     // (the rebuild is posted to the owner: one more owner call runs it)
-    crate::owner::call(crate::owner::Class::App, || {});
-    crate::owner::call(crate::owner::Class::App, || {
+    crate::owner::call(crate::owner::Class::Program, || {});
+    crate::owner::call(crate::owner::Class::Program, || {
         if had_copy {
             assert!(patches::active(caller3), "caller3 was rebuilt for the probe");
             assert!(!holds_leaf(&u, caller3, leaf));
@@ -220,7 +220,7 @@ fn inlined_fn_versions_probes_and_pins() {
 
     // ---- rm: caller's O3 code (the same version) comes back, leaf its O1 code
     crate::inspect::instrument::remove_for_test(group).unwrap();
-    crate::owner::call(crate::owner::Class::App, || {
+    crate::owner::call(crate::owner::Class::Program, || {
         assert_eq!(u.fns[caller as usize].code, o3_start, "the O3 version is back");
         assert_eq!(kind_now(&u, caller).tier_name(), "O3");
         assert_eq!(kind_now(&u, leaf).tier_name(), "O1");
@@ -231,13 +231,13 @@ fn inlined_fn_versions_probes_and_pins() {
     // ---- tier leaf o1: leaf and its inliner run at O1; no O3 build replaces them; unpinned the O3
     // code comes back
     let pin = patches::Owner::Pin(9001);
-    let rows = crate::owner::call(crate::owner::Class::App, || unsafe {
+    let rows = crate::owner::call(crate::owner::Class::Program, || unsafe {
         let _k = crate::zone_alloc::kept();
         assert!(patches::add(up, leaf, pin, patches::Edit::Pin).unwrap());
         codever::cover_inliners(up, pin, &[(leaf, None)], true)
     });
     eprintln!("inspect-tiers pin rows: {:?}", rows);
-    crate::owner::call(crate::owner::Class::App, || {
+    crate::owner::call(crate::owner::Class::Program, || {
         let k = kind_now(&u, caller);
         assert_eq!((k.tier_name(), k.origin_name()), ("O1", "inspect"), "the inliner is pinned at O1");
         assert!(patches::pinned(caller) && patches::pinned(leaf));
@@ -248,7 +248,7 @@ fn inlined_fn_versions_probes_and_pins() {
     });
     assert_eq!(unsafe { run(up, caller) }, 9984);
     assert!(!unsafe { compile_tier1(up, caller) }, "a pinned slot gets no O3 code");
-    crate::owner::call(crate::owner::Class::App, || unsafe {
+    crate::owner::call(crate::owner::Class::Program, || unsafe {
         let _k = crate::zone_alloc::kept();
         patches::remove_owner(up, pin);
         assert_eq!((&*up).fns[caller as usize].code, o3_start, "unpinned: the O3 version is back");
@@ -257,7 +257,7 @@ fn inlined_fn_versions_probes_and_pins() {
 
     // ---- tier caller o3 fresh: a new O3 version, described as such
     assert!(unsafe { compile_tier1(up, caller) });
-    crate::owner::call(crate::owner::Class::App, || {
+    crate::owner::call(crate::owner::Class::Program, || {
         let now = u.fns[caller as usize].code;
         assert_ne!(now, o3_start, "a fresh O3 version");
         assert_eq!(kind_now(&u, caller).tier_name(), "O3");
@@ -269,7 +269,7 @@ fn inlined_fn_versions_probes_and_pins() {
     // keeps its tier; `tier=o1` is the explicit lower tier
     let (_, sites, _) = crate::inspect::instrument::count_for_test("inspect_tiers::caller").unwrap();
     let site = sites.iter().find(|s| s.2 == caller).expect("caller's site").0;
-    crate::owner::call(crate::owner::Class::App, || {
+    crate::owner::call(crate::owner::Class::Program, || {
         let k = kind_now(&u, caller);
         assert_eq!((k.tier_name(), k.origin_name()), ("O3-instrumented", "inspect"), "{:?}", sites);
         assert!(!sites.iter().any(|s| s.3.contains("\"note\"")), "{:?}", sites);

@@ -91,7 +91,7 @@ pub(super) fn code_installed(u: &crate::jit::Unit, id: u32) {
         first
     };
     if first {
-        crate::owner::post(crate::owner::Class::App, || {
+        crate::owner::post(crate::owner::Class::Program, || {
             let up = crate::jit::current_unit();
             if !up.is_null() {
                 unsafe { arm_new(up) };
@@ -294,7 +294,7 @@ fn add(query: &str) -> Result<(Arc<Watch>, Vec<String>), String> {
         return Err("no running unit".into());
     }
     let q = query.to_string();
-    let r = crate::owner::call_within(crate::owner::Class::App, 60_000, move || -> Result<(Arc<Watch>, Vec<String>), String> {
+    let r = crate::owner::call_within(crate::owner::Class::Program, 60_000, move || -> Result<(Arc<Watch>, Vec<String>), String> {
         let u = unsafe { &*up };
         let fields = fields_named(u, &q)?;
         let fname = q.rsplit("::").next().unwrap_or("").to_string();
@@ -416,7 +416,7 @@ pub fn cmd(req: &Req, out: &mut Out) {
                 count_pending(&ws);
             }
             let n = ids.len();
-            let _ = crate::owner::call_within(crate::owner::Class::App, 20_000, move || {
+            let _ = crate::owner::call_within(crate::owner::Class::Program, 20_000, move || {
                 for id in ids {
                     unsafe { super::patches::remove_owner(up, super::patches::Owner::Watch(id)) };
                 }

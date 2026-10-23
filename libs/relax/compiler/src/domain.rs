@@ -1046,7 +1046,7 @@ fn start_prepared(up: *mut Unit, spec: AppSpec, id: DomainId) -> Result<DomainId
     let t1 = std::time::Instant::now();
     let upn = up as usize;
     // the owner thread: the program's tables change there
-    let loaded = crate::owner::call(crate::owner::Class::App, || unsafe { load_graph(upn as *mut Unit, &g, &order, &cfgs, &idents, id, !from_boot) });
+    let loaded = crate::owner::call(crate::owner::Class::Program, || unsafe { load_graph(upn as *mut Unit, &g, &order, &cfgs, &idents, id, !from_boot) });
     let (root, n_reused, new_names, first_file) = match loaded {
         Ok(x) => x,
         Err(e) => return fail(id, e),
@@ -1066,7 +1066,7 @@ fn start_prepared(up: *mut Unit, spec: AppSpec, id: DomainId) -> Result<DomainId
         std::thread::spawn(crate::memstat::trim);
     }
     if compile_phase(id, "main").is_err() { return Ok(id); }
-    let prepared = crate::owner::call(crate::owner::Class::App, || unsafe {
+    let prepared = crate::owner::call(crate::owner::Class::Program, || unsafe {
         if cancelled(id) { return Err("domain compilation cancelled".into()); }
         let u = &mut *(upn as *mut Unit);
         if crate::run::app_domain() == Some(id) { crate::layout::set_root_crate(root); }

@@ -91,7 +91,7 @@ fn call_traced<R>(at: &'static str, f: impl FnOnce() -> R) -> R {
     let traced = TRACE.with(|s| s.started.is_some());
     let holder = if traced { Some(crate::owner::serving_note()) } else { None };
     let t = Instant::now();
-    crate::owner::call(crate::owner::Class::App, || {
+    crate::owner::call(crate::owner::Class::Program, || {
         let waited = t.elapsed().as_secs_f64() * 1e3;
         if let Some(h) = holder.filter(|_| waited > 5.0) {
             eprintln!("reload-trace: unit call wait {waited:.1} ms before {at}: the owner was serving {h}");
@@ -442,7 +442,7 @@ fn publish_reload(u: &mut Unit, versions: &[(u32, u32)], full: bool, scope: Opti
 /// to their previous code, the files to their previous versions, the consts to their previous
 /// values. Returns the rolled-back functions' names. The caller makes a unit call.
 pub unsafe fn rollback(up: *mut Unit, undo: Undo) -> Vec<String> {
-    crate::owner::call(crate::owner::Class::App, || {
+    crate::owner::call(crate::owner::Class::Program, || {
         let u = &mut *up;
         u.flush_cache_records();
         jit::bump_patch_epoch();
@@ -2040,7 +2040,7 @@ unsafe fn apply_mode(up: *mut Unit, edits: Vec<Edit>, partial: u8, module: bool)
             Outcome { kept: 0, pending: false, rung: Rung::Restart, files, lines: vec![format!("internal compiler error applying the edit: {} -- makepad run bug, report it; restart the app", msg)], names: Vec::new(), changed: 0, group: 0, ms: [0.0; 4], undo: None, work: [0; 5] }
         }
     };
-    crate::owner::call(crate::owner::Class::App, || {
+    crate::owner::call(crate::owner::Class::Program, || {
         (*up).reload_rir = None;
         jit::close_patch();
     });
@@ -3535,7 +3535,7 @@ pub(crate) fn settle_verdicts(up: *mut Unit, pending: &mut Vec<PendingPatch>, un
         // Some(None): verified, Some(Some(events)): rejected, None: not yet
         let mut unchecked: Vec<String> = Vec::new();
         let state: Option<Option<Vec<crate::borrowck::event::GandalfEvent>>> = unsafe {
-            crate::owner::call(crate::owner::Class::App, || {
+            crate::owner::call(crate::owner::Class::Program, || {
                 let u = &*up;
                 let mut failed = Vec::new();
                 let mut waiting = false;
@@ -3865,7 +3865,7 @@ fn idle_outcome(file: Option<u32>, line: &str) -> Outcome {
 }
 
 unsafe fn stream_file(up: *mut Unit, path: &str) -> Option<u32> {
-    crate::owner::call(crate::owner::Class::App, || {
+    crate::owner::call(crate::owner::Class::Program, || {
         let prog = &(&*up).prog;
         prog.mods.iter().map(|m| m.file).find(|&f| prog.file_paths[f as usize] == path)
     })
@@ -3969,7 +3969,7 @@ unsafe fn drain_streams(up: *mut Unit) {
             s.reported = true;
             if let Some((file, path)) = target_file(up, target) {
                 let seen = Instant::now();
-                let (parsed, composed) = crate::owner::call(crate::owner::Class::App, || {
+                let (parsed, composed) = crate::owner::call(crate::owner::Class::Program, || {
                     let parsed = (&*up).prog.parse_version(file, &path, s.text.clone());
                     // A stall is diagnostic, not an instruction to delete the unstreamed tail.
                     let composed = if parsed.is_ok() && (path.ends_with(".rs") || matches!(target, StreamTarget::Module(_))) {
@@ -4106,7 +4106,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs, quiet: bool) {
     };
     // (the watcher's holds read the program's files only: lock_unit_quick)
     let mut files: Vec<(String, u32, Option<(std::time::SystemTime, u64)>)> = {
-        crate::owner::call_quick(crate::owner::Class::App, || {
+        crate::owner::call_quick(crate::owner::Class::Program, || {
             let loaded: std::collections::HashMap<_, _> = own_files(&*up).into_iter().collect();
             let mut v: Vec<_> = inputs.paths.iter().map(|(p, (stamp, _))| (p.clone(), loaded.get(p).copied().unwrap_or(u32::MAX), *stamp)).collect();
             for (p, i) in loaded {
@@ -4134,7 +4134,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs, quiet: bool) {
     // the hot set: the program's own package (its root crate's directory) and every file saved
     // this session, polled every 5 ms (a few stats); every file is polled every 100 ms
     let mut hot: Vec<usize> = {
-        let dir = crate::owner::call_quick(crate::owner::Class::App, || {
+        let dir = crate::owner::call_quick(crate::owner::Class::Program, || {
             let u = &*up;
             let root = crate::layout::root_crate() as usize;
             u.prog.crates.get(root).and_then(|c| u.prog.mods.get(c.root_mod as usize)).and_then(|m| u.prog.file_paths.get(m.file as usize)).and_then(|p| std::path::Path::new(p).parent().map(|d| d.to_string_lossy().into_owned()))
@@ -4163,7 +4163,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs, quiet: bool) {
                 *WATCH_INPUTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(crate::zone_alloc::kept_clone(&next));
                 inputs = next;
             }
-            let loaded = crate::owner::call_quick(crate::owner::Class::App, || own_files(&*up));
+            let loaded = crate::owner::call_quick(crate::owner::Class::Program, || own_files(&*up));
             files = inputs.paths.iter().map(|(p, (s, _))| (p.clone(), u32::MAX, *s)).collect();
             for (path, file) in loaded {
                 if let Some(f) = files.iter_mut().find(|f| f.0 == path) { f.1 = file; }
@@ -4191,7 +4191,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs, quiet: bool) {
         if loads != loads_seen || rewatched {
             loads_seen = loads;
             let t_own = Instant::now();
-            let loaded = crate::owner::call_quick(crate::owner::Class::App, || own_files(&*up));
+            let loaded = crate::owner::call_quick(crate::owner::Class::Program, || own_files(&*up));
             if std::env::var_os("MAKEPAD_RUN_LIVE_TRACE").is_some() { eprintln!("makepad live: rewatch (loads {loads}, startup scan {rewatched}): own files in {:.1} ms at t={:.0} ms", t_own.elapsed().as_secs_f64() * 1e3, crate::clock::ms_since_start()); }
             let known: std::collections::HashMap<_, _> = files.iter().enumerate().map(|(i, f)| (f.0.clone(), i)).collect();
             let mut added = Vec::new();
@@ -4381,7 +4381,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs, quiet: bool) {
             };
             // unchanged text (touched, or saved back to the running version)
             let same = {
-                crate::owner::call(crate::owner::Class::App, || {
+                crate::owner::call(crate::owner::Class::Program, || {
                     let u = &*up;
                     let pf = &u.prog.files[f.1 as usize];
                     pf.src[..pf.src_len as usize] == src[..]
@@ -4465,7 +4465,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs, quiet: bool) {
             // SPEC-V: the slots this group installed without a clean verdict (all of them, unless
             // --check-first refused what failed before the install)
             let group = u.group;
-            let ids: Vec<u32> = crate::owner::call(crate::owner::Class::App, || {
+            let ids: Vec<u32> = crate::owner::call(crate::owner::Class::Program, || {
                 let up = &*up;
                 (0..up.fns.len() as u32).filter(|&id| up.fns[id as usize].patch_gen == group && up.fns[id as usize].unverified.load(Ordering::Relaxed)).collect()
             });

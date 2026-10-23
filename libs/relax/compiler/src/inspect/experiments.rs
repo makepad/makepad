@@ -84,10 +84,10 @@ fn install(up: *mut crate::jit::Unit, id: u32, v: &Variant, round: u32) -> Resul
     let owner = super::patches::Owner::Pin(PIN_BASE + id);
     // whatever the last round installed goes first: an O1 pin comes off
     let upv = up as usize;
-    let _ = crate::owner::call_within(crate::owner::Class::App, 30_000, move || unsafe { super::patches::remove_owner(upv as *mut crate::jit::Unit, owner) });
+    let _ = crate::owner::call_within(crate::owner::Class::Program, 30_000, move || unsafe { super::patches::remove_owner(upv as *mut crate::jit::Unit, owner) });
     match v {
         Variant::O1 => {
-            let r = crate::owner::call_within(crate::owner::Class::App, 30_000, move || unsafe { super::patches::add(upv as *mut crate::jit::Unit, id, owner, super::patches::Edit::Pin) }).ok_or("the owner did not answer in 30 s")?;
+            let r = crate::owner::call_within(crate::owner::Class::Program, 30_000, move || unsafe { super::patches::add(upv as *mut crate::jit::Unit, id, owner, super::patches::Edit::Pin) }).ok_or("the owner did not answer in 30 s")?;
             r.map(|_| ())
         }
         Variant::Base | Variant::Opt(_) => {

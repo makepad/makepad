@@ -1008,7 +1008,7 @@ fn load_src_inner(name: *const u8, nlen: usize, path: *const u8, plen: usize, sr
         ms.push(Module { name: name.clone(), krate: u32::MAX, file: 0, path: shown.clone(), defs: Vec::new(), gen: 0, alive: false, arena: None, wrapper: None, extra_exports: Vec::new(), skipped: Vec::new() });
         ms.len() - 1
     };
-    let r = crate::owner::call(crate::owner::program_class(), || {
+    let r = crate::owner::call(crate::owner::Class::Program, || {
         let r = if trusted {
             unsafe { load(up, &name, &path, &deps, false) }.map(|(k, f, d)| (k, f, d, None, None, Vec::new()))
         } else {
@@ -1048,7 +1048,7 @@ pub extern "C" fn __relax_module_get(h: u64, name: *const u8, nlen: usize, ty: *
         }
     };
     let up = jit::current_unit();
-    let r = crate::owner::call(crate::owner::program_class(), || {
+    let r = crate::owner::call(crate::owner::Class::Program, || {
         let ready = unsafe { ensure_export(up, idx, m, &name) };
         let u = unsafe { &mut *up };
         ready.and_then(|_| export(u, m, &name)).and_then(|(d, t)| {
@@ -1118,7 +1118,7 @@ pub extern "C" fn __relax_module_unload(h: u64) {
         }
     };
     let up = jit::current_unit();
-    crate::owner::call(crate::owner::program_class(), || {
+    crate::owner::call(crate::owner::Class::Program, || {
         let u = unsafe { &mut *up };
         defs.extend((0..u.prog.defs.len()).filter(|&i| u.prog.defs[i].krate == module_crate).map(|i| DefId(i as u32)));
         defs.sort_unstable_by_key(|d| d.0);

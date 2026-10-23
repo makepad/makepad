@@ -395,7 +395,7 @@ fn relax_parts(s: &mut Snap, compiler: bool, partial: &mut Vec<String>) {
         }
     }
     if compiler && !up.is_null() {
-        let r = crate::owner::call_within(crate::owner::Class::App, 3000, move || crate::memreport::unit_sizes(unsafe { &*up }));
+        let r = crate::owner::call_within(crate::owner::Class::Program, 3000, move || crate::memreport::unit_sizes(unsafe { &*up }));
         match r {
             Some(rows) => {
                 for (k, v) in rows {
