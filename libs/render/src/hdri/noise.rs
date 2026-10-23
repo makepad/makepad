@@ -272,6 +272,37 @@ pub fn fbm1_d(x: f32, octaves: f32, seed: u32) -> (f32, f32) {
 /// sums in the same order); between, the last octave fades in by its fraction. Plan hdri-7 (the Milky Way's dust and
 /// clouds, the nebulas' sprites).
 pub fn fbm3_frac(x: f32, y: f32, z: f32, octaves: f32, seed: u32) -> f32 {
+    let (sum_n, total_n, sum, total, part) = fbm3_sums(x, y, z, octaves, seed);
+    if part > 0.0 {
+        let (a, b) = (sum_n / total_n, sum / total);
+        (a + (b - a) * part).clamp(0.0, 1.0)
+    } else {
+        (sum / total).clamp(0.0, 1.0)
+    }
+}
+
+/// `fbm3_frac` of `octaves` on the scale of `full` octaves (a whole number; plan hdri-7 D10): every octave keeps the
+/// weight it has in the fbm of `full` octaves, and the finer ones a coarse lookup leaves out count as their mean (one
+/// half). `fbm3_frac` normalises by the octaves it sums, so a coarse lookup weighs its first octave more (the Milky
+/// Way's dust: 0.72 at a 512 bake, 1.8 octaves, against 0.59 at 1024, 2.8) and a texture's contrast would change with
+/// the width. Between two whole counts it is their straight line, as `fbm3_frac` is; at `full` or more (texel 0), or a
+/// NaN count, it is `fbm3_frac` at `full`, bit for bit.
+pub fn fbm3_frac_full(x: f32, y: f32, z: f32, octaves: f32, full: f32, seed: u32) -> f32 {
+    let full = if full.is_nan() { 1.0 } else { full.clamp(1.0, FBM_MAX_OCTAVES as f32).floor() };
+    if !(octaves < full) {
+        return fbm3_frac(x, y, z, full, seed);
+    }
+    let (sum_n, total_n, sum, total, part) = fbm3_sums(x, y, z, octaves, seed);
+    let total_full = 2.0 * (1.0 - 0.5f32.powi(full as i32));
+    // each sum less its mean, so the octaves left out count as one half
+    let (a, b) = (sum_n - 0.5 * total_n, sum - 0.5 * total);
+    let centred = if part > 0.0 { a + (b - a) * part } else { b };
+    (0.5 + centred / total_full).clamp(0.0, 1.0)
+}
+
+/// The sums behind `fbm3_frac`: the whole octaves' sum and amplitude total, the same with the next octave (the whole
+/// octaves' alone when there is no fraction), and that octave's fraction.
+fn fbm3_sums(x: f32, y: f32, z: f32, octaves: f32, seed: u32) -> (f32, f32, f32, f32, f32) {
     let octaves = if octaves.is_nan() { 1.0 } else { octaves.clamp(1.0, FBM_MAX_OCTAVES as f32) };
     let whole = octaves.floor() as u32;
     let part = octaves - whole as f32;
@@ -294,12 +325,7 @@ pub fn fbm3_frac(x: f32, y: f32, z: f32, octaves: f32, seed: u32) -> f32 {
         ];
         p = [q[0] * 2.0 + 17.13, q[1] * 2.0 + 5.71, q[2] * 2.0 + 11.37];
     }
-    if part > 0.0 {
-        let (a, b) = (sum_n / total_n, sum / total);
-        (a + (b - a) * part).clamp(0.0, 1.0)
-    } else {
-        (sum / total).clamp(0.0, 1.0)
-    }
+    (sum_n, total_n, sum, total, part)
 }
 
 /// How many octaves of an fbm whose first wavelength is `base_wavelength` keep its finest wavelength at least two
@@ -642,6 +668,28 @@ mod tests {
         }
         assert_eq!(fbm3_frac(0.3, 0.4, 0.5, 20.0, 1).to_bits(), fbm3(0.3, 0.4, 0.5, 12, 1).to_bits(), "held to 12 octaves");
         assert_eq!(fbm3_frac(0.3, 0.4, 0.5, f32::NAN, 1).to_bits(), fbm3(0.3, 0.4, 0.5, 1, 1).to_bits(), "NaN is one octave");
+    }
+
+    /// fbm3_frac_full keeps every octave at its weight in the fbm of `full` octaves: at a whole number w of them it is
+    /// fbm3 of w on full's scale (0.5 + (fbm3 - 0.5) x total(w) / total(full)), between two it is their straight line, and
+    /// at `full` or more (texel 0), or a NaN count, it is fbm3_frac at `full` bit for bit.
+    #[test]
+    fn fbm3_frac_full_keeps_each_octaves_weight() {
+        let total = |w: u32| 2.0 * (1.0 - 0.5f32.powi(w as i32));
+        for &(x, y, z) in &points() {
+            let at = |w: u32| 0.5 + (fbm3(x, y, z, w, 9) - 0.5) * total(w) / total(6);
+            for w in 1..6u32 {
+                let v = fbm3_frac_full(x, y, z, w as f32, 6.0, 9);
+                assert!((v - at(w)).abs() < 1.0e-6, "{w} octaves: {v} against {}", at(w));
+                let mid = fbm3_frac_full(x, y, z, w as f32 + 0.25, 6.0, 9);
+                let line = at(w) + (if w < 5 { at(w + 1) } else { fbm3(x, y, z, 6, 9) } - at(w)) * 0.25;
+                assert!((mid - line).abs() < 1.0e-6, "{w}.25 octaves: {mid} against {line}");
+            }
+            assert_eq!(fbm3_frac_full(x, y, z, 6.0, 6.0, 9).to_bits(), fbm3(x, y, z, 6, 9).to_bits());
+            assert_eq!(fbm3_frac_full(x, y, z, 9.0, 6.0, 9).to_bits(), fbm3(x, y, z, 6, 9).to_bits());
+            assert_eq!(fbm3_frac_full(x, y, z, f32::NAN, 2.0, 9).to_bits(), fbm3(x, y, z, 2, 9).to_bits());
+            assert!((fbm3_frac_full(x, y, z, 5.9999, 6.0, 9) - fbm3(x, y, z, 6, 9)).abs() < 1.0e-4, "continuous at full");
+        }
     }
 
     /// The octaves a texel allows (D10): log2(base / (2 texel)), held to 1..=max, the most at texel 0; exact at powers of

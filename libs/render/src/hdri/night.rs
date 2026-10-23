@@ -402,22 +402,34 @@ impl NightSky {
     /// stars behind its dust. `self.stars(dir)` bit for bit without it. `texel`: the lookup's texel in radians (0:
     /// exact, the finest detail). Plan hdri-7 D9.
     pub fn deep_sky(&self, dir: Vec3f, texel: f32) -> Vec3f {
-        if self.milky_way.is_none() {
-            return self.stars(dir);
-        }
+        let Some(m) = &self.milky_way else { return self.stars(dir) };
         if self.night_factor <= 0.0 || !(dir.y > 0.0) {
             return Vec3f::default();
         }
         let s = self.to_star(dir);
         let field = if self.star_keep > 0.0 && self.star_gain > 0.0 { self.star_field(s) } else { Vec3f::default() };
-        let (band, dust) = match &self.milky_way {
-            Some(m) => m.at(s, texel),
-            None => (Vec3f::default(), 1.0),
-        };
+        let band = m.at(s, texel).0;
+        // Only a lookup a star reaches pays for the dust in front of it.
+        let dust = if field.max_elem() > 0.0 { self.dust_before_stars(s) } else { 1.0 };
         // The stars as `stars` writes them (so a dust of 1 and no band are `stars`, bit for bit), behind the dust.
         let (extinction, horizon) = (sun_transmittance(dir.y), smoothstep(0.0, 0.03, dir.y));
         let stars = field * extinction * (self.night_factor * horizon);
         stars * dust + band * extinction * horizon
+    }
+
+    /// The share of a star's light at star-space `s` the Milky Way's dust lets through (1 without it). A star is a point,
+    /// not a texture to band-limit, so its dust is read at full detail (texel 0): a star behind the dust dims alike at
+    /// every width. Read at the lookup's texel, the dust's coarse octaves dimmed the stars of a held bake differently from
+    /// a released one's (a block's share differed by 34 %, 512 against 1024; 23 %, 1024 against 2048).
+    fn dust_before_stars(&self, s: Vec3f) -> f32 {
+        self.milky_way.as_ref().map_or(1.0, |m| m.transmittance(s, 0.0))
+    }
+
+    /// The share of the stars' light along `dir` that `deep_sky` lets through: 1 without the Milky Way, off the band and
+    /// below the horizon. The width tests compare it as a field (`widths_agree`).
+    #[cfg(test)]
+    pub(super) fn star_transmittance(&self, dir: Vec3f) -> f32 {
+        if dir.y > 0.0 { self.dust_before_stars(self.to_star(dir)) } else { 1.0 }
     }
 
     /// Where the night's features are, in the map's own frame (plan hdri-7: the tests' and the screenshots' aim).
@@ -1153,8 +1165,9 @@ mod tests {
     /// Plan hdri-7 §2: the moon washes the band out as a real sky does, through the light it puts in the air (no factor of
     /// its own): a full moon takes the band's contrast over the sky down more than five times, and more near the moon (its
     /// contrast there keeps a smaller share of the moonless one than far from it: the two points' band differs, so each
-    /// is measured against its own moonless contrast); and in proportion to the moon's brightness: the sky the moon adds (1 / contrast less the moonless one) is three times as
-    /// large at Moon brightness 1.5 as at 0.5 (the moon's sky light is linear in it; the night's lift cancels in a contrast).
+    /// is measured against its own moonless contrast); and in proportion to the moon's brightness: the sky the moon adds
+    /// (1 / contrast less the moonless one) is three times as large at Moon brightness 1.5 as at 0.5 (the moon's sky light
+    /// is linear in it; the night's lift cancels in a contrast).
     #[test]
     fn the_moon_washes_the_milky_way_out() {
         let mw = MilkyWayParams { dust: 0.0, ..MilkyWayParams::default() };
@@ -1180,6 +1193,7 @@ mod tests {
     }
 
     /// The Milky Way's dust dims the stars behind it, and only while the band draws; off, `deep_sky` is `stars` bit for bit.
+    /// A star dims by the dust along its lookup at full detail, alike at every width.
     #[test]
     fn the_dust_dims_the_stars_behind_it() {
         let off = night_at(&NightParams { moon: false, ..Default::default() }, -30.0);
@@ -1195,6 +1209,8 @@ mod tests {
             assert_eq!(off.deep_sky(w, 0.0), off.stars(w), "no band: deep_sky is stars");
             assert_eq!(clear.deep_sky(w, 0.0), off.stars(w), "no dust, no band light, the same rows: the same stars");
             let t = dusty.milky_way.as_ref().unwrap().at(star.dir, 0.0).1;
+            // a star is a point: a held bake's texel (512 wide) dims it as an exact lookup does
+            assert_eq!(dusty.deep_sky(w, std::f32::consts::TAU / 512.0), dusty.deep_sky(w, 0.0), "a star dims alike at every width");
             if t < 0.6 {
                 seen += 1;
                 if luminance(dusty.deep_sky(w, 0.0)) < 0.7 * luminance(off.stars(w)) {

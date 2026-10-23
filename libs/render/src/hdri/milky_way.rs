@@ -11,7 +11,7 @@
 
 use makepad_draw::*;
 use super::night::mag_arcsec2_to_radiance;
-use super::noise::{fbm3_frac, hash_u32, octaves_for};
+use super::noise::{fbm3_frac_full, hash_u32, octaves_for};
 use super::studio::kelvin_to_rgb;
 use super::MilkyWayParams;
 use crate::sky::luminance;
@@ -94,11 +94,10 @@ impl MilkyWay {
     }
 
     /// At star-space `s`: the band's radiance (gain included, before extinction and the horizon fade) and the dust's
-    /// transmittance for what lies behind (1 off the band). `texel` (radians) band-limits the noise.
+    /// transmittance for what lies behind (1 off the band). `texel` (radians) band-limits the noise, on the scale of its
+    /// finest lookup (`fbm3_frac_full`), so a coarse bake's star clouds and dust lanes are as deep as a fine one's.
     pub(super) fn at(&self, s: Vec3f, texel: f32) -> (Vec3f, f32) {
-        let (x, y, z) = (self.centre.dot(s), self.pole.dot(s), self.l90.dot(s));
-        let flat = x * x + z * z;
-        let cos_l = if flat > 1.0e-8 { x / flat.sqrt() } else { 0.0 };
+        let (x, y, z, cos_l) = self.galactic(s);
         let t = self.dust_at(x, y, z, cos_l, texel);
         if !(self.gain > 0.0) {
             return (Vec3f::default(), t);
@@ -109,12 +108,26 @@ impl MilkyWay {
         let bulge = self.bulge * (-(1.0 - x) / (MW_BULGE_SIGMA * MW_BULGE_SIGMA)).exp();
         let k = MW_CLOUD_SCALE;
         let octaves = octaves_for(1.0 / k, texel, 2.0);
-        let n = on_full_scale(fbm3_frac(x * k, y * k, z * k, octaves, self.cloud_seed), octaves, 2.0);
+        let n = fbm3_frac_full(x * k, y * k, z * k, octaves, 2.0, self.cloud_seed);
         let clouds = (1.0 + 2.0 * (n - 0.5)).clamp(1.0 - MW_CLOUD_DEPTH, 1.0 + MW_CLOUD_DEPTH);
         // the peak caps the band with its star clouds, so no cloud lifts the brightest patch over it
         let band = ((disk + bulge) * clouds).min(self.peak);
         let rgb = self.outer_rgb + (self.core_rgb - self.outer_rgb) * smoothstep(0.5, 1.0, x);
         (rgb * (band * t * self.gain), t)
+    }
+
+    /// The dust's transmittance alone at star-space `s`, as `at` gives it.
+    pub(super) fn transmittance(&self, s: Vec3f, texel: f32) -> f32 {
+        let (x, y, z, cos_l) = self.galactic(s);
+        self.dust_at(x, y, z, cos_l, texel)
+    }
+
+    /// Star-space `s` in galactic coordinates: x toward the centre, y = sin b, z toward l 90, and cos l (0 at the poles).
+    fn galactic(&self, s: Vec3f) -> (f32, f32, f32, f32) {
+        let (x, y, z) = (self.centre.dot(s), self.pole.dot(s), self.l90.dot(s));
+        let flat = x * x + z * z;
+        let cos_l = if flat > 1.0e-8 { x / flat.sqrt() } else { 0.0 };
+        (x, y, z, cos_l)
     }
 
     /// The dust's transmittance at galactic (x, y = sin b, z): the Great Rift along b about +1 degree over the inner
@@ -125,7 +138,7 @@ impl MilkyWay {
         }
         let k = 1.0 / MW_DUST_WAVE;
         let octaves = octaves_for(MW_DUST_WAVE / 4.0, texel, 6.0);
-        let n = on_full_scale(fbm3_frac(x * k, y * (4.0 * k), z * k, octaves, self.dust_seed), octaves, 6.0);
+        let n = fbm3_frac_full(x * k, y * (4.0 * k), z * k, octaves, 6.0, self.dust_seed);
         let r = (y - 0.0175) / 0.044;
         let rift = smoothstep(0.2, 0.5, cos_l) * (-r * r).exp();
         let w = y / 0.09;
@@ -133,23 +146,6 @@ impl MilkyWay {
         let tau = MW_RIFT_TAU * rift * (0.6 + 0.8 * n) + MW_PATCH_TAU * patches;
         (-self.dust * tau).exp().max(MW_DUST_FLOOR)
     }
-}
-
-/// `n`, an fbm of `octaves` (`fbm3_frac`, normalised by the octaves it sums), on the scale of `max` octaves: the octaves
-/// a coarse texel leaves out count as their mean (one half), so the coarse octaves keep the weight they have at the
-/// finest lookup. Normalised by its own octaves the dust's coarse octave weighs 0.72 at 512 (1.8 octaves) and 0.59 at
-/// 1024 (2.8), and the held dust lanes were a fifth deeper than the released ones (plan hdri-7 §5, D10). `n` itself at
-/// `max` octaves, and at a whole number of them exactly the fbm normalised by `max`'s total.
-fn on_full_scale(n: f32, octaves: f32, max: f32) -> f32 {
-    if !(octaves < max) {
-        return n;
-    }
-    let total = |o: f32| {
-        let whole = o.floor();
-        let next = 0.5f32.powi(whole as i32);
-        2.0 * (1.0 - next) + (o - whole) * next
-    };
-    0.5 + (n - 0.5) * (total(octaves) / total(max))
 }
 
 #[cfg(test)]

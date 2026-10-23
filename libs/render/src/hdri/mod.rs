@@ -2752,20 +2752,43 @@ mod tests {
         }
     }
 
-    /// Plan hdri-7 §5: two bake widths show a layer alike. What it adds at 2 x `width`, box-averaged to `width`, and what
-    /// it adds at `width` agree in every 16 x 16 block holding at least a tenth of the brightest block's, within
-    /// `block_share`, and in total within `total_share`. Held against released is 512 against 1024
-    /// (`held_and_released_agree`); an export width, 1024 against 2048 (each layer's ignored `*_at_export_widths` test).
+    /// Plan hdri-7 §5: two bake widths show a layer alike. Two things are compared, each by `blocks_agree`: the light the
+    /// layer draws (what it adds with the stars off on both sides) and, when its dust takes any, the share of the stars'
+    /// light it takes (1 less `NightSky::star_transmittance` at each width's texel centres). The stars themselves stay
+    /// out: they are points read at texel centres, so the star field alone differs by up to 82 % a block between 1024
+    /// and 2048, and the light a dust takes off them carries that (the Milky Way's: a 10.5 % block), which is the stars'
+    /// sampling, not the layer's. Held against released is 512 against 1024 (`held_and_released_agree`); an export
+    /// width, 1024 against 2048 (each layer's ignored `*_at_export_widths` test).
     fn widths_agree(base: &HdriParams, set: &dyn Fn(&mut HdriParams), width: usize, block_share: f32, total_share: f32, what: &str) {
         let lum = |t: &[f32; 4]| 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2];
+        let starless = |p: &HdriParams| {
+            let mut p = p.clone();
+            p.sky.night.star_brightness = 0.0;
+            p
+        };
         let mut on = base.clone();
         set(&mut on);
+        let (on_dark, base_dark) = (starless(&on), starless(base));
         let added = |w: usize| {
-            let (a, b) = (Env::new(&on).bake_par(w, four_threads), Env::new(base).bake_par(w, four_threads));
+            let (a, b) = (Env::new(&on_dark).bake_par(w, four_threads), Env::new(&base_dark).bake_par(w, four_threads));
             a.data.iter().zip(&b.data).map(|(x, y)| lum(x) - lum(y)).collect::<Vec<f32>>()
         };
-        let (w, h) = (width, width / 2);
-        let (held, released) = (added(w), added(2 * w));
+        blocks_agree(&added(width), &added(2 * width), width, block_share, total_share, &format!("{what}, its light"));
+        let env = Env::new(&on);
+        let taken = |w: usize| {
+            let take = |d: Vec3f| vec3f(1.0 - env.night.as_ref().map_or(1.0, |n| n.star_transmittance(d)), 0.0, 0.0);
+            bake_par_with(w, &take, four_threads).data.iter().map(|t| t[0]).collect::<Vec<f32>>()
+        };
+        let (held, released) = (taken(width), taken(2 * width));
+        if held.iter().chain(&released).any(|t| *t > 0.0) {
+            blocks_agree(&held, &released, width, block_share, total_share, &format!("{what}, the stars' light its dust takes"));
+        }
+    }
+
+    /// `held` (`w` x `w / 2`) and `released` (twice as wide), box-averaged to `w`, agree in every 16 x 16 block holding at
+    /// least a tenth of the largest block's, within `block_share`, and in total within `total_share`.
+    fn blocks_agree(held: &[f32], released: &[f32], w: usize, block_share: f32, total_share: f32, what: &str) {
+        let h = w / 2;
         let down: Vec<f32> = (0..h * w)
             .map(|i| {
                 let (y, x) = (i / w, i % w);
@@ -2774,9 +2797,9 @@ mod tests {
             })
             .collect();
         let block = |m: &[f32], by: usize, bx: usize| (0..16).flat_map(|y| (0..16).map(move |x| (y, x))).map(|(y, x)| m[(by * 16 + y) * w + bx * 16 + x]).sum::<f32>() / 256.0;
-        let blocks: Vec<(f32, f32)> = (0..h / 16).flat_map(|by| (0..w / 16).map(move |bx| (by, bx))).map(|(by, bx)| (block(&held, by, bx), block(&down, by, bx))).collect();
+        let blocks: Vec<(f32, f32)> = (0..h / 16).flat_map(|by| (0..w / 16).map(move |bx| (by, bx))).map(|(by, bx)| (block(held, by, bx), block(&down, by, bx))).collect();
         let most = blocks.iter().map(|(h, r)| h.abs().max(r.abs())).fold(0.0f32, f32::max);
-        assert!(most > 0.0, "{what}: the premise: the layer adds light");
+        assert!(most > 0.0, "{what}: the premise: the layer adds something");
         let mut worst = 0.0f32;
         for (h, r) in blocks.iter().filter(|(h, r)| h.abs().max(r.abs()) >= 0.1 * most) {
             worst = worst.max((h - r).abs() / h.abs().max(r.abs()));
