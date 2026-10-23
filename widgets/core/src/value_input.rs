@@ -209,6 +209,10 @@ pub struct ValueInput {
     source: ScriptObjectRef,
     #[walk]
     walk: Walk,
+
+    #[live(true)]
+    #[visible]
+    visible: bool,
     #[layout]
     layout: Layout,
     #[redraw]
@@ -363,6 +367,9 @@ impl ValueInput {
 
 impl Widget for ValueInput {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
         // Written before the quad is begun, because that is when its
         // instance is handed to the shader.
         self.draw_bg.fill = if self.track && self.max > self.min {
@@ -416,6 +423,10 @@ impl Widget for ValueInput {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        // Hidden: no hits, and the field inside takes no keys.
+        if !self.visible {
+            return;
+        }
         let uid = self.widget_uid();
 
         if self.editing {

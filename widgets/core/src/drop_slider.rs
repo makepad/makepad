@@ -136,6 +136,10 @@ pub struct DropSlider {
     source: ScriptObjectRef,
     #[walk]
     walk: Walk,
+
+    #[live(true)]
+    #[visible]
+    visible: bool,
     #[layout]
     layout: Layout,
     #[redraw]
@@ -314,6 +318,9 @@ impl Drop for DropSlider {
 
 impl Widget for DropSlider {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
         if !self.value_init {
             self.value_init = true;
             self.value = self.default.clamp(self.min, self.max);
@@ -378,6 +385,13 @@ impl Widget for DropSlider {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if !self.visible {
+            // A popup left open by a hidden slider has nothing to anchor to.
+            if self.open {
+                self.set_open(cx, false);
+            }
+            return;
+        }
         let uid = self.widget_uid();
         if self.open && crate::modal::ModalAction::is_dismissal(event) {
             self.set_open(cx, false);

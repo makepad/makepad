@@ -500,6 +500,10 @@ pub struct DropDown {
     #[walk]
     walk: Walk,
 
+    // Read by the hand-written `visible`/`set_visible` below.
+    #[live(true)]
+    visible: bool,
+
     #[live]
     bind: String,
     #[live]
@@ -971,6 +975,21 @@ impl WidgetNode for DropDown {
         self.draw_bg.redraw(cx);
     }
 
+    fn visible(&self) -> bool {
+        self.visible
+    }
+
+    fn set_visible(&mut self, cx: &mut Cx, visible: bool) {
+        if self.visible != visible {
+            self.visible = visible;
+            // The open menu would stay up with nothing under it.
+            if !visible && self.is_active {
+                self.set_closed(cx);
+            }
+            self.redraw(cx);
+        }
+    }
+
     fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
         // The open menu's items are widgets too (the design tweaker picks and
         // styles them); the menu that owns them is not a tree node, so they
@@ -1023,6 +1042,9 @@ impl Widget for DropDown {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         self.animator_handle_event(cx, event);
+        if !self.visible && event.requires_visibility() {
+            return;
+        }
         let uid = self.widget_uid();
 
         // ONE menu instance serves every dropdown on the same template, and
@@ -1171,6 +1193,9 @@ impl Widget for DropDown {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
         self.draw_walk(cx, walk);
         DrawStep::done()
     }
