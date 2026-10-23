@@ -41,6 +41,7 @@
 
 use makepad_draw::*;
 use super::atmosphere::SUN_IRRADIANCE;
+use super::milky_way::MilkyWay;
 use super::noise::{hash01, hash_u32};
 use super::studio::{kelvin_to_rgb, light_frame, project, LightFrame};
 use super::{EnvSun, NightParams, SunMode, SunParams};
@@ -112,6 +113,10 @@ const STAR_MAG_LIMIT: f32 = 6.5;
 const STAR_HASH_FLOOR: f32 = 1.0e-4;
 /// The sun's apparent magnitude. A magnitude 0 star gives SUN_IRRADIANCE x 10^(0.4 x -26.74).
 const SUN_MAGNITUDE: f32 = -26.74;
+/// The Milky Way and the nebulas show from astronomical twilight on (plan hdri-7 §2: "visible only in astronomical
+/// twilight and darker"): smoothstep(12, 18, -sun elevation). The stars are full from -12 already, and the lifted
+/// night would otherwise show the band at full contrast in nautical twilight.
+pub(super) const ASTRO_FADE_DEG: (f32, f32) = (12.0, 18.0);
 /// Square arcseconds in a steradian: (180 / pi x 3600)^2.
 const ARCSEC2_PER_SR: f32 = 4.254_517e10;
 /// The SQM conversion: a sky of 0 mag/arcsec² shines 10.8e4 cd/m².
@@ -211,6 +216,10 @@ pub struct NightSky {
     ground_irradiance: Vec3f,
     /// The moon's own part of it, by the night factor.
     moon_ground: Vec3f,
+    /// The galactic centre (l 0), pole and l 90 in star space: constants of the star sphere (plan hdri-7 §2).
+    gal_axes: [Vec3f; 3],
+    /// The Milky Way; Some when its block draws (plan hdri-7 §2).
+    milky_way: Option<MilkyWay>,
 }
 
 /// One star of the field, in star space.
@@ -277,6 +286,21 @@ impl NightSky {
         let g = crate::sun::star_rows(hours, latitude)[1];
         let g = vec3f(g.x, g.y, g.z);
         let gal_pole = vec3f(rows[0].dot(g), rows[1].dot(g), rows[2].dot(g)).normalize();
+        // The galactic centre and l 90 in star space, beside the pole (plan hdri-7 §2): constants of the star sphere,
+        // read through the unturned rows as the pole is.
+        let galactic = crate::sun::star_rows(hours, latitude);
+        let in_star = |w: Vec4f| {
+            let w = vec3f(w.x, w.y, w.z);
+            vec3f(rows[0].dot(w), rows[1].dot(w), rows[2].dot(w)).normalize()
+        };
+        let gal_axes = [in_star(galactic[0]), gal_pole, in_star(galactic[2])];
+        // The Milky Way turns the whole night sphere, the stars and the band as one (D3); without it the rows are the
+        // ones above, untouched.
+        let mw = p.milky_way_drawn();
+        let rows = match mw {
+            Some(m) => night_rows(hours, latitude, m.turn_deg, m.tilt_deg),
+            None => rows,
+        };
 
         let star_keep = p.stars * STAR_KEEP_MAX;
         let star_e0 = SUN_IRRADIANCE * 10.0f32.powf(0.4 * SUN_MAGNITUDE);
@@ -324,6 +348,10 @@ impl NightSky {
             None
         };
 
+        // Plan hdri-7 §2: the band shows from astronomical twilight on, lifted as the stars are.
+        let astro = smoothstep(ASTRO_FADE_DEG.0, ASTRO_FADE_DEG.1, -sun_elevation_deg);
+        let milky_way = mw.map(|m| MilkyWay::new(m, seed, gal_axes, m.strength * lift * astro));
+
         let mut sky = NightSky {
             night_factor,
             sun_dir,
@@ -341,6 +369,8 @@ impl NightSky {
             ambient: Vec3f::default(),
             ground_irradiance: Vec3f::default(),
             moon_ground: Vec3f::default(),
+            gal_axes,
+            milky_way,
         };
         let (ambient, sky_irradiance) = sky.integrate_glow();
         let moon_direct = sky.moon.as_ref().map_or(Vec3f::default(), |m| m.irradiance * m.dir.y.max(0.0));
@@ -366,6 +396,33 @@ impl NightSky {
             return field;
         }
         field * sun_transmittance(dir.y) * (self.night_factor * smoothstep(0.0, 0.03, dir.y))
+    }
+
+    /// What rides with the points (`Env::sky_layers`' `points`): the stars and, with the Milky Way drawn, its band, the
+    /// stars behind its dust. `self.stars(dir)` bit for bit without it. `texel`: the lookup's texel in radians (0:
+    /// exact, the finest detail). Plan hdri-7 D9.
+    pub fn deep_sky(&self, dir: Vec3f, texel: f32) -> Vec3f {
+        if self.milky_way.is_none() {
+            return self.stars(dir);
+        }
+        if self.night_factor <= 0.0 || !(dir.y > 0.0) {
+            return Vec3f::default();
+        }
+        let s = self.to_star(dir);
+        let field = if self.star_keep > 0.0 && self.star_gain > 0.0 { self.star_field(s) } else { Vec3f::default() };
+        let (band, dust) = match &self.milky_way {
+            Some(m) => m.at(s, texel),
+            None => (Vec3f::default(), 1.0),
+        };
+        // The stars as `stars` writes them (so a dust of 1 and no band are `stars`, bit for bit), behind the dust.
+        let (extinction, horizon) = (sun_transmittance(dir.y), smoothstep(0.0, 0.03, dir.y));
+        let stars = field * extinction * (self.night_factor * horizon);
+        stars * dust + band * extinction * horizon
+    }
+
+    /// Where the night's features are, in the map's own frame (plan hdri-7: the tests' and the screenshots' aim).
+    pub fn features(&self) -> NightFeatures {
+        NightFeatures { galactic_centre: self.milky_way.as_ref().map(|_| self.to_world(self.gal_axes[0])), nebulas: Vec::new(), aurora_middle: None }
     }
 
     /// The moon's disc: lit from the sun's direction, plus earthshine. It is also drawn
@@ -455,9 +512,7 @@ impl NightSky {
         vec3f(self.rows[0].dot(dir), self.rows[1].dot(dir), self.rows[2].dot(dir))
     }
 
-    /// Star space back to the world: the transpose of the rows. Only the tests
-    /// need this direction of the turn.
-    #[cfg(test)]
+    /// Star space back to the world: the transpose of the rows.
     fn to_world(&self, s: Vec3f) -> Vec3f {
         self.rows[0] * s.x + self.rows[1] * s.y + self.rows[2] * s.z
     }
@@ -553,6 +608,33 @@ impl NightSky {
     }
 }
 
+/// Where the night's features are, in the map's own frame (before `rotation_deg`): the galactic centre (the Milky
+/// Way drawn, turned with the sphere), each visible nebula's centre and angular radius (radians), and the aurora's
+/// arc middle at its lower border. Plan hdri-7.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NightFeatures {
+    pub galactic_centre: Option<Vec3f>,
+    pub nebulas: Vec<(Vec3f, f32)>,
+    pub aurora_middle: Option<Vec3f>,
+}
+
+/// World to star space for the solar hour and latitude with the night sphere turned by `turn_deg` about the
+/// celestial pole (a sidereal offset: a season; +116 puts the galactic centre on the meridian at 22 h) and tilted by
+/// `tilt_deg` about the observer's east-west line (+X; positive raises the north). At 0 and 0 these are
+/// `celestial_rows`' rows, bit for bit. Plan hdri-7 D3.
+fn night_rows(hours: f32, latitude: f32, turn_deg: f32, tilt_deg: f32) -> [Vec3f; 3] {
+    let hours = if turn_deg != 0.0 { (hours + turn_deg / 15.0).rem_euclid(24.0) } else { hours };
+    let r = crate::sun::celestial_rows(hours, latitude);
+    let rows = [vec3f(r[0].x, r[0].y, r[0].z), vec3f(r[1].x, r[1].y, r[1].z), vec3f(r[2].x, r[2].y, r[2].z)];
+    if tilt_deg == 0.0 {
+        return rows;
+    }
+    // A star at s shows at the world's R^T s; the sky tilted by T about +X shows it at Rx(T) R^T s, so each row r
+    // (r . d) becomes Rx(T) r.
+    let (s, c) = tilt_deg.to_radians().sin_cos();
+    rows.map(|r| vec3f(r.x, r.y * c - r.z * s, r.y * s + r.z * c))
+}
+
 /// Normalised star profile at squared perpendicular distance `d2` (sin² of the
 /// angle; radians² to within 1e-4 over the reach).
 ///
@@ -627,7 +709,7 @@ fn henyey_greenstein(cos_g: f32, g: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hdri::{dir_from_az_el, vec, Env, HdriParams};
+    use crate::hdri::{dir_from_az_el, vec, Env, HdriParams, MilkyWayParams};
     use makepad_render_material::ibl;
 
     #[test]
@@ -955,5 +1037,171 @@ mod tests {
         assert!((mag_arcsec2_to_radiance(21.89) / g0 - 1.0).abs() < 0.01, "{} vs {g0}", mag_arcsec2_to_radiance(21.89));
         assert!((mag_arcsec2_to_radiance(20.0) / mag_arcsec2_to_radiance(22.5) - 10.0).abs() < 1.0e-3);
         assert!((cd_m2_per_engine_unit() / 6303.0 - 1.0).abs() < 0.005, "{}", cd_m2_per_engine_unit());
+    }
+
+    /// A moonless night (the sun 30 degrees down at azimuth 200, 22 h, 45 N) with the Milky Way as `mw` sets it.
+    fn milky_night(mw: MilkyWayParams) -> NightSky {
+        night_at(&NightParams { moon: false, milky_way: Some(mw), ..Default::default() }, -30.0)
+    }
+
+    /// Star space at galactic longitude `l` and latitude `b` (degrees), by the sky's own galactic axes.
+    fn galactic(sky: &NightSky, l: f32, b: f32) -> Vec3f {
+        let (l, b) = (l.to_radians(), b.to_radians());
+        let [c, pole, l90] = sky.gal_axes;
+        (c * (b.cos() * l.cos()) + l90 * (b.cos() * l.sin()) + pole * b.sin()).normalize()
+    }
+
+    /// The band's luminance at (l, b) over the dark sky's zenith glow (G0 at the same lift), extinction aside.
+    fn band_in_g0(sky: &NightSky, l: f32, b: f32) -> f32 {
+        let zenith = luminance(sky.glow(vec3f(0.0, 1.0, 0.0)));
+        luminance(sky.milky_way.as_ref().unwrap().at(galactic(sky, l, b), 0.0).0) / zenith
+    }
+
+    /// Plan hdri-7 §2, §5 (refs §5.2): at Strength 1 and Core 1 the band is the real sky's, in units of the dark sky's
+    /// zenith (G0, 21.9 mag/arcsec²): the core region (|l| <= 30, |b| <= 10) 4.4 +- 1 with its dust; without dust the
+    /// mid longitudes 1.5 to 2.5, the anticentre 0.7 to 1.5, 0.1 to 0.45 at 30 degrees out, at most 0.15 at the poles,
+    /// never over about 9 (the star clouds are capped with the band: MW_PEAK_MU's range, 19.5 to 19.6, is 9.04 G0 at
+    /// most); the Great Rift (b +1, l 10..60) lets 0.25 to 0.45 through; the core is warmer than the anticentre. With
+    /// the constants of Step 3 it prints about: core region 4.03, mid 1.82, anticentre 1.02, 30 deg 0.23, poles 0.03,
+    /// peak 8.88; rift 0.35.
+    #[test]
+    fn the_milky_way_is_the_real_skys() {
+        let clean = milky_night(MilkyWayParams { dust: 0.0, ..MilkyWayParams::default() });
+        let mean = |sky: &NightSky, ls: std::ops::RangeInclusive<i32>, bs: &[f32]| {
+            let (mut sum, mut n) = (0.0f32, 0.0f32);
+            for l in ls {
+                for &b in bs {
+                    sum += band_in_g0(sky, l as f32, b);
+                    n += 1.0;
+                }
+            }
+            sum / n
+        };
+        let mid = 0.5 * (mean(&clean, 80..=100, &[0.0]) + mean(&clean, 260..=280, &[0.0]));
+        let anti = mean(&clean, 170..=190, &[0.0]);
+        let thirty = mean(&clean, -20..=20, &[30.0, -30.0]);
+        let poles = band_in_g0(&clean, 0.0, 90.0).max(band_in_g0(&clean, 0.0, -90.0));
+        let peak = (-30..=30).flat_map(|l| (-10..=10).map(move |b| (l, b))).map(|(l, b)| band_in_g0(&clean, l as f32, b as f32)).fold(0.0, f32::max);
+        let dusty = milky_night(MilkyWayParams::default());
+        let bs: Vec<f32> = (-10..=10).map(|b| b as f32).collect();
+        let core = mean(&dusty, -30..=30, &bs);
+        let rift = (10..=60).map(|l| dusty.milky_way.as_ref().unwrap().at(galactic(&dusty, l as f32, 1.0), 0.0).1).sum::<f32>() / 51.0;
+        println!("G0 units: core region {core:.2}, mid {mid:.2}, anticentre {anti:.2}, 30 deg {thirty:.2}, poles {poles:.3}, peak {peak:.2}; rift transmittance {rift:.2}");
+        assert!((core - 4.4).abs() <= 1.0, "the core region {core}");
+        assert!((1.5..=2.5).contains(&mid), "mid longitudes {mid}");
+        assert!((0.7..=1.5).contains(&anti), "the anticentre {anti}");
+        assert!((0.1..=0.45).contains(&thirty), "30 degrees out {thirty}");
+        assert!(poles <= 0.15, "the poles {poles}");
+        assert!(peak <= 9.04 * 1.001, "the brightest patch {peak}");
+        assert!((0.25..=0.45).contains(&rift), "the rift lets {rift} through");
+        let red_over_blue = |l: f32| {
+            let c = clean.milky_way.as_ref().unwrap().at(galactic(&clean, l, 0.0), 0.0).0;
+            c.x / c.z
+        };
+        assert!(red_over_blue(0.0) > red_over_blue(180.0), "warmer at the core");
+    }
+
+    /// The band's ridge is the galactic equator: round the whole band its light at b 0 is well over its light 6 degrees
+    /// either side.
+    #[test]
+    fn the_band_lies_along_the_galactic_equator() {
+        let sky = milky_night(MilkyWayParams { dust: 0.0, ..MilkyWayParams::default() });
+        let around = |b: f32| (0..72).map(|i| band_in_g0(&sky, i as f32 * 5.0, b)).sum::<f32>();
+        let (on, above, below) = (around(0.0), around(6.0), around(-6.0));
+        assert!(on > 1.4 * above && on > 1.4 * below, "{on} against {above} and {below}");
+    }
+
+    /// Plan hdri-7 D3: Turn and Tilt turn the whole night sphere. The band lives in star space, so its axes there are the
+    /// star sphere's whatever Turn and Tilt say; in the map's frame the galactic centre the feature reports and a star both
+    /// move, by the same turn: the angle between them is the unturned one. (The stars' thickening along the band is the
+    /// star field's own boost in star space, pinned by `more_stars_along_the_milky_way`; it turns with the rows.)
+    #[test]
+    fn turn_and_tilt_turn_the_stars_and_the_band_as_one() {
+        let at = |turn: f32, tilt: f32| milky_night(MilkyWayParams { turn_deg: turn, tilt_deg: tilt, ..MilkyWayParams::default() });
+        let base = at(0.0, 0.0);
+        let star = all_cells().filter_map(|c| base.star_in_cell(c)).next().expect("a star").dir;
+        let base_centre = base.features().galactic_centre.expect("the band draws");
+        let base_star = base.to_world(star);
+        for (turn, tilt) in [(116.0, 0.0), (40.0, 25.0), (300.0, -60.0)] {
+            let sky = at(turn, tilt);
+            assert_eq!(sky.gal_axes, base.gal_axes, "turn {turn}, tilt {tilt}: the band moved in star space");
+            let (centre, seen) = (sky.features().galactic_centre.expect("the band draws"), sky.to_world(star));
+            assert!((centre - sky.to_world(sky.gal_axes[0])).length() < 1.0e-6, "turn {turn}, tilt {tilt}: the feature is the turned centre");
+            assert!(seen.dot(base_star) < 0.9999, "turn {turn}, tilt {tilt}: the star stayed");
+            assert!(centre.dot(base_centre) < 0.9999, "turn {turn}, tilt {tilt}: the band's centre stayed");
+            assert!((seen.dot(centre) - base_star.dot(base_centre)).abs() < 1.0e-5, "turn {turn}, tilt {tilt}: the star and the band part");
+        }
+        let plain = night_at(&NightParams { moon: false, ..Default::default() }, -30.0);
+        assert_eq!(base.rows, plain.rows, "Turn 0 and Tilt 0 are the plain rows, bit for bit");
+    }
+
+    /// Plan hdri-7 §2: the band shows only in astronomical twilight and darker: none with the sun 12 degrees down (the
+    /// stars already full), some at 15, all of it from 18; none by day.
+    #[test]
+    fn the_milky_way_waits_for_astronomical_twilight() {
+        assert_eq!(ASTRO_FADE_DEG, (12.0, 18.0));
+        let band = |el: f32| {
+            let sky = night_at(&NightParams { moon: false, milky_way: Some(MilkyWayParams::default()), ..Default::default() }, el);
+            luminance(sky.milky_way.as_ref().unwrap().at(galactic(&sky, 40.0, 3.0), 0.0).0)
+        };
+        assert_eq!(band(10.0), 0.0);
+        assert_eq!(band(-12.0), 0.0);
+        assert!(band(-15.0) > 0.0 && band(-15.0) < band(-18.0));
+        assert!((band(-18.0) - band(-40.0)).abs() <= 1.0e-6 * band(-40.0), "full from -18");
+    }
+
+    /// Plan hdri-7 §2: the moon washes the band out as a real sky does, through the light it puts in the air (no factor of
+    /// its own): a full moon takes the band's contrast over the sky down more than five times, and more near the moon (its
+    /// contrast there keeps a smaller share of the moonless one than far from it: the two points' band differs, so each
+    /// is measured against its own moonless contrast); and in proportion to the moon's brightness: the sky the moon adds (1 / contrast less the moonless one) is three times as
+    /// large at Moon brightness 1.5 as at 0.5 (the moon's sky light is linear in it; the night's lift cancels in a contrast).
+    #[test]
+    fn the_moon_washes_the_milky_way_out() {
+        let mw = MilkyWayParams { dust: 0.0, ..MilkyWayParams::default() };
+        let dark = milky_night(mw.clone());
+        // band points well up in this sky, the moon 8 degrees above the first
+        let up: Vec<Vec3f> = (0..36).map(|i| dark.to_world(galactic(&dark, i as f32 * 10.0, 3.0))).filter(|w| w.y > 0.3).collect();
+        let (near, far) = (up[0], *up.iter().min_by(|a, b| a.dot(up[0]).total_cmp(&b.dot(up[0]))).unwrap());
+        let (az, el) = crate::hdri::az_el_from_dir(near);
+        let p = NightParams { moon: true, moon_azimuth_deg: az, moon_elevation_deg: (el + 8.0).min(85.0), milky_way: Some(mw), ..Default::default() };
+        let lit_at = |brightness: f32| NightSky::new(&NightParams { moon_brightness: brightness, ..p.clone() }, 7, dir_from_az_el(az + 180.0, -30.0), 22.0, 45.0);
+        let lit = NightSky::new(&p, 7, dir_from_az_el(az + 180.0, -30.0), 22.0, 45.0);
+        let contrast = |sky: &NightSky, w: Vec3f| luminance(sky.milky_way.as_ref().unwrap().at(sky.to_star(w), 0.0).0) / luminance(sky.glow(w));
+        let (c_dark, c_lit) = (contrast(&dark, near), contrast(&lit, near));
+        let (c_far_dark, c_far) = (contrast(&dark, far), contrast(&lit, far));
+        println!("contrast near the moon: moonless {c_dark:.3}, full moon {c_lit:.4}; far from it: moonless {c_far_dark:.3}, full moon {c_far:.4}");
+        assert!(c_dark > 5.0 * c_lit, "the moon takes {c_dark} only to {c_lit}");
+        assert!(c_lit / c_dark < c_far / c_far_dark, "more near the moon: x{} of the moonless contrast, against x{} far from it", c_lit / c_dark, c_far / c_far_dark);
+        let (c_half, c_bright) = (contrast(&lit_at(0.5), near), contrast(&lit_at(1.5), near));
+        let share = (1.0 / c_bright - 1.0 / c_dark) / (1.0 / c_half - 1.0 / c_dark);
+        println!("contrast near the moon at Moon brightness 0.5 {c_half:.4}, 1.5 {c_bright:.4}: the moon's sky x{share:.3}");
+        assert!(c_bright < c_half && c_half < c_dark, "a brighter moon washes it out more: {c_dark}, {c_half}, {c_bright}");
+        assert!((share - 3.0).abs() < 0.03, "in proportion to the moon's brightness: x{share}, not x3");
+    }
+
+    /// The Milky Way's dust dims the stars behind it, and only while the band draws; off, `deep_sky` is `stars` bit for bit.
+    #[test]
+    fn the_dust_dims_the_stars_behind_it() {
+        let off = night_at(&NightParams { moon: false, ..Default::default() }, -30.0);
+        let clear = milky_night(MilkyWayParams { turn_deg: 0.0, strength: 0.0, dust: 0.0, ..MilkyWayParams::default() });
+        let dusty = milky_night(MilkyWayParams { turn_deg: 0.0, strength: 0.0, dust: 2.0, ..MilkyWayParams::default() });
+        let (mut dimmed, mut seen) = (0, 0);
+        for c in all_cells() {
+            let Some(star) = off.star_in_cell(c) else { continue };
+            let w = off.to_world(star.dir);
+            if !(w.y > 0.2) {
+                continue;
+            }
+            assert_eq!(off.deep_sky(w, 0.0), off.stars(w), "no band: deep_sky is stars");
+            assert_eq!(clear.deep_sky(w, 0.0), off.stars(w), "no dust, no band light, the same rows: the same stars");
+            let t = dusty.milky_way.as_ref().unwrap().at(star.dir, 0.0).1;
+            if t < 0.6 {
+                seen += 1;
+                if luminance(dusty.deep_sky(w, 0.0)) < 0.7 * luminance(off.stars(w)) {
+                    dimmed += 1;
+                }
+            }
+        }
+        assert!(seen > 5 && dimmed == seen, "{dimmed} of {seen} stars behind the dust dimmed");
     }
 }

@@ -18,7 +18,7 @@ use makepad_draw::*;
 use makepad_render::hdri::presets::{preset, PRESET_NAMES};
 use makepad_render::hdri::skyline::SkylineBand;
 use std::sync::Arc;
-use makepad_render::hdri::{CasterParams, Env, GoboParams, HdriParams, ImageSet, LightParams, SkylineParams, VolumetricParams, WeatherParams};
+use makepad_render::hdri::{CasterParams, Env, GoboParams, HdriParams, ImageSet, LightParams, MilkyWayParams, SkylineParams, VolumetricParams, WeatherParams};
 use makepad_render_material::ibl::{self, EnvMap};
 use std::time::Instant;
 
@@ -844,7 +844,7 @@ fn night_layer_extra(pool: &TaskPool, preset_name: &str, width: usize, patch: &d
 /// The night's layers a held drag pays for (plan hdri-7), each the patch that switches it on over a preset. Tasks 2
 /// to 4 add a row each.
 fn night_layers() -> Vec<(&'static str, fn(&mut HdriParams))> {
-    vec![]
+    vec![("milky way", |p| p.sky.night.milky_way = Some(MilkyWayParams::default()))]
 }
 
 /// What one layer may add to a held 512 bake, and all of them together (plan hdri-7 §5: "about +20 %").

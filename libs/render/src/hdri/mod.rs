@@ -63,6 +63,7 @@ pub mod composite;
 pub mod volumetric;
 pub mod weather;
 pub mod skyline;
+mod milky_way;
 
 pub use params::*;
 pub use image_light::ImageSet;
@@ -410,6 +411,12 @@ impl Env {
     /// and a band in the images it was built with.
     pub fn has_skyline(&self) -> bool {
         self.skyline.is_some()
+    }
+
+    /// Where the night's features are (`night::NightFeatures`), in the map's own frame (the display shows azimuth a at
+    /// a - rotation_deg); None in Studio mode. Plan hdri-7.
+    pub fn night_features(&self) -> Option<night::NightFeatures> {
+        self.night.as_ref().map(|night| night.features())
     }
 
     /// What the skyline draws at `d` (premultiplied; its skirt below it), or
@@ -947,7 +954,7 @@ impl Env {
         // visible deck, which thins into the haze at the horizon.
         let mut discs = if without == Some(KeyTerm::Sun) || !points { Vec3f::default() } else { atmo.sun_disc(d) };
         if let Some(night) = &self.night {
-            let stars = if points { night.stars(d) } else { Vec3f::default() };
+            let stars = if points { night.deep_sky(d, at.texel) } else { Vec3f::default() };
             c += stars + night.glow(d) + night.ground(d, ground_color);
             if points {
                 discs += match without {
@@ -2715,6 +2722,219 @@ mod tests {
             let first = got.iter().zip(&want).position(|(g, w)| g != w);
             assert!(first.is_none(), "{name}: float {} differs: {} vs {}", first.unwrap(), f32::from_bits(got[first.unwrap()]), f32::from_bits(want[first.unwrap()]));
             println!("night baseline {name}: identical");
+        }
+    }
+
+    /// Plan hdri-7: for a night block set by `set(p, on)`: absent, present but off, and on while the sun is up, every
+    /// bake (serial, parallel, an export width), the key, the keyless copy and the strip's light are the base's.
+    fn night_block_changes_nothing(set: &dyn Fn(&mut HdriParams, bool)) {
+        use super::presets::preset;
+        let same = |a: &HdriParams, b: &HdriParams, what: &str| {
+            let (ea, eb) = (Env::new(a), Env::new(b));
+            let (ma, mb) = (ea.bake(128), eb.bake(128));
+            assert!(ma == mb, "{what}: the 128 bake");
+            assert!(eb.bake_par(128, four_threads) == mb, "{what}: the parallel bake");
+            assert_eq!(ea.sun(), eb.sun(), "{what}: the key");
+            assert!(ea.bake_keyless_par(&ma, four_threads) == eb.bake_keyless_par(&mb, four_threads), "{what}: the keyless copy");
+            assert!(ea.skyline_light() == eb.skyline_light(), "{what}: the strip's light");
+            assert!(ea.bake(512) == eb.bake(512), "{what}: an export width");
+        };
+        for name in ["Moonlit night", "Starry night"] {
+            let base = preset(name).unwrap();
+            let mut off = base.clone();
+            set(&mut off, false);
+            same(&base, &off, &format!("{name}, the block off"));
+            let mut day = base.clone();
+            day.sky.sun.elevation_deg = 10.0;
+            let mut day_on = day.clone();
+            set(&mut day_on, true);
+            same(&day, &day_on, &format!("{name}, the block on by day"));
+        }
+    }
+
+    /// Plan hdri-7 §5: two bake widths show a layer alike. What it adds at 2 x `width`, box-averaged to `width`, and what
+    /// it adds at `width` agree in every 16 x 16 block holding at least a tenth of the brightest block's, within
+    /// `block_share`, and in total within `total_share`. Held against released is 512 against 1024
+    /// (`held_and_released_agree`); an export width, 1024 against 2048 (each layer's ignored `*_at_export_widths` test).
+    fn widths_agree(base: &HdriParams, set: &dyn Fn(&mut HdriParams), width: usize, block_share: f32, total_share: f32, what: &str) {
+        let lum = |t: &[f32; 4]| 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2];
+        let mut on = base.clone();
+        set(&mut on);
+        let added = |w: usize| {
+            let (a, b) = (Env::new(&on).bake_par(w, four_threads), Env::new(base).bake_par(w, four_threads));
+            a.data.iter().zip(&b.data).map(|(x, y)| lum(x) - lum(y)).collect::<Vec<f32>>()
+        };
+        let (w, h) = (width, width / 2);
+        let (held, released) = (added(w), added(2 * w));
+        let down: Vec<f32> = (0..h * w)
+            .map(|i| {
+                let (y, x) = (i / w, i % w);
+                let at = |dy: usize, dx: usize| released[(2 * y + dy) * 2 * w + 2 * x + dx];
+                0.25 * (at(0, 0) + at(0, 1) + at(1, 0) + at(1, 1))
+            })
+            .collect();
+        let block = |m: &[f32], by: usize, bx: usize| (0..16).flat_map(|y| (0..16).map(move |x| (y, x))).map(|(y, x)| m[(by * 16 + y) * w + bx * 16 + x]).sum::<f32>() / 256.0;
+        let blocks: Vec<(f32, f32)> = (0..h / 16).flat_map(|by| (0..w / 16).map(move |bx| (by, bx))).map(|(by, bx)| (block(&held, by, bx), block(&down, by, bx))).collect();
+        let most = blocks.iter().map(|(h, r)| h.abs().max(r.abs())).fold(0.0f32, f32::max);
+        assert!(most > 0.0, "{what}: the premise: the layer adds light");
+        let mut worst = 0.0f32;
+        for (h, r) in blocks.iter().filter(|(h, r)| h.abs().max(r.abs()) >= 0.1 * most) {
+            worst = worst.max((h - r).abs() / h.abs().max(r.abs()));
+        }
+        let (th, tr) = (held.iter().sum::<f32>(), down.iter().sum::<f32>());
+        println!("{what}: {w} against {}, worst block {:.1} %, total {:.2} %", 2 * w, 100.0 * worst, 100.0 * (th - tr).abs() / tr.abs());
+        assert!(worst <= block_share, "{what}: a block differs by {:.1} %", 100.0 * worst);
+        assert!((th - tr).abs() <= total_share * tr.abs(), "{what}: the totals {th} and {tr}");
+    }
+
+    /// Plan hdri-7 §5: held (512) and released (1024) show a layer alike (`widths_agree` at 512).
+    fn held_and_released_agree(base: &HdriParams, set: &dyn Fn(&mut HdriParams), block_share: f32, total_share: f32, what: &str) {
+        widths_agree(base, set, 512, block_share, total_share, what);
+    }
+
+    /// Plan hdri-7 §5: a night layer `set` switches on sits where the stars do: what it adds along `d` (map frame) on an
+    /// open sky goes through a closed deck only as the deck's coverage lets it, thick fog leaves under 1 % of it, and an
+    /// opaque skyline texel hides it. A layer that `lights` the scene (the aurora) also lights the deck's underside and the
+    /// fog a little: 10 % of what it adds is allowed there.
+    fn a_layer_sits_behind_the_deck_the_fog_and_the_skyline(base: &HdriParams, set: &dyn Fn(&mut HdriParams), d: Vec3f, lights: bool) {
+        let lum = crate::sky::luminance;
+        let added = |p: &HdriParams| {
+            let mut on = p.clone();
+            set(&mut on);
+            lum(Env::new(&on).radiance(d)) - lum(Env::new(p).radiance(d))
+        };
+        let open = added(base);
+        assert!(open.abs() > 0.0, "the premise: the layer shows along {d:?}");
+        let mut deck = base.clone();
+        deck.sky.clouds.coverage = 1.0;
+        deck.sky.clouds.sharpness = 1.0;
+        let alpha = Env::new(&deck).clouds.as_ref().map_or(0.0, |layer| layer.sample(d).alpha);
+        let through = added(&deck);
+        let slack = if lights { 0.1 * open.abs() } else { 1.0e-3 * open.abs() };
+        assert!(alpha > 0.9 && (through - open * (1.0 - alpha)).abs() <= slack + 1.0e-12, "a deck of coverage {alpha} passes {through} of {open}");
+        let mut fog = base.clone();
+        fog.sky.weather = Some(WeatherParams { kind: "fog".to_string(), fog: 1.0, ..WeatherParams::default() });
+        // thick fog leaves under 1 % of a point layer; one that lights the scene also lights the fog a little
+        let fog_slack = if lights { 0.1 } else { 0.01 };
+        assert!(added(&fog).abs() < fog_slack * open.abs(), "thick fog lets {} of {open} through", added(&fog));
+        let (w, h) = (64usize, 16usize);
+        let mut images = ImageSet::default();
+        images.skyline = Some(std::sync::Arc::new(skyline::SkylineBand { w, h, texels: vec![[0.5, 0.5, 0.5, 1.0]; w * h], dist: Vec::new(), top_deg: 80.0, bottom_deg: -5.0 }));
+        let mut city = base.clone();
+        city.skyline = Some(SkylineParams { on: true, seed: 7, turn_deg: 0.0, lights_by_day: 0.0, settings: Default::default() });
+        let mut city_on = city.clone();
+        set(&mut city_on);
+        assert_eq!(Env::new_with(&city_on, &images).radiance(d), Env::new_with(&city, &images).radiance(d), "an opaque skyline texel hides the layer");
+    }
+
+    /// Plan hdri-7 D9: a layer that rides with the stars lights nothing: the clouds' ambient, the dome, the ground's gain,
+    /// the night's ground and the strip's light are what they were.
+    fn a_point_layer_lights_nothing(set: &dyn Fn(&mut HdriParams)) {
+        let mut p = super::presets::preset("Starry night").unwrap();
+        p.sky.clouds.coverage = 0.5;
+        let mut on = p.clone();
+        set(&mut on);
+        let (a, b) = (Env::new(&p), Env::new(&on));
+        assert_eq!((a.cloud_ambient, a.dome, a.ground_gain), (b.cloud_ambient, b.dome, b.ground_gain));
+        assert!(a.skyline_light() == b.skyline_light());
+        let down = vec3f(0.0, -1.0, 0.0);
+        assert_eq!(a.night.as_ref().unwrap().ground(down, Vec3f::all(1.0)), b.night.as_ref().unwrap().ground(down, Vec3f::all(1.0)));
+    }
+
+    /// Writes `name`.png of `p` at 1024, exposed as the app's Auto would (0.5 log2(0.18 / mean)), into
+    /// HDRI_NIGHT_VISUAL_DIR (plan hdri-7's engine-side looks; nothing without it).
+    fn write_look(name: &str, p: &HdriParams) {
+        let Some(dir) = std::env::var_os("HDRI_NIGHT_VISUAL_DIR").map(std::path::PathBuf::from) else {
+            return eprintln!("HDRI_NIGHT_VISUAL_DIR not set, {name} skipped");
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        let map = Env::new(p).bake_par(1024, four_threads);
+        let mean = image::mean_luminance(&map).max(1.0e-30);
+        let ev = (0.5 * (0.18 / mean).log2()).clamp(-16.0, 16.0);
+        std::fs::write(dir.join(format!("{name}.png")), export::encode_png(&map, ev).unwrap()).unwrap();
+        println!("look {name}: mean {mean:.3e}, EV {ev:.2}");
+    }
+
+    /// The galactic centre of "Starry night" with the Milky Way at its defaults, in the map's frame (about 16 degrees
+    /// up in the south at 22 h, 45 N).
+    fn starry_centre() -> (HdriParams, Vec3f) {
+        let base = super::presets::preset("Starry night").unwrap();
+        assert_eq!(base.rotation_deg, 0.0, "the map frame is the world frame");
+        let mut on = base.clone();
+        on.sky.night.milky_way = Some(MilkyWayParams::default());
+        let centre = Env::new(&on).night_features().expect("sky mode").galactic_centre.expect("the band draws");
+        (base, centre)
+    }
+
+    #[test]
+    fn the_milky_way_off_or_by_day_changes_nothing() {
+        night_block_changes_nothing(&|p, on| p.sky.night.milky_way = Some(MilkyWayParams { on, ..MilkyWayParams::default() }));
+    }
+
+    #[test]
+    fn the_milky_way_held_and_released_agree() {
+        let base = super::presets::preset("Starry night").unwrap();
+        // Turn 0: the stars stay where they are, so what the layer adds is the band and its dust
+        held_and_released_agree(&base, &|p| p.sky.night.milky_way = Some(MilkyWayParams { turn_deg: 0.0, ..MilkyWayParams::default() }), 0.10, 0.03, "the Milky Way");
+    }
+
+    /// Plan hdri-7 §5 ("in exports at every width", design §7): 1024 against 2048, by the held rule. Ignored: two 2048
+    /// bakes each way, a release run (`cargo test -p makepad-render --release --lib at_export_widths -- --ignored`).
+    #[test]
+    #[ignore = "release: 1024 against 2048"]
+    fn the_milky_way_agrees_at_export_widths() {
+        let base = super::presets::preset("Starry night").unwrap();
+        widths_agree(&base, &|p| p.sky.night.milky_way = Some(MilkyWayParams { turn_deg: 0.0, ..MilkyWayParams::default() }), 1024, 0.10, 0.03, "the Milky Way");
+    }
+
+    #[test]
+    fn the_milky_way_sits_behind_the_weather_and_the_skyline() {
+        let (base, centre) = starry_centre();
+        assert!(centre.y > 0.1, "the premise: the centre is up ({centre:?})");
+        let d = (centre + vec3f(0.0, 0.05, 0.0)).normalize();
+        a_layer_sits_behind_the_deck_the_fog_and_the_skyline(&base, &|p| p.sky.night.milky_way = Some(MilkyWayParams::default()), d, false);
+    }
+
+    #[test]
+    fn the_milky_way_lights_nothing() {
+        a_point_layer_lights_nothing(&|p| p.sky.night.milky_way = Some(MilkyWayParams::default()));
+    }
+
+    /// The feature is the map's: None in Studio mode; with the band, the turned centre; without, none.
+    #[test]
+    fn the_night_features_are_in_the_maps_frame() {
+        let (base, centre) = starry_centre();
+        assert_eq!(Env::new(&base).night_features(), Some(night::NightFeatures::default()));
+        assert!((centre.length() - 1.0).abs() < 1.0e-5);
+        assert_eq!(Env::new(&HdriParams { mode: "studio".to_string(), ..base }).night_features(), None);
+    }
+
+    /// Plan hdri-7 D11: where the unlifted twilight sky and the lifted night glow cross at the zenith (recorded, not
+    /// asserted: ASTRO_FADE_DEG is the spec's, not tuned without the owner). A report, so ignored: Step 7 runs it.
+    #[test]
+    #[ignore = "report: the twilight crossover"]
+    fn the_twilight_crossover_is_measured() {
+        for el in [-6.0f32, -8.0, -10.0, -12.0, -14.0, -16.0, -18.0, -20.0] {
+            let mut p = HdriParams::default();
+            p.sky.sun.mode = "manual".to_string();
+            p.sky.sun.elevation_deg = el;
+            p.sky.night.moon = false;
+            let env = Env::new(&p);
+            let up = vec3f(0.0, 1.0, 0.0);
+            let (sky, glow) = (crate::sky::luminance(env.atmo.as_ref().unwrap().sky(up)), crate::sky::luminance(env.night.as_ref().unwrap().glow(up)));
+            println!("sun {el:6.1}: twilight sky {sky:.3e}, night glow {glow:.3e}, ratio {:.2}", sky / glow.max(1.0e-30));
+        }
+    }
+
+    #[test]
+    #[ignore = "writes PNGs: HDRI_NIGHT_VISUAL_DIR"]
+    fn milky_way_looks() {
+        let base = super::presets::preset("Starry night").unwrap();
+        write_look("starry-night", &base);
+        for turn in [0.0f32, 116.0] {
+            let mut p = base.clone();
+            p.sky.night.milky_way = Some(MilkyWayParams { turn_deg: turn, ..MilkyWayParams::default() });
+            write_look(&format!("milky-way-turn{turn:.0}"), &p);
         }
     }
 }

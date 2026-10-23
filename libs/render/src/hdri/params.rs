@@ -4534,7 +4534,7 @@ mod reader_tests {
             moon_brightness: f32::NAN,
             glow_color: [f32::NAN, 0.5, -1.0],
             glow_strength: f32::INFINITY,
-            milky_way: None,
+            milky_way: Some(MilkyWayParams { on: true, strength: f32::INFINITY, turn_deg: f32::NAN, tilt_deg: 200.0, core: f32::NAN, dust: -1.0 }),
             nebulas: None,
             aurora: None,
         };
@@ -4552,7 +4552,7 @@ mod reader_tests {
         for d in directions() {
             same(aa.sky(d), ab.sky(d), format_args!("the sky at {d:?}"));
             same(aa.sun_disc(d), ab.sun_disc(d), format_args!("the sun's disc at {d:?}"));
-            for (what, a, b) in [("stars", na.stars(d), nb.stars(d)), ("moon", na.moon(d), nb.moon(d)), ("glow", na.glow(d), nb.glow(d))] {
+            for (what, a, b) in [("stars", na.stars(d), nb.stars(d)), ("moon", na.moon(d), nb.moon(d)), ("glow", na.glow(d), nb.glow(d)), ("deep sky", na.deep_sky(d, 0.0), nb.deep_sky(d, 0.0))] {
                 same(a, b, format_args!("the night's {what} at {d:?}"));
             }
             same(ba.backdrop(d), bb.backdrop(d), format_args!("the backdrop at {d:?}"));
