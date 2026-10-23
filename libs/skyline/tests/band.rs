@@ -1545,7 +1545,10 @@ fn over_a_hosts_wet_ground_the_band_leaves_its_land_to_the_host() {
                 if al < -1.5 * px { tally(&mut above, t == d, what); continue; }
                 if al <= 1.5 * px { continue; }
                 let in_lake = makepad_skyline::lakes::cover(&z.lakes, u, al, px, eye);
-                if (land > 0.95 && in_lake == 0.0) || (land < 0.05 && al > edge + 1.5 * px) { tally(&mut clear, t == [0.0; 4], what); }
+                // land clear of every lake by a twentieth of a texel too: the shader's cover is the CPU's to 2 % of a texel
+                // (`the_shaders_lakes_are_the_cpus`), so a texel whose edge comes nearer a shore may hold a sliver of lake
+                let by_lake = makepad_skyline::lakes::cover(&z.lakes, u, al, 1.1 * px, eye) > 0.0;
+                if (land > 0.95 && !by_lake) || (land < 0.05 && al > edge + 1.5 * px) { tally(&mut clear, t == [0.0; 4], what); }
                 else if land < 0.05 && al < edge - 1.5 * px && off_coast(u) { tally(&mut sea, t == d, what); }
                 // (a lake keeps its own share of the texel: the shader's cover is the CPU's to 0.1 %, `the_shaders_lakes_are_the_cpus`)
                 else if land > 0.95 && in_lake >= 0.999 { tally(&mut lake, (0..4).all(|c| (t[c] - d[c]).abs() <= 1e-3 * d[c].abs().max(1.0)), what); }

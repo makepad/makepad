@@ -66,9 +66,10 @@ pub fn band_geom(p: &Params) -> BandGeom {
     BandGeom { top: tc, bottom: bc, deg: tc - bc, horizon: tc / (tc - bc) }
 }
 
-/// The sea distance's ends at Size 1 (m): the slider's first step is about SEA_NEAR_M, its end SEA_FAR_M.
-pub const SEA_NEAR_M: f64 = 50.0;
-pub const SEA_FAR_M: f64 = 5000.0;
+/// The sea distance's ends at Size 1 (m): the slider's first step is about SEA_NEAR_M, its end SEA_FAR_M (the owner's R2:
+/// 2/3 of plan 6's 50 m and 5 km, so the sea is 1.5x as deep below the horizon at every slider value).
+pub const SEA_NEAR_M: f64 = 100.0 / 3.0;
+pub const SEA_FAR_M: f64 = 10000.0 / 3.0;
 /// `sea_edge_rad` when there is no shore (the sea at the viewer's feet): past every view's depth.
 pub const NO_SHORE: f64 = 10.0;
 
@@ -156,22 +157,25 @@ mod tests {
         assert_eq!(ViewSpec::strip(&p, 1024).horizon, 0.95);
     }
 
-    /// Plan hdri-6 §3: the sea distance runs from about 50 m (the slider's first step) to 5 km on a log curve, times Size;
-    /// 0 is no shore (the example's sea at the viewer's feet). Its edge's depression is the same at every Size (the eye is
-    /// Size times as high too).
+    /// Plan hdri-6 §3 and the owner's R2 (the water 1.5x as deep: 2/3 of the distance): the sea distance runs from about
+    /// 33 m (the slider's first step) to 3.3 km on a log curve, times Size; 0 is no shore (the example's sea at the
+    /// viewer's feet). Its edge's depression is the same at every Size (the eye is Size times as high too), and at Sea
+    /// distance 0.6 it is about 0.68 degrees (0.46 at plan 6's 790 m).
     #[test]
-    fn the_sea_distance_runs_from_50_m_to_5_km_with_size() {
+    fn the_sea_distance_runs_from_33_m_to_3_3_km_with_size() {
         let mut p = Params::default();
         assert_eq!((sea_distance_m(&p), sea_edge_rad(&p)), (None, NO_SHORE), "the table's default: no shore");
         assert!(at_sea(&p, 1.0), "without a shore everything on the water is at sea");
         p.set(P::SeaD as usize, 0.01);
-        assert!((sea_distance_m(&p).unwrap() - 52.36).abs() < 0.01, "{:?}", sea_distance_m(&p));
+        assert!((sea_distance_m(&p).unwrap() - 34.904).abs() < 0.001, "{:?}", sea_distance_m(&p));
         p.set(P::SeaD as usize, 1.0);
-        assert!((sea_distance_m(&p).unwrap() - 5000.0).abs() < 1e-9);
+        assert!((sea_distance_m(&p).unwrap() - 10000.0 / 3.0).abs() < 1e-9);
+        p.set(P::SeaD as usize, 0.6);
+        assert!((sea_edge_rad(&p).to_degrees() - 0.6832).abs() < 1e-4, "{}", sea_edge_rad(&p).to_degrees());
         p.set(P::SeaD as usize, 0.3);
         let (d1, e1) = (sea_distance_m(&p).unwrap(), sea_edge_rad(&p));
-        assert!((d1 - 199.05).abs() < 0.01 && (e1 - (6.3f64 / d1).atan()).abs() < 1e-15, "{d1} {e1}");
-        assert!(!at_sea(&p, 150.0) && at_sea(&p, 250.0));
+        assert!((d1 - 132.702).abs() < 0.001 && (e1 - (6.3f64 / d1).atan()).abs() < 1e-15, "{d1} {e1}");
+        assert!(!at_sea(&p, 120.0) && at_sea(&p, 145.0));
         p.set(P::Size as usize, 2.0);
         assert!((sea_distance_m(&p).unwrap() - 2.0 * d1).abs() < 1e-9 && (sea_edge_rad(&p) - e1).abs() < 1e-12, "Size scales the distance, not the angle");
     }

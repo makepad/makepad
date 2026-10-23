@@ -7,8 +7,11 @@ use crate::zones::Zones;
 
 pub const LAKES_MAX: usize = 12;
 /// The nearest a lake's shore comes to the eye, and the farthest its near shore lies at, size units (m at Size 1).
-pub const LAKE_MIN_M: f64 = 300.0;
-pub const LAKE_FAR_M: f64 = 3000.0;
+pub const LAKE_MIN_M: f64 = 200.0;
+pub const LAKE_FAR_M: f64 = 2000.0;
+/// The owner's R2: every lake at 2/3 of plan 6's distance and size (its half-depth, its width across), so it keeps its
+/// bearing and its width in bearing and is 1.5x as deep in angle (LAKE_MIN_M and LAKE_FAR_M were 300 and 3000).
+const NEARER: f64 = 2.0 / 3.0;
 
 /// A lake on the ground plane: its centre's bearing (u, world azimuth) and distance (m), its half-width (a share of the
 /// turn) and its half-depth (m, along the view).
@@ -22,7 +25,7 @@ const TRIES: usize = 3;
 /// The lakes of `p` around `z` (`Zones::new` keeps them): a share of the 36 cells of the turn (the slider's, as many over
 /// Size) each tries up to three places for a lake and keeps the first that fits. Every draw is a hash of its cell and
 /// stream (layer 1950), so the zones' other layers never move, and a lake moves only when an earlier one takes its place.
-/// Dense enough to be seen: at Lakes 0.6 and the default land the median of 40 seeds has two to three lakes at least
+/// Dense enough to be seen: at Lakes 0.6 and the default land the median of 40 seeds has three to four lakes at least
 /// half a texel deep (`depth`) in a strip 1024 texels round the turn.
 pub fn place(z: &Zones, p: &Params) -> Vec<Lake> {
     let (amount, k) = (p[P::PrLake], p[P::Size]);
@@ -34,18 +37,18 @@ pub fn place(z: &Zones, p: &Params) -> Vec<Lake> {
         let fits = |t: usize| {
             let [r2, r3, r4, r5] = [2.0, 3.0, 4.0, 5.0].map(|s| z.rnd(jf, s + 10.0 * t as f64, 1950.0));
             let u = fract((jf + 0.2 + 0.6 * r2) / CELLS as f64);
-            // up to a kilometre deep along the view, nearer ones more often, 200-600 m across
-            let half_d = mix(100.0, 500.0, r3) * k;
+            // up to two thirds of a kilometre deep along the view, nearer ones more often, 133-400 m across
+            let half_d = mix(100.0, 500.0, r3) * NEARER * k;
             let d = LAKE_MIN_M * k + half_d + (LAKE_FAR_M - LAKE_MIN_M) * k * r5 * r5 * r5;
-            let half_u = mix(100.0, 300.0, r4) * k / (TAU * d);
+            let half_u = mix(100.0, 300.0, r4) * NEARER * k / (TAU * d);
             // the whole of it on open land (outside the city core, the town, the industry, the fair and the bridge)
             let on_land = (0..5).all(|i| z.open_n(fract(u + (i as f64 / 2.0 - 1.0) * half_u)) > 0.6);
             // clear of the power lines (straight, nearest q[1] m out at bearing q[0]: the lake's centre lies d cos(the
             // bearing between) along the line's normal) by its own reach and 50 m
             let reach = half_d.max(half_u * TAU * d) + 50.0 * k;
             let off_lines = z.pyl.iter().all(|q| q[3] <= 0.0 || (d * (wd(u, q[0]) * TAU).cos() - q[1]).abs() > reach);
-            // clear of the other lakes: apart in bearing, or (one behind the other) in distance
-            let clear = out.iter().all(|o| wd(o.u, u).abs() >= o.half_u + half_u + 0.01 || (o.d - d).abs() >= o.half_d + half_d + 50.0 * k);
+            // clear of the other lakes: apart in bearing, or (one behind the other) in distance (their gap scaled with them)
+            let clear = out.iter().all(|o| wd(o.u, u).abs() >= o.half_u + half_u + 0.01 || (o.d - d).abs() >= o.half_d + half_d + 50.0 * NEARER * k);
             (on_land && off_lines && clear).then_some(Lake { u, d, half_u, half_d })
         };
         if let Some(l) = (0..TRIES).find_map(fits) { out.push(l); }
@@ -101,22 +104,27 @@ mod tests {
         let z = Zones::new(&p);
         (p, z)
     }
-    /// Plan hdri-6 §4: lakes keep at least LAKE_MIN_M x Size away and stand on open land, at any seed and Size.
+    /// Plan hdri-6 §4 and the owner's R2 (1.5x as deep: 2/3 of the distance): a lake's near shore lies 200 to 2000 m x
+    /// Size out, and the lakes stand on open land, at any seed and Size. Over 40 seeds the nearest shores come within 250 m
+    /// x Size and the farthest past 1500 m x Size (the range is used).
     #[test]
     fn lakes_keep_their_distance_and_their_land() {
-        let mut seen = 0;
+        let (mut seen, mut nearest, mut farthest) = (0, f64::MAX, 0.0f64);
         for seed in 0..40 {
             for k in [0.5, 1.0, 2.0] {
                 let (_, z) = with(seed, 1.0, k);
                 assert!(z.lakes.len() <= LAKES_MAX);
                 for l in &z.lakes {
-                    assert!(l.d - l.half_d >= LAKE_MIN_M * k - 1e-9, "seed {seed}, Size {k}: a shore {} m out", l.d - l.half_d);
+                    let shore = l.d - l.half_d;
+                    assert!(shore >= 200.0 * k - 1e-9 && shore <= 2000.0 * k + 1e-9, "seed {seed}, Size {k}: a shore {shore} m out");
                     for i in 0..5 { assert!(z.open_n(fract(l.u + (i as f64 / 2.0 - 1.0) * l.half_u)) > 0.6, "seed {seed}: a lake off the land"); }
+                    (nearest, farthest) = (nearest.min(shore / k), farthest.max(shore / k));
                     seen += 1;
                 }
             }
         }
         assert!(seen > 100, "the premise: lakes were placed ({seen})");
+        assert!(nearest < 250.0 && farthest > 1500.0, "the shores span {nearest} .. {farthest} m x Size");
     }
     /// More with the slider, none at 0; Size times as large, about as many over Size.
     #[test]

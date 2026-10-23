@@ -131,7 +131,7 @@ mod tests {
         assert!((band_fit(&p).bottom_deg + MIN_GROUND_DEG + SHORE_BELOW_DEG).abs() < 1e-9, "no shore, no lakes");
         p.set(P::SeaD as usize, 0.01);
         let edge = crate::sea_edge_rad(&p).to_degrees();
-        assert!(edge > 6.0 && (band_fit(&p).bottom_deg + edge + SHORE_BELOW_DEG).abs() < 1e-9, "the sea 52 m out: {edge}");
+        assert!(edge > 10.0 && (band_fit(&p).bottom_deg + edge + SHORE_BELOW_DEG).abs() < 1e-9, "the sea 35 m out: {edge}");
         let mut q = Params::default();
         q.set(P::Land as usize, 1.0);
         q.set(P::PrLake as usize, 1.0);
@@ -140,12 +140,51 @@ mod tests {
         let lake = z.lakes.iter().map(|l| (eye / (l.d - l.half_d)).atan().to_degrees()).fold(MIN_GROUND_DEG, f64::max);
         assert!((band_fit(&q).bottom_deg + lake + SHORE_BELOW_DEG).abs() < 1e-9, "the nearest lake: {lake}");
     }
-    /// The fit ignores the view (the field of view, the horizon, the detail view) and the light.
+    /// The fit's two measures of `p`, uncached: the content's top and the ground's depth (rad).
+    fn uncached(p: &Params) -> (f64, f64) {
+        let z = Zones::new(p);
+        (content_top_rad(p, &z), ground_depth_rad(p, &z))
+    }
+    /// The table's defaults, the app's (the sea about 133 m out, a few lakes), all land with every lake, and `tall`.
+    fn bases() -> [(&'static str, Params); 4] {
+        let mut app = Params::default();
+        app.set(P::SeaD as usize, 0.3);
+        app.set(P::PrLake as usize, 0.6);
+        let mut lakes = Params::default();
+        lakes.set(P::Land as usize, 1.0);
+        lakes.set(P::PrLake as usize, 1.0);
+        [("the defaults", Params::default()), ("the app's", app), ("all lakes", lakes), ("tall", tall())]
+    }
+    /// The fit ignores the view (the field of view, the horizon, the detail view) and the light: the content's top and the
+    /// ground's depth, measured afresh (`band_fit` hands back the cached entry of FIT_KEYS, which these rows are not in).
     #[test]
     fn the_fit_ignores_the_view_and_the_light() {
-        let p = Params::default();
-        let mut q = p.clone();
-        for (key, v) in [(P::Vfov, 80.0), (P::Horizon, 0.4), (P::Zoom, 0.5), (P::Haze, 1.0), (P::Lights, 9.0), (P::Temp, 6000.0)] { q.set(key as usize, v); }
-        assert_eq!(band_fit(&p), band_fit(&q));
+        for (name, p) in bases() {
+            let mut q = p.clone();
+            for (key, v) in [(P::Vfov, 80.0), (P::Horizon, 0.4), (P::Zoom, 0.5), (P::Haze, 1.0), (P::Lights, 9.0), (P::Temp, 6000.0)] { q.set(key as usize, v); }
+            assert_eq!(uncached(&p), uncached(&q), "{name}");
+        }
+    }
+    /// Every row outside FIT_KEYS but the field of view and the horizon (which `fit_band` writes) leaves the fit alone: set
+    /// to two other values (a tenth and nine tenths of its range) over each base, the content's top and the ground's
+    /// depth, measured afresh, do not move. A row of the scene's geometry left out of FIT_KEYS, whose change the cache
+    /// would not see, fails here.
+    #[test]
+    fn every_row_outside_fit_keys_leaves_the_fit_alone() {
+        let mut rows = 0;
+        for (name, base) in bases() {
+            let want = uncached(&base);
+            for (i, d) in PARAMS.iter().enumerate() {
+                if FIT_KEYS.iter().any(|k| *k as usize == i) || i == P::Vfov as usize || i == P::Horizon as usize { continue; }
+                for t in [0.1, 0.9] {
+                    let mut q = base.clone();
+                    q.set(i, d.min + t * (d.max - d.min));
+                    assert_ne!(q.v[i], base.v[i], "{name}: {} is not perturbed", d.key);
+                    assert_eq!(uncached(&q), want, "{name}: {} at {} moves the fit", d.key, q.v[i]);
+                }
+                rows += 1;
+            }
+        }
+        assert!(rows >= 4 * 9, "the premise: the light's and the view's rows are perturbed ({rows})");
     }
 }
