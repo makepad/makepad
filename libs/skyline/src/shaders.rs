@@ -72,6 +72,9 @@ script_mod! {
         // over a host's wet ground, the share of its flat ground below the horizon (`under_floor`) the strip leaves to
         // the host's floor, which lays its puddles there (`SkyLight::floor_share`: the puddles' mean share); 0 elsewhere
         host_wet: uniform(0.0)
+        // a host's beacons as points (`SkyLight::point_core`): a core's sigma (rad) and its peak over the designed one; 0:
+        // the example's core (`beacon_core`)
+        point_core: uniform(vec2(0.0, 0.0))
         // the horizon rings, RING x 4 texels: row 0 the sky at +1 degree, row 1 at +15 degrees, row 2 the host's ground,
         // row 3 the coast (x: 1 on land, 0 from SHORE_DEG out to sea; `SkyLight::ring_texels`, `coast_ring`)
         ring_tex: texture_2d(float)
@@ -83,6 +86,13 @@ script_mod! {
 
         // the fragment's centre in pass pixels, exactly (the page's gl_FragCoord): the interpolated pos rounds by the quad's size
         frag: fn() -> vec2 { return floor(self.rect_pos + self.pos * self.rect_size) + 0.5 }
+        // a host's beacon's core (`point_core` set) at d2 squared pixels from its centre, pixels of px rad: its sigma held
+        // to half a pixel, its peak point_core.y times the designed one (the example's core, exp(-d2 / 3), is written at
+        // its callers, unchanged)
+        beacon_core: fn(d2: float, px: float) -> float {
+            let s = max(self.point_core.x / px, 0.5)
+            return self.point_core.y * exp(0.0 - 0.5 * d2 / (s * s))
+        }
         // radians per pixel of the raw view
         px0: fn() -> float { return self.view_span.y * 6.2831853 / self.view_in().x }
         view_in: fn() -> vec2 { return self.view_size - 2.0 * self.view_pad }

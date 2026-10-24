@@ -168,6 +168,7 @@ impl SceneCtx<'_> {
         vars.set_uniform(cx, live_id!(near_rise), &[crate::NEAR_RISE_M as f32]);
         vars.set_uniform(cx, live_id!(wet), &[l.own_wet()]);
         vars.set_uniform(cx, live_id!(host_wet), &[l.floor_share()]);
+        vars.set_uniform(cx, live_id!(point_core), &l.point_core());
         bind_texture(cx, vars, live_id!(lake_tex), self.lakes);
         bind_texture(cx, vars, live_id!(ring_tex), self.ring);
         bind_texture(cx, vars, live_id!(cols), self.cols);

@@ -417,6 +417,71 @@ fn beacons_burn_at_noon() {
     assert_eq!(count_beacons(&dark, facade), 0);
 }
 
+/// A beacon's peaks in band `b` above the horizon (`count_beacons`' red: the red light past 4 x its green and blue,
+/// `beacon_red`) over the sky (a texel under 0.9 covered: an opaque one is a surface, a red light on a facade), each a
+/// local top of that red over the 5 x 5 texels round it and at least a quarter of the brightest:
+/// (x, y, the texel, its width across and up at half its red, texels, read between texels as a bilinear read does).
+fn beacon_peaks(p: &Params, b: &Band) -> Vec<(usize, usize, [f32; 4], [f64; 2])> {
+    let red = |x: usize, y: usize| beacon_red(b.texels[y * b.w + x % b.w]);
+    let rows: Vec<usize> = (3..b.h - 3).filter(|&y| row_el(p, b, y) > 0.0).collect();
+    let tops: Vec<(usize, usize)> = rows.iter().flat_map(|&y| (b.w..2 * b.w).map(move |x| (x, y)))
+        .filter(|&(x, y)| { let r = red(x, y); r > 0.0 && b.texels[y * b.w + x % b.w][3] < 0.9 && (0..25).all(|k| { let (i, j) = (x + k % 5 - 2, y + k / 5 - 2); (i, j) == (x, y) || red(i, j) < r }) })
+        .collect();
+    let most = tops.iter().map(|&(x, y)| red(x, y)).fold(0.0, f32::max);
+    tops.into_iter().filter(|&(x, y)| red(x, y) >= 0.25 * most).map(|(x, y)| {
+        let half = 0.5 * red(x, y) as f64;
+        // from the top along (dx, dy) to where the red falls under half, between the last texel over it and the next;
+        // 3 where it does not within 3 texels (another light beside it)
+        let reach = |dx: isize, dy: isize| -> f64 {
+            let at = |k: isize| red((x as isize + k * dx) as usize, (y as isize + k * dy) as usize) as f64;
+            let mut k = 1;
+            while at(k) >= half {
+                if k == 3 { return 3.0; }
+                k += 1;
+            }
+            (k - 1) as f64 + (at(k - 1) - half) / (at(k - 1) - at(k))
+        };
+        (x % b.w, y, b.texels[y * b.w + x % b.w], [reach(-1, 0) + reach(1, 0), reach(0, -1) + reach(0, 1)])
+    }).collect()
+}
+
+/// A texel's red light past 4 x its green and blue (a beacon's is (1, 0.08, 0.03); the windows, the facades, the glow
+/// and the sky have none), 0 where there is none.
+fn beacon_red(t: [f32; 4]) -> f32 { (t[0] - 4.0 * (t[1] + t[2])).max(0.0) }
+
+/// Plan hdri-7 Task 9 (the owner: a tower's red beacon in the map read as a nebula, a pink disc): in a host's strip
+/// (`SkyLight::point_lights`) a beacon is a small red point. Measured on the generator's night at 1024, 2048 and 4096 px,
+/// beside the example's core in the same light: the brightest beacons' width at half their red (read between texels as
+/// a map's bilinear read shows it), their red against their green and blue, and the brightest one's against the map's
+/// sky at +1 degree (the light's low ring). Tolerances: at most two texels at 1024 and 2048 px (0.70 and 0.35 degrees:
+/// the core is held to half a texel, so a beacon halfway between two texels lights both), 0.25 degrees at 4096
+/// (POINT_SIGMA_DEG, 0.19); the red at least 10 x the green and the blue, and the brightest 3 x the sky's blue.
+#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn a_hosts_beacons_are_small_red_points() {
+    let p = city_params();
+    let light = SkyLight { point_lights: true, ..generator_light(-20.0) };
+    let sky_blue = light.ring_low[0][2];
+    for (w, most_deg) in [(1024usize, 0.7f64), (2048, 0.35), (4096, 0.25)] {
+        for (name, l) in [("the example's core", SkyLight { point_lights: false, ..light.clone() }), ("a point", light.clone())] {
+            let peaks = beacon_peaks(&p, &render_planned(&p, w, &l));
+            assert!(!peaks.is_empty(), "{w} px, {name}: no beacon");
+            for &(x, y, t, width) in &peaks {
+                let deg = width.map(|s| s * 360.0 / w as f64);
+                println!("{w} px, {name}: beacon at ({x}, {y}), {t:?}: {:.2} x {:.2} texels, {:.3} x {:.3} degrees at half its red; red {:.1} x its green, {:.1} x its blue, {:.2} x the sky's blue",
+                    width[0], width[1], deg[0], deg[1], t[0] / t[1], t[0] / t[2], t[0] / sky_blue);
+                if l.point_lights {
+                    assert!(deg[0] <= most_deg && deg[1] <= most_deg, "{w} px: the beacon at ({x}, {y}) is {deg:?} degrees across");
+                    assert!(t[0] >= 10.0 * t[1] && t[0] >= 10.0 * t[2], "{w} px: the beacon at ({x}, {y}) is not red: {t:?}");
+                }
+            }
+            let brightest = peaks.iter().map(|q| q.2[0]).fold(0.0, f32::max);
+            if l.point_lights {
+                assert!(brightest >= 3.0 * sky_blue, "{w} px: the brightest beacon's red {brightest} is not clear of the sky's blue {sky_blue}");
+            }
+        }
+    }
+}
+
 // Measured: the lights' luminance summed over the city's 745 texels, 15.82 by day with lights_by_day 1, 15.84 at night.
 // The brief's measure (the city's peak over median, lights on against off) cannot see the windows at 1024 px: they are
 // sub-pixel, an even glow per floor that raises the median as much as the peak (on 1.44, off 1.47; 1.96 / 1.51 at 4096 px).

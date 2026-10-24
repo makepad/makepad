@@ -72,7 +72,19 @@ pub struct SkyLight {
     /// Host light, never coded: `plan()` carries it in the host's part (`Split`; never `Unit` while it is handed), the
     /// designed part has none. None in the example. Plan hdri-7 D12.
     pub aurora_sky: Option<([[f32; 3]; RING], [[f32; 3]; RING])>,
+    /// A host's beacons are points (`point_core`): a red aviation light's core is POINT_SIGMA_DEG in sigma, held to half
+    /// a pixel of the strip, at POINT_GAIN times its designed peak, so in a map, whose strip is a few tenths of a degree a
+    /// texel, it stays a small red point clear of the sky behind it. False (the example): a core of 1.22 px of the view at
+    /// its designed peak, as the example draws it on a screen. Plan hdri-7 Task 9.
+    pub point_lights: bool,
 }
+
+/// A host's beacon (`SkyLight::point_lights`): its core's sigma, degrees (0.19 degrees at half its peak), held to half a
+/// pixel of the strip (0.18 degrees at 1024 px), and its peak over the designed one (0.07 x Lights at its core, dimmed by
+/// the haze with distance): with it the core stands over the night sky behind it as the light it is, red, not a plum
+/// smudge of red light and blue sky. Plan hdri-7 Task 9.
+pub const POINT_SIGMA_DEG: f32 = 0.08;
+pub const POINT_GAIN: f32 = 5.0;
 
 /// The share of a host's own light the buildings take by night (`SkyLight::night_light_share`): on the generator's
 /// default night (Clear noon, the sun 20 degrees down) the facades then stand at about 5 % of the sky's brightness
@@ -119,7 +131,13 @@ impl SkyLight {
     pub fn example() -> Self {
         Self { sun_u: 0.0, sun_el_deg: -90.0, sun_rgb: [0.0; 3], ambient_rgb: [0.0; 3], ring_low: [HAZE_COL; RING], ring_high: [HAZE_COL; RING],
             lights_by_day: 0.0, design_gain: 1.0, decode: false, night_haze: 1.0, ground: [[0.0; 3]; RING], host_ground: false, night_light_share: 1.0,
-            sea_sky: None, wet: 0.0, aurora_sky: None }
+            sea_sky: None, wet: 0.0, aurora_sky: None, point_lights: false }
+    }
+
+    /// The shaders' `point_core` (`SceneCtx::set_uniforms`): with `point_lights` a beacon's core sigma (rad) and its peak
+    /// over the designed one; else 0 (the example's core).
+    pub fn point_core(&self) -> [f32; 2] {
+        if self.point_lights { [POINT_SIGMA_DEG.to_radians(), POINT_GAIN] } else { [0.0; 2] }
     }
 
     /// The wetness the strip draws itself (the shaders' `wet`, the reflection run's): `wet`, but 0 over a host's ground,
@@ -343,14 +361,15 @@ impl SkyLight {
 
     /// A hash of every field's bits, for cache keys.
     pub fn hash(&self) -> u64 {
-        // (the sea's sky only when it is handed, the wetness only when there is some: a light without them hashes as it did)
+        // (the sea's sky only when it is handed, the wetness only when there is some, the point lights only when on: a
+        // light without them hashes as it did)
         let sea = self.sea_sky.iter().flat_map(|(low, high)| low.iter().chain(high)).flatten();
         let rings = self.ring_low.iter().chain(&self.ring_high).chain(&self.ground).flatten().chain(sea);
         let floats = [&self.sun_u, &self.sun_el_deg].into_iter().chain(&self.sun_rgb).chain(&self.ambient_rgb).chain(rings).chain([&self.lights_by_day, &self.design_gain, &self.night_haze, &self.night_light_share]);
         // (the aurora only when it is handed, marked so it never hashes as a sea sky of the same numbers)
         let aurora = self.aurora_sky.iter().flat_map(|(low, high)| low.iter().chain(high)).flatten().map(|x| (x.to_bits() as u64) | (1u64 << 40));
         hash_bits(0x5c71_19b7_0000_0002, floats.map(|x| x.to_bits() as u64).chain([self.decode as u64, self.host_ground as u64])
-            .chain((self.wet != 0.0).then(|| self.wet.to_bits() as u64)).chain(aurora))
+            .chain((self.wet != 0.0).then(|| self.wet.to_bits() as u64)).chain(aurora).chain(self.point_lights.then_some(1u64 << 41)))
     }
 
     /// The rings as the first three rows of the shaders' ring texture (`RING` wide, RGBA): row 0 `ring_low`, row 1
@@ -661,6 +680,16 @@ mod tests {
         assert_ne!(a.hash(), sh.hash());
         let mut w = a.clone(); w.wet = 0.5;
         assert_ne!(a.hash(), w.hash());
+        let mut pl = a.clone(); pl.point_lights = true;
+        assert_ne!(a.hash(), pl.hash());
+    }
+    /// Plan hdri-7 Task 9: a host's beacons reach the shaders as points (`point_core`: the core's sigma in radians and the
+    /// peak's gain), the example's as they were (0: its 1.22 px core).
+    #[test]
+    fn a_hosts_beacons_reach_the_shaders_as_points() {
+        let example = SkyLight::example();
+        assert_eq!(example.point_core(), [0.0; 2]);
+        assert_eq!(SkyLight { point_lights: true, ..example }.point_core(), [POINT_SIGMA_DEG.to_radians(), POINT_GAIN]);
     }
     /// A dry light hashes as it did before the wet ground (plan hdri-6 §5), so a dry sky keeps its keys: the example and
     /// a day light with every other field set, against their hashes recorded at makepad 40bee3851.
