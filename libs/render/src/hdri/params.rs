@@ -121,8 +121,9 @@ pub const AURORA_COLOR_NAMES: &[&str] = &["classic", "red tops", "storm", "custo
 /// bands), each x 50 kR on the brightest lines of sight at Strength 1: classic, red tops, storm (plan hdri-7 §4, refs
 /// §5.1; Task 4 pins their colours by height). Classic's red and nitrogen are small enough that it is green wherever
 /// it shows at 5 % of its peak (with 0.06 and 0.2 its nitrogen fringe at 103.75 km and its red top at 186 to 189 km
-/// outshone the green).
-pub const AURORA_PRESET_MIX: [[f32; 3]; 3] = [[1.0, 0.04, 0.1], [1.0, 0.5, 0.2], [2.0, 0.4, 2.0]];
+/// outshone the green; with the first positive bands' 600 nm group in the nitrogen, 0.1 outshone it at 103.75 km).
+/// Red tops' red, 0.8, is 12 kR face-on at about 2.9 G0 (refs: 10 to 15 kR, 2.4 to 3.6 G0).
+pub const AURORA_PRESET_MIX: [[f32; 3]; 3] = [[1.0, 0.04, 0.05], [1.0, 0.8, 0.2], [2.0, 0.4, 2.0]];
 
 /// clamp()'s rule for one number: NaN is `fallback`, anything else
 /// (infinities too) is held into `lo..=hi`.

@@ -1394,9 +1394,8 @@ mod tests {
     }
 
     /// Plan hdri-7 D9: the aurora lights the scene: the night's ground and ambient gain its light, green; a great storm
-    /// (IBC IV, Strength 20) over about a steradian (its arc lights 1.15 sr) puts 0.01 to 0.3 of a full moon's light on
-    /// the ground. Refs §5.1 asked for 0.03 to 0.3 (computed 0.11) of a body averaging a third of the peak; the sheet's
-    /// face-on body is an eighth of it (EDGE_MAX), its green held to the 40 km over the border, and it measures 0.015.
+    /// (IBC IV, Strength 20) over about a steradian puts 0.03 to 0.3 of a full moon's light on the ground (refs §5.1;
+    /// the sheet's face-on body is 0.3 of its brightest lines of sight, EDGE_MAX).
     #[test]
     fn the_aurora_lights_the_ground_green() {
         let dark = night_at(&NightParams { moon: false, ..Default::default() }, -30.0);
@@ -1409,7 +1408,7 @@ mod tests {
         let moon = NightSky::new(&NightParams { moon_elevation_deg: 45.0, moon_azimuth_deg: 135.0, ..Default::default() }, 7, dir_from_az_el(315.0, -30.0), 22.0, 45.0);
         let ratio = luminance(great.ground_irradiance - dark.ground_irradiance) / luminance(moon.moon_ground);
         println!("a Strength 20 storm puts {ratio:.3} of a full moon's light on the ground");
-        assert!((0.01..=0.3).contains(&ratio), "{ratio}");
+        assert!((0.03..=0.3).contains(&ratio), "{ratio}");
     }
 
     /// Plan hdri-7 §4: the moon does not hide the aurora but lowers its contrast: under a full moon (the moonlit

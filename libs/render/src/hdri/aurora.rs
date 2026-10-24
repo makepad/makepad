@@ -8,10 +8,11 @@
 //!   the horizon at both ends. The sheet leans poleward with height (FIELD_TILT, a field dip of about 77 degrees), so a
 //!   ray (a field line at a fixed along-arc x) leans toward the middle as it rises. Folds 0.3 to 1 bring in a second and
 //!   a third arc behind the first.
-//! - **Brightness.** A thin sheet's light is its column along the view: face-on an eighth of the brightest (EDGE_MAX),
-//!   seen edge-on (a fold, the arc's ends) up to all of it: 50 kR of green at Strength 1.
-//! - **Colour.** The lines' heights above the border: nitrogen (427.8 nm and the first positive bands) just above it,
-//!   the green 557.7 nm line from a few km up fading over 25 km, the red 630 nm line from about 150 km to 350 km;
+//! - **Brightness.** A thin sheet's light is its column along the view: face-on 0.3 of the brightest (EDGE_MAX, the top
+//!   of refs §5.1's 0.1 to 0.3), seen edge-on (a fold, the arc's ends) up to all of it: 50 kR of green at Strength 1.
+//! - **Colour.** The lines' heights above the border: nitrogen (427.8 nm and the first positive bands, pink together)
+//!   in its bottom 12 km or so, the green 557.7 nm line from a few km up fading over 25 km, held off the bottom 7 km
+//!   more where the nitrogen is strong (a storm's harder electrons), the red 630 nm line from about 150 km to 350 km;
 //!   summed in XYZ per height and turned into Rec.709 once, luminance kept (`spectrum::xyz_to_rgb_keep_luminance`).
 //! - **Band limits.** Every noise reads the lookup's texel (AURORA_BARE_TEXEL for the few looks round the horizon), its
 //!   octaves fading to their mean below two texels, so held and released bakes agree in their means.
@@ -33,8 +34,8 @@ const WAVE_DEPTH_KM: f32 = 4.0;
 const ARC_STEP_KM: f32 = 60.0;
 /// The sheet's poleward lean per km of height: cot of the field's dip (about 77 degrees).
 const FIELD_TILT: f32 = 0.23;
-/// Edge-on over face-on, at most.
-const EDGE_MAX: f32 = 8.0;
+/// Edge-on over face-on, at most: the face-on body is 0.3 of the brightest lines of sight (refs §5.1: 0.1 to 0.3).
+const EDGE_MAX: f32 = 10.0 / 3.0;
 /// The folds: their wavelength along the arc and their depth at Folds 1.
 const FOLD_KM: f32 = 150.0;
 const FOLD_DEPTH_KM: f32 = 80.0;
@@ -46,10 +47,19 @@ const TABLE_LOW_KM: f32 = 80.0;
 const TABLE: usize = 128;
 /// Rayleighs of a line at 1 of the mix on the brightest lines of sight (Strength 1).
 const PEAK_RAYLEIGHS: f32 = 50_000.0;
-/// The nitrogen unit: 427.8 nm at 20 kR and the first positive bands (about 670 nm) at 50 kR.
+/// The nitrogen unit: 427.8 nm at 20 kR and the first positive bands at 50 kR, in their two visible groups: 35 kR
+/// round 650-690 nm (taken at 670 nm) and 15 kR round 580-610 nm (at 600 nm). The second group carries most of their
+/// luminance, so with the violet the lower border reads pink, not a dim maroon seam.
 const N2_VIOLET_SHARE: f32 = 0.4;
-const N2_PINK_SHARE: f32 = 1.0;
+const N2_PINK_SHARE: f32 = 0.7;
 const N2_PINK_NM: f32 = 670.0;
+const N2_ORANGE_SHARE: f32 = 0.3;
+const N2_ORANGE_NM: f32 = 600.0;
+/// The nitrogen's height over the border and its spread (refs §5.1: from the border to about 15 km over it).
+const N2_KM: f32 = 6.0;
+const N2_SPREAD_KM: f32 = 5.0;
+/// How far a storm (nitrogen 0.5 to 2 in the mix) holds the green off its bottom (refs §5.1: 5 to 10 km).
+const GREEN_HOLD_KM: f32 = 7.0;
 /// The window's soft edge at the arc's ends, and the widest half-width (the footprint's 1 / cos beta).
 const WINDOW_EDGE: f32 = 10.0 * PI / 180.0;
 const MAX_HALF: f32 = 88.0 * PI / 180.0;
@@ -247,18 +257,20 @@ impl Aurora {
 /// EDGE_MAX-th of it.
 fn line_table(mix: [f32; 3]) -> [Vec3f; TABLE] {
     let face = PEAK_RAYLEIGHS / EDGE_MAX;
+    let hold = GREEN_HOLD_KM * smoothstep(0.5, 2.0, mix[2]);
     let (green, red, violet, pink) = (line_xyz_per_rayleigh(557.7), line_xyz_per_rayleigh(630.0), line_xyz_per_rayleigh(427.8), line_xyz_per_rayleigh(N2_PINK_NM));
+    let orange = line_xyz_per_rayleigh(N2_ORANGE_NM);
     std::array::from_fn(|i| {
         let h = TABLE_LOW_KM + (i as f32 + 0.5) * (TOP_KM - TABLE_LOW_KM) / TABLE as f32;
         let dh = h - BORDER_KM;
         let border = smoothstep(-1.5, 0.5, dh);
-        let g = smoothstep(2.0, 12.0, dh) * (-(dh - 12.0).max(0.0) / 25.0).exp() * (1.0 - smoothstep(180.0, 220.0, h));
+        let g = smoothstep(2.0 + hold, 12.0 + hold, dh) * (-(dh - 12.0 - hold).max(0.0) / 25.0).exp() * (1.0 - smoothstep(180.0, 220.0, h));
         let q = (h / 220.0).ln() / 0.18;
         let r = (-0.5 * q * q).exp() * smoothstep(140.0, 170.0, h) * (1.0 - smoothstep(320.0, 350.0, h));
-        let w = (dh - 4.0) / 4.0;
+        let w = (dh - N2_KM) / N2_SPREAD_KM;
         let n = (-0.5 * w * w).exp();
         let k = face * border;
-        let xyz: [f32; 3] = std::array::from_fn(|c| k * (mix[0] * g * green[c] + mix[1] * r * red[c] + mix[2] * n * (N2_VIOLET_SHARE * violet[c] + N2_PINK_SHARE * pink[c])));
+        let xyz: [f32; 3] = std::array::from_fn(|c| k * (mix[0] * g * green[c] + mix[1] * r * red[c] + mix[2] * n * (N2_VIOLET_SHARE * violet[c] + N2_PINK_SHARE * pink[c] + N2_ORANGE_SHARE * orange[c])));
         xyz_to_rgb_keep_luminance(xyz)
     })
 }
@@ -303,10 +315,24 @@ mod tests {
         let (high, low) = (tops.profile(230.0), tops.profile(120.0));
         assert!(high.x > high.y, "red tops at 230 km: {high:?}");
         assert!(low.y > low.x, "red tops at 120 km: {low:?}");
+        // refs §5.1: the red tops read orange, then deep red, at about 2.4 to 3.6 G0 face-on (630 nm at 10 to 15 kR)
+        let top = (180..=300).map(|h| luminance(tops.profile(h as f32))).fold(0.0, f32::max) / g0();
+        assert!((2.4..=3.6).contains(&top), "red tops' brightest red above 180 km: {top} G0");
         let storm = at("storm");
-        let (border, above) = (storm.profile(BORDER_KM + 1.0), storm.profile(BORDER_KM + 15.0));
-        assert!(border.x > border.y && border.z > border.y, "the storm's lower border: {border:?}");
+        // refs §5.1: the nitrogen fills the bottom of a storm's sheet, the green held off it for 5 to 10 km, so its
+        // fringe is several km tall (a few texels at 1024), not a seam
+        for dh in [1.0f32, 4.0, 7.0] {
+            let border = storm.profile(BORDER_KM + dh);
+            assert!(border.x > border.y && border.z > border.y, "the storm's lower border, {dh} km up: {border:?}");
+        }
+        let above = storm.profile(BORDER_KM + 15.0);
         assert!(above.y > above.x && above.y > above.z, "15 km up: {above:?}");
+        // and bright enough to read pink beside the green over it (the first positive bands' 600 nm group), not a
+        // maroon line at a thirtieth of it
+        let lum_over = |a: &Aurora, hs: std::ops::Range<i32>| hs.map(|dh| luminance(a.profile(BORDER_KM + dh as f32 * 0.5))).fold(0.0, f32::max);
+        let (fringe, body) = (lum_over(&storm, 0..16), lum_over(&storm, 0..200));
+        println!("the storm's pink fringe {:.2} G0 under its green {:.2} G0", fringe / g0(), body / g0());
+        assert!(fringe >= 0.15 * body, "the storm's fringe {fringe} against its body {body}");
     }
 
     /// The arc stands where its settings say: its lower border at its middle is at Height within half a degree, it sinks
