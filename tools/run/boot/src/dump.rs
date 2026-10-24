@@ -1,7 +1,6 @@
 //! `MAKEPAD_RUN_BOOT_DUMP=<dir>[@<ms>]`: the boot window's frames as PNG files, for looking at a
 //! hidden run (the HAL's snapshot of the presented window, answered by a `Readback` event). While
-//! the JIT activity badge shows, a frame is the app's window with the badge put over it (two
-//! snapshots, composed here).
+//! the JIT ring shows, the window's snapshot has it (the HAL's badge layer, as presented).
 use makepad_hal::{format, usage, Attr, CmdWriter, Id};
 use std::{path::PathBuf, time::Instant};
 
@@ -15,8 +14,6 @@ pub struct Dump {
     last: Option<u128>,
     next: u32,
     pending: Vec<(u32, u128)>,
-    /// the app's window and the activity badge over it: read back apart, written as one frame
-    pairs: Vec<Pair>,
     target: Option<[u32; 2]>,
     /// `MAKEPAD_RUN_BOOT_HOLD=1`: keep drawing (into a texture) after the app has the window
     pub hold: bool,
@@ -24,6 +21,10 @@ pub struct Dump {
     /// no window system, so no window buttons) lays its caption out for: app-drawn buttons, or
     /// native ones at that rect (points)
     pub chrome: Option<crate::caption::Chrome>,
+    /// `MAKEPAD_RUN_RING_HOVER=1`: the JIT ring is drawn hovered, its tooltip showing (a hidden
+    /// run has no pointer); `MAKEPAD_RUN_RING_ALERT=stale|panic`: its dot shows
+    pub ring_hover: bool,
+    pub ring_alert: Option<crate::ring::Alert>,
 }
 
 impl Dump {
@@ -41,7 +42,6 @@ impl Dump {
             last: None,
             next: 1,
             pending: Vec::new(),
-            pairs: Vec::new(),
             target: None,
             hold: std::env::var_os("MAKEPAD_RUN_BOOT_HOLD").is_some(),
             chrome: std::env::var("MAKEPAD_RUN_BOOT_CHROME").ok().and_then(|spec| {
@@ -52,6 +52,12 @@ impl Dump {
                 let native: [f32; 4] = v.try_into().ok()?;
                 Some(crate::caption::Chrome { native, client: false, state: 0 })
             }),
+            ring_hover: std::env::var("MAKEPAD_RUN_RING_HOVER").as_deref() == Ok("1"),
+            ring_alert: match std::env::var("MAKEPAD_RUN_RING_ALERT").as_deref() {
+                Ok("stale") => Some(crate::ring::Alert::Stale),
+                Ok("panic") => Some(crate::ring::Alert::Panic),
+                _ => None,
+            },
         })
     }
 
@@ -68,7 +74,7 @@ impl Dump {
     /// changes, so each of its frames is kept.
     pub fn now(&mut self) -> Option<u32> {
         let ms = self.began.elapsed().as_millis();
-        if self.pending.len() + self.pairs.len() > 4 {
+        if self.pending.len() > 4 {
             return None;
         }
         self.last = Some(ms);
@@ -103,55 +109,7 @@ impl Dump {
         self.began.elapsed().as_millis()
     }
 
-    /// The snapshot `due` just asked for is the app's window: this one, of the activity badge
-    /// placed at `placed` (window points), goes over it.
-    pub fn badge(&mut self, placed: [f32; 4], dpi: f32) -> u32 {
-        let (app, ms) = self.pending.pop().unwrap_or((0, 0));
-        let req = self.next;
-        self.next += 1;
-        let at = [(placed[0] * dpi).round() as i64, (placed[1] * dpi).round() as i64];
-        self.pairs.push(Pair { app, badge: req, ms, at, app_px: None, badge_px: None });
-        req
-    }
-
     pub fn ready(&mut self, req: u32, rect: [u32; 4], pixels: &[u8]) {
-        if let Some(at) = self.pairs.iter().position(|p| p.app == req || p.badge == req) {
-            let [_, _, w, h] = rect;
-            if pixels.len() < (w * h * 4) as usize || w == 0 || h == 0 {
-                self.pairs.remove(at);
-                return;
-            }
-            let pair = &mut self.pairs[at];
-            let image = Some((w, h, pixels[..(w * h * 4) as usize].to_vec()));
-            if pair.app == req {
-                pair.app_px = image;
-            } else {
-                pair.badge_px = image;
-            }
-            if pair.app_px.is_some() && pair.badge_px.is_some() {
-                let pair = self.pairs.remove(at);
-                let (w, h, mut app) = pair.app_px.unwrap();
-                let (bw, bh, badge) = pair.badge_px.unwrap();
-                // premultiplied over
-                for y in 0..bh as i64 {
-                    for x in 0..bw as i64 {
-                        let (ax, ay) = (pair.at[0] + x, pair.at[1] + y);
-                        if ax < 0 || ay < 0 || ax >= w as i64 || ay >= h as i64 {
-                            continue;
-                        }
-                        let b = ((y * bw as i64 + x) * 4) as usize;
-                        let a = ((ay * w as i64 + ax) * 4) as usize;
-                        let alpha = badge[b + 3] as u32;
-                        for c in 0..3 {
-                            app[a + c] = (badge[b + c] as u32 + app[a + c] as u32 * (255 - alpha) / 255).min(255) as u8;
-                        }
-                    }
-                }
-                let path = self.dir.join(format!("frame-{:06}.png", pair.ms));
-                let _ = std::fs::write(path, png(w, h, &app));
-            }
-            return;
-        }
         let Some(at) = self.pending.iter().position(|p| p.0 == req) else {
             return;
         };
@@ -164,16 +122,6 @@ impl Dump {
         let path = self.dir.join(format!("frame-{ms:06}.png"));
         let _ = std::fs::write(path, png(w, h, pixels));
     }
-}
-
-struct Pair {
-    app: u32,
-    badge: u32,
-    ms: u128,
-    /// the badge's place in the app's image (pixels)
-    at: [i64; 2],
-    app_px: Option<(u32, u32, Vec<u8>)>,
-    badge_px: Option<(u32, u32, Vec<u8>)>,
 }
 
 fn crc(mut c: u32, data: &[u8], table: &[u32; 256]) -> u32 {

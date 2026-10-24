@@ -124,8 +124,18 @@ pub(super) fn win_of(hwnd: HWND) -> Option<Rc<Win>> {
     }
 }
 
+/// The window a session's commands for `key` act on: the one it owns, or the one lent to it
+/// (`Op::Lend`: makepad run's app draws into the host's window under its own id), as the X11,
+/// Wayland and AppKit backends resolve it. Without the lent case every command of a borrowing
+/// app was dropped: its drag-query answers (no drag, no caption move: a press only became a click
+/// at its release), cursors, IME areas.
 fn find(key: Key) -> Option<Rc<Win>> {
-    APP.with_borrow(|a| a.wins.get(&key).cloned())
+    APP.with_borrow(|a| a.wins.get(&key).or_else(|| a.wins.values().find(|w| w.recipient.get() == key)).cloned())
+}
+
+/// The session's main window, owned or lent to it.
+fn session_window(a: &App, sid: u32) -> Option<&Rc<Win>> {
+    a.wins.values().find(|w| (w.own.0 == sid || w.recipient.get().0 == sid) && !w.popup())
 }
 
 /// The app theme the user chose (Settings > Personalization > Colors: AppsUseLightTheme).
@@ -573,7 +583,7 @@ fn command(s: &'static Shared, sid: u32, cmd: OsCmd) {
             }
         }
         OsCmd::ActivateApp => {
-            if let Some(w) = APP.with_borrow(|a| a.wins.values().find(|w| w.own.0 == sid && !w.popup()).cloned()) {
+            if let Some(w) = APP.with_borrow(|a| session_window(a, sid).cloned()) {
                 unsafe {
                     let _ = SetForegroundWindow(w.hwnd.get());
                 }
@@ -606,7 +616,7 @@ fn command(s: &'static Shared, sid: u32, cmd: OsCmd) {
         }
         OsCmd::MenuSet { items } => menu::set(sid, items),
         OsCmd::FileDialog { req, kind, title, location, filename, filters } => {
-            let owner = APP.with_borrow(|a| a.wins.values().find(|w| w.own.0 == sid && !w.popup()).map(|w| w.hwnd.get().0 as usize)).unwrap_or(0);
+            let owner = APP.with_borrow(|a| session_window(a, sid).map(|w| w.hwnd.get().0 as usize)).unwrap_or(0);
             dialog::open(dialog::Request { sid, req, kind, title, location, filename, filters, owner });
         }
         OsCmd::DragStart { id, items } => match target(id) {
@@ -707,7 +717,7 @@ fn set_app_icon(sid: u32, w: u32, h: u32, rgba: &[u8]) {
             return;
         }
     };
-    let wins: Vec<HWND> = APP.with_borrow(|a| a.wins.values().filter(|w| w.own.0 == sid && !w.popup()).map(|w| w.hwnd.get()).collect());
+    let wins: Vec<HWND> = APP.with_borrow(|a| a.wins.values().filter(|w| (w.own.0 == sid || w.recipient.get().0 == sid) && !w.popup()).map(|w| w.hwnd.get()).collect());
     for hwnd in &wins {
         set_icon(*hwnd, icon);
     }
@@ -828,7 +838,7 @@ fn mouse_button(w: &Rc<Win>, button: u32, down: bool, lparam: LPARAM) {
         }
         w.buttons.set(w.buttons.get() | button);
         if !w.popup() {
-            dismiss_popups(w.own.0);
+            dismiss_popups(w.recipient.get().0);
         }
         if !w.popup() && matches!(button, 1 | 2) && w.pending.get().is_none() {
             let mut screen = POINT { x: px, y: py };
@@ -1016,13 +1026,13 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         }
         WM_ENTERSIZEMOVE => {
             if !w.popup() {
-                dismiss_popups(w.own.0);
+                dismiss_popups(w.recipient.get().0);
             }
             w.push(|q, id| q.resize_loop(id, true));
         }
         WM_NCLBUTTONDOWN | WM_NCRBUTTONDOWN => {
             if !w.popup() {
-                dismiss_popups(w.own.0);
+                dismiss_popups(w.recipient.get().0);
             }
         }
         WM_EXITSIZEMOVE => {

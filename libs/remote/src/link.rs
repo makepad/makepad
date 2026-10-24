@@ -83,7 +83,8 @@ impl Client {
         Client(Arc::new(Inner { target, name: name.to_string(), link_id: link_id(), conn: Mutex::new(None), ever: Mutex::new(false), seqs: Mutex::new(HashMap::new()), caps: Mutex::new(Vec::new()), timeout: Mutex::new(None) }))
     }
 
-    /// Dials a local endpoint: `spec` is a socket path, a pid or an app name (discovery files).
+    /// Dials a local endpoint: `spec` is a socket path, a discovery file's `tcp:` socket (Windows),
+    /// a pid or an app name (discovery files).
     pub fn connect(spec: &str) -> Result<Client, Error> {
         let target = if spec.contains('/') || spec.ends_with(".sock") {
             Target::Unix(PathBuf::from(spec))

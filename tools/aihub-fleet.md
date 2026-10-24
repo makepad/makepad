@@ -1,8 +1,12 @@
 # AI Hub fleet security
 
-Code: `libs/ai/hub/src/fleet_auth.rs` (credentials), `libs/ai/hub/src/front.rs`
-(the TLS front), `makepad_network::tls` (TLS on each OS's own stack, known
-hosts).
+Code: `makepad_network::fleet` (`platform/network/src/fleet/`): `auth.rs`
+(credentials), `front.rs` (the TLS front, shared by every fleet service),
+`lan.rs` (the private-LAN bind rule); the hub's route policy is
+`libs/ai/hub/src/fleet_routes.rs`; `makepad_network::tls` (TLS on each OS's
+own stack, known hosts). The asset store's sync listener (store sync,
+`apps/commercial/engine/asset/store/src/host/sync.rs`) uses the same front
+and credentials: roles `node` and `lan`, read-only sync routes.
 
 ## The model
 

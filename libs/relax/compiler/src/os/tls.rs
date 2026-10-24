@@ -253,16 +253,17 @@ mod imp {
     }
 }
 
-/// Windows: a TlsAlloc index; compiled code reads the TEB's slot for it, gs:[0x1480 + 8 index]
-/// (TEB.TlsSlots, the 64 directly addressable indexes; TlsGetValue reads the same word). The
-/// OS has no per-key destructor: a host thread-local guard frees the block at thread exit.
+/// Windows: a TlsAlloc index, any of the 1088; compiled code reads the word TlsGetValue reads
+/// with two loads (relax_backend::x64::win_tls_key): the TEB's TlsSlots for indexes below 64,
+/// its TlsExpansionSlots array above (a process with GPU drivers loaded has used up the 64 direct
+/// slots before Relax creates its key). The OS has no per-key destructor: a host thread-local
+/// guard frees the block at thread exit.
 #[cfg(windows)]
 mod imp {
     use crate::os::win32::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static DTOR: AtomicUsize = AtomicUsize::new(0);
-    const TLS_SLOTS: u64 = 0x1480;
 
     struct Guard(std::cell::Cell<(u64, usize)>);
     impl Drop for Guard {
@@ -301,18 +302,17 @@ mod imp {
     }
 
     pub fn jit_offset(key: u64, emit: &dyn Fn(&[u8]) -> u64) -> u64 {
-        if key >= 64 {
-            panic!("thread-local fast path: TlsAlloc index {} is not one of the TEB's 64 direct slots", key);
-        }
-        let off = TLS_SLOTS + 8 * key;
-        let reader = emit(&relax_backend::x64::gs_reader());
+        let Some(off) = relax_backend::x64::win_tls_key(key) else {
+            panic!("thread-local fast path: TlsAlloc index {} is past the TEB's 1088 slots", key);
+        };
+        let reader = emit(&relax_backend::x64::win_tls_reader());
         let read: rt_fn_ty!(fn(u64) -> u64) = unsafe { std::mem::transmute(reader as usize) };
         let old = get(key);
         unsafe { TlsSetValue(key as u32, 0x5a5a_0000 as *mut u8) };
         let seen = read(off);
         unsafe { TlsSetValue(key as u32, old) };
         if seen != 0x5a5a_0000 {
-            panic!("thread-local fast path: gs:[{:#x}] reads {:#x}", off, seen);
+            panic!("thread-local fast path: index {} (gs:[{:#x}] + {:#x}) reads {:#x}", key, off >> 32, off as u32, seen);
         }
         off
     }

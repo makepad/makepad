@@ -150,49 +150,63 @@ let caption_button_px = fn(p: vec2, s: vec2, glyph: float, hover: float, down: f
     alpha = alpha * (1.0 - g) + g
     return vec4(col + vec3(dither(px) * step(0.001, alpha)), alpha)
 }
-// the JIT activity badge over the running app (makepad run; activity.rs): a small galaxy --
-// particles on two trailing arms around a soft core, the inner ones turning faster. level 0..1:
-// the JIT work in flight (how many particles are lit, how often and how brightly they glitter,
-// how bright the core is); block 0..1: the UI is stuck on the JIT (the full stall galaxy: every
-// particle lit, brighter); a: its opacity; spin: its turn so far, beat: its glitter's phase so far
-// (both advanced by the run at eased speeds, so a change of pace never jumps); still: no glitter
-// (reduce motion). Premultiplied. GPU-only.
-let activity_galaxy_px = fn(p: vec2, s: vec2, level: float, block: float, a: float, spin: float, beat_phase: float, still: float, dp: float, px: vec2) -> vec4 {
-    let rad = min(s.x, s.y) * 0.5
-    let d = (p - s * 0.5) / rad
+// the JIT ring in the running app's caption (makepad run; ring.rs), in its 24 pt badge: a ring
+// 14 pt across. mode 0: compiling -- an arc that turns (spin: its turn so far) and covers `fill`
+// of the ring as the compile queue drains, over a faint track; 1: background tier-up -- a thin,
+// dimmer full ring (0..1 blends them); 2 / 3: the program is stopped on invalidated code / a panic
+// -- a solid amber / red dot. hover 0..1 lifts it on a faint disc. ink 1: on a dark caption,
+// 0: on a light one. a: opacity. Premultiplied. GPU-only.
+let jit_ring_px = fn(p: vec2, s: vec2, fill: float, mode: float, a: float, spin: float, hover: float, ink: float, dp: float, px: vec2) -> vec4 {
+    let d = p - s * 0.5
     let r = length(d)
-    let th = atan2(d.y, d.x) / 6.2831853
-    // two arms trailing their spin, the outside slower
-    let phi = th - 0.55 * r - spin * (1.3 - r)
-    // four rings of particles; the outer one comes in with the block (the full stall galaxy)
-    let rings = 4.0
-    let u = r * rings
-    let ring = floor(u)
-    let n = 3.0 + ring * 3.0
-    let cell = floor(fract(phi) * n)
-    let h = fract(sin(dot(vec2(cell, ring), vec2(12.9898, 78.233))) * 43758.5453)
-    let h2 = fract(h * 13.37 + 0.31)
-    let h3 = fract(h * 7.13 + 0.77)
-    // the particle's place in its cell (jittered), in points
-    let along = (fract(fract(phi) * n) - 0.5 - (h - 0.5) * 0.5) * 6.2831853 * max(r, 0.15) * rad / n
-    let across = (fract(u) - 0.5 - (h2 - 0.5) * 0.4) * rad / rings
-    // glitter: each particle flashes on its own beat, more often and brighter with the work
-    let beat = 0.5 + 0.5 * sin(beat_phase + h3 * 6.2831853)
-    let glint = pow(beat, mix(14.0, 5.0, level)) * (0.35 + 0.65 * max(level, block)) * (1.0 - still)
-    let size = 0.7 + 0.25 * block + 0.5 * glint
-    let outer = mix(1.0, block, step(rings - 1.5, ring))
-    let dot_a = clamp(1.0 - (length(vec2(along, across)) - size) * dp, 0.0, 1.0) * step(ring, rings - 1.0) * outer
-    let arm = 0.5 + 0.5 * cos(phi * 12.5663706)
-    let lit = mix(0.45, 1.0, step(h2, 0.3 + 0.7 * max(level, block)))
-    let star = dot_a * mix(0.25, 1.0, arm) * lit * (0.7 + 0.6 * glint) * (1.0 - smoothstep(0.85, 1.0, r))
-    let core = exp(-r * r * 22.0) * (0.16 + 0.3 * level + 0.3 * block)
-    let dim = mix(mix(0.7, 0.85, level), 0.95, block)
-    let light = clamp(max(star, core), 0.0, 1.0) * dim
-    // a faint shade under it, so it reads over light pixels too
-    let shade = exp(-r * r * 2.5) * 0.3 * (1.0 - smoothstep(0.9, 1.0, r))
-    let alpha = clamp(light + shade * (1.0 - light), 0.0, 1.0) * a
-    let col = mix(mix(#8a7fb8, #ece6ff, core), #ffffff, glint * 0.5)
-    return vec4((col.rgb + vec3(dither(px) * step(0.001, light))) * light * a, alpha)
+    let dot = step(1.5, mode)
+    let thin = clamp(mode, 0.0, 1.0) * (1.0 - dot)
+    // the ring's centre line and stroke
+    let rad = 6.0
+    let w = mix(2.0, 1.25, thin)
+    let band = clamp((w * 0.5 - abs(r - rad)) * dp + 0.5, 0.0, 1.0)
+    // the arc: from its head (spin) back over its length, in turns clockwise from the top
+    let t = fract(atan2(d.x, 0.0 - d.y) / 6.2831853 + 1.0)
+    let len = mix(0.16 + 0.84 * clamp(fill, 0.0, 1.0), 1.0, thin)
+    let back = fract(fract(spin) - t + 1.0)
+    let arc_px = 6.2831853 * rad * dp
+    let on_arc = max(clamp((len - back) * arc_px + 0.5, 0.0, 1.0) * clamp(back * arc_px + 1.0, 0.0, 1.0), step(0.999, len))
+    let ink_c = mix(#2a2638, #ece6ff, ink)
+    let arc_c = mix(#5b4fd0, #b8acff, ink)
+    let track_a = mix(0.13, 0.18, ink) * (1.0 - thin)
+    let arc_a = mix(0.92, mix(0.42, 0.5, ink), thin)
+    let arc_col = mix(arc_c.rgb, ink_c.rgb, thin)
+    var col = ink_c.rgb * track_a * band
+    var alpha = track_a * band
+    let arc = band * on_arc * arc_a
+    col = col * (1.0 - arc) + arc_col * arc
+    alpha = alpha * (1.0 - arc) + arc
+    // the dot
+    let dot_c = mix(#f5a524, #e5484d, step(2.5, mode))
+    let disc = clamp((5.0 - r) * dp + 0.5, 0.0, 1.0) * dot
+    let rim = clamp((0.6 - abs(r - 4.6)) * dp, 0.0, 1.0) * dot * (1.0 - ink) * 0.35
+    col = col * (1.0 - dot) + dot_c.rgb * (1.0 - rim) * disc
+    alpha = alpha * (1.0 - dot) + disc
+    // the hover disc under it all
+    let lift = clamp((10.5 - r) * dp + 0.5, 0.0, 1.0) * hover * mix(0.09, 0.14, ink)
+    col = col + ink_c.rgb * lift * (1.0 - alpha)
+    alpha = alpha + lift * (1.0 - alpha)
+    return vec4(col * a, alpha * a)
+}
+// the JIT ring's tooltip plate (its line is drawn over it): a rounded plate with a hairline.
+let jit_tip_px = fn(p: vec2, s: vec2, a: float, ink: float, dp: float) -> vec4 {
+    let e = rounded(p, s, 5.0)
+    let inside = clamp(0.5 - e * dp, 0.0, 1.0)
+    let hair = clamp(1.0 - abs(e + 0.5) * dp, 0.0, 1.0)
+    let plate = mix(#ffffff, #1f1b2e, ink)
+    let line = mix(vec4(0.0, 0.0, 0.0, 0.16), vec4(1.0, 1.0, 1.0, 0.14), ink)
+    let pa = inside * mix(0.97, 0.95, ink)
+    var col = plate.rgb * pa
+    var alpha = pa
+    let h = hair * line.w
+    col = col * (1.0 - h) + line.rgb * h
+    alpha = alpha * (1.0 - h) + h
+    return vec4(col * a, alpha * a)
 }
 let Quad = {
     geom: vertex_buffer(vec2f)
@@ -262,9 +276,9 @@ let Quad = {
     }
     // a card of the halted view, a row of a collapsed group, a touch button, or a window button
     // of the caption. accent: 0 follow-on card, 1 root cause / panic card, 2 member row, 3 button,
-    // 4 caption window button (action: its glyph, selected: hover), 5 the JIT activity badge's
-    // galaxy (selected: level, block: the UI block, pressed: opacity, action: its spin, beat: its
-    // glitter's phase)
+    // 4 caption window button (action: its glyph, selected: hover), 5 the JIT ring (selected:
+    // its fill, block: its mode, pressed: opacity, action: its spin, beat: hover, ink: on a dark
+    // caption), 6 the ring's tooltip plate (pressed: opacity, ink)
     error_band: Quad{
         time: uniform(0.0)
         reduce_motion: uniform(0.0)
@@ -274,13 +288,17 @@ let Quad = {
         accent: instance(0.0)
         block: instance(0.0)
         beat: instance(0.0)
+        ink: instance(0.0)
         pixel: fn() {
             let s = self.rect.zw
             let p = self.pos * s
             let dp = max(self.dpi, 1.0)
             let px = (self.rect.xy + p) * dp
+            if self.accent > 5.5 {
+                return jit_tip_px(p, s, self.pressed, self.ink, dp)
+            }
             if self.accent > 4.5 {
-                return activity_galaxy_px(p, s, self.selected, self.block, self.pressed, self.action, self.beat, self.reduce_motion, dp, px)
+                return jit_ring_px(p, s, self.selected, self.block, self.pressed, self.action, self.beat, self.ink, dp, px)
             }
             if self.accent > 3.5 {
                 return caption_button_px(p, s, self.action, self.selected, self.pressed, dp, px)

@@ -2,8 +2,8 @@
 //! fleet credential proofs, route policy per role, identity stamping, and
 //! the auth-failure ban.
 
-use makepad_ai_hub::fleet_auth::{install_fleet_client, mark_fleet_endpoint, FleetKey, Role, Verifier};
-use makepad_ai_hub::front::{start_front, FrontConfig};
+use makepad_network::fleet::auth::{install_fleet_client, mark_fleet_endpoint, FleetKey, Role, Verifier};
+use makepad_network::fleet::front::{start_front, FrontConfig};
 use makepad_ai_hub::http_client::{http_fetch, HttpClientRequest};
 use makepad_network::tls::{TlsIdentity, TlsServer};
 use std::io::{Read, Write};
@@ -72,16 +72,20 @@ fn front_end_to_end() {
     drop(probe);
     start_front(FrontConfig {
         listen,
-        inner,
+        inner: std::sync::Arc::new(move |_: &str| inner),
+        inner_headers: Vec::new(),
         tls: TlsServer::new(identity).unwrap(),
         verifier,
         front_secret: "the-front-secret".into(),
-        edge: false,
+        policy: std::sync::Arc::new(|role, method: &str, path: &str| makepad_ai_hub::fleet_routes::route_allowed(role, false, method, path)),
+        max_total: makepad_network::fleet::front::LAN_MAX_TOTAL,
+        max_per_ip: makepad_network::fleet::front::LAN_MAX_PER_IP,
+        label: "front",
     })
     .unwrap();
     std::thread::sleep(Duration::from_millis(100));
 
-    let expiry = makepad_ai_hub::fleet_auth::now_secs() + 3600;
+    let expiry = makepad_network::fleet::auth::now_secs() + 3600;
     let lan = key.issue("tester", Role::Lan, expiry).unwrap();
     let device = key.issue("phone", Role::Device, expiry).unwrap();
     let revoked = key.issue("revoked-one", Role::Lan, expiry).unwrap();
@@ -191,16 +195,20 @@ fn websocket_through_the_front() {
     drop(probe);
     start_front(FrontConfig {
         listen,
-        inner,
+        inner: std::sync::Arc::new(move |_: &str| inner),
+        inner_headers: Vec::new(),
         tls: TlsServer::new(identity).unwrap(),
         verifier,
         front_secret: "s".into(),
-        edge: false,
+        policy: std::sync::Arc::new(|role, method: &str, path: &str| makepad_ai_hub::fleet_routes::route_allowed(role, false, method, path)),
+        max_total: makepad_network::fleet::front::LAN_MAX_TOTAL,
+        max_per_ip: makepad_network::fleet::front::LAN_MAX_PER_IP,
+        label: "front",
     })
     .unwrap();
     std::thread::sleep(Duration::from_millis(100));
     mark_fleet_endpoint(&listen.to_string());
-    let token = key.issue("ws-tester", Role::Lan, makepad_ai_hub::fleet_auth::now_secs() + 600).unwrap();
+    let token = key.issue("ws-tester", Role::Lan, makepad_network::fleet::auth::now_secs() + 600).unwrap();
     std::env::set_var("MAKEPAD_AI_HUB_CREDENTIAL", &token);
 
     let (wtx, wrx) = mpsc::channel();

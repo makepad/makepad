@@ -300,6 +300,14 @@ impl Cx {
                     let native = self.windows[w].layout_vec2d_to_native_points(crate::makepad_math::dvec2(0.0, y_center));
                     self.hal.frames.w.window_buttons_center(hal_window_id(w), native.y as f32);
                 }
+                CxOsOp::SetWindowCaption(w, caption, buttons, dark) => {
+                    let native = |r: crate::makepad_math::Rect| {
+                        let r = self.windows[w].layout_rect_to_native_points(r);
+                        [r.pos.x as f32, r.pos.y as f32, r.size.x as f32, r.size.y as f32]
+                    };
+                    let [_, top, _, height] = native(caption);
+                    self.hal.frames.w.window_caption(hal_window_id(w), top, height, native(buttons), dark);
+                }
                 CxOsOp::SetTopmost(w, on) => self.hal.frames.w.window_topmost(hal_window_id(w), on),
                 CxOsOp::SetChromelessWhenMaximized(w, on) => self.hal.frames.w.chromeless_when_max(hal_window_id(w), on),
                 CxOsOp::SetWindowTitle(w, title) => {

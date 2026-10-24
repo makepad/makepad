@@ -664,6 +664,9 @@ pub struct Window {
     /// How an `Overlay` caption label's title was last laid out.
     #[rust]
     caption_title_layout: Option<CaptionTitleLayout>,
+    /// The caption last reported to the platform (`CxOsOp::SetWindowCaption`).
+    #[rust]
+    caption_reported: Option<(Rect, Rect, bool)>,
     #[deref]
     view: View,
 
@@ -1267,6 +1270,47 @@ impl Window {
         (visible, caption_rect, buttons_rect, caption_area)
     }
 
+    /// Tells the platform the caption this window drew (the strip that drags it), the window
+    /// buttons in it (its own, else the system's) and whether it is dark, when that changed:
+    /// `makepad run` draws its JIT ring in the caption by it. Direct children only (no tree
+    /// walk); runs once a draw.
+    fn report_caption(&mut self, cx: &mut Cx) {
+        let bar = self.view.child(id!(caption_bar));
+        let caption = match &self.drag_region {
+            Some((region, _)) => {
+                let area = region.area();
+                if area.is_valid(cx) { area.rect(cx) } else { Rect::default() }
+            }
+            None if bar.visible() => bar.area().rect(cx),
+            None => Rect::default(),
+        };
+        let own = bar.child(id!(windows_buttons));
+        let buttons = if self.hosted_mac_controls {
+            self.hosted_controls_rect
+        } else if bar.visible() && own.visible() {
+            own.area().rect(cx)
+        } else {
+            cx.windows[self.window.window_id()].window_geom.window_chrome_buttons
+        };
+        // the caption's ground: the stock bar's colour, else the window's
+        let mut ground = [0.0f32; 4];
+        if self.drag_region.is_none() && bar.visible() {
+            if let Some(view) = bar.borrow::<View>() {
+                view.draw_bg.draw_vars.get_instance(cx, live_id!(color), &mut ground);
+            }
+        }
+        if ground[3] < 0.5 {
+            let c = self.pass.clear_color;
+            ground = [c.x, c.y, c.z, 1.0];
+        }
+        let dark = 0.2126 * ground[0] + 0.7152 * ground[1] + 0.0722 * ground[2] < 0.5;
+        let report = (caption, buttons, dark);
+        if self.caption_reported != Some(report) {
+            self.caption_reported = Some(report);
+            cx.push_unique_platform_op(CxOsOp::SetWindowCaption(self.window.window_id(), caption, buttons, dark));
+        }
+    }
+
     /// The traffic lights over the left of the app's caption bar (under the WM, in a
     /// macOS-like style): where macOS draws its own, so an app that keeps the gap for them
     /// on macOS has them in the same place here.
@@ -1843,6 +1887,7 @@ impl Window {
         // relayout was one of the two that invalidate explicitly.
         self.drag_query_cache = None;
         self.drag_query_layout_valid = true;
+        self.report_caption(cx);
         self.main_draw_list.end(cx);
         cx.end_pass(&self.pass.handle);
     }

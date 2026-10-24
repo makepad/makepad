@@ -10,10 +10,18 @@ use crate::backend::exec::{self, LentState};
 use crate::backend::log_enabled;
 use crate::buffers::{id_at, read_ids, read_pairs, CmdView};
 use crate::ledger::Kind;
-use crate::session::{LentRef, Session, TextureObj};
+use crate::session::{LentRef, Session, TextureObj, HOST};
 use crate::types::*;
 use makepad_vulkan::vk;
 use std::sync::Arc;
+
+/// A badge layer's composed images (`Vulkan::badged`): the free and held ones of the window's
+/// size, and the newest (what a snapshot of the window reads).
+#[derive(Default)]
+pub(super) struct Badged {
+    pool: Vec<Arc<Image>>,
+    last: Option<Arc<Image>>,
+}
 
 struct Prepared {
     pipeline: Arc<Pipeline>,
@@ -75,6 +83,44 @@ impl Vulkan {
         Ok(image)
     }
 
+    /// A copy of `source` into `image` (their common area); `image` is left as a copy's source.
+    fn copy_image(&self, source: &Arc<Image>, image: &Arc<Image>, batch: &mut Batch) {
+        source.transition(batch.cb, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+        image.transition(batch.cb, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+        let layers = vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1);
+        let copy = vk::ImageCopy::default().src_subresource(layers).dst_subresource(layers)
+            .extent(vk::Extent3D { width: source.desc.w.min(image.desc.w), height: source.desc.h.min(image.desc.h), depth: 1 });
+        unsafe { self.dev.raw.cmd_copy_image(batch.cb, source.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            image.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[copy]); }
+        image.transition(batch.cb, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+        source.transition(batch.cb, source.sampled_layout());
+        batch.images.extend([source.clone(), image.clone()]);
+    }
+
+    /// The image a badge layer frame of host window `key` draws into: the window's retained
+    /// image copied into a free composed image of its size (one a presentation or a snapshot
+    /// still holds is not reused). `None`: nothing rendered yet.
+    fn begin_compose(&mut self, key: (u32, Id), batch: &mut Batch) -> Option<Arc<Image>> {
+        let base = self.win.get(&(key.0, key.1.index)).filter(|t| t.gen == key.1.gen)?.image.clone();
+        let badged = self.badged.get_mut(&key.1.index)?;
+        badged.last = None;
+        badged.pool.retain(|i| [i.desc.w, i.desc.h] == [base.desc.w, base.desc.h]);
+        let image = match badged.pool.iter().find(|i| Arc::strong_count(i) == 1) {
+            Some(i) => i.clone(),
+            None => {
+                let image = Image::new(self.dev.clone(), TextureObj { format: format::BGRA8, w: base.desc.w, h: base.desc.h,
+                    depth: 1, mips: 1, usage: usage::RENDER_TARGET | usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None })
+                    .map_err(|e| eprintln!("[hal-vulkan] badge layer image: {e}")).ok()?;
+                badged.pool.push(image.clone());
+                image
+            }
+        };
+        trim_spares(&mut badged.pool, &image, SCANOUT_SPARES);
+        badged.last = Some(image.clone());
+        self.copy_image(&base, &image, batch);
+        Some(image)
+    }
+
     /// The shell gets an immutable complete image. Window readback and later render passes
     /// keep using the ordinary window target, so their layout changes cannot race scanout.
     fn scanout_image(&mut self, key: (u32, Id), source: &Arc<Image>, batch: &mut Batch) -> Result<Arc<Image>, String> {
@@ -91,16 +137,7 @@ impl Vulkan {
         // the images it gave back are let go again, a few spares kept. Before, the pool only
         // grew: 149's WM held 70 desktop-sized copies (3.9 GB).
         trim_spares(pool, &image, SCANOUT_SPARES);
-        source.transition(batch.cb, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
-        image.transition(batch.cb, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
-        let layers = vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1);
-        let copy = vk::ImageCopy::default().src_subresource(layers).dst_subresource(layers)
-            .extent(vk::Extent3D { width: source.desc.w, height: source.desc.h, depth: 1 });
-        unsafe { self.dev.raw.cmd_copy_image(batch.cb, source.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-            image.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[copy]); }
-        image.transition(batch.cb, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
-        source.transition(batch.cb, source.sampled_layout());
-        batch.images.extend([source.clone(), image.clone()]);
+        self.copy_image(source, &image, batch);
         Ok(image)
     }
 
@@ -114,9 +151,11 @@ impl Vulkan {
         }
     }
 
+    /// A window with a badge layer reads as it was last presented: with the layer.
     pub(super) fn window_image(&mut self, s: &mut Session, id: Id) -> Option<Arc<Image>> {
         if let Some(em) = s.windows.get(s.id, id).ok().and_then(|w| w.val.embedded) { return self.resolve(s, em.tex); }
         let (sid, id) = self.window_key(s.id, id);
+        if let Some(last) = self.badged.get(&id.index).filter(|_| sid == HOST).and_then(|b| b.last.clone()) { return Some(last); }
         self.win.get(&(sid, id.index)).filter(|t| t.gen == id.gen).map(|t| t.image.clone())
     }
 
@@ -180,6 +219,21 @@ impl Vulkan {
         s.stats.max_frame_ns = s.stats.max_frame_ns.max(packet.meta.build_end_ns.saturating_sub(packet.meta.build_start_ns));
         let is_window = kind & !target::FLAGS == target::WINDOW;
         let pick = kind & target::PICK != 0;
+        let replay = kind & target::REPLAY != 0;
+        // a window with a badge layer: its frames stay in the retained image, the layer's frame
+        // (`target::BADGES`, from the executor right after) composes and presents it
+        let layer_key = self.window_key(sid, target);
+        let layered = is_window && !pick && layer_key.0 == HOST && self.badged.contains_key(&layer_key.1.index);
+        let badges = layered && kind & target::BADGES != 0;
+        if badges {
+            self.compose = self.begin_compose(layer_key, &mut batch);
+            if self.compose.is_none() {
+                // nothing rendered yet to draw the layer over
+                if !replay { batch.tickets.push(Ticket::Frame { token: Self::token(s), target, kind, frame: packet.frame, window: false }); }
+                batch.finish(self.queue.as_ref().unwrap(), self.complete.clone(), self.mailbox.clone());
+                return Some(exec::SubmittedFrame { deps: Vec::new(), window: false });
+            }
+        }
         if is_window && !pick && log_enabled() {
             eprintln!("[hal-vulkan] FramePacket session={sid} window={target:?} frame={} passes={} draws={}; encoding before surface acquisition", packet.frame, pr.len(), dr.len());
         }
@@ -211,7 +265,7 @@ impl Vulkan {
                 }
                 let embedded = s.windows.get(sid, target).is_ok_and(|w| w.val.embedded.is_some());
                 let hosted = s.windows.get(sid, target).is_ok_and(|w| w.val.is_hosted());
-                if embedded { presented = true; }
+                if embedded || (layered && !badges) { presented = true; }
                 else if !hosted {
                     let key = self.window_key(sid, target);
                     if log_enabled() {
@@ -220,7 +274,13 @@ impl Vulkan {
                     if let Some(presenter) = self.windows.source.presenter(key.0, key.1) {
                         // A shell's own target goes to its presenter as rendered: nothing reuses it
                         // before the shell's host has released it.
-                        let scanout = if self.windows.source.is_target(&image) { Ok(image.clone()) } else { self.scanout_image(key, &image, &mut batch) };
+                        let shared = badges.then(|| self.windows.source.target(key.0, key.1, [image.desc.w, image.desc.h])).flatten();
+                        let scanout = if let Some(shared) = shared {
+                            // the composed image into the host's next shared image
+                            self.copy_image(&image, &shared, &mut batch);
+                            batch.rendered(&shared);
+                            Ok(shared)
+                        } else if self.windows.source.is_target(&image) { Ok(image.clone()) } else { self.scanout_image(key, &image, &mut batch) };
                         match scanout {
                             Ok(image) => {
                                 presenter.scheduled(key.0, key.1);
@@ -245,7 +305,8 @@ impl Vulkan {
                 }
             }
         }
-        batch.tickets.push(Ticket::Frame { token: Self::token(s), target, kind, frame: packet.frame, window: presented });
+        self.compose = None;
+        if !replay { batch.tickets.push(Ticket::Frame { token: Self::token(s), target, kind, frame: packet.frame, window: presented }); }
         let scheduled = presented || batch.scanout.is_some();
         s.stats.arena_allocs += batch.allocs;
         if kind & target::SNAPSHOT != 0 && !pick {
@@ -263,7 +324,9 @@ impl Vulkan {
         batch: &mut Batch, now: u64, deps: &mut Vec<LentRef>) -> Result<Option<Arc<Image>>, String> {
         let v = pass.viewport;
         if v.iter().any(|v| !v.is_finite() || *v < 0.0) || v[2] <= 0.0 || v[3] <= 0.0 { return Err(format!("invalid pass viewport {v:?} (target {target:?}, window {is_window})")); }
-        let size = [(v[0] + v[2]).ceil() as u32, (v[1] + v[3]).ceil() as u32];
+        let mut size = [(v[0] + v[2]).ceil() as u32, (v[1] + v[3]).ceil() as u32];
+        // a badge layer is drawn over what the window has (a resize may be landing)
+        if let Some(c) = self.compose.as_ref().filter(|_| is_window) { size = [size[0].min(c.desc.w), size[1].min(c.desc.h)]; }
         let mut colors: Vec<(usize, Arc<Image>)> = Vec::new();
         let mut window = None;
         for (i, id) in pass.color.iter().enumerate().filter(|(_, id)| !id.is_none()) {
@@ -281,7 +344,13 @@ impl Vulkan {
                 Some(em) => self.resolve(s, em.tex).ok_or("missing embedded window storage")?,
                 None => {
                     let key = self.window_key(s.id, target);
-                    match self.windows.source.target(key.0, key.1, size) { Some(image) => image, None => self.offscreen(s, target, size, now)? }
+                    let layered = key.0 == HOST && self.badged.contains_key(&key.1.index);
+                    match self.compose.clone() {
+                        Some(composed) => composed,
+                        // the retained image a badge layer is composed over
+                        None if layered => self.offscreen(s, target, size, now)?,
+                        None => match self.windows.source.target(key.0, key.1, size) { Some(image) => image, None => self.offscreen(s, target, size, now)? },
+                    }
                 }
             };
             window = Some(image.clone()); colors.push((0, image));

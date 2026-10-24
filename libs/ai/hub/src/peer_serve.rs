@@ -288,7 +288,7 @@ impl Drop for ServeSlot {
 pub fn route_blob(
     shared: &Arc<ServiceShared>,
     headers: &HttpServerHeaders,
-    caller: &crate::front::Caller,
+    caller: &makepad_network::fleet::front::Caller,
     response_sender: mpsc::Sender<HttpServerResponse>,
 ) {
     let respond = |response: HttpServerResponse| {
@@ -328,7 +328,7 @@ pub fn route_blob(
             "peer-cache serving is disabled on this node".to_string(),
         ));
     }
-    if caller.role != crate::fleet_auth::Role::Device {
+    if caller.role != makepad_network::fleet::auth::Role::Device {
         // -- fail closed without a secret --
         let Some(secret) = peer.secret.as_ref().filter(|_| peer.serve) else {
             return respond(error_response(

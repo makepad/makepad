@@ -144,6 +144,11 @@ hal_commands! {
 
     /// Whether the window draws its own caption, for an embedding parent.
     WindowChrome = 26, window_chrome { id: obj, own: bool };
+    /// The caption the app draws in the window: the strip's top and height (window points; height
+    /// zero: none), the window buttons in it (the app's own or the system's; zero: none), and
+    /// whether the caption is dark. Sent when they change. Session 0 places what it draws in a
+    /// lent window's caption (the JIT ring) by it; window systems ignore it.
+    WindowCaption = 27, window_caption { id: obj, top: f32, height: f32, buttons: rect, dark: bool };
 
     // ---- text input
     ImeShow = 30, ime_show { id: obj, area: rect, config: u32 };

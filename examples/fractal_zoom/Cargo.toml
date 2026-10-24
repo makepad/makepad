@@ -17,6 +17,8 @@ makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", version = "
 # Network rendering (src/remote.rs): the AI hub's kernel client and the
 # fractal Splash kernels, featureless (no models, no local kernel runtime).
 makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false }
+# Fleet credentials (makepad_network::fleet).
+makepad-network = { path = "../../platform/network" }
 
 [dev-dependencies]
 # src/parity.rs: the node's Splash kernels run here, against the local tiles

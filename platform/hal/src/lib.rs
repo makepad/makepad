@@ -82,7 +82,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::Duration;
 
-pub use session::{CloseAs, DomainLaunch, ExecRecord};
+pub use session::{AppCaption, CloseAs, DomainLaunch, ExecRecord};
 
 /// What the relax host provides so a privileged session can start, stop and relaunch apps
 /// (`DomainStart` / `DomainStop` / `DomainRelaunch`): host-native code, registered with

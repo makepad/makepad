@@ -117,7 +117,7 @@ pub fn unit_sizes(u: &crate::jit::Unit) -> Vec<(String, u64)> {
     // where the per-slot blocks live (compiler arena old / new chunks, burst, other heaps): a
     // settle rebuild keeps the slots, so their cold-start blocks pin the cold chunks
     {
-        let mut pl = [[0u64; 4]; 6];
+        let mut pl = [[0u64; 4]; 9];
         let mut put = |k: usize, p: *const u8, n: usize| {
             if n != 0 {
                 pl[k][crate::zone_alloc::placement(p)] += n as u64;
@@ -146,8 +146,13 @@ pub fn unit_sizes(u: &crate::jit::Unit) -> Vec<(String, u64)> {
             if let crate::jit::FnKey::Inst(_, v) = &f.key {
                 put(5, v.as_ptr().cast(), v.capacity() * std::mem::size_of::<relax_types::types::TyId>());
             }
+            put(6, f.calls.as_ptr().cast(), f.calls.len() * 4);
+            put(7, f.rir_refs().as_ptr().cast(), f.rir_refs().len() * 4);
+            if let Some(e) = &f.build_err {
+                put(8, e.as_ptr(), e.len());
+            }
         }
-        for (k, name) in ["names", "pc maps", "histories", "RIR kept", "spec code", "keys (type args)"].iter().enumerate() {
+        for (k, name) in ["names", "pc maps", "histories", "RIR kept", "spec code", "keys (type args)", "calls", "RIR refs", "build errors"].iter().enumerate() {
             let mb = |b: u64| b as f64 / 1048576.0;
             out.push((format!("placement of slot {name}: compiler old {:.1} / compiler new {:.1} / burst {:.1} / other {:.1} MB", mb(pl[k][0]), mb(pl[k][1]), mb(pl[k][2]), mb(pl[k][3])), pl[k][0] + pl[k][1]));
         }

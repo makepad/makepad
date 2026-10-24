@@ -28,4 +28,13 @@ fi
 if test -r "$MAKEPAD_WM_ROOT/tools/linux/display-layout-env.sh"; then
     . "$MAKEPAD_WM_ROOT/tools/linux/display-layout-env.sh"
 fi
-exec target/release/makepad-app-wm "-scale=${MAKEPAD_WM_SCALE:-1.3}" "$@"
+# Sandbox runs under the JIT (`makepad run makepad-sandbox`, apps/wm/src/apps.rs `--jit`), so
+# every node's Sandbox can be inspected and live-patched from the dev machine. Its session
+# transcript and inspect socket live on disk (~/.makepad-run/tmp, the TMPDIR the remote hosts
+# entries use), not on the /tmp tmpfs other jobs fill: ~/.makepad/wm/jit.env, seeded once.
+jit_env="$HOME/.makepad/wm/jit.env"
+if test ! -e "$jit_env"; then
+    mkdir -p "$HOME/.makepad/wm" "$HOME/.makepad-run/tmp"
+    printf 'MAKEPAD_RUN_VERBOSE=1\nTMPDIR=%s/.makepad-run/tmp\n' "$HOME" > "$jit_env"
+fi
+exec target/release/makepad-app-wm "-scale=${MAKEPAD_WM_SCALE:-1.3}" --jit sandbox "$@"

@@ -34,7 +34,8 @@ impl Backend for Headless {
             session: 0,
             backend: backend_id::HEADLESS,
             dialect: dialect::NONE,
-            flags: 0,
+            // a badge layer is kept and drawn like any frame here: nothing
+            flags: info_flags::WINDOW_BADGES,
             formats: (1u64 << format::COUNT) - 1,
             msaa: 1,
             dpi: 1.0,
@@ -105,6 +106,7 @@ impl Gpu for Headless {
             deps, window,
         })
     }
+    fn badges(&self) -> bool { true }
     fn pick(&mut self, s: &mut Session, _window: Id, req: u32, _pos: [f32; 2]) {
         s.events.pick_result(req, &[]);
     }

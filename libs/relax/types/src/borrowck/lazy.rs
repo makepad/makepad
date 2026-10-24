@@ -323,6 +323,41 @@ pub fn take_verdict_keys() -> Vec<(u128, StoredVerdict)> {
 
 static QUEUE: Mutex<Option<Queue>> = Mutex::new(None);
 
+/// The front source that now stands for an identity whose earlier source died (`rehome`).
+static REHOMED: Mutex<Vec<(usize, Arc<dyn FrontSource>)>> = Mutex::new(Vec::new());
+
+/// The front end behind identity `src.identity()` was replaced by `src` (a settle rebuild: the
+/// same program, the same definitions and verdict keys, a new program value). Every queued
+/// check of that identity reads it from now on, and so does a check the worker holds already
+/// (it finds its old source dead): the old front state is no longer kept alive by the queue,
+/// and is never read after the replace. Call with the front end's write lock held. Returns the
+/// queued checks moved.
+pub fn rehome(src: &Arc<dyn FrontSource>) -> usize {
+    let id = src.identity();
+    {
+        let mut r = REHOMED.lock().unwrap_or_else(|e| e.into_inner());
+        r.retain(|x| x.0 != id);
+        r.push((id, src.clone()));
+    }
+    let mut guard = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut n = 0;
+    if let Some(q) = guard.as_mut() {
+        for item in q.items.values_mut() {
+            if item.key.0 == id {
+                item.src = src.clone();
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// The live source standing for a dead one's identity, if it was rehomed.
+fn rehomed(dead: &Arc<dyn FrontSource>) -> Option<Arc<dyn FrontSource>> {
+    let id = dead.identity();
+    REHOMED.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|x| x.0 == id && x.1.alive()).map(|x| x.1.clone())
+}
+
 static WAKE: Condvar = Condvar::new();
 static STARTED: AtomicBool = AtomicBool::new(false);
 static STOP: AtomicBool = AtomicBool::new(false);
@@ -518,11 +553,15 @@ fn finish_verdict(prog: &Program, src: usize, epoch: u64, def: DefId, args: &[Ty
         Err(message) => { record(key, FnVerdict::Unchecked(format!("checker failure: {}", message))); Vec::new() }
     }
 }
-fn worker(src: Arc<dyn FrontSource>, verbose: bool) {
+fn worker(mut src: Arc<dyn FrontSource>, verbose: bool) {
     let _mem = crate::memstat::tag(crate::memstat::Tag::Borrowck);
     src.lower_priority(); src.wait_start();
     loop {
         if stopping() { return; }
+        // (the source the worker started with must not keep a replaced front state alive)
+        if !src.alive() {
+            if let Some(n) = rehomed(&src) { src = n; }
+        }
         let quiet = src.quiet_ns();
         // rank 0 (hot code waiting for its verdict, set_ranks) runs while compiles go on
         let urgent = || QUEUE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|q| q.order.first()).is_some_and(|a| a.0 == 0);
@@ -545,6 +584,10 @@ fn worker(src: Arc<dyn FrontSource>, verbose: bool) {
                 IDLE_REPORTED.store(false, Ordering::Relaxed);
             }
         };
+        let mut item = item;
+        if !item.src.alive() {
+            if let Some(n) = rehomed(&item.src) { item.src = n; }
+        }
         if !item.src.alive() {
             STALE.fetch_add(1, Ordering::Relaxed);
             record(item.key, FnVerdict::Unchecked("stale".into()));

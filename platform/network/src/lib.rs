@@ -3,6 +3,9 @@ pub mod backend;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod blocking_http;
 pub mod digest;
+// Fleet credentials, the TLS front and the LAN bind rule (tools/aihub-fleet.md).
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+pub mod fleet;
 // The embedded TCP server is native-only; browsers cannot listen on sockets.
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod http_server;

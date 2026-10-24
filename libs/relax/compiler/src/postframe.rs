@@ -127,7 +127,7 @@ pub fn ahead_progress() -> (u64, u64) {
     (AHEAD_DONE.load(Relaxed), crate::jit::ahead_queued() + AHEAD_RUNNING.load(Relaxed))
 }
 
-/// The JIT's work in flight, for the run's activity badge (a look, not a measurement).
+/// The JIT's work in flight, for the run's JIT ring (a look, not a measurement).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Activity {
     /// O3 builds queued or running now

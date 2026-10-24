@@ -8,7 +8,7 @@
 //! (see libs/ai/hub/src/fleet_auth.rs). Revoke it on the hub with
 //! `ai-fleet revoke <id>`.
 
-use makepad_ai_hub::fleet_auth::{Credential, FleetKey, Role};
+use makepad_network::fleet::auth::{Credential, FleetKey, Role};
 use std::path::PathBuf;
 
 pub const SCHEME: &str = "makepad-hub://";
@@ -58,11 +58,11 @@ pub fn fleet_key_candidates() -> Vec<PathBuf> {
     if let Ok(p) = std::env::var("MAKEPAD_AI_HUB_FLEET_KEY") {
         out.push(PathBuf::from(p));
     }
-    let dir = makepad_ai_hub::fleet_auth::client_dir();
-    out.push(dir.join("admin").join(makepad_ai_hub::fleet_auth::FLEET_KEY));
+    let dir = makepad_network::fleet::auth::client_dir();
+    out.push(dir.join("admin").join(makepad_network::fleet::auth::FLEET_KEY));
     if let Some(home) = dir.parent() {
         for cache in ["weights-chat", "weights"] {
-            out.push(home.join(cache).join("fleet").join(makepad_ai_hub::fleet_auth::FLEET_KEY));
+            out.push(home.join(cache).join("fleet").join(makepad_network::fleet::auth::FLEET_KEY));
         }
     }
     out
@@ -90,7 +90,7 @@ pub fn issue(addr: &str, name: &str) -> Result<Invite, String> {
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
         .take(40)
         .collect();
-    let expiry = makepad_ai_hub::fleet_auth::now_secs() + VALID_SECS;
+    let expiry = makepad_network::fleet::auth::now_secs() + VALID_SECS;
     let credential = key.issue(&id, Role::Device, expiry).map_err(|e| e.to_string())?;
     let addr = if addr.contains(':') { addr.to_string() } else { format!("{addr}:{DEFAULT_PORT}") };
     Ok(Invite { addr, credential })

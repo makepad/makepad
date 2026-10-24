@@ -5,7 +5,7 @@ use crate::boot_progress::{History, Progress};
 use makepad_hal::{domain_stop, open_flags, session::HOST, CmdWriter, Hal, Id, OpenReq};
 use makepad_studio_protocol::KeyCode;
 use relax_boot::{
-    Action, ActivityWant, Boot as HostWindow, Document, Environment, Event as BootEvent, Icon, LayerWant,
+    Action, Boot as HostWindow, Document, Environment, Event as BootEvent, Icon, LayerWant, RingAlert, RingWant,
 };
 use relax_compiler::{
     diag::Diagnostic,
@@ -69,7 +69,7 @@ static PANICS_CHANGED: AtomicBool = AtomicBool::new(false);
 static EXIT: AtomicI32 = AtomicI32::new(0);
 static ENVIRONMENT: Mutex<Option<Environment>> = Mutex::new(None);
 /// The UI thread began a JIT wait since the window last looked (postframe's hook): the window
-/// wakes, and shows the UI block on the activity badge once the waiting is sustained (BLOCK_AFTER).
+/// wakes, and shows the UI block on the JIT ring once the waiting is sustained (BLOCK_AFTER).
 static UI_WAIT_ARMED: AtomicBool = AtomicBool::new(false);
 /// A true UI block: no frame for this long with the UI thread in JIT waits most of it (one long
 /// lazy compile, or a load's thousands of short ones; never a short hiccup).
@@ -84,23 +84,21 @@ fn ui_wait_began() {
     }
 }
 
-/// The activity badge shows once the JIT has had work in flight this long (one short build shows
+/// The JIT ring shows once the JIT has had work in flight this long (one short build shows
 /// nothing)...
-const ACTIVITY_SHOW_AFTER: Duration = Duration::from_millis(600);
-/// ...and fades out once it has had none this long.
-const ACTIVITY_HIDE_AFTER: Duration = Duration::from_millis(1200);
-/// work in flight (O3 builds + functions built ahead) that reads as a lively level (1 - 1/e)
-const ACTIVITY_WORK: f32 = 48.0;
-/// the run looks at the JIT's queues at most this often (the badge eases between looks)
+const RING_SHOW_AFTER: Duration = Duration::from_millis(600);
+/// ...and settles (fades out) once it has had none this long.
+const RING_SETTLE_AFTER: Duration = Duration::from_millis(800);
+/// the run looks at the JIT's queues at most this often (the ring eases between looks)
 const WATCH_EVERY: Duration = Duration::from_millis(100);
-/// how often the run looks at the JIT while the app runs and no badge shows (new work is seen
+/// how often the run looks at the JIT while the app runs and no ring shows (new work is seen
 /// within this; a UI wait wakes it at once)
-const ACTIVITY_LOOK: Duration = Duration::from_millis(500);
+const RING_LOOK: Duration = Duration::from_millis(500);
 
-/// Whether this run shows the JIT activity badge: `MAKEPAD_RUN_SETTLE_HUD=0` never, `=1` always,
-/// else not in hidden or benchmark runs (MAKEPAD_HIDE_WINDOWS, MAKEPAD_RUN_O3_PROGRESS,
+/// Whether this run shows the JIT ring: `MAKEPAD_RUN_SETTLE_HUD=0` never, `=1` always, else not
+/// in hidden or benchmark runs (MAKEPAD_HIDE_WINDOWS, MAKEPAD_RUN_O3_PROGRESS,
 /// MAKEPAD_RUN_BOOT_DUMP).
-fn activity_on() -> bool {
+fn ring_on() -> bool {
     match std::env::var("MAKEPAD_RUN_SETTLE_HUD").as_deref() {
         Ok("0") => false,
         Ok("1") => true,
@@ -112,9 +110,9 @@ fn activity_on() -> bool {
     }
 }
 
-/// What the run sees of the JIT for the activity badge: the work in flight (O3 builds, functions
-/// built ahead, the UI thread's JIT duty cycle) and a true UI block. Atomics and one lock of the O3
-/// queue a look; the app's threads never wait for it.
+/// What the run sees of the JIT for its ring: the functions compiled and still queued (built
+/// ahead), the UI thread's JIT duty cycle, the O2/O3 builds, a true UI block. Atomics and one lock
+/// of the O3 queue a look; the app's threads never wait for it.
 struct Watch {
     shown: bool,
     busy_since: Option<Instant>,
@@ -122,7 +120,10 @@ struct Watch {
     /// the last look at the JIT's queues (at most every WATCH_EVERY), what they held then
     looked: Instant,
     o3: u64,
-    ahead: u64,
+    done: u64,
+    queued: u64,
+    /// the functions built ahead so far when this compile began
+    done_from: Option<u64>,
     wait_ns: u64,
     duty: f32,
     /// the UI block shows (for the trace)
@@ -139,7 +140,9 @@ impl Watch {
             idle_since: None,
             looked: Instant::now(),
             o3: 0,
-            ahead: 0,
+            done: 0,
+            queued: 0,
+            done_from: None,
             wait_ns: relax_compiler::postframe::activity().ui_wait_ns,
             duty: 0.0,
             blocked: false,
@@ -148,10 +151,10 @@ impl Watch {
         }
     }
 
-    /// The badge's wish now (`None`: the JIT is idle). `clock`: the frame dump's clock (ms), for
-    /// the trace.
-    fn look(&mut self, clock: Option<u128>) -> Option<ActivityWant> {
-        use relax_compiler::postframe::{activity, ui_hang_ns, ui_stall_ns};
+    /// The ring's wish now (`None`: the JIT is settled). `clock`: the frame dump's clock (ms),
+    /// for the trace.
+    fn look(&mut self, clock: Option<u128>) -> Option<RingWant> {
+        use relax_compiler::postframe::{activity, ahead_progress, ui_hang_ns, ui_stall_ns};
         let now = Instant::now();
         let dt = now.duration_since(self.looked).as_secs_f32();
         if dt >= WATCH_EVERY.as_secs_f32() {
@@ -160,44 +163,60 @@ impl Watch {
             self.duty = (waited / dt).clamp(0.0, 1.0);
             self.wait_ns = a.ui_wait_ns;
             self.o3 = a.o3;
-            self.ahead = a.ahead;
+            (self.done, self.queued) = ahead_progress();
             self.looked = now;
         }
         let stalled = Duration::from_nanos(ui_hang_ns().max(ui_stall_ns()));
         let block = stalled >= BLOCK_AFTER;
-        let work = self.o3 + self.ahead;
-        if work > 0 || self.duty > 0.02 || block {
+        let lazy = self.duty > 0.02;
+        let compiling = self.queued > 0 || lazy || block;
+        if compiling {
+            self.done_from.get_or_insert(self.done);
+        } else {
+            self.done_from = None;
+        }
+        if compiling || self.o3 > 0 {
             self.idle_since = None;
             let since = *self.busy_since.get_or_insert(now);
-            self.shown |= block || now.duration_since(since) >= ACTIVITY_SHOW_AFTER;
+            self.shown |= block || now.duration_since(since) >= RING_SHOW_AFTER;
         } else {
-            self.busy_since = None;
             let since = *self.idle_since.get_or_insert(now);
-            self.shown &= now.duration_since(since) < ACTIVITY_HIDE_AFTER;
+            self.shown &= now.duration_since(since) < RING_SETTLE_AFTER;
+            if !self.shown {
+                self.busy_since = None;
+            }
         }
         if self.trace && block != self.blocked {
             if block {
-                eprintln!("makepad-run: jit activity: UI block (the UI waited {:.0} ms on the JIT)", stalled.as_secs_f64() * 1000.0);
+                eprintln!("makepad-run: jit ring: UI block (the UI waited {:.0} ms on the JIT)", stalled.as_secs_f64() * 1000.0);
             } else {
-                eprintln!("makepad-run: jit activity: UI block over");
+                eprintln!("makepad-run: jit ring: UI block over");
             }
         }
         self.blocked = block;
-        let level = (1.0 - (-(work as f32) / ACTIVITY_WORK).exp()).max(self.duty);
-        // the trace: what the badge was told, at most 4 times a second while it shows
+        let want = RingWant {
+            done: self.done.saturating_sub(self.done_from.unwrap_or(self.done)),
+            queued: self.queued,
+            lazy,
+            tier_up: self.o3,
+            block,
+            busy: self.busy_since.map_or(Duration::ZERO, |t| now.duration_since(t)),
+        };
+        // the trace: what the ring was told, at most 4 times a second while it shows
         if self.trace && (self.shown || self.traced.is_some()) && self.traced.is_none_or(|t| now.duration_since(t) >= Duration::from_millis(250)) {
             let at = clock.map_or(String::new(), |ms| format!(" @{ms}"));
             eprintln!(
-                "makepad-run: jit activity{at}: {} level {level:.2} (o3 {}, ahead {}, ui duty {:.2}){}",
-                if self.shown { "shown" } else { "idle" },
-                self.o3,
-                self.ahead,
+                "makepad-run: jit ring{at}: {} (compiling {} of {}, o3 {}, ui duty {:.2}){}",
+                if !self.shown { "settled" } else if compiling { "compiling" } else { "tier-up" },
+                want.queued,
+                want.done + want.queued,
+                want.tier_up,
                 self.duty,
                 if block { " UI BLOCK" } else { "" }
             );
             self.traced = self.shown.then_some(now);
         }
-        self.shown.then_some(ActivityWant { level, block })
+        self.shown.then_some(want)
     }
 
     /// How soon to look again while the UI thread may be heading into a block (its JIT wait began).
@@ -219,7 +238,7 @@ impl Watch {
 /// Where the window layer over the app is in its sequence.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Stage {
-    /// no layer (the activity badge may show)
+    /// no layer (the JIT ring may show)
     Running,
     /// the boot field, the app's first frames going under it
     Boot,
@@ -301,8 +320,13 @@ pub fn run(mut compile: Box<dyn FnMut() -> i32 + Send>) -> i32 {
             // main thread did): a compiler phase, not a swap-quiesced compiler worker
             let _compiler = relax_compiler::zone_alloc::compiler();
             loop {
-                let code = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile()))
-                    .unwrap_or(101);
+                relax_compiler::lifeline::clear_panic_at();
+                // a panic in the compiler (exit 101): its message and position go on the load
+                // screen, not only into a log nobody on the box sees
+                let (code, panicked) = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile())) {
+                    Ok(code) => (code, None),
+                    Err(p) => (101, Some(relax_compiler::lifeline::panic_line(&*p))),
+                };
                 let mut guard = state();
                 let Some(run) = guard.as_mut() else {
                     EXIT.store(code, Ordering::Release);
@@ -329,7 +353,10 @@ pub fn run(mut compile: Box<dyn FnMut() -> i32 + Send>) -> i32 {
                 {
                     // With a unit already installed, retries go through domain relaunch.
                     run.initial_failed = run.spec.is_none();
-                    post(Update::Failure(format!("Compilation failed (exit {code})")));
+                    post(Update::Failure(match &panicked {
+                        Some(line) => format!("Compilation failed: the compiler panicked: {line}"),
+                        None => format!("Compilation failed (exit {code})"),
+                    }));
                     if run.spec.is_some() {
                         return;
                     }
@@ -820,6 +847,7 @@ fn parked(domain: u32) -> Option<Option<ParkedPanic>> {
             message: json.get("message").map_or("", |j| j.str()).into(),
             location: json.get("location").map_or("", |j| j.str()).into(),
             choices,
+            stale: json.get("kind").is_some_and(|k| k.str() == "stale access"),
         }));
     }
     Some(None)
@@ -893,9 +921,13 @@ fn pump(
     let mut next_status = Instant::now();
     let mut dirty = true;
     let mut stage = Stage::Running;
-    let activity = activity_on();
+    let ring = ring_on();
+    // the parked stop the ring's dot was clicked for, and the run's inspect view (the halted view
+    // over the app, opened from the ring)
+    let mut ring_ack: Option<String> = None;
+    let mut inspect_open = false;
     let mut warm_up_at: Option<Instant> = None;
-    // MAKEPAD_RUN_POSTFRAME_LOG (the responsiveness trace): the activity badge's UI blocks too
+    // MAKEPAD_RUN_POSTFRAME_LOG (the responsiveness trace): the JIT ring's UI blocks too
     let mut watch = Watch::new(std::env::var_os("MAKEPAD_RUN_POSTFRAME_LOG").is_some());
     relax_compiler::postframe::on_ui_wait(ui_wait_began);
     loop {
@@ -1186,6 +1218,7 @@ fn pump(
             && (patch_failed
                 || action_failed
                 || failed
+                || inspect_open
                 || !document_errors.is_empty()
                 || data.parked.is_some());
         let mode = if overlay { Mode::Overlay } else { Mode::Boot };
@@ -1202,7 +1235,7 @@ fn pump(
                         && relaunch.is_none_or(|t| t.elapsed() >= Duration::from_millis(300)))));
         // the window layer (Metal): the boot field the app's first frames go under, the warm-up
         // after its first present (until the JIT's readiness signal). An opaque overlay, a failure
-        // or a stop takes it away. (Later JIT work shows in the activity badge, below.)
+        // or a stop takes it away. (Later JIT work shows in the JIT ring, below.)
         // the boot stage begins before the app has the window, once the field has presented
         // (its first frame then never reaches the window before the layer)
         let layers = host.layers() && !overlay && !failed && data.parked.is_none() && !stopping && !pending;
@@ -1243,20 +1276,34 @@ fn pump(
             Stage::Running => None,
         };
         host.layer(want, app_frames);
-        // the JIT activity badge while the app runs: the JIT's work in flight, a UI block
-        let running = activity && stage == Stage::Running && lent_to_app && !active && !failed && data.parked.is_none();
+        // the JIT ring while the app runs: the JIT's work in flight, a UI block, what the program
+        // is stopped on (until the dot is clicked)
+        let running = ring && stage == Stage::Running && lent_to_app && !active && !failed;
+        let alert = data
+            .parked
+            .as_ref()
+            .filter(|p| ring_ack.as_ref() != Some(&p.id))
+            .map(|p| if p.stale { RingAlert::Stale } else { RingAlert::Panic });
         if running && host.badges() {
-            let badge = host.activity(watch.look(host.dump_ms()));
-            for wait in [badge, watch.block_wake(), Some(ACTIVITY_LOOK)].into_iter().flatten() {
+            let want = watch.look(host.dump_ms()).filter(|_| data.parked.is_none());
+            if inspect_open {
+                let summary = format!("JIT · {}", relax_boot::ring_summary(want, None));
+                if data.domain != summary && data.parked.is_none() && data.diagnostics.is_empty() {
+                    data.domain = summary;
+                    dirty = true;
+                }
+            }
+            let shown = host.ring(want, alert);
+            for wait in [shown, watch.block_wake(), Some(RING_LOOK)].into_iter().flatten() {
                 wake_in = Some(wake_in.map_or(wait, |w: Duration| w.min(wait)));
             }
-        } else if let Some(wait) = host.activity(None) {
-            // a badge fading out
+        } else if let Some(wait) = host.ring(None, None) {
+            // a ring fading out
             wake_in = Some(wake_in.map_or(wait, |w: Duration| w.min(wait)));
         }
         if running && host.dumping() {
             host.dump_app();
-            wake_in = Some(wake_in.map_or(ACTIVITY_LOOK, |w: Duration| w.min(ACTIVITY_LOOK)));
+            wake_in = Some(wake_in.map_or(RING_LOOK, |w: Duration| w.min(RING_LOOK)));
         }
         let layered = host.layer_on();
         if active && (dirty || Instant::now() >= next_status) {
@@ -1347,6 +1394,21 @@ fn pump(
         let mut close = false;
         for event in host.events() {
             let action = match event {
+                BootEvent::RingClick => {
+                    // the dot: its stop is seen, the halted view shows it; else Scope, when one
+                    // is attached, is asked to come to this process; else the run's inspect view
+                    if let Some(parked) = &data.parked {
+                        ring_ack = Some(parked.id.clone());
+                        overlay_dismissed = false;
+                    } else if relax_compiler::inspect::pstream::viewing() {
+                        relax_compiler::inspect::flightrec::event("attention", "the JIT ring was clicked", std::process::id() as u64, 0);
+                    } else {
+                        inspect_open = true;
+                        overlay_dismissed = false;
+                    }
+                    dirty = true;
+                    None
+                }
                 BootEvent::DocumentErrors(errors) => {
                     if !errors.is_empty() {
                         overlay_dismissed = false;
@@ -1482,6 +1544,9 @@ fn pump(
                 }
                 Some(Action::Dismiss) if overlay => {
                     overlay_dismissed = true;
+                    if std::mem::take(&mut inspect_open) && data.domain.starts_with("JIT · ") {
+                        data.domain = "Running".into();
+                    }
                     dirty = true;
                 }
                 Some(Action::Select(index))

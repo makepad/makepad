@@ -75,6 +75,11 @@ pub struct Vulkan {
     /// the window (resizes reuse it), and a snapshot or copy reads only what the frame drew.
     hosted_sizes: FastMap<(u32, u32), [u32; 2]>,
     scanout_images: FastMap<(u32, Id), Vec<Arc<Image>>>,
+    /// session 0's windows with a badge layer (by index): the images their layer was composed
+    /// into (`frame::Badged`)
+    badged: FastMap<u32, frame::Badged>,
+    /// the composed image the badge frame being encoded draws into
+    compose: Option<Arc<Image>>,
     aliases: FastMap<(u32, Id), Id>,
     pick_ids: FastMap<(u32, Id), Id>,
     pick_pending: HashSet<(u32, Id)>,
@@ -129,7 +134,7 @@ impl Vulkan {
     #[cfg(target_os = "linux")]
     pub fn on_shell(flags: u32, sessions: super::SessionNotify, shell: &'static super::linux::Shared) -> Result<Self, String> {
         let mut backend = Self::with_sources(flags, sessions, super::linux::surface_source(shell), Box::new(NativeImages::default()))?;
-        backend.info.flags |= info_flags::DISPLAY_CLOCK;
+        backend.info.flags |= info_flags::DISPLAY_CLOCK | info_flags::WINDOW_BADGES;
         if shell.client_chrome() { backend.info.flags |= info_flags::CLIENT_CHROME; }
         if shell.window_manager() { backend.info.flags |= info_flags::WM_HOSTED; }
         if shell.direct_display() { backend.info.flags |= info_flags::DIRECT_DISPLAY; }
@@ -164,7 +169,7 @@ impl Vulkan {
         crate::gpu_limits::set_max_gpu_buffer_bytes(info.max_buffer);
         crate::gpu_limits::set_gpu_working_set_bytes(info.working_set);
         Ok(Self { #[cfg(any(target_os = "linux", target_os = "android"))] media: Default::default(), #[cfg(target_os = "linux")] capture_pool: FastMap::default(), #[cfg(any(target_os = "linux", target_os = "android"))] shell: None, dev, info, tex: FastMap::default(), buf: FastMap::default(), pipe: FastMap::default(), programs: FastMap::default(), draw_bins: Vec::new(), draw_images: Vec::new(),
-            passes: FastMap::default(), win: FastMap::default(), hosted_sizes: FastMap::default(), scanout_images: FastMap::default(), aliases: FastMap::default(), pick_ids: FastMap::default(), pick_pending: HashSet::new(),
+            passes: FastMap::default(), win: FastMap::default(), hosted_sizes: FastMap::default(), scanout_images: FastMap::default(), badged: FastMap::default(), compose: None, aliases: FastMap::default(), pick_ids: FastMap::default(), pick_pending: HashSet::new(),
             fallback: FastMap::default(), windows: surface::Windows::new(source), sharing,
             #[cfg(target_os = "linux")] foreign_support,
             batch: None, spares: Default::default(), mailbox: Mailbox::new(sessions),
@@ -471,6 +476,7 @@ impl Backend for Vulkan {
         self.capture_pool.retain(|key, _| key.0 != sid);
         self.windows.close_session(sid, self.queue.as_ref().unwrap());
         self.tex.retain(|k, _| k.0 != sid); self.buf.retain(|k, _| k.0 != sid); self.pipe.retain(|k, _| k.0 != sid);
+        if sid == HOST { self.badged.clear(); }
         self.win.retain(|k, _| k.0 != sid); self.hosted_sizes.retain(|k, _| k.0 != sid); self.aliases.retain(|k, _| k.0 != sid);
         self.scanout_images.retain(|k, _| k.0 != sid);
         self.pick_ids.retain(|k, _| k.0 != sid); self.pick_pending.retain(|k| k.0 != sid);
@@ -591,6 +597,7 @@ impl exec::DeviceReset for Vulkan {
         self.buf.clear();
         self.win.clear();
         self.hosted_sizes.clear();
+        for b in self.badged.values_mut() { *b = Default::default(); }
         self.scanout_images.clear();
         self.fallback.clear();
         self.passes.clear();
@@ -652,6 +659,11 @@ impl Gpu for Vulkan {
         let handled = media.command(self, s, c);
         self.media = media;
         handled
+    }
+    #[cfg(target_os = "linux")]
+    fn badges(&self) -> bool { self.shell.is_some() }
+    fn badge_layer(&mut self, window: Id, on: bool) {
+        if on { self.badged.entry(window.index).or_default(); } else { self.badged.remove(&window.index); }
     }
     /// The host's run-state overlay is drawn by the macOS backend only so far (the bootloader
     /// host runs on macOS); here it is counted as unsupported, never silently dropped.
@@ -802,6 +814,7 @@ impl Gpu for Vulkan {
         self.capture_pool.remove(&(sid, id));
         self.win.remove(&(sid, id.index)); self.hosted_sizes.remove(&(sid, id.index)); self.pick_ids.remove(&(sid, id));
         self.scanout_images.remove(&(sid, id));
+        if sid == HOST { self.badged.remove(&id.index); }
         self.windows.remove((sid, id), self.queue.as_ref().unwrap());
     }
     fn window_lent(&mut self, sid: u32, id: Id, host: Id, attach: bool) {

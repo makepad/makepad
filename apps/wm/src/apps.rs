@@ -91,7 +91,9 @@ impl Default for AppRegistry {
 
 impl AppRegistry {
     /// The registry for a build, with the person's overrides: the settings
-    /// file first, then the command line's `--module <id>` flags on top.
+    /// file first, then the command line's `--module <id>` and `--jit <id>` flags on top
+    /// (the fleet session runs Sandbox with `--jit sandbox`, so every node's Sandbox can be
+    /// inspected and live-patched).
     /// `processes` is the host's answer (`App::processes`): the platform's
     /// capability and the build's `modules_only` together.
     pub fn load(settings: &Path, args: &[String], build: &WmBuild, processes: bool) -> Self {
@@ -110,9 +112,14 @@ impl AppRegistry {
         }
         let mut i = 0;
         while i < args.len() {
-            if args[i] == "--module" {
+            let flag = match args[i].as_str() {
+                "--module" => Some(Hosting::Module),
+                "--jit" => Some(Hosting::Jit),
+                _ => None,
+            };
+            if let Some(hosting) = flag {
                 if let Some(id) = args.get(i + 1) {
-                    registry.overrides.insert(id.to_lowercase(), Hosting::Module);
+                    registry.overrides.insert(id.to_lowercase(), hosting);
                 }
                 i += 2;
             } else {
@@ -255,6 +262,14 @@ mod tests {
         let _ = std::fs::remove_file(&settings);
         let _ = std::fs::remove_dir(&dir);
         assert_eq!(registry.hosting("sandbox"), Hosting::Jit);
+        assert_eq!(registry.runner("sandbox"), makepad_app_registry::Runner::Jit);
+        assert_eq!(registry.runner("terminal"), makepad_app_registry::Runner::Native);
+    }
+
+    #[test]
+    fn a_jit_flag_runs_the_process_under_the_jit() {
+        let flags = ["-scale=1.3".to_string(), "--jit".to_string(), "Sandbox".to_string()];
+        let registry = AppRegistry::load(Path::new("/nonexistent/apps.splash"), &flags, &build(false, false), true);
         assert_eq!(registry.runner("sandbox"), makepad_app_registry::Runner::Jit);
         assert_eq!(registry.runner("terminal"), makepad_app_registry::Runner::Native);
     }

@@ -272,6 +272,9 @@ mod imp {
 
 const DEPTH: usize = 24;
 const MAX_STACKS: usize = 1 << 16;
+/// A sample's weight bits in the live table's record (the stack id is above bit 40).
+const WEIGHT: u64 = (1 << 39) - 1;
+const AFTER_MARK: u64 = 1 << 39;
 /// live-block table: open addressing over (block, record) pairs; key 0 = empty, 1 = deleted,
 /// 2 = being written
 const LIVE_SLOTS: usize = 1 << 20;
@@ -466,7 +469,10 @@ fn keep(tr: &Tracker, t: &Tables, p: *mut u8, size: usize, frames: &[u64; DEPTH]
     // (the stack index grows here: kept, the tracker outlives the compiler arena)
     let _k = crate::zone_alloc::kept();
     let Some(id) = intern(tr, t, frames, n, tag) else { return };
-    let w = (size as u64).max(t.rate).min((1 << 40) - 1);
+    let w = (size as u64).max(t.rate).min(WEIGHT);
+    // bit 39 of the record: sampled after the last settle rebuild's mark (`zone=cold` keeps the
+    // samples before it)
+    let mark = if crate::zone_alloc::compiler_old_marks() != 0 { AFTER_MARK } else { 0 };
     let st = &t.stacks[id as usize];
     st.alloc_bytes.fetch_add(w as i64, Relaxed);
     st.alloc_blocks.fetch_add(1, Relaxed);
@@ -479,7 +485,7 @@ fn keep(tr: &Tracker, t: &Tables, p: *mut u8, size: usize, frames: &[u64; DEPTH]
         let k = t.keys[i].load(Relaxed);
         // claim (2), write the record, then publish the key: a free never reads a half record
         if (k == 0 || k == 1) && t.keys[i].compare_exchange(k, 2, Acquire, Relaxed).is_ok() {
-            t.vals[i].store(((id as u64) << 40) | w, Relaxed);
+            t.vals[i].store(((id as u64) << 40) | mark | w, Relaxed);
             t.keys[i].store(key, Release);
             let f = &t.filter[hash(key) % FILTER];
             if f.load(Relaxed) < 255 {
@@ -536,7 +542,7 @@ fn forget(tr: &Tracker, p: *mut u8) {
         }
         if k == key && t.keys[i].compare_exchange(key, 1, AcqRel, Relaxed).is_ok() {
             let v = t.vals[i].load(Relaxed);
-            let (id, w) = ((v >> 40) as usize, (v & ((1 << 40) - 1)) as i64);
+            let (id, w) = ((v >> 40) as usize, (v & WEIGHT) as i64);
             if id < t.used.load(Acquire) {
                 let st = &t.stacks[id];
                 st.live_bytes.fetch_sub(w, Relaxed);
@@ -640,8 +646,22 @@ fn host_alloc(p: *mut u8, size: usize) {
     IN_HOST_SAMPLE.with(|b| b.set(true));
     let mut frames = [0u64; DEPTH];
     let n = capture_host(&mut frames);
+    // frames kept per host stack (MAKEPAD_RUN_HEAP_DEPTH): a whole cold start at the full depth
+    // fills the stack table before its end, and later samples go uncounted
+    let k = host_depth();
+    let n = if (n as usize) > k {
+        frames[k..].fill(0);
+        k as u8
+    } else {
+        n
+    };
     keep(&HOST, t, p, size, &frames, n, crate::memstat::current_tag());
     IN_HOST_SAMPLE.with(|b| b.set(false));
+}
+
+fn host_depth() -> usize {
+    static D: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *D.get_or_init(|| std::env::var("MAKEPAD_RUN_HEAP_DEPTH").ok().and_then(|v| v.parse().ok()).unwrap_or(DEPTH).clamp(1, DEPTH))
 }
 
 /// Leaves this thread's allocations out of the host heap's samples (inspect's own threads).
@@ -773,7 +793,7 @@ fn rows(t: &Tables) -> Vec<Row> {
         .collect()
 }
 
-/// The live samples whose block lies in one arena (`heap top host=1 zone=burst|compiler`), per
+/// The live samples whose block lies in one arena (`heap top host=1 zone=burst|compiler|old|new`), per
 /// stack: what survives there (a few surviving blocks pin a whole chunk of the burst arena).
 fn zone_rows(t: &Tables, zone: &str) -> Vec<Row> {
     let mut r: Vec<Row> = rows(t).into_iter().map(|x| (x.0, 0, 0, x.3, x.4, x.5, x.6)).collect();
@@ -785,14 +805,20 @@ fn zone_rows(t: &Tables, zone: &str) -> Vec<Row> {
         let inside = match zone {
             "burst" => crate::zone_alloc::burst_owns(a as *const u8),
             "compiler" => crate::zone_alloc::compiler_owns(a as *const u8),
+            // the compiler arena's chunks from before the last settle rebuild, and those after
+            "old" | "cold" => crate::zone_alloc::placement(a as *const u8) == 0,
+            "new" => crate::zone_alloc::placement(a as *const u8) == 1,
             _ => !crate::zone_alloc::burst_owns(a as *const u8) && !crate::zone_alloc::compiler_owns(a as *const u8),
         };
         if !inside {
             continue;
         }
         let v = v.load(Relaxed);
+        if zone == "cold" && v & AFTER_MARK != 0 {
+            continue;
+        }
         if let Some(x) = r.get_mut((v >> 40) as usize) {
-            x.1 += (v & ((1 << 40) - 1)) as i64;
+            x.1 += (v & WEIGHT) as i64;
             x.2 += 1;
         }
     }
@@ -864,7 +890,7 @@ fn tag_name(t: &Tables, id: usize) -> &'static str {
 }
 
 /// `heap start [host=1] [rate=65536] [ttl_s=600]` | `heap stop [host=1]` | `heap status` |
-/// `heap top [host=1] [by=live|alloc|freed|peak] [n=15] [depth=5] [group=stack|tag] [zone=burst|compiler|other]` |
+/// `heap top [host=1] [by=live|alloc|freed|peak] [n=15] [depth=5] [group=stack|tag] [zone=burst|compiler|old|cold|new|other]` (cold: in old chunks, sampled before the settle rebuild) |
 /// `heap snap <name> [host=1]` | `heap diff <a> <b|now>` | `heap path H<id> [host=1]`
 pub fn cmd_heap(req: &Req, out: &mut Out) {
     let host = req.get("host") == Some("1");

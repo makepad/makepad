@@ -62,3 +62,8 @@ impl Parker {
     pub fn park_timeout(&self, _dur: Duration) {}
     pub fn unpark(&self) {}
 }
+
+/// thread::sleep (no wait registry without threads).
+pub(crate) fn sleep(dur: Duration) {
+    crate::sys::time::sleep(dur)
+}

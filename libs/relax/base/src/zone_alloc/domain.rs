@@ -67,7 +67,7 @@ impl DomainHeap {
         self.inner.arena.detail()
     }
     /// Chunk states with resident bytes (arena.rs `states`).
-    pub fn states(&self) -> [usize; 24] {
+    pub fn states(&self) -> [usize; 28] {
         self.inner.arena.states()
     }
     pub fn range(&self) -> (usize, usize) {
@@ -168,6 +168,17 @@ unsafe fn owner(p: *mut u8) -> Option<Arc<Heap>> {
         h = *heap.next.get();
     }
     None
+}
+
+/// The calling program thread is about to block in a condvar or park wait (std's wait registry):
+/// it settles its current chunks of its program heap (arena.rs `domain_wait`).
+pub fn before_wait() {
+    unsafe { compiler::domain_wait() }
+}
+
+/// The wait `before_wait` announced has ended.
+pub fn after_wait() {
+    compiler::domain_wait_done()
 }
 
 /// Every live domain heap returns its free pages (warm chunks, all-free granules of detached
@@ -600,6 +611,159 @@ mod tests {
             assert_eq!(heap.inner.arena.densify(64), 0);
             enter(std::ptr::null());
         }
+    }
+
+    /// A program thread's current chunk left sparse by a burst gives its whole free pages back
+    /// while attached (`owned_tick`), once per trim epoch, and its blocks stay usable.
+    #[test]
+    fn sparse_current_chunk_gives_free_pages_back() {
+        symbol(b"relax_alloc");
+        let heap = DomainHeap::new().unwrap();
+        unsafe {
+            enter(&*heap);
+            // a burst: 1.2 MB of 64-byte blocks in this thread's current chunk of the class
+            let mut v: Vec<*mut u8> = (0..20_000).map(|_| program_alloc(64, 8)).collect();
+            for &p in &v {
+                std::ptr::write_bytes(p, 7, 64);
+            }
+            let free_mb = |h: &DomainHeap| h.states()[24];
+            assert_eq!(free_mb(&heap), 0);
+            // all but every 1000th go; the survivors are under a quarter of what was carved
+            let keep: Vec<*mut u8> = v.iter().copied().step_by(1000).collect();
+            for (i, p) in v.drain(..).enumerate() {
+                if i % 1000 != 0 {
+                    program_dealloc(p, 64, 8);
+                }
+            }
+            let before = free_mb(&heap);
+            assert!(before > 1 << 20, "the burst left free pages in the current chunk: {before}");
+            // the next epoch: a free that leaves a power of two of live blocks trims
+            heap.inner.arena.densify(0);
+            let extra: Vec<*mut u8> = (0..4).map(|_| program_alloc(64, 8)).collect();
+            for p in extra {
+                program_dealloc(p, 64, 8);
+            }
+            let x = program_alloc(64, 8);
+            program_dealloc(x, 64, 8);
+            // 20 survivors: freeing down to 16 reaches a power of two
+            for &p in &keep[16..] {
+                program_dealloc(p, 64, 8);
+            }
+            let after = free_mb(&heap);
+            assert!(after < before / 4, "the current chunk kept its free pages: {before} -> {after}");
+            // the survivors and new blocks still work
+            for &p in &keep[..16] {
+                assert_eq!(*p, 7);
+            }
+            let fresh: Vec<*mut u8> = (0..30_000).map(|_| program_alloc(64, 8)).collect();
+            for &p in &fresh {
+                std::ptr::write_bytes(p, 9, 64);
+            }
+            for p in fresh {
+                program_dealloc(p, 64, 8);
+            }
+            for &p in &keep[..16] {
+                program_dealloc(p, 64, 8);
+            }
+            enter(std::ptr::null());
+        }
+    }
+
+    /// Blocks another thread freed into a quiet owner's current chunk wait on its remote list; the
+    /// owner takes them when it is about to block (`before_wait`), and the chunk, sparse now,
+    /// gives their pages back.
+    #[test]
+    fn a_waiting_owner_takes_the_remote_frees() {
+        symbol(b"relax_alloc");
+        let heap = DomainHeap::new().unwrap();
+        let addr = &*heap as *const DomainHeap as usize;
+        unsafe {
+            enter(&*heap);
+            let blocks: Vec<usize> = (0..4000).map(|_| program_alloc(200, 8) as usize).collect();
+            // (one block stays: the chunk stays this thread's)
+            let stay = program_alloc(200, 8);
+            let pending = |h: &DomainHeap| h.states()[27];
+            std::thread::spawn(move || {
+                enter(addr as *const DomainHeap);
+                for p in blocks {
+                    program_dealloc(p as *mut u8, 200, 8);
+                }
+                enter(std::ptr::null());
+            })
+            .join()
+            .unwrap();
+            assert!(pending(&heap) >= 4000 * 200, "the frees wait on the remote list: {}", pending(&heap));
+            // (a pass at a wait runs once per trim epoch: the next one)
+            heap.inner.arena.densify(0);
+            before_wait();
+            assert_eq!(pending(&heap), 0, "the owner took them");
+            // the chunk, sparse now, gave its whole free pages back with them
+            assert!(heap.states()[24] < 64 << 10, "free pages kept: {}", heap.states()[24]);
+            let again: Vec<*mut u8> = (0..4000).map(|_| program_alloc(200, 8)).collect();
+            for &p in &again {
+                std::ptr::write_bytes(p, 3, 200);
+            }
+            for p in again {
+                program_dealloc(p, 200, 8);
+            }
+            program_dealloc(stay, 200, 8);
+            enter(std::ptr::null());
+        }
+    }
+
+    fn heap_epoch_bump(addr: usize) {
+        let heap: &DomainHeap = unsafe { &*(addr as *const DomainHeap) };
+        heap.inner.arena.densify(0);
+    }
+
+    /// A thread blocked in a wait keeps its current chunks; what other threads free into them
+    /// meanwhile is settled for it by the monitor (`densify`), and the owner, waking, goes on
+    /// allocating from them.
+    #[test]
+    fn the_monitor_settles_a_waiting_owners_chunk() {
+        symbol(b"relax_alloc");
+        let heap = DomainHeap::new().unwrap();
+        let addr = &*heap as *const DomainHeap as usize;
+        let (to_owner, owner_rx) = std::sync::mpsc::channel::<()>();
+        let (blocks_tx, blocks_rx) = std::sync::mpsc::channel::<Vec<usize>>();
+        let owner = std::thread::spawn(move || unsafe {
+            enter(addr as *const DomainHeap);
+            let blocks: Vec<usize> = (0..6000).map(|_| program_alloc(200, 8) as usize).collect();
+            let stay = program_alloc(200, 8);
+            std::ptr::write_bytes(stay, 5, 200);
+            // a wait: announced (its own pass runs now, before the frees), then blocked until
+            // the test lets it go (the channels are the native heap's)
+            heap_epoch_bump(addr);
+            before_wait();
+            blocks_tx.send(blocks).unwrap();
+            owner_rx.recv().unwrap();
+            after_wait();
+            assert_eq!(*stay, 5);
+            let again: Vec<*mut u8> = (0..6000).map(|_| program_alloc(200, 8)).collect();
+            for &p in &again {
+                std::ptr::write_bytes(p, 6, 200);
+            }
+            for p in again {
+                assert_eq!(*p, 6);
+                program_dealloc(p, 200, 8);
+            }
+            program_dealloc(stay, 200, 8);
+            enter(std::ptr::null());
+        });
+        unsafe {
+            enter(&*heap);
+            for p in blocks_rx.recv().unwrap() {
+                program_dealloc(p as *mut u8, 200, 8);
+            }
+            enter(std::ptr::null());
+        }
+        let pending = |h: &DomainHeap| h.states()[27];
+        assert!(pending(&heap) >= 6000 * 200, "the frees wait on the owner's remote list: {}", pending(&heap));
+        heap.inner.arena.densify(0);
+        assert_eq!(pending(&heap), 0, "the monitor settled the waiting owner's chunk");
+        assert!(heap.states()[24] < 64 << 10, "its free pages went back: {}", heap.states()[24]);
+        to_owner.send(()).unwrap();
+        owner.join().unwrap();
     }
 
     #[test]

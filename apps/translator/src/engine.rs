@@ -248,7 +248,7 @@ fn run(job: &Job, picks: &Arc<FleetPickCache>, latest: &AtomicU64, send: &impl F
                     // certificate) is remembered at its new address.
                     if let Some(hint) = hub_base(&job.settings.hub).filter(|_| hint_dead) {
                         let (old, new) = (host_of(&hint), host_of(&detail));
-                        if old != new && makepad_ai_hub::fleet_auth::same_node(old, new) {
+                        if old != new && makepad_network::fleet::auth::same_node(old, new) {
                             makepad_widgets::log!("translator: hub {old} is now at {new}");
                             send(Update::HubMoved { addr: new.to_string() });
                         }

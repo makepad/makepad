@@ -111,8 +111,8 @@ mod disabled {
     pub fn census() -> [usize; 11] {
         [0; 11]
     }
-    pub fn states() -> [usize; 24] {
-        [0; 24]
+    pub fn states() -> [usize; 28] {
+        [0; 28]
     }
     pub fn mark_old() {}
     pub fn is_old(_: *const u8) -> bool {
@@ -266,7 +266,7 @@ pub use relax_session::phase::{in_compiler, PhaseGuard};
 
 use relax_session::phase::ROUTING as MODE;
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(target_os = "macos")]
 use std::sync::atomic::AtomicBool;
 
@@ -282,13 +282,21 @@ pub fn arena_census() -> ([usize; 11], [usize; 11]) {
 }
 
 /// The compiler and burst arenas' chunk states with resident bytes (arena.rs `states`).
-pub fn arena_states() -> ([usize; 24], [usize; 24]) {
+pub fn arena_states() -> ([usize; 28], [usize; 28]) {
     (compiler::states(), burst::states())
 }
 
 /// The compiler arena's committed chunks are old from now on (`arena_states`' old row).
 pub fn compiler_mark_old() {
-    compiler::mark_old()
+    compiler::mark_old();
+    OLD_MARKS.fetch_add(1, Ordering::Release);
+}
+
+/// `compiler_mark_old` calls so far (heap samples taken before the last one are the cold state's).
+static OLD_MARKS: AtomicUsize = AtomicUsize::new(0);
+
+pub fn compiler_old_marks() -> usize {
+    OLD_MARKS.load(Ordering::Acquire)
 }
 
 /// Where block `p` lives: 0 a compiler-arena chunk marked old, 1 another compiler-arena chunk,

@@ -1,6 +1,6 @@
 //! The TLS front is native-only; on the web only the caller type exists.
 
-use crate::fleet_auth::Role;
+use super::auth::Role;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Caller {
@@ -20,7 +20,7 @@ pub fn caller_from_headers(_lines: &[String], _front_secret: &str) -> Option<Cal
     None
 }
 
-pub fn peer_from_headers(_headers: &makepad_network::HttpServerHeaders) -> std::net::IpAddr {
+pub fn peer_from_headers(_headers: &crate::HttpServerHeaders) -> std::net::IpAddr {
     std::net::IpAddr::from([127, 0, 0, 1])
 }
 

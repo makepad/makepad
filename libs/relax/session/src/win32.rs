@@ -95,6 +95,8 @@ extern "system" {
     pub fn SetNamedSecurityInfoW(name: *mut u16, kind: u32, info: u32, owner: *mut u8,
         group: *mut u8, dacl: *mut u8, sacl: *mut u8) -> u32;
     pub fn EqualSid(a: *const u8, b: *const u8) -> i32;
+    pub fn LookupAccountSidW(system: *const u16, sid: *const u8, name: *mut u16, name_len: *mut u32,
+        domain: *mut u16, domain_len: *mut u32, kind: *mut u32) -> i32;
     pub fn IsValidSid(sid: *const u8) -> i32;
     pub fn IsValidAcl(acl: *const u8) -> i32;
     pub fn GetAce(acl: *const u8, index: u32, ace: *mut *mut u8) -> i32;

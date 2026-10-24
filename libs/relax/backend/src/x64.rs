@@ -86,7 +86,8 @@ pub fn set_rir_map(on: bool) {
 pub struct Env {
     /// where the function slots' tables and thunks are
     pub slots: SlotsPtr,
-    /// fs-relative offset of the runtime's per-thread block pointer
+    /// where the runtime's per-thread block pointer is: Linux the fs-relative offset of its
+    /// static-TLS cell; Windows `win_tls_key` (a gs-relative word, then an offset into it)
     pub tls_key: u64,
     /// glue that allocates the calling thread's block: returns it in r11, preserves all else
     pub tls_slow: u64,
@@ -2521,14 +2522,31 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// r11 = this thread's thread-local block: `mov r11, fs:[key]` (the runtime's static-TLS
-    /// block pointer), slow path `tls_slow` when it is still null (keeps every register but rax/r11).
+    /// r11 = this thread's thread-local block, slow path `tls_slow` when it is still null (keeps
+    /// every register but rax/r11). Linux: `mov r11, fs:[key]` (the runtime's static-TLS block
+    /// pointer). Windows: two loads for any TlsAlloc index (`win_tls_key`): `r11 = gs:[key >> 32]`
+    /// (the TEB itself, or its TlsExpansionSlots array, null until the thread sets an index there),
+    /// then `r11 = [r11 + key as u32]`.
     fn tls_block_r11(&mut self) {
-        // mov rax, [rip + key]; mov r11, fs:[rax] (gs on Windows)
         self.mov_reloc(RAX, Reloc::TlsKey);
-        self.a.b.extend_from_slice(&[TLS_SEG, 0x4c, 0x8b, 0x18]);
-        self.a.test_rr(R11, R11);
-        let p = self.a.jcc32(CC_NE);
+        let p = if matches!(cabi::HOST, cabi::Target::Win64) {
+            // mov r11, rax; shr r11, 32; mov r11, gs:[r11]
+            self.a.b.extend_from_slice(&[0x49, 0x89, 0xc3, 0x49, 0xc1, 0xeb, 0x20, TLS_SEG, 0x4d, 0x8b, 0x1b]);
+            self.a.test_rr(R11, R11);
+            let none = self.a.jcc32(CC_E);
+            // mov eax, eax; mov r11, [r11 + rax]
+            self.a.b.extend_from_slice(&[0x89, 0xc0, 0x4d, 0x8b, 0x1c, 0x03]);
+            self.a.test_rr(R11, R11);
+            let p = self.a.jcc32(CC_NE);
+            let slow = self.a.pos();
+            self.a.patch(none, slow);
+            p
+        } else {
+            // mov r11, fs:[rax]
+            self.a.b.extend_from_slice(&[TLS_SEG, 0x4c, 0x8b, 0x18]);
+            self.a.test_rr(R11, R11);
+            self.a.jcc32(CC_NE)
+        };
         if self.near {
             self.call_reloc(Reloc::TlsSlow);
         } else {
@@ -3630,6 +3648,21 @@ impl<'a> Gen<'a> {
                 }
                 let rd = self.use_i(options, *dst, R10);
                 let rs = self.use_i(options, *src, R11);
+                // overlapping bytes of the frame (frame::copy_overlap; a verify build fails on it,
+                // compile_freq): memmove order, each piece loaded whole before it is stored
+                let delta = crate::frame::copy_overlap(&self.slot_pos, *dst, *src, *size);
+                if delta != 0 {
+                    for (o, w) in crate::frame::copy_pieces(*size, 16, delta > 0) {
+                        if w == 16 {
+                            self.a.sse_rm(0, 0x10, XS, rs, o);
+                            self.a.sse_rm(0, 0x11, XS, rd, o);
+                        } else {
+                            self.a.load_ext(RAX, rs, o, w, false);
+                            self.a.store_n(rd, o, RAX, w);
+                        }
+                    }
+                    return;
+                }
                 if *size >= 32 && *size <= 512 {
                     // 16-byte movups through the float scratch (rep movsb's start-up costs
                     // ~30 cycles: Option<T> moves of a few hundred bytes in hot paths)
@@ -6554,6 +6587,13 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         g.switch_in_range = crate::switch::switch_in_range(g.f);
     }
     g.gen(options);
+    // a copy between overlapping frame bytes is a bug of a pass or of the frame layout: a build
+    // error where passes are verified (it is emitted in memmove order otherwise)
+    if crate::rir::verify_passes_on() {
+        if let Some(e) = crate::frame::overlapping_copy_at(g.f, &g.slot_pos) {
+            return Err(format!("x64 frame layout: {}", e));
+        }
+    }
     // unwind info for the runtime's frame walk (rir::unwind_info_words), 4-byte aligned
     while g.a.b.len() % 4 != 0 {
         g.a.byte(0xcc);
@@ -6610,7 +6650,18 @@ pub fn tls_slow(host: u64, key: u64) -> Vec<u8> {
     let mut a = Asm { b: Vec::new(), sib: None };
     // mov r11, seg:[disp32]: modrm 00/011/100 + SIB 0x25 (no base, no index)
     a.b.extend_from_slice(&[TLS_SEG, 0x4c, 0x8b, 0x1c, 0x25]);
-    a.u32(key as i64 as i32 as u32);
+    if matches!(cabi::HOST, cabi::Target::Win64) {
+        // Windows (win_tls_key): r11 = gs:[key >> 32]; null -> host; r11 = [r11 + key as u32]
+        a.u32((key >> 32) as u32);
+        a.test_rr(R11, R11);
+        // jz +7 (past the load)
+        a.b.extend_from_slice(&[0x74, 0x07]);
+        // mov r11, [r11 + disp32]: modrm 10/011/011
+        a.b.extend_from_slice(&[0x4d, 0x8b, 0x9b]);
+        a.u32(key as u32);
+    } else {
+        a.u32(key as i64 as i32 as u32);
+    }
     a.test_rr(R11, R11);
     // jz +1 (past the ret)
     a.b.extend_from_slice(&[0x74, 0x01]);
@@ -6683,11 +6734,43 @@ pub fn hang_tramp(host: u64) -> Vec<u8> {
     a.b
 }
 
-/// `tls_read(key) -> u64` (Relax's convention: key in rdi): the word `TlsAddr` reads, `gs:[key]`
-/// (Windows: the runtime checks its TlsSlots offset against TlsGetValue).
-pub fn gs_reader() -> Vec<u8> {
-    // mov rax, gs:[rdi] ; ret
-    vec![0x65, 0x48, 0x8b, 0x07, 0xc3]
+/// Windows TEB (x64): NT_TIB.Self, the TEB's own address
+pub const WIN_TEB_SELF: u32 = 0x30;
+/// Windows TEB (x64): TlsSlots[64], the TlsAlloc indexes 0..64
+pub const WIN_TLS_SLOTS: u32 = 0x1480;
+/// Windows TEB (x64): TlsExpansionSlots, a per-thread array of the 1024 indexes 64..1088
+/// (allocated by the thread's first TlsSetValue of such an index; null before)
+pub const WIN_TLS_EXPANSION: u32 = 0x1780;
+/// TlsAlloc indexes beyond the direct slots (TLS_EXPANSION_SLOTS)
+pub const WIN_TLS_EXPANSION_COUNT: u64 = 1024;
+
+/// `Env::tls_key` on Windows for TlsAlloc index `index`: the gs-relative word the fast path
+/// loads in the high half (the TEB's self pointer, or TlsExpansionSlots), the offset of the
+/// index's word from it in the low half. None past the 1088 indexes Windows has.
+pub fn win_tls_key(index: u64) -> Option<u64> {
+    if index < 64 {
+        Some((WIN_TEB_SELF as u64) << 32 | (WIN_TLS_SLOTS as u64 + 8 * index))
+    } else if index < 64 + WIN_TLS_EXPANSION_COUNT {
+        Some((WIN_TLS_EXPANSION as u64) << 32 | 8 * (index - 64))
+    } else {
+        None
+    }
+}
+
+/// `tls_read(key) -> u64` (Relax's convention: key in rdi): the word `TlsAddr` reads on Windows
+/// for a `win_tls_key` key, the same two loads (0 when the gs word is null); the runtime checks
+/// it against TlsSetValue.
+pub fn win_tls_reader() -> Vec<u8> {
+    vec![
+        0x48, 0x89, 0xf8, // mov rax, rdi
+        0x48, 0xc1, 0xe8, 0x20, // shr rax, 32
+        0x65, 0x48, 0x8b, 0x00, // mov rax, gs:[rax]
+        0x48, 0x85, 0xc0, // test rax, rax
+        0x74, 0x06, // jz ret
+        0x89, 0xff, // mov edi, edi
+        0x48, 0x8b, 0x04, 0x38, // mov rax, [rax + rdi]
+        0xc3, // ret
+    ]
 }
 
 /// `fs_base() -> u64`: the thread pointer (fs:0 holds it on x86-64 Linux).

@@ -433,3 +433,40 @@ fn a_domain_worker_with_large_allocations_and_borrowed_field_matches() {
     drop(u);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+// Windows: the JIT's thread-local key lands past the TEB's 64 direct TlsSlots when the process
+// already used them up (a GPU driver loaded before Relax creates its key: box3d on a visible
+// window). The test uses up the direct slots before anything creates the key, then runs JIT code
+// that reads its thread-local block on the calling thread and on a new one (whose
+// TlsExpansionSlots array is still null: the slow path). Elsewhere it runs the same fixture.
+const TLS_FIXTURE: &str = r#"
+use std::cell::Cell;
+thread_local! { static N: Cell<u64> = const { Cell::new(0) }; }
+fn bump(k: u64) -> u64 {
+    N.with(|n| { n.set(n.get() + k); n.get() })
+}
+fn tls_fixture(p: *mut u64) {
+    let a = bump(3) + bump(4);
+    let b = std::thread::spawn(|| bump(5) + bump(6)).join().unwrap();
+    unsafe { *p = a * 100 + b; *p.add(1) = bump(0); }
+}
+"#;
+
+#[test]
+fn jit_tls_past_the_direct_slots() {
+    isolated_test!(jit_tls_past_the_direct_slots);
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    #[cfg(windows)]
+    {
+        let mut last = 0;
+        while last < 64 {
+            last = unsafe { crate::os::win32::TlsAlloc() };
+            assert_ne!(last, u32::MAX, "TlsAlloc failed");
+        }
+    }
+    let (mut u, entry, root) = fixture_of(TLS_FIXTURE, "tls_fixture");
+    let out = [0u64; 2];
+    unsafe { crate::jit::call_jit(&mut *u, entry, out.as_ptr() as u64) }.unwrap_or_else(|p| panic!("{}", p.message));
+    assert_eq!(out, [10 * 100 + 16, 7]);
+    let _ = std::fs::remove_dir_all(root);
+}

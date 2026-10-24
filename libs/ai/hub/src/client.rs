@@ -110,7 +110,7 @@ pub struct LocalService {
 pub fn mark_if_fleet(base_url: &str) {
     if let Ok(url) = crate::http_client::parse_url(base_url) {
         if url.https {
-            crate::fleet_auth::mark_fleet_endpoint(&format!("{}:{}", url.host, url.port));
+            makepad_network::fleet::auth::mark_fleet_endpoint(&format!("{}:{}", url.host, url.port));
         }
     }
 }

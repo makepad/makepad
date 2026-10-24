@@ -130,7 +130,7 @@ pub fn gateway_nodes(port: u16, timeout: Duration) -> Vec<String> {
     for probe in probes {
         if let Ok(Some(ip)) = probe.join() {
             let host_port = format!("{ip}:{port}");
-            crate::fleet_auth::mark_fleet_endpoint(&host_port);
+            makepad_network::fleet::auth::mark_fleet_endpoint(&host_port);
             out.push(format!("https://{host_port}"));
         }
     }
@@ -175,7 +175,7 @@ pub fn accept_fleet_beacon(beacon: &FleetBeaconJson, from: std::net::IpAddr, wan
         v4 => v4.to_string(),
     };
     let host_port = format!("{host}:{}", beacon.port);
-    crate::fleet_auth::mark_fleet_endpoint(&host_port);
+    makepad_network::fleet::auth::mark_fleet_endpoint(&host_port);
     Some(format!("https://{host_port}"))
 }
 
@@ -334,7 +334,7 @@ impl Listener {
                         continue;
                     };
                     // A node is only of use to a process with a fleet credential.
-                    if crate::fleet_auth::own_credential().is_none() {
+                    if makepad_network::fleet::auth::own_credential().is_none() {
                         if !warned_no_credential {
                             warned_no_credential = true;
                             eprintln!("discovery: fleet nodes found, but this process has no fleet credential (~/.makepad/ai-hub/client.credential or MAKEPAD_AI_HUB_CREDENTIAL; see tools/aihub-fleet.md)");
@@ -372,9 +372,9 @@ mod tests {
         assert_eq!(back.port, 8123);
         let from: std::net::IpAddr = "10.9.9.9".parse().unwrap();
         assert_eq!(accept_fleet_beacon(&beacon, from, "gen").as_deref(), Some("https://10.9.9.9:8123"));
-        assert!(crate::fleet_auth::is_fleet_endpoint("10.9.9.9:8123"));
+        assert!(makepad_network::fleet::auth::is_fleet_endpoint("10.9.9.9:8123"));
         assert!(accept_fleet_beacon(&beacon, "10.9.9.8".parse().unwrap(), "game").is_none());
-        assert!(!crate::fleet_auth::is_fleet_endpoint("10.9.9.8:8123"));
+        assert!(!makepad_network::fleet::auth::is_fleet_endpoint("10.9.9.8:8123"));
     }
 
     #[test]

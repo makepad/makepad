@@ -71,10 +71,11 @@ thread_local! {
 
 /// Records where a panic happened on this thread (the panic hook; no allocation, no lock).
 pub fn note_panic_at(file: &str, line: u32) {
-    let name = file.rsplit('/').next().unwrap_or(file).as_bytes();
+    // the source path as the panic reports it (its tail when longer than the cell)
+    let name = file.as_bytes();
     let mut b = [0u8; 62];
     let n = name.len().min(b.len());
-    b[..n].copy_from_slice(&name[..n]);
+    b[..n].copy_from_slice(&name[name.len() - n..]);
     let _ = PANIC_AT.try_with(|c| c.set((b, n as u8, line)));
 }
 
@@ -129,6 +130,14 @@ fn set_state(i: usize, s: u8) {
     }
 }
 
+/// A caught panic as one line: its message, and "(at file:line)" when this thread's panic hook
+/// recorded the position (`panic_at`).
+pub fn panic_line(p: &(dyn std::any::Any + Send)) -> String {
+    let msg = payload_text(p);
+    let at = panic_at();
+    if at.is_empty() { msg } else { format!("{} (at {})", msg, at) }
+}
+
 fn payload_text(p: &(dyn std::any::Any + Send)) -> String {
     p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "(non-string panic payload)".to_string())
 }
@@ -155,9 +164,7 @@ pub fn run(name: &str, policy: OnPanic, mut body: impl FnMut()) {
             std::panic::resume_unwind(p);
         }
         restarts += 1;
-        let msg = payload_text(&*p);
-        let at = panic_at();
-        let line = crate::zone_alloc::kept_with(|| if at.is_empty() { msg.clone() } else { format!("{} (at {})", msg, at) });
+        let line = crate::zone_alloc::kept_with(|| panic_line(&*p));
         {
             let mut reg = REG.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(e) = reg.get_mut(i) {

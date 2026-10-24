@@ -25,7 +25,6 @@ macro_rules! print {
     ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stdout().write_fmt(format_args!($($t)+)); }};
 }
 
-mod activity;
 mod caption;
 mod document;
 mod dump;
@@ -35,12 +34,13 @@ mod groups;
 mod icon;
 mod layer;
 mod layout;
+mod ring;
 mod text;
 
 use document::{Program, ERROR_BAND, FIELD, GLYPH, ICON, PIPE_BANK_SIZE};
 pub use groups::order as order_diagnostics;
 pub use icon::Icon;
-pub use activity::Want as ActivityWant;
+pub use ring::{summary as ring_summary, Alert as RingAlert, Want as RingWant};
 pub use layer::Want as LayerWant;
 use makepad_hal::{
     backend_id, buffer_kind, clock_ns, dialect, event_tag, format, info_flags, input, lifecycle,
@@ -126,6 +126,8 @@ pub enum Event {
     Text(String),
     Input(RawEvent, Vec<u8>),
     DocumentErrors(Vec<Diagnostic>),
+    /// The JIT ring in the app's caption was clicked (`Boot::ring`).
+    RingClick,
 }
 
 pub fn diagnostic_text(diagnostic: &Diagnostic) -> String {
@@ -239,8 +241,8 @@ pub struct Boot {
     layers: bool,
     /// the window system composites badges over the window (`info_flags::WINDOW_BADGES`)
     badges: bool,
-    /// the JIT activity badge
-    activity: activity::Activity,
+    /// the JIT ring in the running app's caption
+    ring: ring::Ring,
     /// the window's chrome as the platform reports it: the caption strip follows it
     chrome: caption::Chrome,
 }
@@ -277,7 +279,7 @@ impl Boot {
             gpu: std::env::var_os("MAKEPAD_RUN_BOOT_STATS").is_some(),
             layers: info.flags & info_flags::WINDOW_LAYERS != 0,
             badges: info.flags & info_flags::WINDOW_BADGES != 0,
-            activity: activity::Activity::new(),
+            ring: ring::Ring::new(),
             chrome: caption::Chrome {
                 client: info.flags & info_flags::CLIENT_CHROME != 0,
                 ..Default::default()
@@ -440,6 +442,10 @@ impl Boot {
     /// and off the scroll area while its content overflows (a press there scrolls). The window
     /// has no system caption bar, so this is the only way it moves.
     pub fn drag_answer(&self, point: [f32; 2]) -> u32 {
+        // the JIT ring in the app's caption is a click, not the window's move
+        if self.ring.window.is_some() && contains(self.ring.placed, point) {
+            return input::drag_query::CLIENT;
+        }
         let Some(renderer) = &self.renderer else {
             return input::drag_query::CAPTION;
         };
@@ -734,6 +740,14 @@ impl Boot {
                     if Some(window) == self.window =>
                 {
                     self.events.push(Event::Input(raw, payload.to_vec()));
+                }
+                HalEvent::MouseDown { window, .. }
+                | HalEvent::MouseMove { window, .. }
+                | HalEvent::MouseUp { window, .. }
+                | HalEvent::MouseLeave { window, .. }
+                    if Some(window) == self.ring.window =>
+                {
+                    self.ring_pointer(&event)
                 }
                 HalEvent::KeyDown { window, .. } if Some(window) == self.window => {
                     self.events.push(Event::KeyDown(raw))
@@ -1207,10 +1221,10 @@ impl Boot {
         self.dump.is_some()
     }
 
-    /// A dump keeps the running app's frames while no badge and no layer is over them (the HAL's
+    /// A dump keeps the running app's frames while no ring and no layer is over them (the HAL's
     /// snapshot of the window), at the dump's pace.
     pub fn dump_app(&mut self) {
-        let (Some(window), None, false) = (self.window, self.activity.window, self.layer_on()) else { return };
+        let (Some(window), None, false) = (self.window, self.ring.window, self.layer_on()) else { return };
         if let Some(req) = self.dump.as_mut().and_then(|d| d.due()) {
             let mut writer = CmdWriter::new(HOST);
             writer.snapshot(window, req);
@@ -1223,119 +1237,214 @@ impl Boot {
         self.dump.as_ref().map(|d| d.ms())
     }
 
-    /// Whether this window can show the JIT activity badge (the window system composites badges).
+    /// Whether this window can show the JIT ring (the window system composites badges).
     pub fn badges(&self) -> bool {
         self.badges && self.window.is_some() && self.renderer.as_ref().is_some_and(|r| r.active.is_some())
     }
 
-    /// The run's wish for the JIT activity badge this turn (`None`: the JIT is idle; a shown badge
-    /// fades out, then goes). Draws the badge's frame when one is due; returns how long until the
-    /// next (`None`: no badge).
-    pub fn activity(&mut self, want: Option<ActivityWant>) -> Option<Duration> {
-        let want = want.filter(|_| self.badges());
+    /// The caption the app draws in this window (`WindowCaption`), when it said.
+    fn app_caption(&self) -> Option<makepad_hal::AppCaption> {
         let window = self.window?;
-        self.activity.set(want);
+        Hal::global().with_world(|w| w.session(HOST).and_then(|s| s.windows.get(HOST, window).ok()).and_then(|w| w.val.app_caption))
+    }
+
+    /// The run's wish for the JIT ring this turn: the JIT's work (`None`: settled; a shown ring
+    /// fades out, then goes) and what the program is stopped on. Draws the ring's frame (and the
+    /// tooltip's while the pointer rests on it) when one is due; returns how long until the next
+    /// (`None`: no ring).
+    pub fn ring(&mut self, want: Option<RingWant>, alert: Option<RingAlert>) -> Option<Duration> {
+        let shows = self.badges();
+        let window = self.window?;
+        // a dump may show the dot and the tooltip (a hidden run has no stop or pointer to show)
+        let alert = alert.or(self.dump.as_ref().and_then(|d| d.ring_alert));
+        if self.dump.as_ref().is_some_and(|d| d.ring_hover) && self.ring.window.is_some() {
+            self.ring.hovered.get_or_insert_with(|| Instant::now() - Duration::from_secs(1));
+        }
+        self.ring.set(want.filter(|_| shows), alert.filter(|_| shows));
+        let size = [self.geometry[2], self.geometry[3]];
+        let caption = self.app_caption();
+        let place = ring::Ring::place(size, caption);
         let mut writer = CmdWriter::new(HOST);
-        let place = activity::Activity::place([self.geometry[2], self.geometry[3]]);
-        let badge = match self.activity.window {
-            Some(badge) if self.activity.done() || !self.badges() => {
+        match self.ring.window {
+            Some(badge) if self.ring.done() || !shows => {
                 writer.window_close(badge);
+                // the badge layer ends: the window shows without it
+                if self.badges {
+                    let size = [self.geometry[2], self.geometry[3]];
+                    badge_frame(&mut writer, &mut self.frame, self.dump.as_mut(), window, self.dpi, size, |_| {});
+                }
                 Hal::global().submit(&writer.buf());
-                self.activity.window = None;
+                if self.ring.tip {
+                    self.ring.tip = false;
+                    if let Some(renderer) = &mut self.renderer {
+                        renderer.text.unpin();
+                    }
+                }
+                self.ring.window = None;
+                self.ring.hovered = None;
+                self.ring.pressed = false;
                 return None;
             }
             Some(badge) => {
-                if self.activity.placed != place {
+                if self.ring.placed != place {
                     writer.window_geom(badge, place);
-                    self.activity.placed = place;
+                    self.ring.placed = place;
                 }
-                badge
             }
-            None if self.activity.wanted() => {
-                // one slot for the run's badges, a new generation each time one is made
-                let slot = *self
-                    .activity
-                    .slot
-                    .get_or_insert_with(|| Hal::global().with_world(|w| w.host_window_id()));
-                let badge = Id::new(slot.index, slot.gen);
-                self.activity.slot = Some(Id::new(slot.index, slot.gen.wrapping_add(1).max(1)));
-                writer.window_create(badge, window_kind::BADGE, window, place, false);
-                self.activity.window = Some(badge);
-                self.activity.placed = place;
-                badge
+            None if self.ring.wanted() => {
+                // the ring's place for the pointer; its pixels are the window's badge layer
+                let badge = next_badge(&mut self.ring.slot);
+                writer.window_create(badge, window_kind::BADGE | window_style::BADGE_INPUT, window, place, false);
+                self.ring.window = Some(badge);
+                self.ring.placed = place;
             }
             None => return None,
+        }
+        // the tooltip while the pointer rests on the ring
+        let tip = match (self.ring.tip_shown(), self.renderer.as_mut()) {
+            (true, Some(renderer)) => {
+                let run = renderer.text.shape(&self.ring.tip_text(), ring::TIP_FONT, 1.0e4, ring::TIP_H);
+                self.ring.tip_placed = ring::Ring::place_tip(place, run.width, size);
+                self.ring.tip = true;
+                Some(run)
+            }
+            _ => {
+                if self.ring.tip {
+                    self.ring.tip = false;
+                    if let Some(renderer) = &mut self.renderer {
+                        renderer.text.unpin();
+                    }
+                }
+                None
+            }
         };
         Hal::global().submit(&writer.buf());
         let now = Instant::now();
-        if now >= self.activity.next_frame {
-            self.present_badge(badge);
-            self.activity.next_frame = now + activity::FRAME;
+        if now >= self.ring.next_frame {
+            let dark = caption.map_or(self.environment.dark.unwrap_or(true), |c| c.dark);
+            self.present_ring(window, tip, dark);
+            self.ring.next_frame = now + ring::FRAME;
         }
-        Some(self.activity.next_frame.saturating_duration_since(Instant::now()))
+        let wait = self.ring.next_frame.saturating_duration_since(Instant::now());
+        Some(self.ring.tip_due().map_or(wait, |due| wait.min(due)))
     }
 
-    /// One frame of the activity badge: its galaxy, one quad over transparent pixels.
-    fn present_badge(&mut self, badge: Id) {
+    /// The pointer on the ring's badge (session 0's while it is over it): hover, press, click.
+    fn ring_pointer(&mut self, event: &HalEvent) {
+        let rect = [0.0, 0.0, ring::SIDE, ring::SIDE];
+        let local = |x: f64, y: f64, placed: [f32; 4]| [x as f32 - placed[0], y as f32 - placed[1]];
+        let placed = self.ring.placed;
+        match *event {
+            HalEvent::MouseMove { x, y, .. } => {
+                let over = contains(rect, local(x, y, placed));
+                if over && self.ring.hovered.is_none() {
+                    self.ring.hovered = Some(Instant::now());
+                } else if !over && !self.ring.pressed {
+                    self.ring.hovered = None;
+                }
+            }
+            HalEvent::MouseDown { button: 1, .. } => {
+                self.ring.pressed = true;
+                self.ring.hovered.get_or_insert_with(Instant::now);
+            }
+            HalEvent::MouseUp { x, y, button: 1, .. } => {
+                let over = contains(rect, local(x, y, placed));
+                if self.ring.pressed && over {
+                    self.events.push(Event::RingClick);
+                }
+                self.ring.pressed = false;
+                if !over {
+                    self.ring.hovered = None;
+                }
+            }
+            HalEvent::MouseLeave { .. } => {
+                self.ring.hovered = None;
+                self.ring.pressed = false;
+            }
+            _ => {}
+        }
+        self.ring.next_frame = Instant::now();
+    }
+
+    /// One frame of the ring (one quad), and of its tooltip (a plate and its line) when it
+    /// shows, in `window`'s badge layer. `dark`: the caption under them is dark.
+    fn present_ring(&mut self, window: Id, tip: Option<Arc<text::Shaped>>, dark: bool) {
         let reduce_motion = self.environment.reduce_motion;
         let dpi = self.dpi;
+        let look = self.ring.look(reduce_motion);
+        let tip_rect = self.ring.tip_placed;
+        let ring_rect = self.ring.placed;
+        let viewport = [self.geometry[2], self.geometry[3]];
         let Some(renderer) = self.renderer.as_mut() else { return };
         let Some(program) = renderer.active.as_ref() else { return };
-        let pipe = &program.pipes[ERROR_BAND];
-        let look = self.activity.look(reduce_motion);
-        let side = activity::SIDE;
-        let viewport = [side, side];
-        let mut uniforms = Vec::new();
-        pipe.uniforms.write(
-            &[
-                (id!(viewport), &viewport),
-                (id!(dpi), &[dpi]),
-                (id!(reduce_motion), &[reduce_motion as u8 as f32]),
-            ],
-            &mut uniforms,
-        );
-        let mut data = Vec::new();
-        pipe.instances.write(
-            &[
-                (id!(rect), &look.rect),
-                (id!(accent), &[ACTIVITY_GALAXY]),
-                (id!(selected), &[look.level]),
-                (id!(block), &[look.block]),
-                (id!(pressed), &[look.opacity]),
-                (id!(action), &[look.spin]),
-                (id!(beat), &[look.beat]),
-            ],
-            &mut data,
-        );
-        self.frame += 1;
-        let mut writer = CmdWriter::new(HOST);
-        writer.frame_begin(
-            self.frame,
-            FrameMeta {
-                build_start_ns: makepad_hal::clock_ns(),
-                ..Default::default()
-            },
-        );
-        writer.pass(Pass {
-            color: [Id::NONE; 4],
-            load: [pass_load::CLEAR; 5],
-            clear: [[0.0; 4]; 4],
-            viewport: [0.0, 0.0, side * dpi, side * dpi],
-            dpi,
-            ..Default::default()
-        });
-        pipe.draw(&mut writer, &data, &uniforms, renderer.text.atlas(), [0.0, 0.0, side * dpi, side * dpi]);
-        writer.frame_set_build_end(makepad_hal::clock_ns());
-        // a dump keeps the app's frame with the badge over it (both read back, put together)
-        let snapshot = match (&mut self.dump, self.window) {
-            (Some(dump), Some(window)) => dump.due().map(|req| (window, req, dump.badge(self.activity.placed, dpi))),
-            _ => None,
+        let ink = dark as u8 as f32;
+        let band = &program.pipes[ERROR_BAND];
+        let quad = |rect: [f32; 4], accent: f32| {
+            let mut uniforms = Vec::new();
+            band.uniforms.write(
+                &[(id!(viewport), &viewport), (id!(dpi), &[dpi]), (id!(reduce_motion), &[reduce_motion as u8 as f32])],
+                &mut uniforms,
+            );
+            let mut data = Vec::new();
+            band.instances.write(
+                &[
+                    (id!(rect), &rect),
+                    (id!(accent), &[accent]),
+                    (id!(selected), &[look.fill]),
+                    (id!(block), &[look.mode]),
+                    (id!(pressed), &[look.opacity]),
+                    (id!(action), &[look.spin]),
+                    (id!(beat), &[look.hover]),
+                    (id!(ink), &[ink]),
+                ],
+                &mut data,
+            );
+            (uniforms, data)
         };
-        writer.frame_end(badge, target::WINDOW | if snapshot.is_some() { target::SNAPSHOT } else { 0 });
-        if let Some((window, app, over)) = snapshot {
-            writer.snapshot(window, app);
-            writer.snapshot(badge, over);
+        let px = |r: [f32; 4]| [(r[0] * dpi).floor(), (r[1] * dpi).floor(), (r[2] * dpi).ceil() + 1.0, (r[3] * dpi).ceil() + 1.0];
+        // the tooltip's line, its glyphs pinned (the HAL draws the layer again over app frames)
+        let mut glyphs = Vec::new();
+        let mut tip_ready = false;
+        if let Some(run) = &tip {
+            renderer.text.begin_pinned();
+            let mut requests = Vec::new();
+            let color = if dark { [0.925, 0.902, 1.0, look.opacity] } else { [0.165, 0.149, 0.22, look.opacity] };
+            let style = document::Line { role: document::Role::Hints, size: ring::TIP_FONT, height: ring::TIP_H, gap: 0.0, color, align: 0.0 };
+            let baseline = (ring::TIP_H * 0.5 + ring::TIP_FONT * 0.36).round();
+            let position = [tip_rect[0] + ring::TIP_PAD, tip_rect[1] + baseline - renderer.text.ascender(ring::TIP_FONT)];
+            let line = TextLine { run: run.clone(), position, style, fixed: true };
+            renderer.text.glyph_instances(program, &line, line.position[1], tip_rect, dpi, &mut requests, &mut glyphs);
+            let mut writer = CmdWriter::new(HOST);
+            tip_ready = renderer.text.finish_pinned(&mut writer, &requests);
+            Hal::global().submit(&writer.buf());
         }
+        let (ring_uniforms, ring_data) = quad(ring_rect, RING);
+        let tip_draws = tip_ready.then(|| {
+            let (uniforms, data) = quad(tip_rect, TIP);
+            let mut glyph_uniforms = Vec::new();
+            let sdf = makepad_font_core::raster::Settings::default().sdfer;
+            program.pipes[GLYPH].uniforms.write(
+                &[
+                    (id!(viewport), &viewport),
+                    (id!(dpi), &[dpi]),
+                    (id!(dark), &[ink]),
+                    (id!(radius), &[sdf.radius]),
+                    (id!(cutoff), &[sdf.cutoff]),
+                ],
+                &mut glyph_uniforms,
+            );
+            (uniforms, data, glyph_uniforms)
+        });
+        let atlas = renderer.text.atlas();
+        let glyph = &program.pipes[GLYPH];
+        let mut writer = CmdWriter::new(HOST);
+        badge_frame(&mut writer, &mut self.frame, self.dump.as_mut(), window, dpi, viewport, |writer| {
+            band.draw(writer, &ring_data, &ring_uniforms, atlas, px(ring_rect));
+            if let Some((uniforms, data, glyph_uniforms)) = &tip_draws {
+                band.draw(writer, data, uniforms, atlas, px(tip_rect));
+                glyph.draw(writer, &glyphs, glyph_uniforms, atlas, px(tip_rect));
+            }
+        });
         Hal::global().submit(&writer.buf());
     }
 
@@ -1671,8 +1780,33 @@ impl Layout {
 
 /// `Card::accent` of a window button of the caption.
 const CAPTION_BUTTON: f32 = 4.0;
-/// `error_band.accent` of the activity badge's galaxy (activity.rs).
-const ACTIVITY_GALAXY: f32 = 5.0;
+/// `error_band.accent` of the JIT ring (ring.rs) and of its tooltip's plate.
+const RING: f32 = 5.0;
+const TIP: f32 = 6.0;
+
+/// A frame of `window`'s badge layer (`target::BADGES`): one pass over the whole window (`size`
+/// points) in window pixels, loading what is under it, with the draws `draw` writes (none: the
+/// layer ends). The HAL draws it over every frame the window presents. A dump reads the window
+/// back with it, as presented.
+fn badge_frame(writer: &mut CmdWriter, frame: &mut u64, dump: Option<&mut dump::Dump>, window: Id, dpi: f32, size: [f32; 2], draw: impl FnOnce(&mut CmdWriter)) {
+    *frame += 1;
+    writer.frame_begin(*frame, FrameMeta { build_start_ns: makepad_hal::clock_ns(), ..Default::default() });
+    writer.pass(Pass { color: [Id::NONE; 4], load: [pass_load::LOAD; 5], viewport: [0.0, 0.0, size[0] * dpi, size[1] * dpi], dpi, ..Default::default() });
+    draw(writer);
+    writer.frame_set_build_end(makepad_hal::clock_ns());
+    let snapshot = dump.and_then(|d| d.due());
+    writer.frame_end(window, target::WINDOW | target::BADGES | if snapshot.is_some() { target::SNAPSHOT } else { 0 });
+    if let Some(req) = snapshot {
+        writer.snapshot(window, req);
+    }
+}
+
+/// A badge id of `slot` (one slot per badge, made on first use), a new generation each time.
+fn next_badge(slot: &mut Option<Id>) -> Id {
+    let s = *slot.get_or_insert_with(|| Hal::global().with_world(|w| w.host_window_id()));
+    *slot = Some(Id::new(s.index, s.gen.wrapping_add(1).max(1)));
+    Id::new(s.index, s.gen)
+}
 
 /// The glyph a window button of the caption shows (document `error_band.action`): 0 minimise,
 /// 1 maximise / restore, 2 close.

@@ -567,7 +567,7 @@ fn with_block_memory(mut i: DomainInfo) -> DomainInfo {
     i
 }
 /// Each domain heap's chunk states with resident bytes (`memory`; walks every chunk header).
-pub fn heap_states() -> Vec<(DomainId, [usize; 24])> {
+pub fn heap_states() -> Vec<(DomainId, [usize; 28])> {
     domains().iter().filter_map(|d| Some((d.info.id, d.heap.as_ref()?.states()))).collect()
 }
 

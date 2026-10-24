@@ -228,7 +228,8 @@ pub mod info_flags {
     /// The backend composes session 0's window layer over a lent window (`window_overlay`
     /// with a layer texture).
     pub const WINDOW_LAYERS: u32 = 64;
-    /// Session 0 may put badges on its windows (`window_kind::BADGE`).
+    /// Session 0 may put badges on its windows (`window_kind::BADGE`, `target::BADGES`): the
+    /// backend composes a window's badge layer into every frame it presents.
     pub const WINDOW_BADGES: u32 = 128;
     /// A makepad window manager hosts the windows (the Linux WM shell): they are its tiles,
     /// which draw their own caption in the WM's style; the WM's messages arrive as `AppMessage`.
@@ -632,11 +633,13 @@ pub mod window_kind {
     /// The host supplies geometry and ticks; each frame names its imported image in
     /// `Pass::color[0]`. Completion is reported against the window as usual.
     pub const HOSTED: u32 = 3;
-    /// Session 0 only (`info_flags::WINDOW_BADGES`): a small transparent surface over a window of
-    /// session 0 (`parent`) at `geom`, in the parent's points (top left). The window system
-    /// composites it over the parent's content, whoever draws that (a lent window's app too):
-    /// the app's frames neither wait for it nor carry its cost. It takes no input and is never
-    /// adopted. Its frames are window frames of premultiplied pixels (cleared transparent).
+    /// Session 0 only (`info_flags::WINDOW_BADGES`): a badge's place over a window of session 0
+    /// (`parent`) at `geom`, in the parent's points (top left). It has no surface and no frames
+    /// (session 0 draws badges in the window's badge layer, `target::BADGES`); it is never
+    /// adopted and is the HAL's own object, not the window system's. Made with
+    /// `window_style::BADGE_INPUT`, the pointer over it (and a press begun there, until its
+    /// release) goes to session 0 as events of the badge, and the window system's caption
+    /// question there is session 0's too; everywhere else input stays the window's.
     pub const BADGE: u32 = 4;
 }
 
@@ -667,6 +670,8 @@ pub mod window_style {
     pub const FULLSCREEN_AUXILIARY: u32 = 1 << 18;
     /// the size is exact: not fitted to the attached displays (a capture size may exceed any)
     pub const EXACT_SIZE: u32 = 1 << 19;
+    /// a badge (`window_kind::BADGE`) that takes the pointer over its rect
+    pub const BADGE_INPUT: u32 = 1 << 20;
 }
 
 /// Window states (`WindowState`).
@@ -729,8 +734,17 @@ pub mod target {
     pub const SNAPSHOT: u32 = 0x400;
     /// Executor-set flag: a session-0 overlay frame, never a transfer of ownership.
     pub const OVERLAY: u32 = 0x800;
+    /// Or-ed into `kind` of a window frame of session 0 (`info_flags::WINDOW_BADGES`): the
+    /// window's badge layer (the JIT ring, its tooltip), in window pixels, its passes loading
+    /// what is under them. The HAL keeps it and draws it over every frame the window presents,
+    /// whoever drew that frame (a borrower's too), until the next one; it presents the window
+    /// again at once (the app may be idle). One with no draws ends the layer.
+    pub const BADGES: u32 = 0x1000;
+    /// Executor-set flag: the kept badge layer drawn again over a new frame of its window (no
+    /// `FrameDone`: session 0 heard of that frame when it sent it).
+    pub const REPLAY: u32 = 0x2000;
     /// The bits of `kind` that are flags; the rest is the target.
-    pub const FLAGS: u32 = PICK | CAPTURE | SNAPSHOT | OVERLAY;
+    pub const FLAGS: u32 = PICK | CAPTURE | SNAPSHOT | OVERLAY | BADGES | REPLAY;
 }
 
 /// Layout of `PipelineDesc::bindings` (the blob's `[u32]` binding table): the buffer slot of each

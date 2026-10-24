@@ -1,5 +1,5 @@
 //! Fleet credentials on the web: a browser serves nothing and reaches no
-//! fleet node directly (see fleet_auth.rs for the native model).
+//! fleet node directly (see auth.rs for the native model).
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Role {

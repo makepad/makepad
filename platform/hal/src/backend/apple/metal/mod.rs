@@ -82,6 +82,12 @@ pub struct Metal {
     /// App aliases resolve to host storage; lending never moves or frees that storage.
     window_aliases: FastMap<(u32, Id), Id>,
     overlays: FastMap<Id, frame::Overlay>,
+    /// session 0's windows with a badge layer (by index), and the image each last presented:
+    /// its retained image with the layer drawn over (what a snapshot of the window reads)
+    badged: FastMap<u32, Option<Win>>,
+    /// a badge layer frame is being encoded: its window pass draws into the drawable, over a
+    /// copy of the window's retained image
+    composing: bool,
     /// Dismissal retries when AppKit temporarily has no drawable.
     restores: FastMap<Id, Win>,
     /// per window: the id texture the newest pick frame drew into (`Pick` reads it back)
@@ -168,6 +174,8 @@ impl Metal {
             win: FastMap::default(),
             window_aliases: FastMap::default(),
             overlays: FastMap::default(),
+            badged: FastMap::default(),
+            composing: false,
             restores: FastMap::default(),
             pick_ids: FastMap::default(),
             pick_pending: Default::default(),
@@ -197,6 +205,10 @@ impl Metal {
     }
 
     fn retained_window(&self, owner: u32, id: Id) -> Option<&Win> {
+        // a window with a badge layer reads as it was last presented: with the layer
+        if let Some(Some(composed)) = self.badged.get(&id.index).filter(|_| owner == HOST) {
+            if composed.gen == id.gen { return Some(composed); }
+        }
         self.win.get(&(owner, id.index)).filter(|w| w.gen == id.gen).or_else(|| {
             if owner != HOST { return None; }
             self.overlays.get(&id).and_then(|o| o.base.as_ref()).or_else(|| self.restores.get(&id))
@@ -629,7 +641,10 @@ impl Gpu for Metal {
     }
 
     fn window_closed(&mut self, sid: u32, id: Id) {
-        if sid == HOST { self.drop_overlay(id); }
+        if sid == HOST {
+            self.drop_overlay(id);
+            if let Some(Some(composed)) = self.badged.remove(&id.index) { self.dev.retire(Box::new(composed.tex)); }
+        }
         if let Some(w) = self.win.remove(&(sid, id.index)) {
             self.dev.retire(Box::new(w.tex));
         }
@@ -639,6 +654,14 @@ impl Gpu for Metal {
 
     fn window_overlay(&mut self, s: &mut Session, id: Id, rect: Option<[f32; 4]>, layer: Id, now: u64) {
         self.set_overlay(s, id, rect, layer, now);
+    }
+
+    fn badge_layer(&mut self, window: Id, on: bool) {
+        if on {
+            self.badged.entry(window.index).or_insert(None);
+        } else if let Some(Some(composed)) = self.badged.remove(&window.index) {
+            self.dev.retire(Box::new(composed.tex));
+        }
     }
 
     fn badges(&self) -> bool {

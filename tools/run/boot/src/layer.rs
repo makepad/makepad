@@ -6,7 +6,7 @@
 //! screen); at the first present a Gaussian-blurred app fades in behind the still-working galaxy
 //! (its stars glinting, the warm-up arc advancing with the functions built ahead); when the app
 //! is ready (the JIT's readiness signal) the arc closes, the sharp app fades in and the galaxy
-//! goes, and the layer with it. (Later JIT work shows in the activity badge, `activity.rs`, not
+//! goes, and the layer with it. (Later JIT work shows in the JIT ring, `ring.rs`, not
 //! here.) The run decides when it shows and goes; a fade is never reversed half-way. Every fade
 //! runs on this session's clock, never the app's.
 use makepad_hal::Id;

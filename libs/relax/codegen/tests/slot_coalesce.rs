@@ -607,3 +607,140 @@ fn a_tag_that_reaches_the_payload_keeps_the_option_and_its_copy_apart() {
         assert_eq!(run(&g, 10), want);
     }
 }
+
+/// DFREE (Sandbox: glibc "double free or corruption (out)"): HashMap::entry inlined. The key K (40
+/// bytes: String, bool, live-edit ext word) moves into the Entry result R (64 bytes) at offset 0 on
+/// the Vacant path and at offset 8 on the Occupied path (behind the -1 niche word). Joining K into R
+/// along the Vacant copy made the Occupied move a copy of one slot onto itself shifted by a word,
+/// copied forward in 16-byte pieces: the moved key's words came out [w0, w1, w1, w3, w3].
+/// f(n): K = [n, 3n, n + 5, n ^ 0xff, 7n]; odd n: R = Occupied(K) (R.0 = -1, K at R+8); even n:
+/// R = Vacant(K, 11, 12) (K at R+0); returns a hash of what R holds.
+fn build_entry_move() -> Func {
+    let mut f = Func::new("entry_move".into(), 0);
+    let n = f.vreg(Cls::I);
+    f.params.push(n);
+    f.rets.push(Cls::I);
+    let (sk, sr) = (f.slot(40, 8), f.slot(64, 8));
+    for _ in 0..6 {
+        f.block();
+    }
+    let v = |f: &mut Func| f.vreg(Cls::I);
+    let (pk, pr) = (v(&mut f), v(&mut f));
+    push(&mut f, 0, Inst::SlotAddr(pk, sk));
+    push(&mut f, 0, Inst::SlotAddr(pr, sr));
+    let (w1, w2, w3, w4) = (v(&mut f), v(&mut f), v(&mut f), v(&mut f));
+    push(&mut f, 0, Inst::Store(Mem::Int(8, false), pk, 0, n));
+    push(&mut f, 0, Inst::IBinI(IOp::Mul, U64, w1, n, 3));
+    push(&mut f, 0, Inst::Store(Mem::Int(8, false), pk, 8, w1));
+    push(&mut f, 0, Inst::IBinI(IOp::Add, U64, w2, n, 5));
+    push(&mut f, 0, Inst::Store(Mem::Int(8, false), pk, 16, w2));
+    push(&mut f, 0, Inst::IBinI(IOp::Xor, U64, w3, n, 0xff));
+    push(&mut f, 0, Inst::Store(Mem::Int(8, false), pk, 24, w3));
+    push(&mut f, 0, Inst::IBinI(IOp::Mul, U64, w4, n, 7));
+    push(&mut f, 0, Inst::Store(Mem::Int(8, false), pk, 32, w4));
+    let (odd, t) = (v(&mut f), v(&mut f));
+    push(&mut f, 0, Inst::IBinI(IOp::And, U64, odd, n, 1));
+    push(&mut f, 0, Inst::ICmpI(Cond::Ne, false, t, odd, 0));
+    f.blocks[0].term = Term::Branch(t, 1, 2);
+    // b1: Occupied: the key at R+8, the niche word -1 at R+0
+    let (p8, m1) = (v(&mut f), v(&mut f));
+    push(&mut f, 1, Inst::IBinI(IOp::Add, U64, p8, pr, 8));
+    push(&mut f, 1, Inst::Copy(p8, pk, 40));
+    push(&mut f, 1, Inst::Iconst(m1, -1));
+    push(&mut f, 1, Inst::Store(Mem::Int(8, false), pr, 0, m1));
+    f.blocks[1].term = Term::Jump(3);
+    // b2: Vacant: the key at R+0, then two more fields
+    let (a, b) = (v(&mut f), v(&mut f));
+    push(&mut f, 2, Inst::Copy(pr, pk, 40));
+    push(&mut f, 2, Inst::Iconst(a, 11));
+    push(&mut f, 2, Inst::Store(Mem::Int(8, false), pr, 40, a));
+    push(&mut f, 2, Inst::Iconst(b, 12));
+    push(&mut f, 2, Inst::Store(Mem::Int(8, false), pr, 48, b));
+    f.blocks[2].term = Term::Jump(3);
+    // b3: occupied (R.0 == -1)? hash R+8..R+48 : hash R+0..R+56
+    let (tag, occ) = (v(&mut f), v(&mut f));
+    push(&mut f, 3, Inst::Load(Mem::Int(8, false), tag, pr, 0));
+    push(&mut f, 3, Inst::ICmpI(Cond::Eq, false, occ, tag, -1));
+    f.blocks[3].term = Term::Branch(occ, 4, 5);
+    for (blk, from, words) in [(4u32, 8i32, 5), (5, 0, 7)] {
+        let acc = v(&mut f);
+        push(&mut f, blk, Inst::Iconst(acc, 0));
+        for k in 0..words {
+            let (x, m) = (v(&mut f), v(&mut f));
+            push(&mut f, blk, Inst::Load(Mem::Int(8, false), x, pr, from + 8 * k));
+            push(&mut f, blk, Inst::IBinI(IOp::Mul, U64, m, acc, 1_000_003));
+            push(&mut f, blk, Inst::IBin(IOp::Add, U64, acc, m, x));
+        }
+        f.blocks[blk as usize].term = Term::Ret(vec![acc]);
+    }
+    f.verify().unwrap();
+    f
+}
+
+fn entry_move_reference(n: u64) -> u64 {
+    let k = [n, n.wrapping_mul(3), n.wrapping_add(5), n ^ 0xff, n.wrapping_mul(7)];
+    let ws: Vec<u64> = if n & 1 != 0 { k.to_vec() } else { k.iter().copied().chain([11, 12]).collect() };
+    ws.iter().fold(0u64, |acc, &x| acc.wrapping_mul(1_000_003).wrapping_add(x))
+}
+
+#[test]
+fn a_move_to_another_offset_keeps_the_slots_apart() {
+    let f0 = build_entry_move();
+    for n in [6u64, 7, 1000, 1001] {
+        assert_eq!(run(&f0, n), entry_move_reference(n), "before the pass, n = {n}");
+    }
+    let mut f = f0.clone();
+    opt::coalesce_slot_copies(&mut f, true);
+    assert!(f.overlapping_copy().is_none(), "the pass left a copy between overlapping bytes of one slot:\n{}", f.dump());
+    f.verify().unwrap();
+    for n in [6u64, 7, 1000, 1001] {
+        assert_eq!(run(&f, n), entry_move_reference(n), "after the pass, n = {n}\n{}", f.dump());
+    }
+}
+
+/// The backends' guard (frame::copy_overlap): a copy between overlapping bytes of the frame --
+/// here the joined form of the DFREE miscompile, one 64-byte slot, the 40 bytes at 0 copied to 8
+/// and to -8 of a second one -- is emitted in memmove order outside verify mode (a correct copy,
+/// never a shifted one), and the RIR verifier names it.
+#[test]
+fn an_overlapping_frame_copy_is_a_memmove() {
+    for up in [true, false] {
+        let mut f = Func::new("overlap_copy".into(), 0);
+        let n = f.vreg(Cls::I);
+        f.params.push(n);
+        f.rets.push(Cls::I);
+        let s = f.slot(64, 8);
+        f.block();
+        let v = |f: &mut Func| f.vreg(Cls::I);
+        let (p, q, src) = (v(&mut f), v(&mut f), v(&mut f));
+        push(&mut f, 0, Inst::SlotAddr(p, s));
+        // up: [8..48) <- [0..40); down: [0..40) <- [8..48)
+        let (from, to) = if up { (0, 8) } else { (8, 0) };
+        push(&mut f, 0, Inst::IBinI(IOp::Add, U64, src, p, from));
+        push(&mut f, 0, Inst::IBinI(IOp::Add, U64, q, p, to));
+        for k in 0..6 {
+            let w = v(&mut f);
+            push(&mut f, 0, Inst::IBinI(IOp::Add, U64, w, n, 100 * (k + 1)));
+            push(&mut f, 0, Inst::Store(Mem::Int(8, false), p, 8 * k as i32, w));
+        }
+        push(&mut f, 0, Inst::Copy(q, src, 40));
+        let acc = v(&mut f);
+        push(&mut f, 0, Inst::Iconst(acc, 0));
+        for k in 0..6 {
+            let (x, m) = (v(&mut f), v(&mut f));
+            push(&mut f, 0, Inst::Load(Mem::Int(8, false), x, p, 8 * k));
+            push(&mut f, 0, Inst::IBinI(IOp::Mul, U64, m, acc, 1_000_003));
+            push(&mut f, 0, Inst::IBin(IOp::Add, U64, acc, m, x));
+        }
+        f.blocks[0].term = Term::Ret(vec![acc]);
+        assert!(f.overlapping_copy().is_some(), "the verifier names the overlapping copy");
+        let reference = |n: u64| {
+            let mut w: Vec<u64> = (0..6).map(|k| n.wrapping_add(100 * (k + 1))).collect();
+            if up { w.copy_within(0..5, 1) } else { w.copy_within(1..6, 0) }
+            w.iter().fold(0u64, |a, &x| a.wrapping_mul(1_000_003).wrapping_add(x))
+        };
+        for n in [0u64, 5, 77] {
+            assert_eq!(run(&f, n), reference(n), "up {up}, n = {n}");
+        }
+    }
+}

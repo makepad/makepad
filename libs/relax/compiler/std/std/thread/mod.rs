@@ -133,7 +133,7 @@ pub fn current() -> Thread {
 // ---- free functions
 
 pub fn sleep(dur: Duration) {
-    sys::time::sleep(dur)
+    crate::sync::raw::sleep(dur)
 }
 
 pub fn sleep_ms(ms: u32) {

@@ -2,7 +2,7 @@
 //! blocking calls for a worker thread, and the fleet's kernel nodes.
 //!
 //! A fleet URL (`https://host:port`, from the LAN beacon or
-//! [`crate::fleet_auth::mark_fleet_endpoint`]) goes through the fleet TLS
+//! [`makepad_network::fleet::auth::mark_fleet_endpoint`]) goes through the fleet TLS
 //! front with this process's credential; a loopback URL (`http://`) is a
 //! machine-local node.
 
@@ -416,7 +416,7 @@ pub fn kernel_nodes() -> Vec<(KernelNode, KernelInfoJson)> {
             if host_port.starts_with("http://") {
                 urls.push(host_port.to_string());
             } else {
-                crate::fleet_auth::mark_fleet_endpoint(host_port);
+                makepad_network::fleet::auth::mark_fleet_endpoint(host_port);
                 urls.push(format!("https://{host_port}"));
             }
         }

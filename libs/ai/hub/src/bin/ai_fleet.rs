@@ -11,7 +11,7 @@
 //! every node. Credentials are secrets: written to files, never printed.
 //! See tools/aihub-fleet.md.
 
-use makepad_ai_hub::fleet_auth::{client_dir, now_secs, FleetKey, Role, FLEET_KEY, NODE_CREDENTIAL, REVOKED};
+use makepad_network::fleet::auth::{client_dir, now_secs, FleetKey, Role, FLEET_KEY, NODE_CREDENTIAL, REVOKED};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

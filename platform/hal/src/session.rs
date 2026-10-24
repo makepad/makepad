@@ -223,6 +223,100 @@ pub struct WindowObj {
     /// Last submitted base layer (session, window alias, frame), independent of
     /// presentation counters and the overlay's own frame serial.
     pub base_frame: Option<(u32, Id, u64)>,
+    /// Session 0's window: the caption the app drawing it reports (`WindowCaption`).
+    pub app_caption: Option<AppCaption>,
+    /// Session 0's window: its badge that takes the pointer (`window_style::BADGE_INPUT`) and
+    /// the badge's rect (window points), and whether the pointer is over it (1) or a press
+    /// begun on it is held (2).
+    pub badge_input: Option<(Id, [f32; 4])>,
+    pub badge_pointer: u8,
+    /// Session 0's window: its badge layer (`target::BADGES`), drawn over every frame it presents.
+    pub badges: Option<std::sync::Arc<KeptFrame>>,
+}
+
+/// A frame kept past its batch (session 0's badge layer): its packet with its own passes and
+/// draws (ranges from 0), the batch's arena, and a copy of every byte run its passes and draws
+/// borrowed from the client (uniforms, inline instances), which their slices point into now.
+#[derive(Debug, Default)]
+pub struct KeptFrame {
+    frame: FramePacket,
+    passes: Vec<Pass>,
+    draws: Vec<Draw>,
+    arena: Vec<u8>,
+    /// 8-aligned (the slices are read as words), never changed after `keep`
+    bytes: Vec<Box<[u64]>>,
+}
+
+// SAFETY: the only pointers are the slices into `bytes`, owned and immutable for the frame's life.
+unsafe impl Send for KeptFrame {}
+unsafe impl Sync for KeptFrame {}
+
+impl KeptFrame {
+    /// A copy of packet `packet` of `view`; `None` when its ranges are out of bounds.
+    ///
+    /// Call only inside the `hal_submit` that received `view` (its slices are still alive).
+    pub fn keep(view: &crate::buffers::CmdView, packet: u32) -> Option<Self> {
+        let p = *view.frames.get(packet as usize)?;
+        let within = |r: Range, len: usize| {
+            let a = r.off as usize;
+            a.checked_add(r.len as usize).filter(|e| *e <= len).map(|e| a..e)
+        };
+        let passes = view.passes.get(within(p.passes, view.passes.len())?)?;
+        let draws_at = within(p.draws, view.draws.len())?;
+        let mut kept = KeptFrame { arena: view.arena.to_vec(), ..Default::default() };
+        let own = |s: Slice, bytes: &mut Vec<Box<[u64]>>| -> Slice {
+            // SAFETY: inside the call that received the slice (see above)
+            let src = unsafe { s.as_bytes() };
+            if src.is_empty() { return Slice::EMPTY; }
+            let mut words = vec![0u64; src.len().div_ceil(8)].into_boxed_slice();
+            // SAFETY: `words` has at least `src.len()` bytes
+            unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), words.as_mut_ptr() as *mut u8, src.len()) };
+            let out = Slice { ptr: words.as_ptr() as *const u8, len: src.len() };
+            bytes.push(words);
+            out
+        };
+        for pass in passes {
+            let r = within(pass.draws, view.draws.len())?;
+            if r.start < draws_at.start || r.end > draws_at.end { return None; }
+            let mut pass = *pass;
+            pass.uniforms = own(pass.uniforms, &mut kept.bytes);
+            pass.draws = Range { off: (r.start - draws_at.start) as u32, len: r.len() as u32 };
+            kept.passes.push(pass);
+        }
+        for d in &view.draws[draws_at] {
+            let mut d = *d;
+            for u in &mut d.uniforms { *u = own(*u, &mut kept.bytes); }
+            d.inst.data = own(d.inst.data, &mut kept.bytes);
+            kept.draws.push(d);
+        }
+        kept.frame = FramePacket {
+            passes: Range { off: 0, len: kept.passes.len() as u32 },
+            draws: Range { off: 0, len: kept.draws.len() as u32 },
+            ..p
+        };
+        Some(kept)
+    }
+
+    /// The frame as a batch of one packet (packet 0).
+    pub fn view(&self) -> crate::buffers::CmdView<'_> {
+        crate::buffers::CmdView { session: HOST, cmds: &[], arena: &self.arena, frames: std::slice::from_ref(&self.frame), passes: &self.passes, draws: &self.draws }
+    }
+
+    /// Whether the frame draws anything (none: the layer ends).
+    pub fn draws(&self) -> bool {
+        !self.draws.is_empty()
+    }
+}
+
+/// The caption an app draws in its window (`WindowCaption`), in window points.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AppCaption {
+    /// the strip that drags the window: its top and height (zero: none)
+    pub top: f32,
+    pub height: f32,
+    /// the window buttons in it (zero: none)
+    pub buttons: [f32; 4],
+    pub dark: bool,
 }
 
 impl WindowObj {
@@ -1219,6 +1313,15 @@ impl World {
                 self.window_geom(sid, window, geom, dpi, state);
             }
         }
+        if let Some(hid) = alias {
+            if self.badge_event(hid, &mut event, payload) {
+                self.to_session(HOST, |q| {
+                    event.data = q.put_bytes(payload);
+                    q.push(event);
+                });
+                return;
+            }
+        }
         use crate::events::event_tag as tag;
         let input = matches!(event.tag, tag::MouseDown | tag::MouseMove | tag::MouseUp | tag::MouseLeave
             | tag::Scroll | tag::Pinch | tag::Touch | tag::KeyDown | tag::KeyUp | tag::Text | tag::Ime
@@ -1232,6 +1335,45 @@ impl World {
             event.data = q.put_bytes(payload);
             q.push(event);
         });
+    }
+
+    /// Whether a pointer event of lent window `hid` is session 0's: over its badge that takes
+    /// input, or of a press begun there (until its release). Such an event is retargeted to the
+    /// badge (a caption question stays the window's: session 0 answers it for the window). The
+    /// pointer leaving the badge gives session 0 a `MouseLeave` of it; the event itself then goes
+    /// on to the app.
+    fn badge_event(&mut self, hid: Id, event: &mut RawEvent, payload: &[u8]) -> bool {
+        use crate::events::event_tag as tag;
+        if !matches!(event.tag, tag::MouseDown | tag::MouseMove | tag::MouseUp | tag::MouseLeave | tag::Scroll | tag::DragQuery) {
+            return false;
+        }
+        let Some(w) = self.sessions.get_mut(&HOST).and_then(|s| s.windows.get_mut(HOST, hid).ok()) else { return false };
+        let Some((badge, [bx, by, bw, bh])) = w.val.badge_input else { return false };
+        let at = match event.decode(payload) {
+            Some(crate::HalEvent::MouseDown { x, y, .. } | crate::HalEvent::MouseMove { x, y, .. }
+                | crate::HalEvent::MouseUp { x, y, .. } | crate::HalEvent::Scroll { x, y, .. }
+                | crate::HalEvent::DragQuery { x, y, .. } | crate::HalEvent::MouseLeave { x, y, .. }) => [x as f32, y as f32],
+            _ => return false,
+        };
+        let inside = event.tag != tag::MouseLeave
+            && at[0] >= bx && at[1] >= by && at[0] < bx + bw && at[1] < by + bh;
+        let held = w.val.badge_pointer == 2;
+        let (mine, next) = match event.tag {
+            tag::MouseDown if inside => (true, 2),
+            tag::MouseUp if held => (true, inside as u8),
+            tag::MouseMove | tag::MouseUp | tag::Scroll if held || inside => (true, if held { 2 } else { 1 }),
+            tag::DragQuery => (inside, w.val.badge_pointer),
+            _ => (false, 0),
+        };
+        let left = w.val.badge_pointer != 0 && next == 0;
+        w.val.badge_pointer = next;
+        if left {
+            self.to_session(HOST, |q| q.mouse_leave(badge, at[0] as f64, at[1] as f64));
+        }
+        if mine {
+            event.window = if event.tag == tag::DragQuery { hid } else { badge };
+        }
+        mine
     }
 
     /// Objects alive of one kind, summed over all sessions.

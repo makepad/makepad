@@ -3,7 +3,7 @@
 //! Nodes are trusted ssh-style: each makes its own self-signed TLS
 //! certificate on first start, and a client records the certificate's
 //! fingerprint per node on first contact (`~/.makepad/ai-hub/known_nodes`),
-//! warning loudly if it ever changes (makepad_network::tls::KnownHosts).
+//! warning loudly if it ever changes (crate::tls::KnownHosts).
 //! Nothing about nodes is provisioned.
 //!
 //! Clients are what is checked. A **fleet key** (32 random bytes) lives on
@@ -29,7 +29,7 @@
 //! Credentials are per person, app install, device or node (role `lan`,
 //! `node` or `device`) and revocable one by one.
 
-use makepad_network::tls::{self, from_hex, to_hex};
+use crate::tls::{self, from_hex, to_hex};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -83,7 +83,7 @@ fn valid_id(id: &str) -> bool {
 }
 
 fn hmac(key: &[u8], msg: &str) -> [u8; 32] {
-    makepad_network::tunnel::hmac_sha256(key, msg.as_bytes())
+    crate::tunnel::hmac_sha256(key, msg.as_bytes())
 }
 
 /// A credential's public part.
@@ -252,7 +252,7 @@ impl Verifier {
 
 /// `~/.makepad/ai-hub`.
 pub fn client_dir() -> PathBuf {
-    crate::home::makepad_home().join("ai-hub")
+    super::makepad_home().join("ai-hub")
 }
 
 static NODE_CREDENTIAL_TEXT: OnceLock<Option<String>> = OnceLock::new();

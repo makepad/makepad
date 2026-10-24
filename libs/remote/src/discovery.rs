@@ -207,9 +207,14 @@ pub fn apps() -> Vec<App> {
     out
 }
 
-/// `spec` is a pid or an app name; of several with that name the most recent (highest pid).
+/// `spec` is a pid, an app name (of several with that name the most recent: highest pid) or a
+/// `tcp:` socket a discovery file names.
 pub fn find(spec: &str) -> Option<App> {
     let list = apps();
+    // a loopback endpoint as its discovery file names it (Windows): the file carries its token
+    if spec.starts_with("tcp:") {
+        return list.into_iter().rfind(|a| a.socket == spec);
+    }
     match spec.parse::<u32>() {
         Ok(pid) => list.into_iter().find(|a| a.pid == pid),
         Err(_) => list.into_iter().rfind(|a| a.app == spec),

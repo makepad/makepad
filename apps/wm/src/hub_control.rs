@@ -547,7 +547,7 @@ fn worker(
     // The same client identity the other apps use: the credential in
     // MAKEPAD_AI_HUB_CREDENTIAL or ~/.makepad/ai-hub/client.credential, the
     // node's certificate recorded in ~/.makepad/ai-hub/known_nodes.
-    makepad_ai_hub::fleet_auth::mark_fleet_endpoint(base.trim_start_matches("https://").trim_start_matches("http://"));
+    makepad_network::fleet::auth::mark_fleet_endpoint(base.trim_start_matches("https://").trim_start_matches("http://"));
     let mut t = HttpFleetTransport;
     let mut since = 0u64;
     // The registry's chat models, asked once per hub that answers.

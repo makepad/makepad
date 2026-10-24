@@ -751,6 +751,11 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     let workspace = workspace_dir();
     // everything this run writes: the workspace's <target>/relax (dirs.rs)
     let target_dir = crate::dirs::relax_dir().display().to_string();
+    // the relax dir is made private before anything writes into it: the build scripts' out dirs
+    // (and the host's window state) created it with create_dir_all, so on Windows it inherited the
+    // checkout's ACL and the cache's own check then turned the cache off ("writable by
+    // NT SERVICE\MakepadTunnel" on a tunnel box). The verdict stays the cache's (cache.rs).
+    let _ = crate::pack::ensure_private_dir(std::path::Path::new(&target_dir));
     crate::source_context::set_output_dir(&target_dir);
     // std is the std the program runs on, unless MAKEPAD_RUN_STD says otherwise
     if crate::vfs::is_virtual(&workspace) {

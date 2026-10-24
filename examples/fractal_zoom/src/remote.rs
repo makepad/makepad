@@ -22,7 +22,7 @@
 
 use crate::kernels::FractalKind;
 use crate::tiles::{Done, Job, QueueHandle};
-use makepad_ai_hub::fleet_auth;
+use makepad_network::fleet;
 use makepad_ai_hub::kernel_client::{Batch, KernelFleet, KernelNode};
 use makepad_ai_hub::kernel_wire::kernels::{fractal_job, fractal_tile, FractalParams, MAX_ITER};
 use makepad_ai_hub::kernel_wire::{KernelInfoJson, STATUS_OK};
@@ -48,7 +48,7 @@ fn probe_nodes() -> (Vec<(KernelNode, KernelInfoJson)>, Vec<NodeStatus>) {
                 if host_port.starts_with("http://") {
                     urls.push(host_port.to_string());
                 } else {
-                    fleet_auth::mark_fleet_endpoint(host_port);
+                    fleet::auth::mark_fleet_endpoint(host_port);
                     urls.push(format!("https://{host_port}"));
                 }
             }
@@ -63,9 +63,9 @@ fn probe_nodes() -> (Vec<(KernelNode, KernelInfoJson)>, Vec<NodeStatus>) {
     if urls.is_empty() {
         return (Vec::new(), status);
     }
-    if fleet_auth::own_credential().is_none() {
+    if fleet::auth::own_credential().is_none() {
         status.push(NodeStatus {
-            addr: fleet_auth::client_dir().join(fleet_auth::CLIENT_CREDENTIAL).display().to_string(),
+            addr: fleet::auth::client_dir().join(fleet::auth::CLIENT_CREDENTIAL).display().to_string(),
             state: "no fleet credential: every node will refuse".into(),
         });
     }

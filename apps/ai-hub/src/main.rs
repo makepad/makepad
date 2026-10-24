@@ -16,12 +16,13 @@
 //!               machine, chat-only and sandboxed, tool calls returned as text
 //!               (env MAKEPAD_AI_HUB_CLAUDE=1; libs/ai/hub/src/claude_cli.rs).
 //!               Needs --host <private LAN IP>, the fleet key in
-//!               <cache-dir>/fleet, and the token file
-//!               (MAKEPAD_AI_HUB_CLAUDE_TOKEN_FILE, default
-//!               ~/.makepad/ai-hub/claude.token, mode 600). Model:
+//!               <cache-dir>/fleet, and this Mac's Claude Code login (the
+//!               person's own, from the login keychain; the hub hands the
+//!               child only its access token). Model:
 //!               MAKEPAD_AI_HUB_CLAUDE_MODEL (default sonnet).
 //!   --claude-cli-selftest  enable as --claude-cli, run hostile probe turns
-//!               (shell, file read, fetch) through it, print PASS/FAIL, exit.
+//!               (shell, file read, fetch) through it plus a sandbox read
+//!               probe with the real binary, print PASS/FAIL, exit.
 //!
 //!   env HF_TOKEN                     bearer token for gated HF repos (flux1-dev)
 //!   env MAKEPAD_ASSET_AI_HF_BASE   alternate HF endpoint / LAN mirror

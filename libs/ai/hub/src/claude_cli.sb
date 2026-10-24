@@ -2,7 +2,7 @@
 ;;
 ;; Applied by the hub as
 ;;   /usr/bin/sandbox-exec -p <this text> -D TURN_DIR=<turn dir> -D CLAUDE_BIN=<claude binary> <claude binary> ...
-;; (libs/ai/hub/src/claude_cli.rs, `sandboxed_program`). Both parameters are canonical
+;; (libs/ai/hub/src/claude_cli.rs, `turn_command`). Both parameters are canonical
 ;; paths (no symlinks): the sandbox matches real paths.
 ;;
 ;; What it allows, and nothing else:
@@ -21,6 +21,10 @@
 ;;   "api.anthropic.com only". No inbound, no listening, no UDP, no other port.
 ;; - IPC: a short list of system lookups (DNS configuration, notifications, user
 ;;   records); no Apple events, no pasteboard, no window server, no keychain daemon.
+;; - login: none needed here. The hub (outside this sandbox) reads the person's Claude
+;;   Code login from the keychain and passes only the short-lived access token in the
+;;   environment, so no keychain file, no securityd lookup and no /usr/bin/security exec
+;;   is allowed: the child can neither read other keychain items nor refresh the login.
 (version 1)
 (deny default)
 

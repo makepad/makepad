@@ -45,6 +45,17 @@ pub(crate) const WAIT_READ: u32 = 3;
 pub(crate) const WAIT_WRITE: u32 = 4;
 pub(crate) const WAIT_PARK: u32 = 5;
 pub(crate) const WAIT_ONCE: u32 = 6;
+pub(crate) const WAIT_SLEEP: u32 = 8;
+
+/// thread::sleep, recorded in the wait registry while it sleeps (a sleeping thread is a quiet
+/// one: makepad run settles its heap chunks there, as at a futex wait).
+pub(crate) fn sleep(dur: Duration) {
+    #[cfg(not(relax_web))]
+    unsafe { __relax_wait_enter(WAIT_SLEEP, 0, 0) };
+    crate::sys::time::sleep(dur);
+    #[cfg(not(relax_web))]
+    unsafe { __relax_wait_leave() };
+}
 
 /// futex_wait, recorded in the wait registry while it blocks.
 pub(crate) fn futex_wait(futex: &AtomicU32, expected: u32, timeout: Option<Duration>, _kind: u32, _holder: usize) -> bool {

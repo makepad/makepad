@@ -766,6 +766,25 @@ mod imp {
             unsafe { ensure_acl(&target, dir) }
         }
 
+        /// `DOMAIN\name` of a SID, else its `S-1-...` form.
+        unsafe fn account(sid: *const u8) -> String {
+            let (mut name, mut domain) = ([0u16; 256], [0u16; 256]);
+            let (mut n, mut d, mut kind) = (256u32, 256u32, 0u32);
+            if LookupAccountSidW(null_mut(), sid, name.as_mut_ptr(), &mut n, domain.as_mut_ptr(), &mut d, &mut kind) != 0 {
+                let name = String::from_utf16_lossy(&name[..n as usize]);
+                let domain = String::from_utf16_lossy(&domain[..d as usize]);
+                return if domain.is_empty() { name } else { format!("{}\\{}", domain, name) };
+            }
+            // revision, subauthority count, six-byte big-endian authority, little-endian subauthorities
+            let count = *sid.add(1) as usize;
+            let authority = (0..6).fold(0u64, |a, i| a << 8 | *sid.add(2 + i) as u64);
+            let mut text = format!("S-{}-{}", *sid, authority);
+            for i in 0..count {
+                text += &format!("-{}", read_unaligned(sid.add(8 + 4 * i).cast::<u32>()));
+            }
+            text
+        }
+
         unsafe fn ensure_acl(target: &Path, display: &Path) -> Result<(), String> {
             let error = || format!("{}: {}", display.display(), std::io::Error::last_os_error());
             let writable = || format!("{} is writable by group or others", display.display());
@@ -858,7 +877,11 @@ mod imp {
                 let mask = read_unaligned(ace.add(4).cast::<u32>());
                 let sid = ace.add(offset);
                 if size < offset + 8 + 4 * (*sid.add(1) as usize) || IsValidSid(sid) == 0 { return Err(writable()); }
-                if mask & WRITE_RIGHTS != 0 && !trusted(sid) { return Err(writable()); }
+                if mask & WRITE_RIGHTS != 0 && !trusted(sid) {
+                    // name the principal: the fix is that account's grant, not this check
+                    return Err(format!("{} is writable by {} (a JIT cache may be writable only by you, SYSTEM and Administrators)",
+                        display.display(), account(sid)));
+                }
             }
             Ok(())
         }

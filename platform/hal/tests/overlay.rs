@@ -235,3 +235,111 @@ fn a_window_layer_leaves_input_with_the_app_and_needs_its_texture() {
     frame(&hal, sid, APP_WINDOW, 12, target::WINDOW);
     assert_eq!(last(&hal).layers, [(sid, APP_WINDOW, 12), (HOST, HOST_WINDOW, 101)]);
 }
+
+#[test]
+fn a_badge_that_takes_input_gets_the_pointer_over_it_and_its_press() {
+    let (hal, sid) = setup();
+    const BADGE: Id = Id::new(9, 1);
+    // (the headless backend composites no badges: the routing is the world's, set as a badge
+    // with `window_style::BADGE_INPUT` sets it)
+    hal.with_world(|w| {
+        let host = w.session_mut(HOST).unwrap().windows.get_mut(HOST, HOST_WINDOW).unwrap();
+        host.val.badge_input = Some((BADGE, [960.0, 2.0, 24.0, 24.0]));
+    });
+    hal.with_world(|w| {
+        // over the app, onto the badge, a click there, a drag query there, off it again
+        w.window_event(sid, RawEvent::mouse_move(APP_WINDOW, 500.0, 10.0, 0.0, 0.0, 0), &[]);
+        w.window_event(sid, RawEvent::mouse_move(APP_WINDOW, 970.0, 12.0, 0.0, 0.0, 0), &[]);
+        w.window_event(sid, RawEvent::drag_query(APP_WINDOW, 970.0, 12.0), &[]);
+        w.window_event(sid, RawEvent::mouse_down(APP_WINDOW, 970.0, 12.0, 1, 0), &[]);
+        // the press is held: a move off it is still the badge's, and so is the release
+        w.window_event(sid, RawEvent::mouse_move(APP_WINDOW, 900.0, 12.0, 0.0, 0.0, 0), &[]);
+        w.window_event(sid, RawEvent::mouse_up(APP_WINDOW, 900.0, 12.0, 1, 0), &[]);
+        w.window_event(sid, RawEvent::mouse_move(APP_WINDOW, 800.0, 12.0, 0.0, 0.0, 0), &[]);
+    });
+    let host = take(&hal, HOST);
+    let tags: Vec<_> = host.iter().map(|(e, _)| (e.tag, e.window)).collect();
+    assert_eq!(tags, [
+        (tag::MouseMove, BADGE),
+        (tag::DragQuery, HOST_WINDOW),
+        (tag::MouseDown, BADGE),
+        (tag::MouseMove, BADGE),
+        (tag::MouseLeave, BADGE),
+        (tag::MouseUp, BADGE),
+    ]);
+    let app: Vec<_> = take(&hal, sid).iter().map(|(e, _)| e.tag).collect();
+    assert_eq!(app, [tag::MouseMove, tag::MouseMove]);
+}
+
+#[test]
+fn the_apps_caption_is_the_host_windows() {
+    let (hal, sid) = setup();
+    let mut app = CmdWriter::new(sid);
+    app.window_caption(APP_WINDOW, 0.0, 28.0, [7.0, 6.0, 54.0, 16.0], true);
+    hal.submit(&app.buf());
+    hal.with_world(|w| {
+        let host = &w.session(HOST).unwrap().windows.get(HOST, HOST_WINDOW).unwrap().val;
+        assert_eq!(host.app_caption, Some(AppCaption { top: 0.0, height: 28.0, buttons: [7.0, 6.0, 54.0, 16.0], dark: true }));
+    });
+}
+
+/// Session 0's badge layer frame of the host window: one pass, a draw when `draws` (its uniforms
+/// borrowed from a buffer gone after the submit).
+fn badges(hal: &Hal, serial: u64, draws: bool) {
+    let mut cmd = CmdWriter::new(HOST);
+    cmd.frame_begin(serial, FrameMeta::default());
+    cmd.pass(Pass { viewport: [0.0, 0.0, 2000.0, 1400.0], ..Default::default() });
+    let uniforms: Vec<u8> = (0..32).collect();
+    if draws {
+        let mut d = Draw::default();
+        d.uniforms[0] = Slice::from_bytes(&uniforms);
+        cmd.draw(d);
+    }
+    cmd.frame_end(HOST_WINDOW, target::WINDOW | target::BADGES);
+    hal.submit(&cmd.buf());
+    drop(uniforms);
+}
+
+fn frames_done(events: &[(RawEvent, Vec<u8>)]) -> usize {
+    events.iter().filter(|(e, _)| e.tag == tag::FrameDone).count()
+}
+
+#[test]
+fn a_badge_layer_is_kept_over_every_frame_until_one_without_draws() {
+    let (hal, sid) = setup();
+    badges(&hal, 21, true);
+    let kept = hal.with_world(|w| w.session(HOST).unwrap().windows.get(HOST, HOST_WINDOW).unwrap().val.badges.clone()).expect("kept");
+    // the layer owns what its draw borrowed
+    let view = kept.view();
+    assert_eq!(unsafe { view.draws[0].uniforms[0].as_bytes() }, (0..32).collect::<Vec<u8>>().as_slice());
+    assert_eq!((view.frames[0].passes.off, view.frames[0].draws.off), (0, 0));
+    assert_eq!(frames_done(&take(&hal, HOST)), 1);
+    // the app's frames are drawn under it: the app hears of them, session 0 does not again
+    frame(&hal, sid, APP_WINDOW, 12, target::WINDOW);
+    frame(&hal, sid, APP_WINDOW, 13, target::WINDOW);
+    assert_eq!(frames_done(&take(&hal, sid)), 2);
+    assert_eq!(frames_done(&take(&hal, HOST)), 0);
+    assert_eq!(hal.with_world(|w| w.session(HOST).unwrap().frame), 21);
+    // a frame without draws ends the layer
+    badges(&hal, 22, false);
+    assert_eq!(frames_done(&take(&hal, HOST)), 1);
+    assert!(hal.with_world(|w| w.session(HOST).unwrap().windows.get(HOST, HOST_WINDOW).unwrap().val.badges.is_none()));
+}
+
+#[test]
+fn only_session_0_has_badge_layers_and_a_badge_has_no_frames() {
+    let (hal, sid) = setup();
+    let bad = |hal: &Hal, sid: u32| hal.with_world(|w| w.session(sid).unwrap().stats.bad_args);
+    let before = bad(&hal, sid);
+    frame(&hal, sid, APP_WINDOW, 12, target::WINDOW | target::BADGES);
+    frame(&hal, sid, APP_WINDOW, 13, target::WINDOW | target::REPLAY);
+    assert_eq!(bad(&hal, sid), before + 2);
+    const BADGE: Id = Id::new(9, 1);
+    let mut host = CmdWriter::new(HOST);
+    host.window_create(BADGE, window_kind::BADGE | window_style::BADGE_INPUT, HOST_WINDOW, [960.0, 2.0, 24.0, 24.0], false);
+    hal.submit(&host.buf());
+    assert!(hal.with_world(|w| w.session(HOST).unwrap().windows.get(HOST, HOST_WINDOW).unwrap().val.badge_input.is_some()));
+    let before = bad(&hal, HOST);
+    frame(&hal, HOST, BADGE, 30, target::WINDOW);
+    assert_eq!(bad(&hal, HOST), before + 1);
+}

@@ -427,6 +427,14 @@ impl Metal {
         Some(object)
     }
 
+    /// The texture a badge layer's composed frame of `window` is kept in (made at its size).
+    fn composed_storage(&mut self, window: Id, w: u32, h: u32) -> Option<ObjcId> {
+        let mut slot = self.badged.get_mut(&window.index)?.take();
+        let tex = self.overlay_storage(&mut slot, window, w, h);
+        self.badged.insert(window.index, slot);
+        tex
+    }
+
     fn copy_layer(&mut self, src: ObjcId, dst: ObjcId, rect: [u32; 4]) {
         if src == dst || rect[2] == 0 || rect[3] == 0 { return; }
         let (cb, _) = self.ensure_batch();
@@ -745,6 +753,12 @@ impl Metal {
         let Some(shell) = self.shell else {
             return self.offscreen_target(s, sid, window, w, h, now);
         };
+        // a window with a badge layer: its frames stay in the retained image, the layer's frame
+        // draws into the drawable over a copy of it
+        let (owner, physical) = self.window_key(sid, window);
+        if owner == HOST && self.badged.contains_key(&physical.index) && !self.composing {
+            return self.offscreen_target(s, sid, window, w, h, now);
+        }
         let (w, h) = (w.max(1), h.max(1));
         if let Some(fd) = self.frame_drawable.as_ref().filter(|fd| fd.sid == sid && fd.window == window) {
             return Some(fd.texture);
@@ -794,6 +808,12 @@ impl Metal {
         if self.layer_sizes.insert((owner, physical.index), now_size) != Some(now_size) {
             if owner == s.id {
                 s.ledger.add(window_row(window.index, window.gen, w as u64 * h as u64 * 4 * 3, w, h, now, s.frame));
+            }
+        }
+        if self.composing {
+            if let Some((base, bw, bh)) = self.win.get(&(HOST, physical.index)).filter(|b| b.gen == physical.gen).map(|b| (b.tex.obj.as_id(), b.w, b.h)) {
+                if w > bw || h > bh { self.clear_layer(texture); }
+                self.copy_layer(base, texture, [0, 0, w.min(bw), h.min(bh)]);
             }
         }
         self.frame_drawable = Some(FrameDrawable { sid, window, drawable: Some(drawable), texture, w, h });
@@ -864,6 +884,15 @@ impl Metal {
     /// The window frame is encoded: a window that keeps its frames copies the drawable's content.
     fn finish_window_frame(&mut self, s: &mut Session, now: u64, snapshot: bool) {
         let Some(fd) = self.frame_drawable.take() else { return };
+        if self.composing {
+            // the composed image is kept apart: the retained image never holds the layer
+            let (_, physical) = self.window_key(fd.sid, fd.window);
+            if let Some(dst) = self.composed_storage(physical, fd.w, fd.h) {
+                self.copy_layer(fd.texture, dst, [0, 0, fd.w, fd.h]);
+            }
+            drop(fd.drawable);
+            return;
+        }
         let host_window = s.windows.get(s.id, fd.window).is_ok_and(|w| w.val.adoptable || w.val.alias_of.is_some());
         if !self.retain && !snapshot && !host_window {
             return;
@@ -940,7 +969,20 @@ impl Metal {
         }
         let mut window_encoded = false;
         let mut partial = false;
-        if sid == HOST && is_window && !pick {
+        let replay = kind & target::REPLAY != 0;
+        let (owner, physical) = self.window_key(sid, target);
+        let badges = is_window && !pick && kind & target::BADGES != 0 && owner == HOST && self.badged.contains_key(&physical.index);
+        if badges && !self.win.get(&(HOST, physical.index)).is_some_and(|b| b.gen == physical.gen) {
+            // nothing rendered yet to draw the layer over
+            if !replay {
+                if let Some(b) = self.batch.as_mut() {
+                    b.tickets.push(Ticket { sid, target, frame, font_frames: s.font_frames.clone(), time: PassTime::Buffer, window: false, kind, partial: false, prof: Vec::new(), prof_samples: None });
+                }
+            }
+            return Some(exec::SubmittedFrame { deps, window: false });
+        }
+        self.composing = badges;
+        if sid == HOST && is_window && !pick && !badges {
             self.copy_layer_image(s, target, seq);
         }
         for pass in &view.passes[passes] {
@@ -973,7 +1015,7 @@ impl Metal {
                 }
             }
         }
-        if window_encoded && !pick && !hosted {
+        if window_encoded && !pick && !hosted && !badges {
             window_encoded = self.composite_overlay(s, sid, target, now);
         }
         if let Some(key) = prof_key.filter(|_| window_encoded && !pick) {
@@ -991,9 +1033,10 @@ impl Metal {
             }
             self.finish_window_frame(s, now, kind & target::SNAPSHOT != 0);
         }
+        self.composing = false;
         self.prof_key = None;
         let prof = std::mem::take(&mut self.prof);
-        if let Some(b) = self.batch.as_mut() {
+        if let Some(b) = self.batch.as_mut().filter(|_| !replay) {
             b.tickets.push(Ticket { sid, target, frame, font_frames: s.font_frames.clone(), time, window: window_encoded && !pick && !hosted, kind, partial, prof, prof_samples: samples.clone() });
         }
         if alone {

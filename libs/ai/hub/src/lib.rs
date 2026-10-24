@@ -51,17 +51,9 @@ mod disk_volume;
 pub mod error;
 pub mod fabric;
 pub mod fleet;
-// Fleet authority, credentials, pins, and the TLS front (native only).
-#[cfg(not(target_arch = "wasm32"))]
-pub mod fleet_auth;
-#[cfg(target_arch = "wasm32")]
-#[path = "fleet_auth_portable.rs"]
-pub mod fleet_auth;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod front;
-#[cfg(target_arch = "wasm32")]
-#[path = "front_portable.rs"]
-pub mod front;
+// Which hub routes each fleet role reaches (the front itself is
+// makepad_network::fleet).
+pub mod fleet_routes;
 pub mod job;
 // Splash compute kernels on fleet CPUs: the wire and the client are
 // featureless; the node side is the `kernel` feature.

@@ -165,6 +165,21 @@ pub struct SlotHistory {
 }
 
 impl FnEntry {
+    /// The slots this body's RIR references (placement census).
+    pub(crate) fn rir_refs(&self) -> &[u32] {
+        &self.rir_refs
+    }
+    /// A settle rebuild's replace (on the owner, under the front write, in fresh compiler chunks):
+    /// the call lists that lie in the old state's chunks are copied, so they stop pinning them.
+    pub(crate) fn rehome_lists(&mut self) {
+        let old = |b: &[u32]| !b.is_empty() && crate::zone_alloc::placement(b.as_ptr().cast()) == 0;
+        if old(&self.calls) {
+            self.calls = self.calls.to_vec().into_boxed_slice();
+        }
+        if old(&self.rir_refs) {
+            self.rir_refs = self.rir_refs.to_vec().into_boxed_slice();
+        }
+    }
     /// Reading an untouched slot's history never allocates.
     pub fn history(&self) -> &SlotHistory {
         static EMPTY: SlotHistory = SlotHistory { prev: Vec::new(), retired: Vec::new(), inlined_into: Vec::new() };
@@ -6567,6 +6582,13 @@ pub fn reclaim_generation() -> u64 {
 /// The disk cache opened with no code store: no code entry can be linked in this run (run.rs).
 pub static CODE_CACHE_EMPTY: AtomicBool = AtomicBool::new(false);
 pub static MAIN_COMPILES: relax_session::sync::Mutex<Vec<MainCompile>> = relax_session::sync::Mutex::new(Vec::new());
+/// Whether the main thread's compiles are kept for MAKEPAD_RUN_MAIN_COMPILE_LOG (its only reader):
+/// otherwise every lazy call on main grew MAIN_COMPILES for the whole run (Sandbox: 18 MB after
+/// 2 min, pinning compiler-arena chunks across the settle rebuild).
+pub fn main_compile_log() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_MAIN_COMPILE_LOG").is_some())
+}
 
 /// One compile the main thread waited for (MAKEPAD_RUN_MAIN_COMPILE_LOG): wall interval, the slot,
 /// how it was satisfied and where its wall time went (ns).
@@ -6724,7 +6746,9 @@ unsafe fn compile_slot_on_stack_rt(up: *mut Unit, id: u32) -> u64 {
         if let Some(mut rec) = MAIN_REC.with(|c| c.take()) {
             rec.end = wall_ns();
             crate::postframe::main_compile(&(&*up).fns[id as usize].name, &rec);
-            MAIN_COMPILES.lock().unwrap().push(rec);
+            if main_compile_log() {
+                MAIN_COMPILES.lock().unwrap().push(rec);
+            }
         }
     }
     r
@@ -12540,7 +12564,7 @@ fn progress_start() {
 /// for a benchmark that times only once the optimised code has settled: `pending` = builds queued or
 /// running or counting (PGO), plus one while the startup phase holds the workers; `installs` = O3 installs so far.
 /// The file exists from the first write on; a program that never reads it pays nothing.
-/// O3 builds queued or running now (postframe::activity, the run's activity badge).
+/// O3 builds queued or running now (postframe::activity, the run's JIT ring).
 pub(crate) fn o3_pending() -> u64 {
     (tier_queue().map_or(0, |q| q.len()) + TIER_ACTIVE.lock().map_or(0, |a| a.len())) as u64
 }
@@ -15100,7 +15124,14 @@ fn tier1_thread(runtime: &crate::options::RuntimeOptions, k: usize, normal: usiz
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { compile_tier1(up, id) }));
         if let Err(p) = r {
             crate::inspect::tierlog::note(id, crate::inspect::tierlog::ev::O3_PANIC, 0, 0, 0);
-            let msg = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "panic".to_string());
+            let msg = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned())
+                .or_else(|| p.downcast_ref::<crate::preempt::PublishBail>().map(|b| format!("publish bail ({}, {} slots)", b.what, b.slots.len())))
+                .or_else(|| p.downcast_ref::<crate::infer::diagnostics::FatalError>().map(|e| format!("fatal error: {}", e.0)))
+                .or_else(|| p.is::<crate::preempt::Preempted>().then(|| "preempted".to_string()))
+                .or_else(|| p.is::<crate::preempt::OwnerBusy>().then(|| "owner busy".to_string()))
+                .or_else(|| p.is::<crate::preempt::NeedsLoad>().then(|| "needs load".to_string()))
+                .or_else(|| p.is::<crate::preempt::NeedsUnit>().then(|| "needs the unit".to_string()))
+                .unwrap_or_else(|| "panic".to_string());
             let n = TIER1_PANICS.fetch_add(1, Ordering::Relaxed);
             if n < 3 {
                 eprintln!("makepad: O3 build of slot {} panicked: {} -- O3 dropped for it", id, msg);
@@ -19949,8 +19980,11 @@ fn ahead_helper(f: std::sync::Arc<FrontShared>, index: u32) {
                         drop(q);
                         if ahead_trace() {
                             let r = front_read("ahead_trace");
-                            let (prog, _) = r.of(&f);
-                            for (d, _) in &unused { eprintln!("ahead-dropped {}", prog.def_path(*d)); }
+                            // (a front state a settle rebuild replaced names a dropped program)
+                            if f.alive.load(Ordering::SeqCst) {
+                                let (prog, _) = r.of(&f);
+                                for (d, _) in &unused { eprintln!("ahead-dropped {}", prog.def_path(*d)); }
+                            }
                         }
                         drop(unused);
                         q = f.queue.lock().unwrap_or_else(|e| e.into_inner());

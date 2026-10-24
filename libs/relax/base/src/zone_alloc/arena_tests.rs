@@ -5,7 +5,6 @@ mod tests {
     use std::alloc::GlobalAlloc;
     use std::sync::{Arc, Barrier};
 
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     /// A job-arena scope as compile jobs open it: the arena takes compiler-phase blocks only.
     fn test_scope() -> (crate::zone_alloc::PhaseGuard, ScratchGuard) {
@@ -36,7 +35,7 @@ mod tests {
 
     #[test]
     fn sizes_alignment_zeroing_and_escape() {
-        let _serial = lock(&TEST_LOCK);
+        let _serial = crate::zone_alloc::test_serial();
         trim();
         let before = stats();
         let mut blocks = Vec::new();
@@ -96,7 +95,7 @@ mod tests {
 
     #[test]
     fn nested_scopes_unwind_and_realloc_between_heaps() {
-        let _serial = lock(&TEST_LOCK);
+        let _serial = crate::zone_alloc::test_serial();
         trim();
         let before = stats();
         unsafe {
@@ -150,7 +149,7 @@ mod tests {
 
     #[test]
     fn empty_current_chunk_decommits_and_stale_cache_is_safe() {
-        let _serial = lock(&TEST_LOCK);
+        let _serial = crate::zone_alloc::test_serial();
         trim();
         let before = stats();
         let _scope = test_scope();
@@ -194,7 +193,7 @@ mod tests {
 
     #[test]
     fn remote_frees_during_allocation_and_after_owner_exit() {
-        let _serial = lock(&TEST_LOCK);
+        let _serial = crate::zone_alloc::test_serial();
         trim();
         let before = stats();
         let mut workers = Vec::new();
@@ -244,7 +243,7 @@ mod tests {
 
     #[test]
     fn warm_chunks_are_reused_without_commit_and_bounded() {
-        let _serial = lock(&TEST_LOCK);
+        let _serial = crate::zone_alloc::test_serial();
         trim();
         let before = stats();
         let _scope = test_scope();
@@ -290,7 +289,7 @@ mod tests {
 
     #[test]
     fn free_slots_reused_and_full_chunks_survive_escape() {
-        let _serial = lock(&TEST_LOCK);
+        let _serial = crate::zone_alloc::test_serial();
         trim();
         let before = stats();
         let mut blocks = Vec::new();
@@ -319,7 +318,7 @@ mod tests {
 
     #[test]
     fn exhausted_reservation_falls_back_and_counting_wrapper_works() {
-        let _serial = lock(&TEST_LOCK);
+        let _serial = crate::zone_alloc::test_serial();
         trim();
         let before = stats();
         let _scope = test_scope();

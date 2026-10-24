@@ -711,7 +711,8 @@ pub enum Reloc {
     /// a slot as a call target: its thunk (`SlotTable::thunk`), which jumps to the slot's current
     /// code (a direct branch the runtime keeps in step with the table word)
     Call(u32),
-    /// the thread-local block key / cell offset (`Env::tls_key`, pre-scaled as the backend loads it)
+    /// the thread-local block key / cell offset (`Env::tls_key`, pre-scaled as the backend loads it;
+    /// x64 Windows: `x64::win_tls_key`)
     TlsKey,
     /// `Env::tls_slow`
     TlsSlow,
@@ -1849,8 +1850,87 @@ impl Func {
                 }
             }
         }
+        // Copy is memcpy: its source and destination never overlap unless they are the same
+        // bytes (a slot copied onto its own storage, which moves nothing). A pass that forwards
+        // one slot into another must not leave a copy between two offsets of one slot whose
+        // ranges meet: the backends copy forward in chunks (DFREE: a moved key shifted a word).
+        if let Some((bi, x)) = self.overlapping_copy() {
+            return Err(format!("{}: b{} copy between overlapping bytes of one slot: {:?}", self.name, bi, x));
+        }
         Ok(())
     }
+
+    /// The first `Copy` whose destination and source are addresses of one slot (single-definition
+    /// SlotAddr / Mov / constant-Add chains) at different offsets with overlapping ranges.
+    pub fn overlapping_copy(&self) -> Option<(usize, Inst)> {
+        if !self.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::Copy(..)))) {
+            return None;
+        }
+        let at = slot_offsets(self);
+        for (bi, b) in self.blocks.iter().enumerate() {
+            for x in &b.insts {
+                if let Inst::Copy(d, s, n) = x {
+                    if let (Some((ds, doff)), Some((ss, soff))) = (at[d.0 as usize], at[s.0 as usize]) {
+                        if ds == ss && doff != soff && doff < soff + *n as i64 && soff < doff + *n as i64 {
+                            return Some((bi, x.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Per vreg: (slot, constant byte offset) when its one definition is a SlotAddr, or a
+/// single-definition Mov / 64-bit constant Add of such a value.
+pub fn slot_offsets(f: &Func) -> Vec<Option<(u32, i64)>> {
+    let nv = f.vregs.len();
+    let mut ndef = vec![0u32; nv];
+    for p in &f.params {
+        if (p.0 as usize) < nv {
+            ndef[p.0 as usize] += 1;
+        }
+    }
+    for b in &f.blocks {
+        for i in &b.insts {
+            crate::regalloc::for_defs(i, |d| {
+                if (d.0 as usize) < nv {
+                    ndef[d.0 as usize] += 1
+                }
+            });
+        }
+    }
+    let mut at: Vec<Option<(u32, i64)>> = vec![None; nv];
+    for b in &f.blocks {
+        for i in &b.insts {
+            if let Inst::SlotAddr(d, s) = i {
+                if (d.0 as usize) < nv && ndef[d.0 as usize] == 1 {
+                    at[d.0 as usize] = Some((*s, 0));
+                }
+            }
+        }
+    }
+    let mut grew = true;
+    while grew {
+        grew = false;
+        for b in &f.blocks {
+            for i in &b.insts {
+                let (d, s, k) = match i {
+                    Inst::Mov(d, s) => (*d, *s, 0),
+                    Inst::IBinI(IOp::Add, IntTy { bits: 64, .. }, d, s, k) => (*d, *s, *k),
+                    _ => continue,
+                };
+                if (d.0 as usize) < nv && (s.0 as usize) < nv && ndef[d.0 as usize] == 1 && at[d.0 as usize].is_none() {
+                    if let Some((sl, o)) = at[s.0 as usize] {
+                        at[d.0 as usize] = Some((sl, o + k));
+                        grew = true;
+                    }
+                }
+            }
+        }
+    }
+    at
 }
 
 /// `v` re-extended to integer type `it` (how RIR keeps narrow integers in registers).

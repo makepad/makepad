@@ -452,6 +452,59 @@ pub fn slot_addr_positions(f: &Func, at: &[i64]) -> Vec<i64> {
     pos
 }
 
+/// `Copy(dst, src, n)` with both addresses at known frame positions (`slot_addr_positions`) whose
+/// byte ranges overlap but are not the same bytes: `dst - src` in bytes, else 0. Copy is memcpy
+/// (no pass may make such a copy: rir `overlapping_copy`), but the frame layout shares storage
+/// too, so the backends check the final layout: under MAKEPAD_RUN_VERIFY_PASSES such a copy fails
+/// the build, elsewhere it is emitted in memmove order -- a correct copy, never a wrong one.
+pub fn copy_overlap(pos: &[i64], dst: VReg, src: VReg, n: u32) -> i64 {
+    let (Some(&pd), Some(&ps)) = (pos.get(dst.0 as usize), pos.get(src.0 as usize)) else { return 0 };
+    if pd == i64::MIN || ps == i64::MIN {
+        return 0;
+    }
+    // positions grow downwards: an address is the frame base minus its position
+    let delta = ps - pd;
+    if delta != 0 && delta.unsigned_abs() < n as u64 { delta } else { 0 }
+}
+
+/// The first copy of `f` that `copy_overlap` finds in the final layout, described (the backends'
+/// verify-mode build error).
+pub fn overlapping_copy_at(f: &Func, pos: &[i64]) -> Option<String> {
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for i in &b.insts {
+            if let Inst::Copy(d, s, n) = i {
+                let delta = copy_overlap(pos, *d, *s, *n);
+                if delta != 0 {
+                    return Some(format!("{}: b{} copy between overlapping frame bytes (dst - src = {} of {} bytes): {:?}", f.name, bi, delta, n, i));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The pieces (offset, width) a backend copies `n` bytes in: 16-byte pieces, then 8/4/2/1 --
+/// in this order when the destination is below the source (or apart from it), reversed when it
+/// is above: each piece is loaded whole before it is stored, so no piece reads a byte an
+/// earlier piece wrote (memmove order).
+pub fn copy_pieces(n: u32, wide: u32, dst_above: bool) -> Vec<(i32, u8)> {
+    let mut v = Vec::new();
+    let mut o = 0u32;
+    for w in [wide, 8, 4, 2, 1] {
+        if w == 0 {
+            continue;
+        }
+        while o + w <= n {
+            v.push((o as i32, w as u8));
+            o += w;
+        }
+    }
+    if dst_above {
+        v.reverse();
+    }
+    v
+}
+
 /// Every block once: reverse postorder of those reachable from the entry, then the others in
 /// index order (dataflow sweeps in this order settle in about loop depth + 2 passes; lowering's
 /// block numbers are not in flow order -- a join is made before the blocks that reach it).

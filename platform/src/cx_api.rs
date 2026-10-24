@@ -325,6 +325,10 @@ pub enum CxOsOp {
     /// distance below the window's top edge, in points: a caption row of
     /// another height than the system's keeps them in line. No-op elsewhere.
     CenterWindowButtons(WindowId, f64),
+    /// The caption this window draws (the strip that drags it) and the window buttons in it
+    /// (layout points, zero: none) and whether it is dark: the HAL's `WindowCaption`, by which
+    /// `makepad run` places its JIT ring in the caption. Pushed when it changes.
+    SetWindowCaption(WindowId, Rect, Rect, bool),
     SetTopmost(WindowId, bool),
     /// `true`: drop the native maximized-state border/titlebar strip a
     /// backend would otherwise keep (Windows only; other backends ignore
@@ -574,6 +578,7 @@ impl CxOsOp {
             Self::HideWindowButtons(..) => "HideWindowButtons",
             Self::ShowWindowButtons(..) => "ShowWindowButtons",
             Self::CenterWindowButtons(..) => "CenterWindowButtons",
+            Self::SetWindowCaption(..) => "SetWindowCaption",
             Self::SetTopmost(..) => "SetTopmost",
             Self::SetChromelessWhenMaximized(..) => "SetChromelessWhenMaximized",
             Self::SetWindowTitle(..) => "SetWindowTitle",

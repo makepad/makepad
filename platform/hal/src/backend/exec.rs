@@ -158,8 +158,17 @@ pub trait Gpu {
     fn window_overlay(&mut self, s: &mut Session, id: Id, rect: Option<[f32; 4]>, layer: Id, now: u64);
     /// Mobile shells lend their permanent host window even without an explicit adopt flag.
     fn auto_adopt(&self) -> bool { false }
-    /// The window system composites session 0's badges (`window_kind::BADGE`) over its windows.
+    /// The backend composes session 0's badge layers (`target::BADGES`) into the frames its
+    /// windows present.
     fn badges(&self) -> bool { false }
+    /// Session 0's window `window` has a badge layer (`on`) or no longer has one. While it has,
+    /// every frame of the window (session 0's, or a borrower's through its alias) renders into
+    /// the window's retained image and is not presented by `frame`: the executor follows it with
+    /// the layer's frame (`target::BADGES | target::REPLAY`), which copies that image into the
+    /// window's output, draws the layer over it there and presents the output. A BADGES frame
+    /// without REPLAY is the layer's new frame (answered with `FrameDone`); with REPLAY it is
+    /// not answered. The retained image never holds the layer, so it is never drawn twice.
+    fn badge_layer(&mut self, _window: Id, _on: bool) {}
     /// A command for the window system, validated against the tables. True when the backend's
     /// window system took it and reports the outcome itself (events from the OS).
     fn os(&mut self, _sid: u32, _cmd: OsCmd) -> bool {
@@ -195,6 +204,62 @@ pub fn clamped_pass(s: &mut Session, target: Id, size: [u32; 2], fits: [u32; 2],
     if s.clamped_pass_targets.contains(&target) { return; }
     s.clamped_pass_targets.push(target);
     eprintln!("[hal] pass {size:?} at dpi {dpi} is larger than its attachments {fits:?} (target {target:?}); drawn clipped to them");
+}
+
+/// Session 0's badge `id` moved to `geom` (`None`: it closes): where its window routes the
+/// pointer to it, when it takes input.
+fn badge_moved(world: &mut World, id: Id, geom: Option<[f32; 4]>) {
+    let Some(s) = world.session_mut(HOST) else { return };
+    let Some(parent) = s.windows.get(HOST, id).ok().filter(|w| w.val.kind & 0xff == window_kind::BADGE).map(|w| w.val.parent) else { return };
+    if let Some(geom) = geom {
+        if let Ok(w) = s.windows.get_mut(HOST, id) { w.val.geom = geom; }
+    }
+    if let Ok(p) = s.windows.get_mut(HOST, parent) {
+        if p.val.badge_input.is_some_and(|(b, _)| b == id) {
+            p.val.badge_input = geom.map(|g| (id, g));
+            if geom.is_none() { p.val.badge_pointer = 0; }
+        }
+    }
+}
+
+/// Session 0's badge layer frame for its window `window`: kept on the window (one without draws
+/// ends the layer), then composed over the window's retained image and presented.
+#[allow(clippy::too_many_arguments)]
+fn badge_frame(gpu: &mut dyn Gpu, world: &mut World, sid: u32, window: Id, kind: u32, packet: u32, view: &CmdView, now: u64) {
+    let Some(s) = world.session_mut(sid) else { return };
+    let own = s.windows.get(sid, window).is_ok_and(|w| w.val.kind & 0xff != window_kind::BADGE && !w.val.is_hosted() && w.val.embedded.is_none());
+    if sid != HOST || !gpu.badges() || kind & !target::FLAGS != target::WINDOW || kind & (target::PICK | target::CAPTURE) != 0 || !own {
+        s.bad();
+        return;
+    }
+    let Some(kept) = KeptFrame::keep(view, packet) else { s.bad(); return };
+    let kept = std::sync::Arc::new(kept);
+    let Ok(w) = s.windows.get_mut(HOST, window) else { return };
+    let had = w.val.badges.is_some();
+    let ends = !kept.draws();
+    w.val.badges = Some(kept.clone());
+    if !had {
+        gpu.badge_layer(window, true);
+    }
+    // a last frame without draws shows the window without its layer, then the layer goes
+    let _ = gpu.frame(s, HOST, window, kind, 0, &kept.view(), now);
+    if ends {
+        if let Ok(w) = s.windows.get_mut(HOST, window) { w.val.badges = None; }
+        gpu.badge_layer(window, false);
+    }
+    if gpu.completes_inline() {
+        world.frame_done(HOST, window, kind, kept.view().frames[0].frame, 0, now, [0.0; 2]);
+    }
+}
+
+/// Session 0's host window `window` shows a new frame: its badge layer is drawn over it.
+fn replay_badges(gpu: &mut dyn Gpu, world: &mut World, window: Id, now: u64) {
+    let Some(s) = world.session_mut(HOST) else { return };
+    let Some(kept) = s.windows.get(HOST, window).ok().and_then(|w| w.val.badges.clone()) else { return };
+    let frame = s.frame;
+    let _ = gpu.frame(s, HOST, window, target::WINDOW | target::BADGES | target::REPLAY, 0, &kept.view(), now);
+    // a replay is not a frame of session 0's: its frame counter stays
+    s.frame = frame;
 }
 
 pub fn lent_state(s: &Session, sid: u32, id: Id) -> LentState {
@@ -418,7 +483,13 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                     s.stale();
                     return;
                 }
-                gpu.os(sid, OsCmd::WindowCreate { id, kind, parent, geom });
+                if kind & window_style::BADGE_INPUT != 0 {
+                    if let Ok(p) = s.windows.get_mut(HOST, parent) {
+                        p.val.badge_input = Some((id, geom));
+                        p.val.badge_pointer = 0;
+                    }
+                }
+                // the HAL's own object: no window system surface
                 return;
             }
             // a child domain's window is a render target lent to its parent, never an OS window
@@ -468,6 +539,13 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             return;
         }
         HalCmd::WindowClose { id } => {
+            if sid == HOST {
+                badge_moved(world, id, None);
+            }
+            let badge = world.session(sid).and_then(|s| s.windows.get(sid, id).ok()).is_some_and(|w| w.val.kind & 0xff == window_kind::BADGE);
+            if sid == HOST && !badge && world.session(HOST).and_then(|s| s.windows.get(HOST, id).ok()).is_some_and(|w| w.val.badges.is_some()) {
+                gpu.badge_layer(id, false);
+            }
             let hosted = world.session(sid).and_then(|s| s.windows.get(sid, id).ok()).is_some_and(|w| w.val.is_hosted());
             let host = world.session(sid).and_then(|s| s.windows.get(sid, id).ok()).and_then(|w| w.val.alias_of);
             if let Some(host) = host {
@@ -480,7 +558,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                     gpu.window_lent(sid, id, host, false);
                 } else {
                     gpu.window_closed(sid, id);
-                    handled = !hosted && gpu.os(sid, OsCmd::WindowClose { id });
+                    handled = !hosted && !badge && gpu.os(sid, OsCmd::WindowClose { id });
                 }
             }
             if let Some(s) = world.session_mut(sid) {
@@ -500,7 +578,11 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             };
             if w.val.is_hosted() { return; }
             let (dpi, state) = (w.val.dpi.unwrap_or(s.dpi), w.val.state);
-            if !gpu.os(sid, OsCmd::WindowGeom { id, geom }) {
+            let badge = sid == HOST && w.val.kind & 0xff == window_kind::BADGE;
+            if badge {
+                badge_moved(world, id, Some(geom));
+            }
+            if badge || !gpu.os(sid, OsCmd::WindowGeom { id, geom }) {
                 let geom = unplaced_at_origin(geom);
                 world.window_geom(sid, id, geom, dpi, state);
                 world.to_session(sid, |q| q.geom(id, geom[0] as f64, geom[1] as f64, geom[2] as f64, geom[3] as f64, dpi, state));
@@ -514,6 +596,25 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             if w.val.embedded.is_some() {
                 let parent = s.parent;
                 world.to_session(parent, |q| q.child_chrome(id, sid, own));
+            }
+            return;
+        }
+        HalCmd::WindowCaption { id, top, height, buttons, dark } => {
+            let Some(s) = world.session_mut(sid) else { return };
+            let Ok(w) = s.windows.get_mut(sid, id) else { s.stale(); return };
+            if ![top, height].iter().chain(buttons.iter()).all(|v| v.is_finite()) {
+                s.bad();
+                return;
+            }
+            let value = Some(crate::AppCaption { top, height, buttons, dark });
+            // a lent window's caption is the host window's: session 0 draws by it
+            match w.val.alias_of {
+                Some(host) => {
+                    if let Some(h) = world.session_mut(HOST).and_then(|s| s.windows.get_mut(HOST, host).ok()) {
+                        h.val.app_caption = value;
+                    }
+                }
+                None => w.val.app_caption = value,
             }
             return;
         }
@@ -587,7 +688,16 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
         HalCmd::Frame { target, mut kind, packet } => {
             let Some(s) = world.session_mut(sid) else { return };
             // Only the executor selects this target: clients cannot bypass lending.
-            if kind & target::OVERLAY != 0 { s.bad(); return; }
+            if kind & (target::OVERLAY | target::REPLAY) != 0 { s.bad(); return; }
+            if kind & target::BADGES != 0 {
+                badge_frame(gpu, world, sid, target, kind, packet, view, now);
+                return;
+            }
+            // a badge has no frames (its pixels are its window's badge layer)
+            if kind & !target::FLAGS == target::WINDOW && s.windows.get(sid, target).is_ok_and(|w| w.val.kind & 0xff == window_kind::BADGE) {
+                s.bad();
+                return;
+            }
             let overlay = sid == HOST && kind & !target::FLAGS == target::WINDOW
                 && kind & target::PICK == 0
                 && s.windows.get(sid, target).is_ok_and(|w| w.val.overlay.is_some());
@@ -673,6 +783,10 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 if let Some(w) = world.session_mut(HOST).and_then(|s| s.windows.get_mut(HOST, id).ok()) {
                     w.val.borrower_frame = true;
                 }
+            }
+            // the window's badge layer over the frame it now shows
+            if submitted.window && kind & target::PICK == 0 && (host.is_some() || sid == HOST) {
+                replay_badges(gpu, world, host.unwrap_or(target), now);
             }
             if gpu.completes_inline() {
                 if submitted.window && !overlay {
@@ -778,6 +892,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
         | HalCmd::WindowGeom { .. }
         | HalCmd::WindowTitle { .. }
         | HalCmd::WindowChrome { .. }
+        | HalCmd::WindowCaption { .. }
         | HalCmd::ChildDragReply { .. }
         | HalCmd::ParentMessage { .. }
         | HalCmd::WindowOverlay { .. }

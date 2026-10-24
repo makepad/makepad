@@ -107,6 +107,9 @@ const WARM_LARGE_BYTES_MAX: usize = 32 << 20;
 /// An emptied chunk of a thread that was carved beyond this goes back to the shared state at once
 /// (the warm list or the OS); a lighter one stays the thread's for its next block.
 const OWNED_KEEP_MAX: usize = 32 << 10;
+/// A thread's current chunk of a program heap carved at least this far may give its whole free
+/// granules back while attached (`owned_tick`).
+const OWNED_TRIM_MIN: usize = 256 << 10;
 struct Warm {
     runs: [(usize, usize); WARM_MAX], // (chunk index, touched bytes)
     len: usize,
@@ -165,7 +168,7 @@ thread_local! {
     static DOMAIN_EXIT_GUARD: DomainExitGuard = const { DomainExitGuard };
     /// The domain arena this thread is inside and its chunk cache of it (`DomainTls`).
     static DOMAIN: DomainTls = const {
-        DomainTls { arena: Cell::new(std::ptr::null()), id: Cell::new(0), current: Cell::new([NO_CURRENT; CLASSES]) }
+        DomainTls { arena: Cell::new(std::ptr::null()), id: Cell::new(0), current: Cell::new([NO_CURRENT; CLASSES]), pass: Cell::new(0), quiet: AtomicU8::new(QUIET_RUNNING) }
     };
 }
 
@@ -179,7 +182,16 @@ struct DomainTls {
     arena: Cell<*const Arena>,
     id: Cell<usize>,
     current: Cell<[Current; CLASSES]>,
+    /// The trim epoch of the thread's last pass over all its current chunks (`owner_pass`)
+    pass: Cell<usize>,
+    /// Whether the thread is blocked in a wait (`domain_wait` .. `domain_wait_done`) and so does
+    /// not touch its current chunks: QUIET_WAITING lets the monitor take one (QUIET_SETTLING) and
+    /// settle it for the owner (`densify`); the owner, waking, waits until it is handed back.
+    quiet: AtomicU8,
 }
+const QUIET_RUNNING: u8 = 0;
+const QUIET_WAITING: u8 = 1;
+const QUIET_SETTLING: u8 = 2;
 /// The calling thread's `DomainTls`. A const thread-local without drop glue cannot fail.
 #[inline(always)]
 fn domain_tls() -> &'static DomainTls {
@@ -462,6 +474,8 @@ struct Owned {
     bump: AtomicUsize,
     stride: usize,
     live: AtomicUsize,
+    /// The arena's trim epoch this chunk's owner last looked at (`owned_tick`)
+    trim_seen: usize,
 }
 /// Compiler arena: a chunk is attached to at most one thread, the one that has it as its current
 /// chunk for the class (`remote != NONE` while attached). That thread allocates and frees its own
@@ -474,7 +488,12 @@ struct Chunk {
     /// RMW, a detached chunk adds under the lock. Live bytes = account - remote_bytes.
     account: AtomicUsize,
     owned: UnsafeCell<Owned>,
-    _line: [usize; 3],
+    /// Program heaps, while the chunk is attached: the owner thread's `DomainTls::quiet` (0: none).
+    /// Set at attach and cleared at handoff, both under the chunk's lock, so a thread holding the
+    /// lock may read it: the owner's thread-local record outlives its attached chunks (a thread
+    /// hands every chunk back before its thread-locals go, DomainExitGuard).
+    owner_quiet: AtomicUsize,
+    _line: [usize; 1],
     remote: AtomicUsize, // NONE: detached (and closes publication during handoff)
     remote_bytes: AtomicUsize,
     live: AtomicUsize,
@@ -824,6 +843,11 @@ pub struct Arena {
     /// MAKEPAD_RUN_HEAP_CHECK (program heaps): one bit per 16 bytes of the reservation, set while
     /// a block starts there (0: off). See `heap_check_on`.
     live_bits: AtomicUsize,
+    /// Program heaps: advanced once a second by the monitor (`densify`). A thread's current chunk
+    /// that has become sparse gives its whole free granules back at most once per epoch
+    /// (`owned_tick`): no other thread may touch its free list, and the thread itself frees into
+    /// it, so the free pages of a thread's current chunks are released by the thread.
+    trim_epoch: AtomicUsize,
 }
 static DEFAULT: Arena = Arena::new();
 impl Arena {
@@ -854,8 +878,9 @@ impl Arena {
             headers: [const {
                 Chunk {
                     account: AtomicUsize::new(0),
-                    owned: UnsafeCell::new(Owned { free: 0, bump: AtomicUsize::new(0), stride: 0, live: AtomicUsize::new(0) }),
-                    _line: [0; 3],
+                    owned: UnsafeCell::new(Owned { free: 0, bump: AtomicUsize::new(0), stride: 0, live: AtomicUsize::new(0), trim_seen: 0 }),
+                    owner_quiet: AtomicUsize::new(0),
+                    _line: [0; 1],
                     remote: AtomicUsize::new(NONE),
                     remote_bytes: AtomicUsize::new(0),
                     live: AtomicUsize::new(0),
@@ -889,6 +914,7 @@ impl Arena {
                 3,
             ),
             live_bits: AtomicUsize::new(0),
+            trim_epoch: AtomicUsize::new(0),
         }
     }
 
@@ -1024,7 +1050,12 @@ impl Arena {
     /// Makes the chunk the calling thread's: its free list, bump and live count move to `owned`
     /// and the remote list opens. Called with the chunk's lock held.
     unsafe fn attach(&self, h: &Chunk, s: &State) {
-        *h.owned.get() = Owned { free: s.free, bump: AtomicUsize::new(s.bump), stride: s.stride, live: AtomicUsize::new(h.live.load(Ordering::Relaxed)) };
+        // (a chunk taken from the lists had its free pages released there: no trim before the next epoch)
+        *h.owned.get() = Owned { free: s.free, bump: AtomicUsize::new(s.bump), stride: s.stride, live: AtomicUsize::new(h.live.load(Ordering::Relaxed)), trim_seen: self.trim_epoch.load(Ordering::Relaxed) };
+        if self.dynamic {
+            let q = DOMAIN.try_with(|t| &t.quiet as *const AtomicU8 as usize).unwrap_or(0);
+            h.owner_quiet.store(q, Ordering::Relaxed);
+        }
         h.remote.store(0, Ordering::Release);
     }
     /// Takes the blocks other threads freed into the owner's free list.
@@ -1042,6 +1073,7 @@ impl Arena {
     unsafe fn handoff(&self, index: usize, s: &mut State) {
         let h = &self.headers[index];
         self.drain(h, h.remote.swap(NONE, Ordering::AcqRel));
+        h.owner_quiet.store(0, Ordering::Relaxed);
         let o = &*h.owned.get();
         s.free = o.free;
         s.bump = o.bump.load(Ordering::Relaxed);
@@ -1065,6 +1097,115 @@ impl Arena {
         let mut s = lock(&self.headers[c.index].state);
         if s.committed != 0 && s.attached {
             self.handoff(c.index, &mut s);
+        }
+    }
+    /// The owner freed a block of its current chunk `index` of `class`, leaving `live` blocks
+    /// (`tick_at`), with more than OWNED_KEEP_MAX carved (cheap tests on the free path; the checks
+    /// here are rare). An emptied chunk that has been carved far goes back at once (its pages are released as before; a lightly
+    /// used one stays the thread's, ready for its next block). In a program heap, a chunk carved
+    /// far whose live blocks fill under a quarter of it gives its whole free granules to the OS,
+    /// once per trim epoch: a thread's current chunks keep what a burst left free (Sandbox: 122 MB
+    /// of whole free 4 KB pages in 800 current chunks of 55 threads), and only the owner may
+    /// rewrite its free list. The released slots leave the list until the chunk is handed back.
+    #[inline]
+    unsafe fn owned_tick(&self, index: usize, class: usize, live: usize) {
+        if live == 0 {
+            // (no free of another thread waits on its remote list: those count as live)
+            self.release_emptied(index, class);
+            return;
+        }
+        if !self.dynamic {
+            return;
+        }
+        let epoch = self.trim_epoch.load(Ordering::Relaxed);
+        // once per epoch the thread settles all its current chunks, not only this one: the blocks
+        // other threads freed into them wait on their remote lists, and the classes it stopped
+        // using have no other moment for it (a thread that never waits in std, as a UI thread in
+        // its event loop). The pass looks at this chunk too. (Only the pass reads the remote
+        // lists: other threads write that line.)
+        let passed = DOMAIN.try_with(|t| {
+            if t.pass.get() != epoch && std::ptr::eq(t.arena.get(), self) {
+                t.pass.set(epoch);
+                self.owner_pass(t);
+                true
+            } else {
+                false
+            }
+        });
+        if passed == Ok(true) {
+            return;
+        }
+        self.trim_owned(index, live, epoch);
+    }
+    /// A sparse current chunk `index` of the calling owner (`live` blocks) gives its whole free
+    /// granules back, once per trim epoch.
+    unsafe fn trim_owned(&self, index: usize, live: usize, epoch: usize) {
+        let h = self.headers.get_unchecked(index);
+        let o = &mut *h.owned.get();
+        let bump = o.bump.load(Ordering::Relaxed);
+        if bump < OWNED_TRIM_MIN || live * o.stride * 4 >= bump || o.trim_seen == epoch {
+            return;
+        }
+        o.trim_seen = epoch;
+        let _s = lock(&h.state);
+        let chunk = self.base.load(Ordering::Relaxed) + index * CHUNK;
+        if let Some(head) = self.drop_free_granules(index, chunk, o.stride, bump, o.free) {
+            o.free = head;
+        }
+    }
+    /// The monitor (`densify`, chunk `index` attached, its lock held) settles a current chunk whose
+    /// owner is blocked in a wait, as the owner's own pass would: the blocks other threads freed
+    /// into it are its free list's again, and, sparse, it gives its whole free pages back. A pool
+    /// worker that did a job and now waits for the next kept what the others freed of its blocks
+    /// (Scope: 25-55 MB on the remote lists of waiting workers). The owner's `quiet` word makes it
+    /// safe: taken from QUIET_WAITING, the owner, waking, waits for it to be handed back.
+    unsafe fn settle_for_waiting_owner(&self, index: usize, h: &Chunk, epoch: usize) {
+        let q = h.owner_quiet.load(Ordering::Relaxed);
+        if !COMPILER || q == 0 || h.remote.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        let q = &*(q as *const AtomicU8);
+        if q.compare_exchange(QUIET_WAITING, QUIET_SETTLING, Ordering::Acquire, Ordering::Relaxed).is_err() {
+            return;
+        }
+        self.drain(h, h.remote.swap(0, Ordering::Acquire));
+        let o = &mut *h.owned.get();
+        let (live, bump) = (o.live.load(Ordering::Relaxed), o.bump.load(Ordering::Relaxed));
+        if bump >= OWNED_TRIM_MIN && live * o.stride * 4 < bump && o.trim_seen != epoch {
+            o.trim_seen = epoch;
+            let chunk = self.base.load(Ordering::Relaxed) + index * CHUNK;
+            if let Some(head) = self.drop_free_granules(index, chunk, o.stride, bump, o.free) {
+                o.free = head;
+            }
+        }
+        q.store(QUIET_WAITING, Ordering::Release);
+    }
+    /// The owner thread `t` of this program heap settles its current chunks (`domain_wait`, the
+    /// first tick of an epoch): what other threads freed into them is its own again, an emptied
+    /// one goes back, a sparse one gives its whole free pages back.
+    unsafe fn owner_pass(&self, t: &DomainTls) {
+        if !COMPILER || !self.dynamic {
+            return;
+        }
+        let epoch = self.trim_epoch.load(Ordering::Relaxed);
+        for class in 0..CLASSES {
+            let c = t.current.as_ptr().cast::<Current>().add(class).read();
+            if c.index == NONE {
+                continue;
+            }
+            let h = self.headers.get_unchecked(c.index);
+            if h.remote.load(Ordering::Relaxed) != 0 {
+                self.drain(h, h.remote.swap(0, Ordering::Acquire));
+            }
+            let (live, bump) = {
+                let o = &*h.owned.get();
+                (o.live.load(Ordering::Relaxed), o.bump.load(Ordering::Relaxed))
+            };
+            if live == 0 && bump > OWNED_KEEP_MAX {
+                self.release_emptied(c.index, class);
+            } else if live != 0 {
+                self.trim_owned(c.index, live, epoch);
+            }
         }
     }
     /// The thread's current chunk of `class` has no live block left and a large carved part: it
@@ -1234,13 +1375,21 @@ impl Arena {
     /// Returns the collapses done.
     pub fn densify(&self, budget: usize) -> usize {
         let base = self.base.load(Ordering::Relaxed);
-        if !self.dynamic || base == 0 || !os::THP {
+        if !self.dynamic || base == 0 {
             return 0;
         }
+        // (the pass is the monitor's second: the threads' current chunks may trim again)
+        let epoch = self.trim_epoch.fetch_add(1, Ordering::Relaxed) + 1;
         let mut done = 0;
         for (index, h) in self.headers.iter().enumerate() {
             let s = lock(&h.state);
             if s.committed == 0 || s.released {
+                continue;
+            }
+            if s.attached && s.stride != 0 {
+                unsafe { self.settle_for_waiting_owner(index, h, epoch) };
+            }
+            if !os::THP {
                 continue;
             }
             let address = base + index * CHUNK;
@@ -1255,19 +1404,24 @@ impl Arena {
                 continue;
             }
             // a thread's current chunk is hot whatever is live in it at this moment (a frame's
-            // temporaries come and go there): carved half way, it is dense enough
+            // temporaries come and go there): carved half way, it is dense enough -- unless its
+            // live blocks fill under a quarter of what it carved: that one gives its free pages
+            // back (`owned_tick`), and a huge page would keep them
             let attached = s.attached && COMPILER;
-            let dense = if attached {
-                // the owner thread updates it without the lock: a racy, approximate read
-                unsafe { (*h.owned.get()).bump.load(Ordering::Relaxed) >= CHUNK / 2 }
+            let (dense, sparse) = if attached {
+                // the owner thread updates these without the lock: a racy, approximate read
+                let o = h.owned.get();
+                let (bump, live) = unsafe { ((*o).bump.load(Ordering::Relaxed), (*o).live.load(Ordering::Relaxed)) };
+                let sparse = bump >= OWNED_TRIM_MIN && live * s.stride * 4 < bump;
+                (bump >= CHUNK / 2 && !sparse, sparse)
             } else {
-                h.live.load(Ordering::Relaxed) * s.stride >= CHUNK / 2
+                (h.live.load(Ordering::Relaxed) * s.stride >= CHUNK / 2, h.live.load(Ordering::Relaxed) * s.stride < CHUNK / 8)
             };
             if !huge && s.committed == CHUNK && dense && done < budget {
                 h.huge.store(true, Ordering::Relaxed);
                 unsafe { os::huge_pages(address, CHUNK, true) };
                 done += 1;
-            } else if huge && !attached && h.live.load(Ordering::Relaxed) * s.stride < CHUNK / 8 {
+            } else if huge && sparse {
                 h.huge.store(false, Ordering::Relaxed);
                 unsafe { os::huge_pages(address, CHUNK, false) };
             }
@@ -1293,8 +1447,8 @@ impl Arena {
             h.old.store(s.committed != 0, Ordering::Relaxed);
         }
     }
-    pub fn states(&self) -> [usize; 24] {
-        let mut c = [0usize; 24];
+    pub fn states(&self) -> [usize; 28] {
+        let mut c = [0usize; 28];
         let base = self.base.load(Ordering::Relaxed);
         if base == 0 {
             return c;
@@ -1335,8 +1489,58 @@ impl Arena {
                 c[22] += live * s.stride;
                 c[23] += res;
             }
+            // whole free granules in the carved part (what a page release could give back): an
+            // attached chunk's owned list is read racily (bounded, every link checked)
+            if row == 0 || row == 1 {
+                let head = if row == 0 && COMPILER { unsafe { (*h.owned.get()).free } } else { s.free };
+                c[24 + row] += Self::free_granule_bytes(base + index * CHUNK, bump, s.stride, head);
+            }
+            // attached chunks: the requested bytes of their live blocks, and the blocks other
+            // threads freed that wait on the remote list for the owner (racy, bounded walk)
+            if row == 0 && COMPILER {
+                c[26] += h.account.load(Ordering::Relaxed).wrapping_sub(h.remote_bytes.load(Ordering::Relaxed)) as isize as usize;
+                let (chunk, end) = (base + index * CHUNK, base + index * CHUNK + bump);
+                let mut p = h.remote.load(Ordering::Acquire);
+                let mut n = 0;
+                while p != 0 && p != NONE && p >= chunk && p < end && n < CHUNK / 16 {
+                    n += 1;
+                    p = unsafe { std::ptr::read_volatile(p as *const usize) };
+                }
+                c[27] += n * s.stride;
+            }
         }
         c
+    }
+    /// Bytes of the granules of `[chunk, chunk + carved)` whose slots are all on the free list
+    /// starting at `head` (`states`' census; the list may change under a racy read: a link
+    /// outside the carved slots ends the walk).
+    fn free_granule_bytes(chunk: usize, carved: usize, stride: usize, head: usize) -> usize {
+        if stride == 0 || carved == 0 {
+            return 0;
+        }
+        let nslots = carved / stride;
+        // (no allocation: the caller holds the chunk's lock)
+        let mut free = [0u64; (CHUNK / 16) / 64];
+        let mut p = head;
+        let mut steps = 0;
+        while p != 0 && steps < nslots {
+            if p < chunk || p >= chunk + nslots * stride || (p - chunk) % stride != 0 {
+                break;
+            }
+            let k = (p - chunk) / stride;
+            free[k / 64] |= 1 << (k % 64);
+            p = unsafe { std::ptr::read_volatile(p as *const usize) };
+            steps += 1;
+        }
+        let is_free = |k: usize| free[k / 64] >> (k % 64) & 1 == 1;
+        let mut bytes = 0;
+        for g in 0..carved / GRANULE {
+            let (lo, hi) = (g * GRANULE, (g + 1) * GRANULE);
+            if (lo / stride..=(hi - 1) / stride).all(|k| k < nslots && is_free(k)) {
+                bytes += GRANULE;
+            }
+        }
+        bytes
     }
     fn partial_push(&self, i: usize, class: usize) {
         let mut p = lock(&self.partial);
@@ -1504,10 +1708,8 @@ impl Arena {
         let live = o.live.load(Ordering::Relaxed) - 1;
         o.live.store(live, Ordering::Relaxed);
         h.account.store(h.account.load(Ordering::Relaxed).wrapping_sub(requested), Ordering::Relaxed);
-        // An emptied chunk that has been carved far goes back at once (its pages are
-        // released as before); a lightly used one stays the thread's, ready for its next block.
-        if live == 0 && o.bump.load(Ordering::Relaxed) > OWNED_KEEP_MAX {
-            self.release_emptied(index, class);
+        if tick_at(live) && o.bump.load(Ordering::Relaxed) > OWNED_KEEP_MAX {
+            self.owned_tick(index, class, live);
         }
     }
     /// The program allocator's fast path (`domain_alloc`): this is the domain arena the calling
@@ -1559,8 +1761,9 @@ impl Arena {
                 let live = o.live.load(Ordering::Relaxed) - 1;
                 o.live.store(live, Ordering::Relaxed);
                 h.account.store(h.account.load(Ordering::Relaxed).wrapping_sub(size), Ordering::Relaxed);
-                if live == 0 && o.bump.load(Ordering::Relaxed) > OWNED_KEEP_MAX {
-                    release_emptied_c(index, class, self);
+                // emptied, or at a tick count of live blocks, and carved far: `owned_tick` looks at it
+                if tick_at(live) && o.bump.load(Ordering::Relaxed) > OWNED_KEEP_MAX {
+                    owned_tick_c(index, class, live, self);
                 }
                 return;
             }
@@ -2144,70 +2347,77 @@ impl Arena {
         if base == 0 {
             return;
         }
-        let mut free = [0u64; (CHUNK / 16) / 64];
         for index in 0..N {
             let h = &self.headers[index];
             let mut s = lock(&h.state);
             if (COMPILER && s.attached) || s.stride == 0 || s.committed != CHUNK || h.live.load(Ordering::Relaxed) == 0 || s.free == 0 {
                 continue;
             }
-            let (stride, chunk) = (s.stride, base + index * CHUNK);
-            let nslots = s.bump / stride;
-            free[..(nslots + 63) / 64].fill(0);
-            let mut p = s.free;
-            while p != 0 {
-                let k = (p - chunk) / stride;
-                free[k / 64] |= 1 << (k % 64);
-                p = unsafe { *(p as *const usize) };
+            let chunk = base + index * CHUNK;
+            if let Some(head) = unsafe { self.drop_free_granules(index, chunk, s.stride, s.bump, s.free) } {
+                s.free = head;
             }
-            let is_free = |k: usize| free[k / 64] >> (k % 64) & 1 == 1;
-            // granules whose overlapping slots are all free (a granule past the carved end only counts its carved part)
-            let carved = s.bump;
-            let mut run: Option<(usize, usize)> = None;
-            let mut released = 0usize;
-            let mut newhead = 0usize;
-            // pass 1: find the dropped byte ranges and release them; remember them as a bitmap over granules
-            let ngr = (carved + GRANULE - 1) / GRANULE;
-            let mut gone_gr = [0u64; (CHUNK / GRANULE + 63) / 64];
-            for g in 0..ngr {
-                let (lo, hi) = (g * GRANULE, ((g + 1) * GRANULE).min(carved));
-                let (k0, k1) = (lo / stride, (hi - 1) / stride);
-                if (k0..=k1).all(|k| is_free(k)) {
-                    gone_gr[g / 64] |= 1 << (g % 64);
-                    run = match run {
-                        Some((a, b)) if b == lo => Some((a, g * GRANULE + GRANULE)),
-                        Some((a, b)) => {
-                            released += b - a;
-                            unsafe { os::release((chunk + a) as *mut u8, b - a) };
-                            Some((lo, lo + GRANULE))
-                        }
-                        None => Some((lo, lo + GRANULE)),
-                    };
-                }
-            }
-            if let Some((a, b)) = run {
-                released += b - a;
-                unsafe { os::release((chunk + a) as *mut u8, b - a) };
-            }
-            if released == 0 {
-                continue;
-            }
-            unsafe { self.unhuge(index, chunk, CHUNK) };
-            // pass 2: relink the free slots that do not touch a dropped granule
-            let dropped = |k: usize| {
-                let (g0, g1) = (k * stride / GRANULE, ((k + 1) * stride - 1) / GRANULE);
-                (g0..=g1).any(|g| gone_gr[g / 64] >> (g % 64) & 1 == 1)
-            };
-            for k in (0..nslots).rev() {
-                if is_free(k) && !dropped(k) {
-                    let slot = chunk + k * stride;
-                    unsafe { *(slot as *mut usize) = newhead };
-                    newhead = slot;
-                }
-            }
-            s.free = newhead;
         }
     }
+    /// Releases the granules of chunk `index` (at `chunk`, `carved` bytes carved in slots of
+    /// `stride`) whose slots are all on the free list from `head`, and returns the relinked list of
+    /// the other free slots; None when no granule was whole. The caller owns the list (the chunk's
+    /// lock for a detached chunk, the owner thread for its current one) and holds the chunk's lock.
+    unsafe fn drop_free_granules(&self, index: usize, chunk: usize, stride: usize, carved: usize, head: usize) -> Option<usize> {
+        let nslots = carved / stride;
+        let mut free = [0u64; (CHUNK / 16) / 64];
+        let mut p = head;
+        while p != 0 {
+            let k = (p - chunk) / stride;
+            free[k / 64] |= 1 << (k % 64);
+            p = *(p as *const usize);
+        }
+        let is_free = |k: usize| free[k / 64] >> (k % 64) & 1 == 1;
+        // granules whose overlapping slots are all free (a granule past the carved end only counts its carved part)
+        let mut run: Option<(usize, usize)> = None;
+        let mut released = 0usize;
+        let mut newhead = 0usize;
+        // pass 1: find the dropped byte ranges and release them; remember them as a bitmap over granules
+        let ngr = (carved + GRANULE - 1) / GRANULE;
+        let mut gone_gr = [0u64; (CHUNK / GRANULE + 63) / 64];
+        for g in 0..ngr {
+            let (lo, hi) = (g * GRANULE, ((g + 1) * GRANULE).min(carved));
+            let (k0, k1) = (lo / stride, (hi - 1) / stride);
+            if (k0..=k1).all(|k| is_free(k)) {
+                gone_gr[g / 64] |= 1 << (g % 64);
+                run = match run {
+                    Some((a, b)) if b == lo => Some((a, g * GRANULE + GRANULE)),
+                    Some((a, b)) => {
+                        released += b - a;
+                        os::release((chunk + a) as *mut u8, b - a);
+                        Some((lo, lo + GRANULE))
+                    }
+                    None => Some((lo, lo + GRANULE)),
+                };
+            }
+        }
+        if let Some((a, b)) = run {
+            released += b - a;
+            os::release((chunk + a) as *mut u8, b - a);
+        }
+        if released == 0 {
+            return None;
+        }
+        self.unhuge(index, chunk, CHUNK);
+        // pass 2: relink the free slots that do not touch a dropped granule
+        let dropped = |k: usize| {
+            let (g0, g1) = (k * stride / GRANULE, ((k + 1) * stride - 1) / GRANULE);
+            (g0..=g1).any(|g| gone_gr[g / 64] >> (g % 64) & 1 == 1)
+        };
+        for k in (0..nslots).rev() {
+            if is_free(k) && !dropped(k) {
+                let slot = chunk + k * stride;
+                *(slot as *mut usize) = newhead;
+                newhead = slot;
+            }
+        }
+        Some(newhead)
+}
     /// (class, stride) of a small request.
     #[inline]
     fn class_of(&self, size: usize, align: usize) -> (usize, usize) {
@@ -2349,6 +2559,18 @@ unsafe extern "C" fn dealloc_in_slow(p: *mut u8, size: usize, align: usize, a: &
 unsafe extern "C" fn release_emptied_c(index: usize, class: usize, a: &Arena) {
     a.release_emptied(index, class)
 }
+/// The live counts at which an owner's free looks at its chunk (`owned_tick`): 0, the powers of
+/// two, and above 64 the counts with at most one bit set in their low six (1 in 9 of them): a
+/// sparse chunk with few survivors is seen as it empties, a busy one every few dozen frees.
+#[inline(always)]
+fn tick_at(live: usize) -> bool {
+    live & live.wrapping_sub(1) & 63 == 0
+}
+#[cold]
+#[inline(never)]
+unsafe extern "C" fn owned_tick_c(index: usize, class: usize, live: usize, a: &Arena) {
+    a.owned_tick(index, class, live)
+}
 /// Puts the calling thread inside domain arena `a` (null: none): the chunks it holds in the
 /// arena it leaves go back to that arena (alive: the thread is still registered in its domain);
 /// the next arena starts with an empty cache.
@@ -2363,6 +2585,43 @@ pub unsafe fn enter_domain(a: *const Arena) {
     if let Some(a) = a.as_ref() {
         a.enter_thread();
     }
+}
+/// The calling program thread is about to block (a wait of std's wait registry: lock, condvar,
+/// park, sleep): it takes the blocks other threads freed into its current chunks (they wait on
+/// the remote lists for the owner, which drained them only when its own free list of the class
+/// ran dry: Scope had 69 MB of its attached chunks' 115 MB of slots there), and gives the free
+/// pages of its sparse current chunks back (`owned_tick`, once per trim epoch). What other
+/// threads free into them during the wait waits for the owner's next wait or tick (handing the
+/// chunks back at a wait instead made Scope's threads carve 2-3x more: measured, dropped).
+///
+/// At most once per trim epoch (a second) per thread: a pass reads the header of every current
+/// chunk (a cache miss each), and threads that wait thousands of times a second paid 20-30 ms/s
+/// of CPU for it at every wait (Scope).
+pub unsafe fn domain_wait() {
+    // (a wait inside the thread's thread-local destructors finds no record: nothing to do)
+    let _ = DOMAIN.try_with(|t| {
+        if let Some(a) = t.arena.get().as_ref() {
+            let epoch = a.trim_epoch.load(Ordering::Relaxed);
+            if t.pass.get() != epoch {
+                t.pass.set(epoch);
+                a.owner_pass(t);
+            }
+            // from here until `domain_wait_done` the thread does not touch its chunks
+            t.quiet.store(QUIET_WAITING, Ordering::Release);
+        }
+    });
+}
+/// The wait `domain_wait` announced has ended: the thread takes its chunks back (it waits while
+/// the monitor settles one of them, a bounded pass under that chunk's lock).
+pub fn domain_wait_done() {
+    let _ = DOMAIN.try_with(|t| {
+        while t.quiet.load(Ordering::Relaxed) != QUIET_RUNNING {
+            if t.quiet.compare_exchange(QUIET_WAITING, QUIET_RUNNING, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+                break;
+            }
+            std::hint::spin_loop();
+        }
+    });
 }
 /// The domain arena the calling thread is inside.
 #[inline(always)]
@@ -2450,7 +2709,7 @@ pub fn detail() -> (usize, usize, usize, usize) {
 pub fn census() -> [usize; 11] {
     DEFAULT.census()
 }
-pub fn states() -> [usize; 24] {
+pub fn states() -> [usize; 28] {
     DEFAULT.states()
 }
 pub fn mark_old() {

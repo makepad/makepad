@@ -52,7 +52,7 @@ fn pinned_entries() -> Vec<String> {
     }
     // A browser has no ~/.makepad: on the web only MAKEPAD_AI_HUB pins.
     #[cfg(not(target_arch = "wasm32"))]
-    if let Ok(text) = std::fs::read_to_string(crate::fleet_auth::client_dir().join("pinned")) {
+    if let Ok(text) = std::fs::read_to_string(makepad_network::fleet::auth::client_dir().join("pinned")) {
         out.extend(text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(str::to_string));
     }
     out

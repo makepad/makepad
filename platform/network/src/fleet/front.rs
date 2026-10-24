@@ -1,24 +1,24 @@
-//! The TLS front of a fleet node: the only listener a non-loopback node
-//! exposes. It terminates TLS (the node's endorsed, pinned certificate),
-//! authenticates every request with a fleet credential, applies the role's
-//! route policy, then hands the request to the node's HTTP server on
-//! loopback with the caller's identity in headers that only the front can
-//! set (they carry a per-process secret).
+//! The TLS front of a fleet service: the only listener a service exposes
+//! off loopback. It terminates TLS (the machine's pinned certificate),
+//! authenticates every request with a fleet credential, applies the
+//! service's route policy, then hands the request to the service's HTTP
+//! server on loopback with the caller's identity in headers that only the
+//! front can set (they carry a per-process secret).
 //!
-//! The same front, with `edge: true`, is the internet-ready listener of
-//! the hub: device routes only.
+//! The AI hub runs one per LAN listener and, optionally, an internet edge
+//! (device routes only, tighter caps); the asset store runs one for sync.
 //!
 //! Hardening: a cap on connections in total and per address, 10 s for TLS,
 //! a 16 KiB request head that must arrive within 15 s (slowloris), auth
 //! failures throttled per address (5 in 10 min → 15 min ban), an audit line
 //! per refusal, and idle connections closed after 10 min.
 
-use crate::fleet_auth::{now_secs, Role, Verifier};
-use makepad_network::tls::{TlsServer, TlsStream};
+use super::auth::{now_secs, Role, Verifier};
+use crate::tls::{TlsServer, TlsStream};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -39,46 +39,37 @@ const MAX_FAILURES: usize = 5;
 const FAILURE_WINDOW: Duration = Duration::from_secs(10 * 60);
 const BAN: Duration = Duration::from_secs(15 * 60);
 
+/// Who may reach which route of the service behind a front:
+/// `(role, method, path)`; the path may carry a query.
+pub type RoutePolicy = Arc<dyn Fn(Role, &str, &str) -> bool + Send + Sync>;
+
+/// Which of the service's loopback servers serves a path (a service may
+/// split its routes over several planes).
+pub type InnerRoute = Arc<dyn Fn(&str) -> SocketAddr + Send + Sync>;
+
 pub struct FrontConfig {
     pub listen: SocketAddr,
-    pub inner: SocketAddr,
+    /// The service's own HTTP server(s), on loopback, by request path.
+    pub inner: InnerRoute,
+    /// Extra header lines (`Name: value`) for every request the front hands
+    /// on, e.g. the service's own credential for front-admitted callers.
+    pub inner_headers: Vec<String>,
     pub tls: TlsServer,
     pub verifier: Arc<Verifier>,
     /// Per-process secret proving a request came through a front.
     pub front_secret: String,
-    /// Internet edge: device routes only, tighter limits.
-    pub edge: bool,
+    /// The service's route policy; anything it refuses gets 403.
+    pub policy: RoutePolicy,
+    /// Connection caps: in total and per client address.
+    pub max_total: usize,
+    pub max_per_ip: usize,
+    /// Names the audit lines and threads (`front`, `edge`, `store-sync`).
+    pub label: &'static str,
 }
 
-/// Which routes a role may reach (method, path). `edge` narrows every role
-/// to the device set.
-pub fn route_allowed(role: Role, edge: bool, method: &str, path: &str) -> bool {
-    let path = path.split('?').next().unwrap_or(path);
-    let device = matches!(
-        (method, path),
-        ("GET", "/health") | ("GET", "/models") | ("GET", "/voices") | ("POST", "/generate") | ("POST", "/realtime")
-    ) || (method == "GET" && (path.starts_with("/job/") || path.starts_with("/artifact/") || path.starts_with("/realtime/")))
-        || (method == "POST" && path.starts_with("/job/") && (path.ends_with("/cancel") || path.ends_with("/keepalive")))
-        || (method == "POST" && path == "/bye");
-    if edge {
-        return device;
-    }
-    match role {
-        Role::Lan => true,
-        // Paired devices also fetch the on-device model files: read-only,
-        // hash-addressed (the blob endpoint), on the LAN front only.
-        // And the control panel's routes (CONTROL_API.md): paired devices
-        // may watch and steer the node they are paired with.
-        Role::Device => device
-            || (method == "GET" && path.starts_with(crate::peer_serve::BLOB_PATH_PREFIX))
-            || path == "/control"
-            || path == "/control/watch"
-            || path == "/control/model"
-            || path == "/llm/context",
-        // Nodes fetch model blobs from each other (and check health).
-        Role::Node => (method == "GET" && path.starts_with(crate::peer_serve::BLOB_PATH_PREFIX)) || (method == "GET" && path == "/health"),
-    }
-}
+/// The caps of a LAN front (an internet edge uses tighter ones).
+pub const LAN_MAX_TOTAL: usize = 256;
+pub const LAN_MAX_PER_IP: usize = 32;
 
 struct Limits {
     per_ip: Mutex<HashMap<IpAddr, usize>>,
@@ -151,13 +142,39 @@ impl Drop for ConnSlot {
     }
 }
 
-fn audit(edge: bool, peer: &SocketAddr, what: &str) {
-    eprintln!("{} {peer}: {what}", if edge { "edge" } else { "front" });
+fn audit(label: &str, peer: &SocketAddr, what: &str) {
+    eprintln!("{label} {peer}: {what}");
 }
 
-pub fn start_front(config: FrontConfig) -> io::Result<std::thread::JoinHandle<()>> {
+/// A running front. Dropping it leaves the front running (a service's whole
+/// life); [`FrontHandle::stop`] closes the listener and joins its thread.
+/// Connections already admitted finish on their own threads.
+pub struct FrontHandle {
+    addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl FrontHandle {
+    /// The bound address (the port is the OS's when `listen` asked for 0).
+    pub fn local_addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    pub fn stop(&mut self) {
+        let Some(join) = self.join.take() else { return };
+        self.stop.store(true, Ordering::SeqCst);
+        // The acceptor blocks in accept (no polling while idle): one local
+        // connection wakes it to see the flag.
+        let _ = TcpStream::connect_timeout(&self.addr, Duration::from_secs(1));
+        let _ = join.join();
+    }
+}
+
+pub fn start_front(config: FrontConfig) -> io::Result<FrontHandle> {
     let listener = TcpListener::bind(config.listen)?;
-    let (max_total, max_per_ip) = if config.edge { (64, 8) } else { (256, 32) };
+    let addr = listener.local_addr()?;
+    let (max_total, max_per_ip) = (config.max_total, config.max_per_ip);
     let limits = Arc::new(Limits {
         per_ip: Mutex::new(HashMap::new()),
         failures: Mutex::new(HashMap::new()),
@@ -166,13 +183,18 @@ pub fn start_front(config: FrontConfig) -> io::Result<std::thread::JoinHandle<()
         max_per_ip,
     });
     let config = Arc::new(config);
-    std::thread::Builder::new()
-        .name(if config.edge { "ai-hub-edge" } else { "ai-hub-front" }.into())
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopping = stop.clone();
+    let join = std::thread::Builder::new()
+        .name(format!("fleet-{}", config.label))
         .spawn(move || {
             for tcp in listener.incoming() {
+                if stopping.load(Ordering::SeqCst) {
+                    return;
+                }
                 let Ok(tcp) = tcp else { continue };
                 let Ok(peer) = tcp.peer_addr() else { continue };
-                let ip = crate::front::normalize(peer.ip());
+                let ip = normalize(peer.ip());
                 if limits.banned(ip) {
                     continue;
                 }
@@ -181,26 +203,27 @@ pub fn start_front(config: FrontConfig) -> io::Result<std::thread::JoinHandle<()
                 };
                 let config = config.clone();
                 let limits = limits.clone();
-                let _ = std::thread::Builder::new().name("ai-hub-front-conn".into()).spawn(move || {
+                let _ = std::thread::Builder::new().name(format!("fleet-{}-conn", config.label)).spawn(move || {
                     let _slot = slot;
                     match serve(&config, tcp, peer) {
                         Ok(()) => {}
                         Err(Refusal::Auth(why)) => {
-                            audit(config.edge, &peer, &format!("auth refused: {why}"));
+                            audit(config.label, &peer, &format!("auth refused: {why}"));
                             if limits.fail(ip) {
-                                audit(config.edge, &peer, &format!("banned for {} s", BAN.as_secs()));
+                                audit(config.label, &peer, &format!("banned for {} s", BAN.as_secs()));
                             }
                         }
                         Err(Refusal::Quiet) => {}
-                        Err(Refusal::Other(why)) => audit(config.edge, &peer, &why),
+                        Err(Refusal::Other(why)) => audit(config.label, &peer, &why),
                     }
                 });
             }
-        })
+        })?;
+    Ok(FrontHandle { addr, stop, join: Some(join) })
 }
 
 pub fn normalize(ip: IpAddr) -> IpAddr {
-    makepad_network::http_server::normalize_client_ip(ip)
+    crate::http_server::normalize_client_ip(ip)
 }
 
 enum Refusal {
@@ -292,9 +315,9 @@ pub fn parse_head(head: &[u8]) -> Option<ParsedHead> {
 }
 
 impl ParsedHead {
-    pub fn rewrite(&self, secret: &str, client: &str, role: Role, peer: IpAddr) -> Vec<u8> {
+    pub fn rewrite(&self, secret: &str, extra: &[String], client: &str, role: Role, peer: IpAddr) -> Vec<u8> {
         let mut out = String::new();
-        for line in &self.lines {
+        for line in self.lines.iter().chain(extra) {
             out.push_str(line);
             out.push_str("\r\n");
         }
@@ -318,7 +341,7 @@ fn serve(config: &FrontConfig, tcp: TcpStream, peer: SocketAddr) -> Result<(), R
         // credential guess.
         Ok(1) if first[0].is_ascii_uppercase() => {
             let mut tcp = tcp;
-            let body = "{\"error\":\"this node speaks https only (see tools/aihub-fleet.md)\"}";
+            let body = "{\"error\":\"this service speaks https only (see tools/aihub-fleet.md)\"}";
             let _ = write!(
                 tcp,
                 "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -348,15 +371,15 @@ fn serve(config: &FrontConfig, tcp: TcpStream, peer: SocketAddr) -> Result<(), R
             return Err(Refusal::Auth(e.to_string()));
         }
     };
-    if !route_allowed(cred.role, config.edge, &parsed.method, &parsed.path) {
+    if !(config.policy)(cred.role, &parsed.method, &parsed.path) {
         respond(&mut tls, 403, "not allowed for this credential");
         return Err(Refusal::Other(format!("{} {} {} refused for role {}", cred.client_id, parsed.method, parsed.path, cred.role.as_str())));
     }
-    let mut inner = TcpStream::connect_timeout(&config.inner, Duration::from_secs(5))
+    let mut inner = TcpStream::connect_timeout(&(config.inner)(&parsed.path), Duration::from_secs(5))
         .map_err(|e| Refusal::Other(format!("inner connect: {e}")))?;
     let _ = inner.set_nodelay(true);
     inner
-        .write_all(&parsed.rewrite(&config.front_secret, &cred.client_id, cred.role, normalize(peer.ip())))
+        .write_all(&parsed.rewrite(&config.front_secret, &config.inner_headers, &cred.client_id, cred.role, normalize(peer.ip())))
         .and_then(|_| inner.write_all(&rest))
         .map_err(|e| Refusal::Other(format!("inner write: {e}")))?;
     pump(&mut tls, &mut inner);
@@ -447,7 +470,7 @@ pub fn caller_from_headers(lines: &[String], front_secret: &str) -> Option<Calle
         })
     };
     let secret = get(HEADER_FRONT)?;
-    if !makepad_network::tls::constant_time_eq(secret.as_bytes(), front_secret.as_bytes()) {
+    if !crate::tls::constant_time_eq(secret.as_bytes(), front_secret.as_bytes()) {
         return None;
     }
     Some(Caller { client_id: get(HEADER_CLIENT)?, role: Role::parse(&get(HEADER_ROLE)?)?, app: None })
@@ -455,7 +478,7 @@ pub fn caller_from_headers(lines: &[String], front_secret: &str) -> Option<Calle
 
 /// The real client address behind a front, for the inner server's per-IP
 /// limits (trusted only from loopback, where the front is).
-pub fn peer_from_headers(headers: &makepad_network::HttpServerHeaders) -> IpAddr {
+pub fn peer_from_headers(headers: &crate::HttpServerHeaders) -> IpAddr {
     headers
         .lines
         .iter()
@@ -481,36 +504,14 @@ mod tests {
         assert_eq!(p.method, "POST");
         assert_eq!(p.path, "/generate");
         assert_eq!(p.authorization.as_deref(), Some("MKC2 a.lan.9.ff"));
-        let out = String::from_utf8(p.rewrite("s3cret", "rik-mac", Role::Lan, "10.0.0.5".parse().unwrap())).unwrap();
-        assert!(!out.to_ascii_lowercase().contains("authorization"));
+        let out = String::from_utf8(p.rewrite("s3cret", &["Authorization: Bearer inner".to_string()], "rik-mac", Role::Lan, "10.0.0.5".parse().unwrap())).unwrap();
+        assert!(!out.contains("MKC2"));
+        assert!(out.contains("Authorization: Bearer inner\r\n"));
         assert!(!out.contains("guess") && !out.contains("admin"));
         assert!(out.contains("X-Makepad-Client: rik-mac\r\n"));
         assert!(out.ends_with("\r\n\r\n"));
         let lines: Vec<String> = out.split("\r\n").map(String::from).collect();
         assert_eq!(caller_from_headers(&lines, "s3cret"), Some(Caller { client_id: "rik-mac".into(), role: Role::Lan, app: None }));
         assert_eq!(caller_from_headers(&lines, "other"), None);
-    }
-
-    #[test]
-    fn route_policy() {
-        assert!(route_allowed(Role::Lan, false, "GET", "/jobs"));
-        assert!(!route_allowed(Role::Device, false, "GET", "/jobs"));
-        assert!(route_allowed(Role::Device, false, "GET", "/control/watch?since=3"));
-        assert!(route_allowed(Role::Device, false, "POST", "/control/model"));
-        assert!(!route_allowed(Role::Device, true, "GET", "/control"));
-        assert!(!route_allowed(Role::Node, false, "GET", "/control"));
-        assert!(route_allowed(Role::Device, false, "POST", "/generate"));
-        assert!(route_allowed(Role::Device, false, "GET", "/voices"));
-        assert!(route_allowed(Role::Device, false, "GET", "/job/abc"));
-        assert!(route_allowed(Role::Device, false, "GET", "/v1/model_blob/00"));
-        assert!(!route_allowed(Role::Device, false, "POST", "/v1/model_blob/00"));
-        assert!(!route_allowed(Role::Device, true, "GET", "/v1/model_blob/00"));
-        assert!(!route_allowed(Role::Device, false, "GET", "/v1/model_inventory"));
-        assert!(route_allowed(Role::Node, false, "GET", "/v1/model_blob/00"));
-        assert!(!route_allowed(Role::Node, false, "POST", "/generate"));
-        // The edge narrows even a LAN credential to the device set.
-        assert!(!route_allowed(Role::Lan, true, "GET", "/jobs"));
-        assert!(!route_allowed(Role::Lan, true, "GET", "/v1/model_inventory"));
-        assert!(route_allowed(Role::Lan, true, "GET", "/models"));
     }
 }

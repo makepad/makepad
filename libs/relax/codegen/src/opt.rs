@@ -8397,6 +8397,53 @@ pub fn coalesce_slot_copies(f: &mut Func, prefix: bool) -> bool {
                 step(&mut cur, &f.blocks[bi].insts[ii], bi, ii);
             }
         }
+        // One instruction reading one slot of a pair and writing the other: liveness after it says
+        // nothing about the instruction itself. Joined, the slots are one storage (the smaller one
+        // the larger one's prefix: same offsets), so its read and write meet unless they are
+        // disjoint there -- or, for a copy, the very same bytes (a copy onto itself, which moves
+        // nothing). DFREE: HashMap::entry's key (40 bytes) joined the Entry result (64) along the
+        // Vacant copy at offset 0, and the Occupied variant's move of the key to offset 8 became a
+        // copy of the joined slot onto itself shifted by a word: the copied key's ext word held
+        // the stale bytes after its bool, and its drop freed a stack address. A call handed both
+        // (nocapture extents) may write one before it reads the other: any overlap interferes.
+        for (bi, b) in f.blocks.iter().enumerate() {
+            if !reach[bi] {
+                continue;
+            }
+            for (ii, i) in b.insts.iter().enumerate() {
+                let (rd, wr) = acc(i, bi, ii);
+                let mut rds: Vec<(u32, i64, i64)> = rd.into_iter().collect();
+                let mut wrs: Vec<(u32, i64, i64)> = wr.into_iter().collect();
+                if let Some(v) = nc_rd.get(&(bi, ii)) { rds.extend(v.iter().copied()); }
+                if let Some(v) = nc_wr.get(&(bi, ii)) { wrs.extend(v.iter().copied()); }
+                if rds.is_empty() || wrs.is_empty() {
+                    continue;
+                }
+                let is_copy = matches!(i, Inst::Copy(..));
+                for &(rs, rlo, rhi) in &rds {
+                    for &(ws, wlo, whi) in &wrs {
+                        if rs == ws {
+                            continue;
+                        }
+                        let meet = rlo < whi && wlo < rhi;
+                        let same = is_copy && rlo == wlo && rhi == whi && rhi != i64::MAX;
+                        if !meet || same {
+                            continue;
+                        }
+                        for &k in &of_slot[rs as usize] {
+                            let (cb, ci, bs, cs) = cands[k];
+                            if (cb, ci) == (bi, ii) || bad[k] || !((rs, ws) == (bs, cs) || (rs, ws) == (cs, bs)) {
+                                continue;
+                            }
+                            bad[k] = true;
+                            if slotcoal_trace() {
+                                bad_at[k] = format!(" at b{}#{} (reads {} [{}..{}) and writes {} [{}..{}) in one instruction: {:?})", bi, ii, rs, rlo, if rhi == i64::MAX { -1 } else { rhi }, ws, wlo, if whi == i64::MAX { -1 } else { whi }, i);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if slotcoal_trace() {
             eprintln!("slotcoal {}: candidates {}", f.name, cands.iter().zip(&bad).map(|(&(_, _, bs, cs), &b)| format!("{}->{}{}", bs, cs, if b { " interferes" } else { "" })).collect::<Vec<_>>().join(", "));
             if bad.iter().any(|&b| b) {
