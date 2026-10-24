@@ -42,6 +42,7 @@
 use makepad_draw::*;
 use super::atmosphere::SUN_IRRADIANCE;
 use super::milky_way::MilkyWay;
+use super::nebulas::Nebulas;
 use super::noise::{hash01, hash_u32};
 use super::studio::{kelvin_to_rgb, light_frame, project, LightFrame};
 use super::{EnvSun, NightParams, SunMode, SunParams};
@@ -108,7 +109,7 @@ const MILKY_WAY_SIN_HALF: f32 = 0.17;
 /// Star counts grow about 3.2x per magnitude (10^0.5). A cell's hash h in (0, 1]
 /// therefore maps to the magnitude m = LIMIT + 2·log10(h), and its flux relative to
 /// the faintest star is h^-0.8.
-const STAR_MAG_LIMIT: f32 = 6.5;
+pub(super) const STAR_MAG_LIMIT: f32 = 6.5;
 /// h is floored so the brightest star is magnitude -1.5 (Sirius is -1.46).
 const STAR_HASH_FLOOR: f32 = 1.0e-4;
 /// The sun's apparent magnitude. A magnitude 0 star gives SUN_IRRADIANCE x 10^(0.4 x -26.74).
@@ -141,7 +142,7 @@ const STAR_SIGMA_CORE: f32 = 0.05 * PI / 180.0;
 const STAR_SIGMA_HALO: f32 = 0.35 * PI / 180.0;
 const STAR_CORE_SHARE: f32 = 0.6;
 /// Squared reach of a star: 3 halo sigmas (1.05 degrees), as the sine of the angle.
-const STAR_REACH2: f32 = 9.0 * STAR_SIGMA_HALO * STAR_SIGMA_HALO;
+pub(super) const STAR_REACH2: f32 = 9.0 * STAR_SIGMA_HALO * STAR_SIGMA_HALO;
 /// The Gaussians are cut at 3 sigma and lowered by their value there, so they reach
 /// zero smoothly. These are e^-4.5, and the mass left relative to 2 pi sigma^2,
 /// which is 1 - 5.5·e^-4.5.
@@ -220,6 +221,8 @@ pub struct NightSky {
     gal_axes: [Vec3f; 3],
     /// The Milky Way; Some when its block draws (plan hdri-7 §2).
     milky_way: Option<MilkyWay>,
+    /// The nebulas; Some when their block draws (plan hdri-7 §3).
+    nebulas: Option<Nebulas>,
 }
 
 /// One star of the field, in star space.
@@ -351,6 +354,8 @@ impl NightSky {
         // Plan hdri-7 §2: the band shows from astronomical twilight on, lifted as the stars are.
         let astro = smoothstep(ASTRO_FADE_DEG.0, ASTRO_FADE_DEG.1, -sun_elevation_deg);
         let milky_way = mw.map(|m| MilkyWay::new(m, seed, gal_axes, m.strength * lift * astro));
+        // Plan hdri-7 §3: the nebulas likewise, along the band when it draws; their stars lifted as the field's are.
+        let nebulas = p.nebulas_drawn().map(|n| Nebulas::new(n, mw.map(|_| gal_axes), lift * astro, star_gain * astro, &star_colors));
 
         let mut sky = NightSky {
             night_factor,
@@ -371,6 +376,7 @@ impl NightSky {
             moon_ground: Vec3f::default(),
             gal_axes,
             milky_way,
+            nebulas,
         };
         let (ambient, sky_irradiance) = sky.integrate_glow();
         let moon_direct = sky.moon.as_ref().map_or(Vec3f::default(), |m| m.irradiance * m.dir.y.max(0.0));
@@ -398,43 +404,62 @@ impl NightSky {
         field * sun_transmittance(dir.y) * (self.night_factor * smoothstep(0.0, 0.03, dir.y))
     }
 
-    /// What rides with the points (`Env::sky_layers`' `points`): the stars and, with the Milky Way drawn, its band, the
-    /// stars behind its dust. `self.stars(dir)` bit for bit without it. `texel`: the lookup's texel in radians (0:
-    /// exact, the finest detail). Plan hdri-7 D9.
+    /// What rides with the points (`Env::sky_layers`' `points`): the stars and, with the Milky Way or the nebulas drawn,
+    /// the band and the clouds of gas, the stars behind both dusts and the band behind the clouds'. `self.stars(dir)` bit
+    /// for bit when neither draws. `texel`: the lookup's texel in radians (0: exact, the finest detail). Plan hdri-7 D9.
     pub fn deep_sky(&self, dir: Vec3f, texel: f32) -> Vec3f {
-        let Some(m) = &self.milky_way else { return self.stars(dir) };
+        if self.milky_way.is_none() && self.nebulas.is_none() {
+            return self.stars(dir);
+        }
         if self.night_factor <= 0.0 || !(dir.y > 0.0) {
             return Vec3f::default();
         }
         let s = self.to_star(dir);
         let field = if self.star_keep > 0.0 && self.star_gain > 0.0 { self.star_field(s) } else { Vec3f::default() };
-        let band = m.at(s, texel).0;
+        let band = self.milky_way.as_ref().map_or(Vec3f::default(), |m| m.at(s, texel).0);
+        let (gas, veil) = self.nebulas.as_ref().map_or((Vec3f::default(), 1.0), |n| n.at(s, texel));
         // Only a lookup a star reaches pays for the dust in front of it.
         let dust = if field.max_elem() > 0.0 { self.dust_before_stars(s) } else { 1.0 };
-        // The stars as `stars` writes them (so a dust of 1 and no band are `stars`, bit for bit), behind the dust.
+        // The stars as `stars` writes them (so a dust of 1 and no band are `stars`, bit for bit), behind both dusts.
         let (extinction, horizon) = (sun_transmittance(dir.y), smoothstep(0.0, 0.03, dir.y));
         let stars = field * extinction * (self.night_factor * horizon);
-        stars * dust + band * extinction * horizon
+        stars * dust + (band * veil + gas) * extinction * horizon
     }
 
-    /// The share of a star's light at star-space `s` the Milky Way's dust lets through (1 without it). A star is a point,
-    /// not a texture to band-limit, so its dust is read at full detail (texel 0): a star behind the dust dims alike at
-    /// every width. Read at the lookup's texel, the dust's coarse octaves dimmed the stars of a held bake differently from
-    /// a released one's (a block's share differed by 34 %, 512 against 1024; 23 %, 1024 against 2048).
+    /// The share of a star's light at star-space `s` the dusts let through, the Milky Way's and the nebulas' (1 without
+    /// them). A star is a point, not a texture to band-limit, so the dust is read at full detail (texel 0): a star behind
+    /// it dims alike at every width. Read at the lookup's texel, the Milky Way's coarse octaves dimmed the stars of a held
+    /// bake differently from a released one's (a block's share differed by 34 %, 512 against 1024; 23 %, 1024 against
+    /// 2048).
     fn dust_before_stars(&self, s: Vec3f) -> f32 {
-        self.milky_way.as_ref().map_or(1.0, |m| m.transmittance(s, 0.0))
+        let band = self.milky_way.as_ref().map_or(1.0, |m| m.transmittance(s, 0.0));
+        self.nebulas.as_ref().map_or(band, |n| band * n.transmittance(s, 0.0))
     }
 
-    /// The share of the stars' light along `dir` that `deep_sky` lets through: 1 without the Milky Way, off the band and
-    /// below the horizon. The width tests compare it as a field (`widths_agree`).
+    /// The share of the stars' light along `dir` that `deep_sky` lets through: the Milky Way's dust times the nebulas'
+    /// (1 without either, off their dust and below the horizon). The width tests compare it as a field (`widths_agree`).
     #[cfg(test)]
     pub(super) fn star_transmittance(&self, dir: Vec3f) -> f32 {
         if dir.y > 0.0 { self.dust_before_stars(self.to_star(dir)) } else { 1.0 }
     }
 
+    /// The nebulas' embedded stars along `dir` as `deep_sky` adds them (none without the nebulas): stars that Star
+    /// brightness scales and no dust dims, so `widths_agree` counts them beside the field's.
+    #[cfg(test)]
+    pub(super) fn embedded_stars(&self, dir: Vec3f) -> Vec3f {
+        match &self.nebulas {
+            Some(n) if self.night_factor > 0.0 && dir.y > 0.0 => n.embedded_stars(self.to_star(dir)) * sun_transmittance(dir.y) * smoothstep(0.0, 0.03, dir.y),
+            _ => Vec3f::default(),
+        }
+    }
+
     /// Where the night's features are, in the map's own frame (plan hdri-7: the tests' and the screenshots' aim).
     pub fn features(&self) -> NightFeatures {
-        NightFeatures { galactic_centre: self.milky_way.as_ref().map(|_| self.to_world(self.gal_axes[0])), nebulas: Vec::new(), aurora_middle: None }
+        NightFeatures {
+            galactic_centre: self.milky_way.as_ref().map(|_| self.to_world(self.gal_axes[0])),
+            nebulas: self.nebulas.as_ref().map_or(Vec::new(), |n| n.centres().into_iter().map(|(c, r)| (self.to_world(c), r)).collect()),
+            aurora_middle: None,
+        }
     }
 
     /// The moon's disc: lit from the sun's direction, plus earthshine. It is also drawn
@@ -652,7 +677,7 @@ fn night_rows(hours: f32, latitude: f32, turn_deg: f32, tilt_deg: f32) -> [Vec3f
 ///
 /// It integrates to 1 over the sphere, so a star's flux is its irradiance
 /// whatever the sigmas are. The core carries STAR_CORE_SHARE and the halo the rest.
-fn star_kernel(d2: f32) -> f32 {
+pub(super) fn star_kernel(d2: f32) -> f32 {
     STAR_CORE_SHARE * windowed_gaussian(d2, STAR_SIGMA_CORE)
         + (1.0 - STAR_CORE_SHARE) * windowed_gaussian(d2, STAR_SIGMA_HALO)
 }
@@ -721,7 +746,7 @@ fn henyey_greenstein(cos_g: f32, g: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hdri::{dir_from_az_el, vec, Env, HdriParams, MilkyWayParams};
+    use crate::hdri::{dir_from_az_el, vec, Env, HdriParams, MilkyWayParams, NebulaParams};
     use makepad_render_material::ibl;
 
     #[test]
@@ -1219,5 +1244,74 @@ mod tests {
             }
         }
         assert!(seen > 5 && dimmed == seen, "{dimmed} of {seen} stars behind the dust dimmed");
+    }
+
+    /// Plan hdri-7 §3: the nebulas fade with daylight as the Milky Way does: none with the sun 12 degrees down, some at
+    /// 15, all of them from 18.
+    #[test]
+    fn the_nebulas_wait_for_astronomical_twilight() {
+        let gas = |el: f32| {
+            let sky = night_at(&NightParams { moon: false, nebulas: Some(NebulaParams { amount: 1.0, ..NebulaParams::default() }), ..Default::default() }, el);
+            let n = sky.nebulas.as_ref().unwrap();
+            n.centres().iter().map(|(c, _)| luminance(n.at(*c, 0.0).0)).sum::<f32>()
+        };
+        assert_eq!(gas(-12.0), 0.0);
+        assert!(gas(-15.0) > 0.0 && gas(-15.0) < gas(-18.0));
+        assert!((gas(-18.0) - gas(-40.0)).abs() <= 1.0e-5 * gas(-40.0), "full from -18");
+    }
+
+    /// Plan hdri-7 §3 ("dark dust in front"): a dark cloud's dust dims what lies behind it, the band and the stars, by its
+    /// own transmittance. At the centre of a dark cloud well up that no other cloud reaches, with the Milky Way on,
+    /// `deep_sky` is what it is without the nebulas times the cloud's `through` (`Nebulas::at`'s second value), and less.
+    #[test]
+    fn the_nebulas_dust_dims_what_lies_behind() {
+        let mw = MilkyWayParams::default();
+        let off = night_at(&NightParams { moon: false, milky_way: Some(mw.clone()), ..Default::default() }, -30.0);
+        for seed in 1..=64u32 {
+            let neb = NebulaParams { amount: 1.0, seed, ..NebulaParams::default() };
+            let on = night_at(&NightParams { moon: false, milky_way: Some(mw.clone()), nebulas: Some(neb), ..Default::default() }, -30.0);
+            let n = on.nebulas.as_ref().unwrap();
+            let clouds = n.centres();
+            let alone = |i: usize| clouds.iter().enumerate().all(|(j, (c, r))| j == i || c.dot(clouds[i].0) < (1.05 * (r + clouds[i].1)).min(3.1).cos());
+            let dark = (0..clouds.len()).find(|&i| {
+                let (gas, through) = n.at(clouds[i].0, 0.0);
+                gas == Vec3f::default() && through < 0.8 && on.to_world(clouds[i].0).y > 0.2 && alone(i)
+            });
+            let Some(i) = dark else { continue };
+            let w = on.to_world(clouds[i].0);
+            let through = n.at(on.to_star(w), 0.0).1;
+            let (dimmed, clear) = (on.deep_sky(w, 0.0), off.deep_sky(w, 0.0));
+            println!("seed {seed}: a dark cloud lets {through:.3} through: {} against {}", luminance(dimmed), luminance(clear));
+            assert!(luminance(clear) > 0.0, "the premise: the band and the stars behind it");
+            assert!((dimmed - clear * through).length() <= 1.0e-4 * clear.length(), "{dimmed:?} against {clear:?} x {through}");
+            assert!(luminance(dimmed) < luminance(clear));
+            assert!((on.star_transmittance(w) - off.star_transmittance(w) * through).abs() <= 1.0e-6, "the stars dim by both dusts: {} against {} x {through}", on.star_transmittance(w), off.star_transmittance(w));
+            return;
+        }
+        panic!("the premise: a dark cloud well up, alone, among 64 seeds");
+    }
+
+    /// Plan hdri-7 §3 ("they fade with ... the moon like the Milky Way"): through the light the moon puts in the air, a
+    /// full moon 8 degrees above a glowing cloud takes its contrast over the sky down more than five times (the Milky Way's
+    /// test, `the_moon_washes_the_milky_way_out`, on a nebula).
+    #[test]
+    fn the_moon_washes_the_nebulas_out() {
+        for seed in 1..=32u32 {
+            let neb = NebulaParams { amount: 1.0, seed, ..NebulaParams::default() };
+            let dark = night_at(&NightParams { moon: false, nebulas: Some(neb.clone()), ..Default::default() }, -30.0);
+            let n = dark.nebulas.as_ref().unwrap();
+            let glowing = n.centres().into_iter().map(|(c, _)| c).find(|c| luminance(n.at(*c, 0.0).0) > 0.0 && (0.3..0.8).contains(&dark.to_world(*c).y));
+            let Some(c) = glowing else { continue };
+            let w = dark.to_world(c);
+            let (az, el) = crate::hdri::az_el_from_dir(w);
+            let p = NightParams { moon: true, moon_azimuth_deg: az, moon_elevation_deg: (el + 8.0).min(85.0), nebulas: Some(neb), ..Default::default() };
+            let lit = NightSky::new(&p, 7, dir_from_az_el(az + 180.0, -30.0), 22.0, 45.0);
+            let contrast = |sky: &NightSky| luminance(sky.nebulas.as_ref().unwrap().at(sky.to_star(w), 0.0).0) / luminance(sky.glow(w));
+            let (c_dark, c_lit) = (contrast(&dark), contrast(&lit));
+            println!("seed {seed}: a nebula's contrast near the moon: moonless {c_dark:.3}, full moon {c_lit:.4}");
+            assert!(c_dark > 5.0 * c_lit, "the moon takes {c_dark} only to {c_lit}");
+            return;
+        }
+        panic!("the premise: a glowing cloud well up among 32 seeds");
     }
 }

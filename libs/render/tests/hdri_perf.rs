@@ -18,7 +18,7 @@ use makepad_draw::*;
 use makepad_render::hdri::presets::{preset, PRESET_NAMES};
 use makepad_render::hdri::skyline::SkylineBand;
 use std::sync::Arc;
-use makepad_render::hdri::{CasterParams, Env, GoboParams, HdriParams, ImageSet, LightParams, MilkyWayParams, SkylineParams, VolumetricParams, WeatherParams};
+use makepad_render::hdri::{CasterParams, Env, GoboParams, HdriParams, ImageSet, LightParams, MilkyWayParams, NebulaParams, SkylineParams, VolumetricParams, WeatherParams};
 use makepad_render_material::ibl::{self, EnvMap};
 use std::time::Instant;
 
@@ -844,7 +844,27 @@ fn night_layer_extra(pool: &TaskPool, preset_name: &str, width: usize, patch: &d
 /// The night's layers a held drag pays for (plan hdri-7), each the patch that switches it on over a preset. Tasks 2
 /// to 4 add a row each.
 fn night_layers() -> Vec<(&'static str, fn(&mut HdriParams))> {
-    vec![("milky way", |p| p.sky.night.milky_way = Some(MilkyWayParams::default()))]
+    vec![("milky way", |p| p.sky.night.milky_way = Some(MilkyWayParams::default())), ("nebulas", |p| p.sky.night.nebulas = Some(NebulaParams::default()))]
+}
+
+/// Plan hdri-7 §5: a held Size drag over the nebulas: 24 held 512 bakes of `preset_name` with the nebulas at `seed` (a
+/// seed no other row uses, so no sprite row is filled yet), their Size stepping from 0.25 to 4 (each step may read a
+/// sprite level the last did not, whose rows fill then), against the same bakes without nebulas. (base median ms, the
+/// drag's median extra ms, its worst extra ms.)
+fn nebula_size_drag(pool: &TaskPool, preset_name: &str, seed: u32) -> (f64, f64, f64) {
+    let off = preset(preset_name).expect("a built-in preset loads");
+    held_bake_ms(pool, &off, 512);
+    let (mut base, mut extra) = (Vec::new(), Vec::new());
+    for i in 0..24 {
+        let size = 0.25 * 16f32.powf(i as f32 / 23.0);
+        let mut on = off.clone();
+        on.sky.night.nebulas = Some(NebulaParams { amount: 1.0, size, seed, ..NebulaParams::default() });
+        let (b, w) = (held_bake_ms(pool, &off, 512), held_bake_ms(pool, &on, 512));
+        base.push(b);
+        extra.push(w - b);
+    }
+    let worst = extra.iter().copied().fold(f64::MIN, f64::max);
+    (median(base), median(extra), worst)
 }
 
 /// What one layer may add to a held 512 bake, and all of them together (plan hdri-7 §5: "about +20 %").
@@ -867,8 +887,8 @@ fn the_held_night_bakes_are_measured() {
 }
 
 /// Plan hdri-7 §5: each night layer adds at most a fifth to a held 512 bake of "Moonlit night" and of "Starry night",
-/// all of them together at most two fifths; the released 1024 cost is printed beside it. (Task 3 adds a held nebula
-/// Size drag after the per-layer rows.)
+/// all of them together at most two fifths; the released 1024 cost is printed beside it. A held nebula Size drag
+/// (`nebula_size_drag`) is gated like a layer.
 #[test]
 #[ignore = "release timing; see the module comment"]
 fn held_night_layers_cost_at_most_a_fifth_more() {
@@ -882,12 +902,33 @@ fn held_night_layers_cost_at_most_a_fifth_more() {
                 let (base, extra) = night_layer_extra(pool, name, 1024, patch);
                 println!("hdri_perf: released 1024, {name}, {layer}: {base:6.2} ms {extra:+5.2} ms");
             }
+            if layers.iter().any(|(layer, _)| *layer == "nebulas") {
+                // a fresh seed per preset ("Moonlit night" and "Starry night" differ in length), filled by this drag alone
+                let (base, extra, worst) = nebula_size_drag(pool, name, 0x7e57_0010 + name.len() as u32);
+                println!("hdri_perf: held 512, {name}, a nebula Size drag: {base:6.2} ms, median {extra:+5.2} ms ({:+.0} %), worst step {worst:+5.2} ms", 100.0 * extra / base);
+                assert!(extra / base <= HELD_NIGHT_LAYER_SHARE, "{name}: a nebula Size drag adds {:.0} % a step", 100.0 * extra / base);
+            }
             if layers.len() > 1 {
                 let all = |p: &mut HdriParams| layers.iter().for_each(|(_, patch)| patch(p));
                 let (base, extra) = night_layer_extra(pool, name, 512, &all);
                 println!("hdri_perf: held 512, {name}, all {} layers: {base:6.2} ms {extra:+5.2} ms ({:+.0} %)", layers.len(), 100.0 * extra / base);
                 assert!(extra / base <= HELD_NIGHT_ALL_SHARE, "{name}: the layers together add {:.0} %", 100.0 * extra / base);
             }
+        }
+    });
+}
+
+/// Plan hdri-7 Task 3: the first bake of a new nebula seed fills the sprite rows it reads (reported, not gated: a seed
+/// is typed, not dragged); the next bake of that seed reads them.
+#[test]
+#[ignore = "release timing; see the module comment"]
+fn the_first_bake_of_a_new_nebula_seed_is_reported() {
+    with_pool(|pool| {
+        for (width, seed) in [(512usize, 0x7e57_0001u32), (1024, 0x7e57_0002)] {
+            let mut p = preset("Starry night").expect("a built-in preset loads");
+            p.sky.night.nebulas = Some(NebulaParams { amount: 1.0, seed, ..NebulaParams::default() });
+            let (cold, warm) = (timed_bake(pool, &p, width).total_ms, timed_bake(pool, &p, width).total_ms);
+            println!("hdri_perf: {width} with a new nebula seed: first {cold:6.2} ms, then {warm:6.2} ms");
         }
     });
 }

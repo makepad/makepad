@@ -4535,7 +4535,7 @@ mod reader_tests {
             glow_color: [f32::NAN, 0.5, -1.0],
             glow_strength: f32::INFINITY,
             milky_way: Some(MilkyWayParams { on: true, strength: f32::INFINITY, turn_deg: f32::NAN, tilt_deg: 200.0, core: f32::NAN, dust: -1.0 }),
-            nebulas: None,
+            nebulas: Some(NebulaParams { on: true, amount: f32::NAN, size: f32::INFINITY, brightness: -1.0, realism: 2.0, seed: 3 }),
             aurora: None,
         };
         raw.studio = StudioParams { top: [f32::NAN, 20.0, -1.0], horizon: [0.5, f32::INFINITY, 0.2], floor: [0.1; 3], horizon_softness: f32::NAN };

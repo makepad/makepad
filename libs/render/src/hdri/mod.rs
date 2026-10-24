@@ -64,6 +64,8 @@ pub mod volumetric;
 pub mod weather;
 pub mod skyline;
 mod milky_way;
+mod lazy_grid;
+mod nebulas;
 
 pub use params::*;
 pub use image_light::ImageSet;
@@ -1869,10 +1871,12 @@ pub(crate) mod probe {
         CasterSoft,
         /// A caster's bloom raster built (`caster::CasterBloom::build`, R5).
         CasterBloom,
+        /// A nebula seed's sprites made (`nebulas::sprites_for`, plan hdri-7): once per seed, never per held tick.
+        NebulaSprites,
     }
 
     thread_local! {
-        static COUNTS: [Cell<usize>; 7] = const { [const { Cell::new(0) }; 7] };
+        static COUNTS: [Cell<usize>; 8] = const { [const { Cell::new(0) }; 8] };
     }
 
     /// One more of `work` on this thread.
@@ -2892,8 +2896,9 @@ mod tests {
     ///
     /// The two make the whole layer only if everything that dims the stars goes through `star_transmittance`, so that is
     /// checked first, at every starlit texel centre of the `width` bake: `deep_sky` with the stars on is `deep_sky` with
-    /// them off plus `stars` times `star_transmittance`. A layer that dims the stars some other way fails there, instead
-    /// of passing with its dimming unmeasured.
+    /// them off plus `stars` times `star_transmittance` (plus the stars a layer holds, which Star brightness scales too
+    /// and no dust dims: the nebulas' embedded stars, `NightSky::embedded_stars`). A layer that dims the stars some other
+    /// way fails there, instead of passing with its dimming unmeasured.
     fn widths_agree(base: &HdriParams, set: &dyn Fn(&mut HdriParams), width: usize, block_share: f32, total_share: f32, what: &str) {
         let lum = |t: &[f32; 4]| 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2];
         let starless = |p: &HdriParams| {
@@ -2921,7 +2926,8 @@ mod tests {
                     continue;
                 }
                 let t = lit.star_transmittance(d);
-                let (got, want) = (lit.deep_sky(d, texel), dark.deep_sky(d, texel) + stars * t);
+                let embedded = lit.embedded_stars(d) - dark.embedded_stars(d);
+                let (got, want) = (lit.deep_sky(d, texel), dark.deep_sky(d, texel) + stars * t + embedded);
                 assert!((got - want).length() <= 1.0e-5 * got.length().max(want.length()), "{what}: along {d:?} the stars are dimmed outside star_transmittance ({t}): {got:?} against {want:?}");
                 starlit += 1;
                 dimmed += (t < 1.0) as usize;
@@ -3114,6 +3120,73 @@ mod tests {
             let mut p = base.clone();
             p.sky.night.milky_way = Some(MilkyWayParams { turn_deg: turn, ..MilkyWayParams::default() });
             write_look(&format!("milky-way-turn{turn:.0}"), &p);
+        }
+    }
+
+    #[test]
+    fn the_nebulas_off_or_by_day_change_nothing() {
+        night_block_changes_nothing(&|p, on| p.sky.night.nebulas = Some(NebulaParams { on, ..NebulaParams::default() }));
+    }
+
+    /// The gas's filaments and the Realism clamp are thresholded, so a coarse level's mean moves a little: the nebulas'
+    /// held-vs-released rule is 20 % a block and 10 % in total (the Milky Way's and the aurora's: 10 % and 3 %).
+    #[test]
+    fn the_nebulas_held_and_released_agree() {
+        let base = super::presets::preset("Starry night").unwrap();
+        held_and_released_agree(&base, &|p| p.sky.night.nebulas = Some(NebulaParams { amount: 1.0, size: 2.0, ..NebulaParams::default() }), 0.20, 0.10, "the nebulas");
+    }
+
+    /// Plan hdri-7 §5 ("in exports at every width"): 1024 against 2048, by the nebulas' held rule (ignored, release).
+    #[test]
+    #[ignore = "release: 1024 against 2048"]
+    fn the_nebulas_agree_at_export_widths() {
+        let base = super::presets::preset("Starry night").unwrap();
+        widths_agree(&base, &|p| p.sky.night.nebulas = Some(NebulaParams { amount: 1.0, size: 2.0, ..NebulaParams::default() }), 1024, 0.20, 0.10, "the nebulas");
+    }
+
+    #[test]
+    fn the_nebulas_sit_behind_the_weather_and_the_skyline() {
+        let base = super::presets::preset("Starry night").unwrap();
+        let set = |p: &mut HdriParams| p.sky.night.nebulas = Some(NebulaParams { amount: 1.0, size: 2.0, ..NebulaParams::default() });
+        let mut on = base.clone();
+        set(&mut on);
+        let clouds = Env::new(&on).night_features().unwrap().nebulas;
+        // the centre, well up, where the clouds add the most (a dark cloud adds only where a star stands behind it)
+        let lum = |p: &HdriParams, d: Vec3f| crate::sky::luminance(Env::new(p).radiance(d));
+        let (d, _) = clouds
+            .iter()
+            .filter(|(c, _)| c.y > 0.25 && c.y < 0.9)
+            .map(|(c, _)| (*c, (lum(&on, *c) - lum(&base, *c)).abs()))
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .expect("the premise: a cloud well up");
+        a_layer_sits_behind_the_deck_the_fog_and_the_skyline(&base, &set, d, false);
+    }
+
+    #[test]
+    fn the_nebulas_light_nothing() {
+        a_point_layer_lights_nothing(&|p| p.sky.night.nebulas = Some(NebulaParams { amount: 1.0, ..NebulaParams::default() }));
+    }
+
+    /// A map with nebulas bakes the same on one thread and on four (the sprites' rows fill on whichever thread reads
+    /// them first: a seed no other test uses, so this bake fills them).
+    #[test]
+    fn a_bake_with_nebulas_is_its_parallel_bake() {
+        let mut p = super::presets::preset("Starry night").unwrap();
+        p.sky.night.nebulas = Some(NebulaParams { amount: 1.0, size: 3.0, seed: 0x51ab_0004, ..NebulaParams::default() });
+        let env = Env::new(&p);
+        let parallel = env.bake_par(64, four_threads);
+        assert!(env.bake(64) == parallel);
+    }
+
+    #[test]
+    #[ignore = "writes PNGs: HDRI_NIGHT_VISUAL_DIR"]
+    fn nebula_looks() {
+        let mut base = super::presets::preset("Starry night").unwrap();
+        base.sky.night.milky_way = Some(MilkyWayParams::default());
+        for realism in [0.0f32, 0.5, 1.0] {
+            let mut p = base.clone();
+            p.sky.night.nebulas = Some(NebulaParams { amount: 0.6, realism, ..NebulaParams::default() });
+            write_look(&format!("nebulas-r{realism:.1}"), &p);
         }
     }
 }
