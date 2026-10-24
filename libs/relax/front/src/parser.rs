@@ -2435,14 +2435,27 @@ impl<'a> Parser<'a> {
                 ItemKind::Use(self.ast.push_row(UseItem { global, tree }))
             }
             T::KwExtern if self.nth(1) == T::KwCrate => {
+                let extern_lo = self.lo();
                 self.pos += 2;
-                name = if self.eat(T::KwSelfValue) {
+                let self_crate = self.eat(T::KwSelfValue);
+                name = if self_crate {
                     Ident { lo: self.prev_hi() - 4, hi: self.prev_hi() }
                 } else {
                     self.ident_tok()?
                 };
                 let rename = if self.eat(T::KwAs) { Some(self.ident_or_underscore()?) } else { None };
                 self.expect(T::Semi)?;
+                // an `extern crate dep as alias;` a macro expansion wrote binds `alias` for the
+                // macro paths that follow it (serde_derive: `extern crate serde as _serde;
+                // _serde::__require_serde_not_serde_core!();`); the file's own are in the
+                // prescan's tree, as with `use`
+                if let Some(m) = self.macros.as_ref().filter(|_| extern_lo as usize >= self.src.len() && !self_crate) {
+                    let crate_name = String::from_utf8_lossy(self.bytes(name.lo, name.hi)).trim_start_matches("r#").to_string();
+                    let bind = rename.map_or(crate_name.clone(), |r| String::from_utf8_lossy(self.bytes(r.lo, r.hi)).trim_start_matches("r#").to_string());
+                    if bind != "_" {
+                        m.add_use(&self.cur_module(), bind, vec![String::new(), crate_name]);
+                    }
+                }
                 ItemKind::ExternCrate(rename)
             }
             T::KwExtern if matches!(self.nth(1), T::OpenBrace) || (self.nth(2) == T::OpenBrace && is_str(self.nth(1))) => {

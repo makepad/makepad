@@ -1785,7 +1785,7 @@ pub fn attr_macro_at(p: &crate::parser::Parser, attrs: &[crate::ast::Attr]) -> O
         if last == "relax" && (relax_level_toks(&text, toks, i, hi).is_some() || relax_keep_toks(&text, toks, i, hi)) {
             continue;
         }
-        if !last.is_empty() && crate::macro_reg::has_attr(&last) {
+        if !last.is_empty() && crate::macro_reg::has_attr_for(&p.krate, &last) {
             cand = Some((k, last));
         }
     }
@@ -1870,7 +1870,7 @@ pub fn expand_attr_macro(p: &crate::parser::Parser, attr: &crate::ast::Attr, lo:
     let item_ts = stream(&item, &|a| if a <= before { item_lo + a } else { cut_hi + a - before - 1 })?;
     let call = span_of(item_lo, item_hi);
     let mut out = Expansion { text: String::from(" "), toks: Vec::new(), origins: Vec::new() };
-    match crate::macro_reg::run_attr(p.session, &name, &attr_ts, &item_ts, call) {
+    match crate::macro_reg::run_attr(p.session, &p.krate, &name, &attr_ts, &item_ts, call) {
         Ok(ts) => {
             emit_tokens(&ts.trees, p.edition, &mut out, &mut Vec::new()).map_err(|m| (item_lo, m))?;
             if trace_on("expand:attr") {
