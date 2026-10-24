@@ -3342,8 +3342,10 @@ mod tests {
     /// Plan hdri-7 D9: the aurora's light is in the open dome too, so the ground's gain stays a cover ratio: under a sky
     /// all but clear it is what it was without the aurora, and under a closed deck the ground gains only what the deck's
     /// own light gains (the night ground's light times the gain is the deck's light: their ratios, with the aurora and
-    /// without, agree). The deck's gain is not held to 1: at night a closed deck, lit by the sky's mean (`cloud_ambient`),
-    /// already puts more on the ground than the open sky does (Starry night: (2.17, 1.46, 0.74) without the aurora).
+    /// without, agree). The deck's gain is not held to 1 (the plan's absolute form, gain <= 1, fails at the base without
+    /// the aurora; this ratio form is the controller's ruling, 2026-10-24): since plan 6's `cloud_ambient` a closed
+    /// night deck, lit by the sky's mean, already puts more on the ground than the open sky does (Starry night:
+    /// (2.17, 1.46, 0.74) without the aurora).
     #[test]
     fn the_auroras_light_keeps_the_ground_gain_a_cover_ratio() {
         let mut thin = super::presets::preset("Starry night").unwrap();
@@ -3414,8 +3416,8 @@ mod tests {
         let base = super::presets::preset("Starry night").unwrap();
         for (name, a) in [
             ("aurora-classic", AuroraParams::default()),
-            ("aurora-red-tops", AuroraParams { color: "red tops".into(), ..AuroraParams::default() }),
-            ("aurora-storm", AuroraParams { color: "storm".into(), strength: 3.0, folds: 1.0, rays: 1.0, ..AuroraParams::default() }),
+            ("aurora-magenta-tops", AuroraParams { color: "magenta tops".into(), ..AuroraParams::default() }),
+            ("aurora-storm", AuroraParams { color: "storm".into(), folds: 1.0, rays: 1.0, ..AuroraParams::default() }),
             ("aurora-high", AuroraParams { height_deg: 45.0, width_deg: 160.0, ..AuroraParams::default() }),
         ] {
             let mut p = base.clone();

@@ -12,8 +12,10 @@
 //!   of refs §5.1's 0.1 to 0.3), seen edge-on (a fold, the arc's ends) up to all of it: 50 kR of green at Strength 1.
 //! - **Colour.** The lines' heights above the border: nitrogen (427.8 nm and the first positive bands, pink together)
 //!   in its bottom 12 km or so, the green 557.7 nm line from a few km up fading over 25 km, held off the bottom 7 km
-//!   more where the nitrogen is strong (a storm's harder electrons), the red 630 nm line from about 150 km to 350 km;
-//!   summed in XYZ per height and turned into Rec.709 once, luminance kept (`spectrum::xyz_to_rgb_keep_luminance`).
+//!   more where the nitrogen is strong (a storm's harder electrons), with the N2+ first negative bands (427.8 and
+//!   470.9 nm) rising over it and fading slower, so the lime lower edge turns cyan-green, teal, then blue; the red
+//!   630 nm line from about 150 km to 350 km with 427.8 nm over it, magenta-purple. Summed in XYZ per height and turned
+//!   into Rec.709 once, luminance kept (`spectrum::xyz_to_rgb_keep_luminance`).
 //! - **Band limits.** Every noise reads the lookup's texel (AURORA_BARE_TEXEL for the few looks round the horizon), its
 //!   octaves fading to their mean below two texels, so held and released bakes agree in their means.
 
@@ -60,6 +62,22 @@ const N2_KM: f32 = 6.0;
 const N2_SPREAD_KM: f32 = 5.0;
 /// How far a storm (nitrogen 0.5 to 2 in the mix) holds the green off its bottom (refs §5.1: 5 to 10 km).
 const GREEN_HOLD_KM: f32 = 7.0;
+/// The N2+ first negative bands that come with the green (part of its unit): TEAL_SHARE rayleighs per rayleigh of the
+/// green at its brightest, rising from TEAL_FROM_KM to TEAL_KM over the border and falling over TEAL_FALL_KM above it,
+/// slower than the green (a sunlit curtain's tops scatter the bands' sunlight). In their two visible heads, 470.9 and
+/// 427.8 nm, 3 to 1: the bands' own share is about 1 to 3, but with the violet head foremost the high curtain read
+/// violet-purple where the photographs show blue. So the curtain runs from the lime green line at its lower edge
+/// through cyan-green and teal to blue higher up, as the owner's photographs show it (2026-10-24).
+const TEAL_SHARE: f32 = 0.25;
+const TEAL_FROM_KM: f32 = 4.0;
+const TEAL_KM: f32 = 30.0;
+const TEAL_FALL_KM: f32 = 80.0;
+const TEAL_VIOLET_SHARE: f32 = 0.25;
+const TEAL_BLUE_SHARE: f32 = 0.75;
+const TEAL_BLUE_NM: f32 = 470.9;
+/// The 427.8 nm violet that comes with the red line, per rayleigh of 630 nm (part of its unit): the sunlit tops'
+/// bands over the oxygen's red, so a high curtain reads magenta-purple, never deep red or maroon (owner, 2026-10-24).
+const TOPS_VIOLET: f32 = 0.8;
 /// The window's soft edge at the arc's ends, and the widest half-width (the footprint's 1 / cos beta).
 const WINDOW_EDGE: f32 = 10.0 * PI / 180.0;
 const MAX_HALF: f32 = 88.0 * PI / 180.0;
@@ -259,18 +277,24 @@ fn line_table(mix: [f32; 3]) -> [Vec3f; TABLE] {
     let face = PEAK_RAYLEIGHS / EDGE_MAX;
     let hold = GREEN_HOLD_KM * smoothstep(0.5, 2.0, mix[2]);
     let (green, red, violet, pink) = (line_xyz_per_rayleigh(557.7), line_xyz_per_rayleigh(630.0), line_xyz_per_rayleigh(427.8), line_xyz_per_rayleigh(N2_PINK_NM));
-    let orange = line_xyz_per_rayleigh(N2_ORANGE_NM);
+    let (orange, blue) = (line_xyz_per_rayleigh(N2_ORANGE_NM), line_xyz_per_rayleigh(TEAL_BLUE_NM));
     std::array::from_fn(|i| {
         let h = TABLE_LOW_KM + (i as f32 + 0.5) * (TOP_KM - TABLE_LOW_KM) / TABLE as f32;
         let dh = h - BORDER_KM;
         let border = smoothstep(-1.5, 0.5, dh);
         let g = smoothstep(2.0 + hold, 12.0 + hold, dh) * (-(dh - 12.0 - hold).max(0.0) / 25.0).exp() * (1.0 - smoothstep(180.0, 220.0, h));
+        let high = 1.0 - smoothstep(320.0, 350.0, h);
+        let t = TEAL_SHARE * smoothstep(TEAL_FROM_KM, TEAL_KM, dh) * (-(dh - TEAL_KM).max(0.0) / TEAL_FALL_KM).exp() * high;
         let q = (h / 220.0).ln() / 0.18;
-        let r = (-0.5 * q * q).exp() * smoothstep(140.0, 170.0, h) * (1.0 - smoothstep(320.0, 350.0, h));
+        let r = (-0.5 * q * q).exp() * smoothstep(140.0, 170.0, h) * high;
         let w = (dh - N2_KM) / N2_SPREAD_KM;
         let n = (-0.5 * w * w).exp();
         let k = face * border;
-        let xyz: [f32; 3] = std::array::from_fn(|c| k * (mix[0] * g * green[c] + mix[1] * r * red[c] + mix[2] * n * (N2_VIOLET_SHARE * violet[c] + N2_PINK_SHARE * pink[c] + N2_ORANGE_SHARE * orange[c])));
+        let xyz: [f32; 3] = std::array::from_fn(|c| {
+            let green_unit = g * green[c] + t * (TEAL_VIOLET_SHARE * violet[c] + TEAL_BLUE_SHARE * blue[c]);
+            let red_unit = r * (red[c] + TOPS_VIOLET * violet[c]);
+            k * (mix[0] * green_unit + mix[1] * red_unit + mix[2] * n * (N2_VIOLET_SHARE * violet[c] + N2_PINK_SHARE * pink[c] + N2_ORANGE_SHARE * orange[c]))
+        });
         xyz_to_rgb_keep_luminance(xyz)
     })
 }
@@ -298,26 +322,51 @@ mod tests {
         assert!((peak / 51.0 - 1.0).abs() <= 0.1, "{peak} G0");
     }
 
-    /// The colour by height comes from the lines: classic is green wherever it shows; red tops are red high up and
-    /// green low down; the storm's lower border is pink-violet (red and blue over green) and green above it.
+    /// The colour by height comes from the lines, as the owner's photographs show it (2026-10-24): every look's
+    /// brightest, lower edge is lime (green over red over blue), its body 40 km over the border cyan-green to teal
+    /// (green over blue over red), and blue 75 km up; no look is ever red or maroon (red over green with little blue)
+    /// or grey (its hues cancelling) where it shows at 1 % of its peak. Classic carries at most a trace of violet at the
+    /// top; magenta tops run on into a faint magenta-purple; the storm's lower border is pink-violet (red and blue over
+    /// green) and green above it.
     #[test]
     fn each_preset_has_its_colours_by_height() {
         let at = |color: &str| Aurora::new(&AuroraParams { color: color.to_string(), ..AuroraParams::default() }, 1.0);
-        let classic = at("classic");
-        let most = (0..TABLE).map(|i| luminance(classic.table[i])).fold(0.0, f32::max);
-        for i in 0..TABLE {
-            let c = classic.table[i];
-            if luminance(c) >= 0.05 * most {
-                assert!(c.y > c.x && c.y > c.z, "classic at table entry {i}: {c:?}");
+        let height = |i: usize| TABLE_LOW_KM + (i as f32 + 0.5) * (TOP_KM - TABLE_LOW_KM) / TABLE as f32;
+        for color in ["classic", "magenta tops", "storm"] {
+            let a = at(color);
+            let lime = a.table.iter().copied().fold(Vec3f::default(), |b, c| if luminance(c) > luminance(b) { c } else { b });
+            assert!(lime.y > lime.x && lime.x > lime.z, "{color} at its brightest: {lime:?}");
+            let body = a.profile(BORDER_KM + 40.0);
+            assert!(body.y > body.z && body.z > body.x, "{color} 40 km over the border: {body:?}");
+            let high = a.profile(BORDER_KM + 75.0);
+            assert!(high.z > high.y && high.z > high.x, "{color} 75 km over the border: {high:?}");
+            let peak = luminance(lime);
+            for i in 0..TABLE {
+                let c = a.table[i];
+                if luminance(c) < 0.01 * peak {
+                    continue;
+                }
+                let (most, least) = (c.x.max(c.y).max(c.z), c.x.min(c.y).min(c.z));
+                assert!(least < 0.55 * most, "{color} at {} km is grey: {c:?}", height(i));
+                assert!(!(c.x > c.y && c.x > 2.0 * c.z), "{color} at {} km is red: {c:?}", height(i));
             }
         }
-        let tops = at("red tops");
+        let classic = at("classic");
+        for i in 0..TABLE {
+            let c = classic.table[i];
+            if height(i) > BORDER_KM + 10.0 {
+                assert!(c.x <= 0.6 * c.y.max(c.z), "classic at {} km carries more than a trace of magenta: {c:?}", height(i));
+            }
+        }
+        let tops = at("magenta tops");
         let (high, low) = (tops.profile(230.0), tops.profile(120.0));
-        assert!(high.x > high.y, "red tops at 230 km: {high:?}");
-        assert!(low.y > low.x, "red tops at 120 km: {low:?}");
-        // refs §5.1: the red tops read orange, then deep red, at about 2.4 to 3.6 G0 face-on (630 nm at 10 to 15 kR)
-        let top = (180..=300).map(|h| luminance(tops.profile(h as f32))).fold(0.0, f32::max) / g0();
-        assert!((2.4..=3.6).contains(&top), "red tops' brightest red above 180 km: {top} G0");
+        assert!(high.x > high.y && high.z > high.y && high.z > 0.6 * high.x, "magenta tops at 230 km: {high:?}");
+        assert!(low.y > low.x && low.y > low.z, "magenta tops at 120 km: {low:?}");
+        // refs §5.1: 630 nm at 10 to 15 kR face-on, about 2.4 to 3.6 G0, at the default Strength (3), over the green's
+        // end at 220 km: faint beside the green's 46 G0 face-on (the table is at Strength 1)
+        let top = (210..=300).map(|h| luminance(tops.profile(h as f32))).fold(0.0, f32::max) * AuroraParams::default().strength / g0();
+        println!("magenta tops: {top:.2} G0 over 210 km at the default Strength, at 230 km {high:?}");
+        assert!((2.4..=3.6).contains(&top), "magenta tops' brightest above 210 km at the default Strength: {top} G0");
         let storm = at("storm");
         // refs §5.1: the nitrogen fills the bottom of a storm's sheet, the green held off it for 5 to 10 km, so its
         // fringe is several km tall (a few texels at 1024), not a seam

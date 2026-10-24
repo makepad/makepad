@@ -116,14 +116,16 @@ pub const AURORA_FOLDS_RANGE: (f32, f32) = (0.0, 1.0);
 /// What clamp() keeps of `AuroraParams::rays`.
 pub const AURORA_RAYS_RANGE: (f32, f32) = (0.0, 1.0);
 /// Accepted values of `AuroraParams::color`; the first is the fallback.
-pub const AURORA_COLOR_NAMES: &[&str] = &["classic", "red tops", "storm", "custom"];
+pub const AURORA_COLOR_NAMES: &[&str] = &["classic", "magenta tops", "storm", "custom"];
 /// The colour presets' line amounts (green 557.7 nm, red 630.0 nm, nitrogen: 427.8 nm plus the first positive
-/// bands), each x 50 kR on the brightest lines of sight at Strength 1: classic, red tops, storm (plan hdri-7 §4, refs
-/// §5.1; Task 4 pins their colours by height). Classic's red and nitrogen are small enough that it is green wherever
-/// it shows at 5 % of its peak (with 0.06 and 0.2 its nitrogen fringe at 103.75 km and its red top at 186 to 189 km
-/// outshone the green; with the first positive bands' 600 nm group in the nitrogen, 0.1 outshone it at 103.75 km).
-/// Red tops' red, 0.8, is 12 kR face-on at about 2.9 G0 (refs: 10 to 15 kR, 2.4 to 3.6 G0).
-pub const AURORA_PRESET_MIX: [[f32; 3]; 3] = [[1.0, 0.04, 0.05], [1.0, 0.8, 0.2], [2.0, 0.4, 2.0]];
+/// bands), each x 50 kR on the brightest lines of sight at Strength 1: classic, magenta tops, storm (plan hdri-7 §4,
+/// refs §5.1; Task 4 pins their colours by height). Classic's red and nitrogen are small enough that its lower edge
+/// and body are green and teal, with at most a trace of violet at the top (with 0.06 and 0.2 its nitrogen fringe at
+/// 103.75 km and its red top at 186 to 189 km outshone the green; with the first positive bands' 600 nm group in the
+/// nitrogen, 0.1 outshone it at 103.75 km). Magenta tops' red, 0.25, is 11 kR face-on at the default Strength 3,
+/// about 3.2 G0 over 210 km with the bands' blue (refs: 10 to 15 kR, 2.4 to 3.6 G0): faint beside the green, as the
+/// owner's photographs show it.
+pub const AURORA_PRESET_MIX: [[f32; 3]; 3] = [[1.0, 0.04, 0.05], [1.0, 0.25, 0.2], [2.0, 0.4, 2.0]];
 
 /// clamp()'s rule for one number: NaN is `fallback`, anything else
 /// (infinities too) is held into `lo..=hi`.
@@ -578,7 +580,8 @@ pub struct NebulaParams {
 #[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
 pub struct AuroraParams {
     pub on: bool,
-    /// The green line's brightest column / 50 kR, 0.02..=20 (IBC I to IV; 1: 50 kR).
+    /// The green line's brightest column / 50 kR, 0.02..=20 (IBC I to IV; 1: 50 kR). The default is 3: a clear arc at
+    /// the night presets' Auto exposure (owner, 2026-10-24).
     pub strength: f32,
     /// The line mix, one of AURORA_COLOR_NAMES. Read through `color()`.
     pub color: String,
@@ -603,20 +606,20 @@ pub struct AuroraParams {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuroraColor {
     Classic,
-    RedTops,
+    MagentaTops,
     Storm,
     Custom,
 }
 
 impl AuroraColor {
     /// In AURORA_COLOR_NAMES' order.
-    pub const ALL: [AuroraColor; 4] = [AuroraColor::Classic, AuroraColor::RedTops, AuroraColor::Storm, AuroraColor::Custom];
+    pub const ALL: [AuroraColor; 4] = [AuroraColor::Classic, AuroraColor::MagentaTops, AuroraColor::Storm, AuroraColor::Custom];
 
     /// The string stored in `AuroraParams::color`.
     pub fn as_str(self) -> &'static str {
         match self {
             AuroraColor::Classic => "classic",
-            AuroraColor::RedTops => "red tops",
+            AuroraColor::MagentaTops => "magenta tops",
             AuroraColor::Storm => "storm",
             AuroraColor::Custom => "custom",
         }
@@ -1586,7 +1589,7 @@ impl Default for AuroraParams {
     fn default() -> Self {
         AuroraParams {
             on: true,
-            strength: 1.0,
+            strength: 3.0,
             color: "classic".to_string(),
             mix: AURORA_PRESET_MIX[0],
             direction_deg: 0.0,
@@ -1909,8 +1912,8 @@ impl NebulaParams {
 impl AuroraParams {
     /// `color` as clamp() holds it (`is_choice`: case and space forgiving); anything else is Classic.
     pub fn color(&self) -> AuroraColor {
-        if is_choice(&self.color, "red tops") {
-            AuroraColor::RedTops
+        if is_choice(&self.color, "magenta tops") {
+            AuroraColor::MagentaTops
         } else if is_choice(&self.color, "storm") {
             AuroraColor::Storm
         } else if is_choice(&self.color, "custom") {
@@ -1924,7 +1927,7 @@ impl AuroraParams {
     pub fn line_mix(&self) -> [f32; 3] {
         match self.color() {
             AuroraColor::Classic => AURORA_PRESET_MIX[0],
-            AuroraColor::RedTops => AURORA_PRESET_MIX[1],
+            AuroraColor::MagentaTops => AURORA_PRESET_MIX[1],
             AuroraColor::Storm => AURORA_PRESET_MIX[2],
             AuroraColor::Custom => self.mix,
         }
@@ -4049,12 +4052,14 @@ mod night_param_tests {
         p.sky.night.aurora = Some(AuroraParams::default());
         assert!(p.clamp().is_empty(), "the defaults are inside their own ranges");
         assert_eq!(HdriParams::from_json(&p.to_json()), Ok(p.clone()));
+        // owner, 2026-10-24: at Strength 1 the default arc was a faint smear at the night presets' Auto exposure
+        assert_eq!(AuroraParams::default().strength, 3.0, "the aurora's default Strength");
         p.sky.night.milky_way = Some(MilkyWayParams { on: true, strength: f32::INFINITY, turn_deg: 370.0, tilt_deg: f32::NAN, core: -1.0, dust: 3.0 });
         p.sky.night.nebulas = Some(NebulaParams { on: true, amount: 2.0, size: 0.0, brightness: f32::NEG_INFINITY, realism: f32::NAN, seed: u32::MAX });
         p.sky.night.aurora = Some(AuroraParams {
             on: true,
             strength: 0.0,
-            color: " Red Tops ".to_string(),
+            color: " Magenta Tops ".to_string(),
             mix: [f32::NAN, 3.0, -1.0],
             direction_deg: -90.0,
             height_deg: 90.0,
@@ -4081,7 +4086,7 @@ mod night_param_tests {
         let aur = p.sky.night.aurora.clone().unwrap();
         assert_eq!(
             (aur.strength, aur.color.as_str(), aur.mix, aur.direction_deg, aur.height_deg, aur.width_deg, aur.folds, aur.rays),
-            (0.02, "red tops", [AURORA_PRESET_MIX[0][0], 2.0, 0.0], 270.0, 75.0, 10.0, 1.0, 0.5)
+            (0.02, "magenta tops", [AURORA_PRESET_MIX[0][0], 2.0, 0.0], 270.0, 75.0, 10.0, 1.0, 0.5)
         );
         assert!(p.clamp().is_empty(), "clamping twice changes nothing");
         assert_eq!(HdriParams::from_json(&p.to_json()), Ok(p.clone()));
@@ -4150,7 +4155,7 @@ mod night_param_tests {
     /// anything else is the first; the line mix is the preset's or the custom one.
     #[test]
     fn every_aurora_colour_round_trips_through_its_accessor() {
-        assert_eq!(AURORA_COLOR_NAMES, &["classic", "red tops", "storm", "custom"]);
+        assert_eq!(AURORA_COLOR_NAMES, &["classic", "magenta tops", "storm", "custom"]);
         for (i, name) in AURORA_COLOR_NAMES.iter().enumerate() {
             let mut p = HdriParams::default();
             p.sky.night.aurora = Some(AuroraParams { color: name.to_string(), ..AuroraParams::default() });
@@ -4163,13 +4168,13 @@ mod night_param_tests {
         // Every variant has its name listed: the match stops compiling when a variant is added.
         for c in AuroraColor::ALL {
             match c {
-                AuroraColor::Classic | AuroraColor::RedTops | AuroraColor::Storm | AuroraColor::Custom => assert!(AURORA_COLOR_NAMES.contains(&c.as_str())),
+                AuroraColor::Classic | AuroraColor::MagentaTops | AuroraColor::Storm | AuroraColor::Custom => assert!(AURORA_COLOR_NAMES.contains(&c.as_str())),
             }
         }
         let custom = AuroraParams { color: "custom".to_string(), mix: [0.3, 0.4, 0.5], ..AuroraParams::default() };
         assert_eq!(custom.line_mix(), [0.3, 0.4, 0.5]);
         assert_eq!(AuroraParams { mix: [0.3, 0.4, 0.5], ..AuroraParams::default() }.line_mix(), AURORA_PRESET_MIX[0], "classic ignores the mix");
-        assert_eq!(AuroraParams { color: "red tops".into(), ..AuroraParams::default() }.line_mix(), AURORA_PRESET_MIX[1]);
+        assert_eq!(AuroraParams { color: "magenta tops".into(), ..AuroraParams::default() }.line_mix(), AURORA_PRESET_MIX[1]);
         assert_eq!(AuroraParams { color: "storm".into(), ..AuroraParams::default() }.line_mix(), AURORA_PRESET_MIX[2]);
         assert_eq!(AuroraParams::default().mix, AURORA_PRESET_MIX[0]);
     }
