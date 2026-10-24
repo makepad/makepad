@@ -426,9 +426,13 @@ impl Env {
     /// The distance is None where the texel has no coverage (the glow, a prop's light over the sky) or the band no
     /// distance plane, and where the plane reads 0 (a distance the handoff made safe), which no surface the strip draws
     /// stands at. The light is None where there is none or the band has no light plane. The colour is `city_at`'s.
+    /// Where the strip gives way to this map's floor (`gives_way`) it is read on either side of the horizon apart
+    /// (`SkylineBand::sample_skirted_lit_parted`): it leaves its flat ground clear from the horizon down, so a look just
+    /// over the horizon, and the puddle that mirrors it, sees the near rise standing there, not the clear under it and
+    /// the sky behind (plan hdri-6 fix wave 1, round 3).
     fn city_far_at(&self, d: Vec3f) -> Option<([f32; 4], Option<f32>, Option<skyline::TexelLight>)> {
         let ((band, turn), skirt) = (self.skyline.as_ref()?, self.city_skirt.as_ref()?);
-        let (s, far, light) = band.sample_skirted_lit(skirt, d, *turn);
+        let (s, far, light) = if self.gives_way() { band.sample_skirted_lit_parted(skirt, d, *turn) } else { band.sample_skirted_lit(skirt, d, *turn) };
         Some((s, far.filter(|&far| far > 0.0), light))
     }
 

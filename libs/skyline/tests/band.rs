@@ -1519,7 +1519,8 @@ fn a_wet_ground_mirrors_only_what_stands_above_it() {
 /// lays its puddles; only what stands keeps its own pixels, above the horizon. The land and the shore below the horizon
 /// are the dry band's kept by 1 - the share (its colour and its coverage), whatever was drawn before the ground there
 /// (the ranges, the front treeline, the glow, the city, the props behind the near rise) giving way with it.
-/// Everything else is the host's dry band: the sky and what stands in it, the lakes (which keep their own Water
+/// Everything else is the host's dry band: the sky and what stands in it but the near rise's face (a bank under the
+/// trees, `over_a_hosts_wet_floor_the_near_rise_is_a_bank_under_the_trees`), the lakes (which keep their own Water
 /// reflections), and at night the sea from its distance out (bit for bit; by day it is the floor's water,
 /// `by_day_over_a_hosts_wet_floor_the_sea_is_the_floors_water`), by day and at night (`SkyLight::plan`, the decode).
 /// The app's scene, a shore in front of the sea (Sea distance 0.3) and lakes, and props_heavy's. Before (fix round 1):
@@ -1535,6 +1536,7 @@ fn over_a_hosts_wet_ground_the_band_gives_way_below_the_horizon() {
     let (z, edge, w) = (Zones::new(&p), makepad_skyline::sea_edge_rad(&p), 2048usize);
     let (px, eye) = (std::f64::consts::TAU / w as f64, makepad_skyline::props::kit::EYE * p[P::Size]);
     assert!(scene != "app" || !z.lakes.is_empty(), "the premise: lakes at seed 7");
+    let rise = rise_tops(&p, w);
     // the coast the day's sea fades into over a host's ground (`coast_at`: the ring's two nearest entries)
     let coast = makepad_skyline::coast_ring(|u| z.land(u));
     let off_coast = |u: f64| { let i = (u * RING as f64 - 0.5).floor() as i64; [i, i + 1].iter().all(|&i| coast[i.rem_euclid(RING as i64) as usize] == 0.0) };
@@ -1553,7 +1555,8 @@ fn over_a_hosts_wet_ground_the_band_gives_way_below_the_horizon() {
                 let (i, u) = (y * w + x, (x as f64 + 0.5) / w as f64);
                 let (d, t, land) = (dry.texels[i], wet.texels[i], z.land(u));
                 let what = format!("x {x}, {:.2} deg: wet {t:?}, dry {d:?}", -al.to_degrees());
-                if al < -1.5 * px { tally(&mut above, t == d, what); continue; }
+                // (the near rise's face and its top's texels are a bank under the trees: `rise_tops`)
+                if al < -1.5 * px { if -al > rise[x] + 1.5 * px { tally(&mut above, t == d, what); } continue; }
                 if al <= 1.5 * px { continue; }
                 let in_lake = makepad_skyline::lakes::cover(&z.lakes, u, al, px, eye);
                 // land clear of every lake by a twentieth of a texel too: the shader's cover is the CPU's to 2 % of a texel
@@ -1575,6 +1578,77 @@ fn over_a_hosts_wet_ground_the_band_gives_way_below_the_horizon() {
             assert!(n.1.is_none(), "{name}: {what} fails at {}", n.1.unwrap());
             assert!(n.0 >= least, "{name}, the premise: {} texels of {what}", n.0);
         }
+    }
+    }
+}
+
+/// The top of the near rise over each of `w` columns round the turn at `p` (raw elevation, rad: the column's ground rise
+/// over its off-centre factor, `terrain::columns`' row 6, as `DrawSkyGround` covers it and `SceneCtx::rise` takes it).
+fn rise_tops(p: &Params, w: usize) -> Vec<f64> {
+    let m = terrain::margin(p, 1.0, w);
+    let cols = terrain::columns(&Zones::new(p), p, 0.0, 1.0, w, m);
+    (0..w).map(|x| { let g = cols[(x + m) * terrain::ROWS + 6]; g[1] as f64 / (g[2] as f64).max(1e-3) }).collect()
+}
+
+/// Plan hdri-6 fix wave 1, round 3 (ruling 1's acceptance: under a host's fully wet floor no light band stands between
+/// the treeline and its reflection, the reflected treeline starting right below what stands): over a host's ground
+/// under standing water the near rise's face, which stands, is a bank under the trees, not the floor. The host's ground
+/// it takes when dry (`host_ground`: the map's ground ring, under a wet ground the damp ground, its sky sheen included)
+/// gives way to the front treeline's own colour (its silhouettes' 0.6 and its daylight, albedo 0.07 lit half from
+/// above) by the floor's share (`SkyLight::floor_share`), so at Wet ground 1.00 the rise and its reflection in the
+/// host's floor read as the treeline's foot. The app's scene (Sea distance 0.3, lakes) and props_heavy's, 4096 px, the
+/// land columns' texels wholly on the rise's face (clear of the horizon and of the rise's top by a texel): at noon,
+/// shares 0.5 and 1, each is the dry band's moved toward the bank by the share, in colour and coverage; and at noon and
+/// at night (`SkyLight::plan`, the decode), share 1, their mean luminance is no more than the treeline's right above
+/// them (the 0.25 degrees over the rise's top: its trees and what shows between them) by RISE_NOISE. The host's ground
+/// is half its low ring, about what a wet ground's sheen shows at the horizon. Before: the rise kept the host's ground,
+/// the damp ground with its sheen: at Wet ground 1.00 a light band 0.8 degrees tall with its reflection.
+#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn over_a_hosts_wet_floor_the_near_rise_is_a_bank_under_the_trees() {
+    const RISE_NOISE: f32 = 0.01;
+    let mut app = Params::default();
+    for (k, v) in [(P::SeaD, 0.3), (P::PrLake, 1.0)] { app.set(k as usize, v); }
+    let half = |l: SkyLight| SkyLight { ground: [std::array::from_fn(|c| 0.5 * l.ring_low[0][c]); RING], ..l };
+    let noon_host = half(SkyLight { host_ground: true, ..noon([1.2, 1.3, 1.5]) });
+    // the front treeline's own colour where its trees are solid (`DrawSkyRange`, k 5)
+    let (sil, up) = (makepad_skyline::params::SIL, 0.5 + 0.5 * noon_host.sun_el_deg.to_radians().sin());
+    let bank: [f32; 3] = std::array::from_fn(|c| 0.6 * sil[c] * noon_host.gpu_gain() + 0.07 * (noon_host.ambient_rgb[c] + noon_host.sun_rgb[c] * up));
+    for (scene, p) in [("app", Some(app)), ("props_heavy", baseline("props_heavy").map(|(p, _)| p))] {
+    let Some(p) = p else { eprintln!("no baseline props_heavy, skipped"); continue };
+    let (z, w) = (Zones::new(&p), 4096usize);
+    let (px, rise) = (std::f64::consts::TAU / w as f64, rise_tops(&p, w));
+    let dry = render_planned(&p, w, &noon_host);
+    // the land columns' texels wholly on the rise's face, and the treeline's right above them
+    let (mut face, mut trees) = (vec![], vec![]);
+    for x in (0..w).filter(|&x| z.land((x as f64 + 0.5) / w as f64) > 0.95) {
+        for y in 0..dry.h {
+            let el = row_el(&p, &dry, y);
+            if el > px && el < rise[x] - px { face.push(y * w + x); }
+            if el > rise[x] + px && el < rise[x] + px + 0.25f64.to_radians() { trees.push(y * w + x); }
+        }
+    }
+    assert!(face.len() > 1000 && trees.len() > 1000, "{scene}, the premise: {} texels on the rise's face, {} over it", face.len(), trees.len());
+    for share in [0.5f32, 1.0] {
+        let wet = render_planned(&p, w, &SkyLight { wet: share, ..noon_host.clone() });
+        let (mut worst, mut miss) = (0.0f32, None);
+        for &i in &face {
+            let (d, t) = (dry.texels[i], wet.texels[i]);
+            for c in 0..4 {
+                let want = if c < 3 { d[c] + share * (bank[c] - d[c]) } else { d[3] };
+                let e = (t[c] - want).abs() / want.abs().max(1e-3);
+                worst = worst.max(e);
+                if e > 2e-3 && miss.is_none() { miss = Some(format!("x {}, row {}: wet {t:?}, dry {d:?}, the bank {bank:?}", i % w, i / w)); }
+            }
+        }
+        println!("{scene}, noon, share {share}: {} texels on the rise's face, the dry band's moved toward the bank by the share to {worst:.2e}", face.len());
+        assert!(miss.is_none(), "{scene}, noon, share {share}: the rise's face is not the dry band's moved toward the bank: {}", miss.unwrap());
+    }
+    for (name, light) in [("noon", noon_host.clone()), ("night", half(generator_light(-20.0)))] {
+        let wet = render_planned(&p, w, &SkyLight { wet: 1.0, ..light });
+        let mean = |m: &[usize]| m.iter().map(|&i| lum(&wet.texels[i])).sum::<f32>() / m.len() as f32;
+        let (f, t) = (mean(&face), mean(&trees));
+        println!("{scene}, {name}, share 1: the rise's face {f:.4e}, the treeline right above it {t:.4e} ({:+.2} %)", 100.0 * (f / t - 1.0));
+        assert!(f <= t * (1.0 + RISE_NOISE), "{scene}, {name}: at share 1 the rise's face ({f:.4e}) stands {:.1} % over the treeline right above it ({t:.4e})", 100.0 * (f / t - 1.0));
     }
     }
 }

@@ -326,6 +326,16 @@ script_mod! {
             if self.host_ground > 0.5 { let u = self.view_raw().x; c = mix(c, self.ring_at(u, 0.625), max(land, self.coast_at(u))) }
             // the land's own colour (the host's ground on its land; what a host's wet floor takes the place of)
             let cl = c
+            // over a host's wet floor (`host_wet`) the near rise's face, which stands, is a bank under the trees, not the
+            // floor: the host's ground (the damp ground, its sky sheen included) gives way to the front treeline's own
+            // colour (DrawSkyRange's where its trees are solid) by the floor's share, so at Wet ground 1.00 the rise and
+            // its reflection in the floor read as the treeline's foot (plan hdri-6 fix wave 1, ruling 1's acceptance)
+            var rc = cl
+            if self.host_wet > 0.0 {
+                let bank = self.sil * 0.6 + self.day_lit(vec3(0.07, 0.07, 0.07), 1.0, 0.5 + 0.5 * sin(self.sun_el))
+                rc = cl + (bank - cl) * self.host_wet
+                if al <= 0.0 { c = rc }
+            }
             // water standing on the land (a lake, the host's wetness on the land and the shore): (1 - Fresnel) of the ground
             // shows through it, darkened as through a puddle, and by Fresnel the dark water the night sea shows (its 0.5 sil);
             // the water shader adds what it mirrors
@@ -350,7 +360,9 @@ script_mod! {
                 let gw = self.host_wet * (1.0 - max(ws.x * (1.0 - coast * self.day()), ws.y)) * self.under_floor()
                 var lc = cl
                 if ws.x > 0.0 { lc = gr }
-                return vec4(max(c * gm - lc * gw, vec3(0.0, 0.0, 0.0)), gm - gw)
+                // (the share of a texel across the horizon over it is the rise's face: the bank)
+                let up = max(gm - self.under_floor(), 0.0)
+                return vec4(max(c * gm - lc * gw + (rc - c) * up, vec3(0.0, 0.0, 0.0)), gm - gw)
             }
             return vec4(c * gm, gm)
         }

@@ -129,7 +129,9 @@ impl SkyLight {
     /// its puddles as its own field lays them, their water and what they mirror (the skyline at the mirrored elevation,
     /// through the host's weather), the strip's ground between them: so the band and the host's floor below it are one
     /// floor (plan hdri-6 §5), the floor's dry ground never showing through and the reflection starting right under
-    /// what stands (fix wave 1, the owner's D1 applied literally). The lakes and the sea stay the strip's.
+    /// what stands (fix wave 1, the owner's D1 applied literally). The lakes and the sea stay the strip's. The near
+    /// rise's face, which stands, is a bank under the trees: by the same share its colour gives way from the host's
+    /// ground to the front treeline's own, so at Wet ground 1.00 the treeline and its reflection meet at the horizon.
     pub fn leaves_land(&self) -> bool {
         self.host_ground && self.wet > 0.0
     }

@@ -125,7 +125,7 @@ impl SkylineBand {
     /// it the skirt fading out over SKIRT_DEG (smoothstep), continuous across the band's bottom
     /// edge. `skirt` is this band's own (`skirt()`).
     pub fn sample_skirted(&self, skirt: &BandSkirt, d: Vec3f, turn_deg: f32) -> [f32; 4] {
-        self.skirted::<false>(skirt, d, turn_deg).0
+        self.skirted::<false>(skirt, d, turn_deg, false).0
     }
 
     /// `sample_skirted` with the distance (m) of what the texel shows: the coverage-weighted mean of its surfaces
@@ -133,7 +133,7 @@ impl SkylineBand {
     /// its colour, and the blend between the two over FADE_DEG). None where the coverage is 0 or the band has no
     /// distance plane. The colour is `sample_skirted`'s, bit for bit.
     pub fn sample_skirted_far(&self, skirt: &BandSkirt, d: Vec3f, turn_deg: f32) -> ([f32; 4], Option<f32>) {
-        let (c, far, _) = self.skirted::<true>(skirt, d, turn_deg);
+        let (c, far, _) = self.skirted::<true>(skirt, d, turn_deg, false);
         (c, far)
     }
 
@@ -142,7 +142,17 @@ impl SkylineBand {
     /// none in the skirt below (the skirt is the strip's ground, all surface). None where there is no light or the band
     /// has no light plane. The colour and the distance are `sample_skirted_far`'s, bit for bit.
     pub fn sample_skirted_lit(&self, skirt: &BandSkirt, d: Vec3f, turn_deg: f32) -> ([f32; 4], Option<f32>, Option<TexelLight>) {
-        self.skirted::<true>(skirt, d, turn_deg)
+        self.skirted::<true>(skirt, d, turn_deg, false)
+    }
+
+    /// `sample_skirted_lit` with the band read on either side of the horizon apart (`rows_at`): a read above it blends
+    /// only rows wholly above it, one below it only rows wholly below (the row the horizon crosses holds both, the
+    /// ground below the horizon with what stands above it, and is read on neither side). For a strip that leaves part
+    /// of its ground below the horizon clear (makepad_skyline's `SkyLight::floor_share`): a look just over the horizon,
+    /// and the puddle that mirrors it, sees what stands there, not the strip's ground or the clear under it. Elsewhere
+    /// `sample_skirted_lit`.
+    pub fn sample_skirted_lit_parted(&self, skirt: &BandSkirt, d: Vec3f, turn_deg: f32) -> ([f32; 4], Option<f32>, Option<TexelLight>) {
+        self.skirted::<true>(skirt, d, turn_deg, true)
     }
 
     /// The band's own share of what the map reads along `d` (`sample_skirted`): 1 in its rows (its lowest FADE_DEG
@@ -160,7 +170,8 @@ impl SkylineBand {
     }
 
     /// `sample_skirted`, and with `FAR` the distance and the light (`sample_skirted_lit`): one body, so the colours are one.
-    fn skirted<const FAR: bool>(&self, skirt: &BandSkirt, d: Vec3f, turn_deg: f32) -> ([f32; 4], Option<f32>, Option<TexelLight>) {
+    /// `parted`: the band read on either side of the horizon apart (`sample_skirted_lit_parted`).
+    fn skirted<const FAR: bool>(&self, skirt: &BandSkirt, d: Vec3f, turn_deg: f32, parted: bool) -> ([f32; 4], Option<f32>, Option<TexelLight>) {
         let bottom = self.bottom_deg;
         // Above the band or below its skirt, nothing (before the place's arcsine and
         // arctangent, which most of a map's texels would pay for nothing). The test
@@ -178,15 +189,15 @@ impl SkylineBand {
         // The distance of premultiplied distance pd under alpha a.
         let far = |pd: f32, a: f32| (FAR && self.has_dist() && a > 0.0).then(|| pd / a);
         if el >= bottom + FADE_DEG {
-            let (c, pd) = self.bilinear_far::<FAR>(el, u);
-            return (c, far(pd, c[3]), self.light_at::<FAR>(el, u, 1.0));
+            let (c, pd) = self.bilinear_far::<FAR>(el, u, parted);
+            return (c, far(pd, c[3]), self.light_at::<FAR>(el, u, 1.0, parted));
         }
         let (ground, gpd) = (skirt.at(u), if FAR { skirt.dist_at(u) } else { 0.0 });
         if el >= bottom {
-            let (sharp, spd) = self.bilinear_far::<FAR>(el, u);
+            let (sharp, spd) = self.bilinear_far::<FAR>(el, u, parted);
             let t = smooth((el - bottom) / FADE_DEG);
             let c: [f32; 4] = std::array::from_fn(|c| ground[c] + (sharp[c] - ground[c]) * t);
-            return (c, far(gpd + (spd - gpd) * t, c[3]), self.light_at::<FAR>(el, u, t));
+            return (c, far(gpd + (spd - gpd) * t, c[3]), self.light_at::<FAR>(el, u, t, parted));
         }
         let fade = smooth((el - (bottom - SKIRT_DEG)) / SKIRT_DEG);
         let c = ground.map(|c| c * fade);
@@ -203,20 +214,19 @@ impl SkylineBand {
         self.light.len() >= self.w * self.h
     }
 
-    /// With `FAR`, the light at elevation `el` (inside the band) and strip u, read with the colour's lerps, `share` of it
-    /// (the band's share over its lowest FADE_DEG); None without light or without a light plane.
-    fn light_at<const FAR: bool>(&self, el: f32, u: f32, share: f32) -> Option<TexelLight> {
+    /// With `FAR`, the light at elevation `el` (inside the band) and strip u, read with the colour's lerps (`parted` as
+    /// theirs), `share` of it (the band's share over its lowest FADE_DEG); None without light or without a light plane.
+    fn light_at<const FAR: bool>(&self, el: f32, u: f32, share: f32, parted: bool) -> Option<TexelLight> {
         if !FAR || !self.has_light() {
             return None;
         }
-        let (w, h) = (self.w, self.h);
+        let w = self.w;
         let x = u * w as f32 - 0.5;
-        let y = ((self.top_deg - el) / (self.top_deg - self.bottom_deg) * h as f32 - 0.5).clamp(0.0, (h - 1) as f32);
-        let (x0, y0) = (x.floor(), y.floor());
-        let (fx, fy) = (x - x0, y - y0);
+        let x0 = x.floor();
+        let fx = x - x0;
+        let (r0, r1, fy) = self.rows_at(el, parted);
         let column = |i: f32| (i as i64).rem_euclid(w as i64) as usize;
         let (c0, c1) = (column(x0), column(x0 + 1.0));
-        let (r0, r1) = (y0 as usize, (y0 as usize + 1).min(h - 1));
         let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
         let at = |k: usize| {
             let l = |r: usize, c: usize| self.light[r * w + c][k];
@@ -242,21 +252,45 @@ impl SkylineBand {
 
     /// The bilinear read at elevation `el` (inside the band) and strip u.
     fn bilinear(&self, el: f32, u: f32) -> [f32; 4] {
-        self.bilinear_far::<false>(el, u).0
+        self.bilinear_far::<false>(el, u, false).0
+    }
+
+    /// The two rows a read at elevation `el` (inside the band) blends and the weight of the lower one. `parted`: never
+    /// across the horizon (`sample_skirted_lit_parted`): above it only the rows wholly above it (their bottom edges at
+    /// or over it), below it only those wholly below (their top edges at or under it), the nearest of them where the
+    /// read falls between.
+    fn rows_at(&self, el: f32, parted: bool) -> (usize, usize, f32) {
+        let h = self.h;
+        let span = self.top_deg - self.bottom_deg;
+        let y = ((self.top_deg - el) / span * h as f32 - 0.5).clamp(0.0, (h - 1) as f32);
+        let y0 = y.floor();
+        let (r0, r1) = (y0 as usize, (y0 as usize + 1).min(h - 1));
+        let fy = y - y0;
+        if !parted {
+            return (r0, r1, fy);
+        }
+        // the horizon's place in rows: rows 0 .. above are wholly over it, below .. h wholly under it
+        let at = self.top_deg / span * h as f32;
+        let (above, below) = (at.floor().clamp(1.0, h as f32) as usize, at.ceil().clamp(0.0, (h - 1) as f32) as usize);
+        if el >= 0.0 && r1 >= above {
+            (above - 1, above - 1, 0.0)
+        } else if el < 0.0 && r0 < below {
+            (below, below, 0.0)
+        } else {
+            (r0, r1, fy)
+        }
     }
 
     /// The bilinear read at elevation `el` (inside the band) and strip u, and with `FAR` its premultiplied distance
-    /// (a D, read with the same lerps; 0 without a distance plane).
-    fn bilinear_far<const FAR: bool>(&self, el: f32, u: f32) -> ([f32; 4], f32) {
-        let (w, h) = (self.w, self.h);
-        let span = self.top_deg - self.bottom_deg;
+    /// (a D, read with the same lerps; 0 without a distance plane). `parted`: as `rows_at`.
+    fn bilinear_far<const FAR: bool>(&self, el: f32, u: f32, parted: bool) -> ([f32; 4], f32) {
+        let w = self.w;
         let x = u * w as f32 - 0.5;
-        let y = ((self.top_deg - el) / span * h as f32 - 0.5).clamp(0.0, (h - 1) as f32);
-        let (x0, y0) = (x.floor(), y.floor());
-        let (fx, fy) = (x - x0, y - y0);
+        let x0 = x.floor();
+        let fx = x - x0;
+        let (r0, r1, fy) = self.rows_at(el, parted);
         let column = |i: f32| (i as i64).rem_euclid(w as i64) as usize;
         let (c0, c1) = (column(x0), column(x0 + 1.0));
-        let (r0, r1) = (y0 as usize, (y0 as usize + 1).min(h - 1));
         let texel = |r: usize, c: usize| self.texels[r * w + c];
         // Lerps, not weights: four equal texels give exactly that texel back.
         let colour = lerp4(lerp4(texel(r0, c0), texel(r0, c1), fx), lerp4(texel(r1, c0), texel(r1, c1), fx), fy);
@@ -1270,11 +1304,13 @@ mod tests {
     /// round the turn (the preview bake's), square texels, the horizon 44.01 rows down: clear sky, the city's
     /// silhouettes 1.4 to 3.9 degrees up with the sky between them (two columns of three), over a dark treeline (rows
     /// 40-42; both 0.04 of the strip's own ground, the damp ring `ground_damp`, as dark against it as the app's at
-    /// night), the near rise in row 43 wholly above the horizon, and below the horizon the strip's flat ground, which
+    /// night), the near rise in row 43 wholly above the horizon (its face a bank under the trees by `share`: the damp
+    /// ground giving way to the treeline's colour), and below the horizon the strip's flat ground, which
     /// gives way to the map's floor at every depression (makepad_skyline's `under_floor`, from half a texel under the
     /// horizon): its ground kept by 1 - `share` (the strip leaves the puddles' mean share of it clear,
     /// `SkyLight::floor_share`), to the band's bottom, 6.3 degrees down. This is the strip's contract, which the GPU
-    /// band test `over_a_hosts_wet_ground_the_band_gives_way_below_the_horizon` holds the shaders to.
+    /// band tests `over_a_hosts_wet_ground_the_band_gives_way_below_the_horizon` and
+    /// `over_a_hosts_wet_floor_the_near_rise_is_a_bank_under_the_trees` hold the shaders to.
     fn wet_floor_band(l: &SkylineLight, share: f32) -> SkylineBand {
         let (w, h, row) = (1024usize, 62usize, 360.0 / 1024.0);
         let top = 44.01 * row;
@@ -1289,8 +1325,10 @@ mod tests {
                     33..=39 if (x / 8) % 3 != 0 => (g * 0.04, 1.0),
                     0..=39 => (Vec3f::default(), 0.0),
                     40..=42 => (g * 0.04, 1.0),
-                    // the near rise, 0.2 to 0.35 degrees high, the trees standing on it over the rest of the texel
-                    43 => (g * 0.55, 1.0),
+                    // the near rise, 0.2 to 0.35 degrees high, the trees standing on it over the rest of the texel; over
+                    // a wet floor its face is a bank under the trees, the damp ground giving way to the treeline's own
+                    // colour by the share (makepad_skyline's `DrawSkyGround`)
+                    43 => (g * (0.04 + 0.51 * (1.0 - share)), 1.0),
                     _ => (g * (1.0 - share * floor), 1.0 - share * floor),
                 };
                 [t.x, t.y, t.z, a]
@@ -1309,7 +1347,13 @@ mod tests {
     /// silhouettes (the mean of the rows 2 to 3 degrees up) and their reflection (the mean of the rows 2 to 3 degrees
     /// down, at least its top row) by more than STRIPE_NOISE of it. Before (fix round 1: the strip's ground kept whole
     /// down to the reflection of its near rise's top, 1.8 degrees): a band of ground between the treeline and its
-    /// reflection, by night at 1.00 29 % over both (at noon 26 %; at 0.5 2.8 and 1.7 %).
+    /// reflection, by night at 1.00 29 % over both (at noon 26 %; at 0.5 2.8 and 1.7 %). And at Wet ground 1.00 no row
+    /// within 0.45 degrees of the horizon (the near rise and its reflection) is brighter than both the treeline right
+    /// above it (the mean of the rows 0.6 to 1.2 degrees up) and its reflection right below (0.6 to 1.2 down) by more
+    /// than STRIPE_NOISE: the reflected treeline starts right below what stands. Before (fix round 2): by night 88 % and
+    /// at noon 85 % over both, the rise's face in the damp ground's colour, its sky sheen included (with that face a
+    /// bank under the trees, still 13 % by night: the band read across the horizon, the sky behind the clear row under
+    /// it showing through over the horizon and in the puddle that mirrors it).
     #[test]
     fn under_a_wet_floor_no_row_by_the_horizon_stands_out() {
         const STRIPE_NOISE: f32 = 0.01;
@@ -1351,12 +1395,25 @@ mod tests {
                     let excess = (mean(el) - silhouettes.max(reflection)) / mean(el);
                     if excess > worst { (worst, at) = (excess, el); }
                 }
-                println!("{name}, Wet ground {wet} (share {share:.3}): the silhouettes {silhouettes:.4e}, their reflection {reflection:.4e}; the most a row stands over both {:.2} % (at {at:.2} deg)", 100.0 * worst);
-                out.push((name, wet, worst, at));
+                // the treeline right above the near rise, 0.6 to 1.2 degrees up, and its reflection right below, 0.6 to
+                // 1.2 down: no row within 0.45 degrees of the horizon (the rise and its reflection) brighter than both
+                let near = |from: i32| (from..=from + 12).map(|k| mean(k as f32 * 0.05)).sum::<f32>() / 13.0;
+                let (treeline, mirrored) = (near(12), near(-24));
+                let (mut by, mut by_at) = (f32::MIN, 0.0);
+                for k in -9..=9 {
+                    let el = k as f32 * 0.05;
+                    let excess = (mean(el) - treeline.max(mirrored)) / mean(el);
+                    if excess > by { (by, by_at) = (excess, el); }
+                }
+                println!("{name}, Wet ground {wet} (share {share:.3}): the silhouettes {silhouettes:.4e}, their reflection {reflection:.4e}; the most a row stands over both {:.2} % (at {at:.2} deg); the treeline {treeline:.4e}, its reflection {mirrored:.4e}; the most a row by the horizon stands over both {:.2} % (at {by_at:.2} deg)", 100.0 * worst, 100.0 * by);
+                out.push((name, wet, worst, at, by, by_at));
             }
         }
-        for (name, wet, worst, at) in out {
+        for (name, wet, worst, at, by, by_at) in out {
             assert!(worst <= STRIPE_NOISE, "{name}, Wet ground {wet}: the row at {at:.2} degrees stands {:.1} % over both the silhouettes and their reflection", 100.0 * worst);
+            // (at Wet ground 1.00, where the floor mirrors everything: below it the puddles under the horizon mirror the
+            // rise and the strip's ground lies between them, both lighter than the treeline's reflection further down)
+            assert!(wet < 1.0 || by <= STRIPE_NOISE, "{name}, Wet ground {wet}: the row at {by_at:.2} degrees stands {:.1} % over both the treeline right above it and its reflection right below", 100.0 * by);
         }
     }
 
