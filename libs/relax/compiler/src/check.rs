@@ -13,7 +13,7 @@
 //! crate (and what it reaches) only.
 
 macro_rules! eprintln {
-    ($($arg:tt)*) => { if !crate::diag::enabled() { std::eprintln!($($arg)*); } };
+    ($($arg:tt)*) => { if !crate::diag::enabled() { stderr_line!($($arg)*); } };
 }
 
 use relax_types::next_solver::{Goal, ParamEnvId};
@@ -280,7 +280,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         let uu = unsafe { &*(upn as *const Unit) };
         let (prog, tcx) = (&uu.prog, &uu.tcx);
         let d = owner.owner;
-        if std::env::var_os("MAKEPAD_RUN_CHECK_TRACE").is_some() { std::eprintln!("makepad check: body {}", prog.def_path(d)); }
+        if std::env::var_os("MAKEPAD_RUN_CHECK_TRACE").is_some() { stderr_line!("makepad check: body {}", prog.def_path(d)); }
         let mut out = Outcome { errors: Vec::new(), diags: Vec::new(), seed: None, retry: false };
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // the syntax-level lints do not wait for the types (rustc runs them before analysis)
@@ -313,7 +313,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
                 Ok(r) => at_patterns = r.at_patterns,
                 Err(p) if p.is::<crate::preempt::NeedsLoad>() || crate::preempt::is_preempted(&*p) => std::panic::resume_unwind(p),
                 Err(_) => {
-                    if std::env::var_os("MAKEPAD_RUN_CHECK_TRACE").is_some() { std::eprintln!("makepad check: pattern analysis failed in {}", prog.def_path(d)); }
+                    if std::env::var_os("MAKEPAD_RUN_CHECK_TRACE").is_some() { stderr_line!("makepad check: pattern analysis failed in {}", prog.def_path(d)); }
                 }
             }
             if !crate::borrowck::enabled(options) {
@@ -379,7 +379,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         });
         outcomes.extend(results.lock().unwrap().drain(..));
     }
-    if std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some() { std::eprintln!("makepad check: owners {:.2} s, anon consts {:.2} s, bodies {:.2} s ({} jobs)", t_owners.as_secs_f64(), (t_par - t_owners).as_secs_f64(), (t_check.elapsed() - t_par).as_secs_f64(), jobs); }
+    if std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some() { stderr_line!("makepad check: owners {:.2} s, anon consts {:.2} s, bodies {:.2} s ({} jobs)", t_owners.as_secs_f64(), (t_par - t_owners).as_secs_f64(), (t_check.elapsed() - t_par).as_secs_f64(), jobs); }
     outcomes.sort_by_key(|(i, _)| *i);
     // owners that failed or met an unloaded module: every skipped file loaded, checked again
     // (only when some other crate's file is still skipped: else the first answer stands)
@@ -497,7 +497,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     lint_warnings.sort_by_cached_key(|e| error_position(e));
     lint_warnings.dedup();
     if emit && !crate::diag::enabled() {
-        for w in &lint_warnings { std::eprintln!("{}", w); }
+        for w in &lint_warnings { stderr_line!("{}", w); }
     }
     // rustc's order: by file, then position (a plain string sort put line 10 before line 3)
     errors.sort_by_cached_key(|e| error_position(e));

@@ -3,6 +3,32 @@
 //! main-thread run host: the HAL's permanent window (hal_run.rs, the boot document) with the
 //! compilation and the app domains as its guests (hal_host.rs). The Android host library
 //! (tools/run/android_host) is the same host as a shared object.
+// Diagnostics never panic: std's print macros panic when a write fails (ENOSPC on the session
+// log in a full tmpfs /tmp aborted a fleet Sandbox inside a lazy compile, 2026-10-23), so in this
+// crate every print is a write whose error is dropped. Test builds keep std's captured macros.
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! eprintln {
+    () => {{ use ::std::io::Write as _; let _ = ::std::io::stderr().write_all(b"\n"); }};
+    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stderr().write_fmt(format_args!("{}\n", format_args!($($t)+))); }};
+}
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! eprint {
+    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stderr().write_fmt(format_args!($($t)+)); }};
+}
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! println {
+    () => {{ use ::std::io::Write as _; let _ = ::std::io::stdout().write_all(b"\n"); }};
+    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stdout().write_fmt(format_args!("{}\n", format_args!($($t)+))); }};
+}
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! print {
+    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stdout().write_fmt(format_args!($($t)+)); }};
+}
+
 mod hal_host;
 mod hal_run;
 mod quit_signal;

@@ -7637,6 +7637,12 @@ pub struct SlotScan {
     /// A ret slot escaping only into one call's arguments: (block, inst). `esc` stays
     /// conservative for the other passes; forwarding counts this call as a write.
     pub ret_call: Vec<Option<(usize, usize)>>,
+    /// The call arguments a slot's address (or an address inside it) is passed as: (block, inst,
+    /// argument index), direct and host callees only.
+    pub call_args: Vec<Vec<(usize, usize, u32)>>,
+    /// The slot escapes otherwise than as such a call argument (stored, returned, an indirect
+    /// callee, an address defined more than once, ...): `esc` without the call arguments.
+    pub esc_other: Vec<bool>,
 }
 
 pub fn slot_scan(f: &Func) -> SlotScan {
@@ -7698,6 +7704,7 @@ pub fn slot_scan_inner(f: &Func, terminal_calls: bool) -> SlotScan {
     // end of the furthest byte read (a copy of fewer bytes than the slot holds -- its tail
     // padding -- still covers every read)
     let mut rd_end = vec![0i64; ns];
+    let mut call_args: Vec<Vec<(usize, usize, u32)>> = vec![Vec::new(); ns];
     let mut whole: Vec<Option<(usize, usize, u32)>> = vec![None; ns];
     let mut reads = vec![0u32; ns];
     let sl = |v: VReg| vs[v.0 as usize].0;
@@ -7764,10 +7771,14 @@ pub fn slot_scan_inner(f: &Func, terminal_calls: bool) -> SlotScan {
                 // terminal block; calls there may observe or retain the address.
                 Inst::Call(..) if terminal_calls && matches!(b.term, Term::Unreachable) => {}
                 Inst::Call(c, args, _) => {
-                    for arg in args {
+                    for (k, arg) in args.iter().enumerate() {
                         let s = sl(*arg);
                         if s != NONE {
-                            esc[s as usize] = true;
+                            if matches!(c, Callee::Fn(_) | Callee::Host(_)) {
+                                call_args[s as usize].push((bi, ii, k as u32));
+                            } else {
+                                esc[s as usize] = true;
+                            }
                             let call = &mut ret_call[s as usize];
                             *call = Some(match *call {
                                 None => (bi, ii),
@@ -7820,7 +7831,13 @@ pub fn slot_scan_inner(f: &Func, terminal_calls: bool) -> SlotScan {
             *call = None;
         }
     }
-    SlotScan { vs, esc, writes, reads, rd_end, whole, ret_call }
+    let esc_other = esc.clone();
+    for (s, c) in call_args.iter().enumerate() {
+        if !c.is_empty() {
+            esc[s] = true;
+        }
+    }
+    SlotScan { vs, esc, writes, reads, rd_end, whole, ret_call, call_args, esc_other }
 }
 /// Installs (Some) or removes (None) sroa's no-capture oracle for this thread.
 pub fn set_sroa_nocapture(q: Option<Box<dyn Fn(&Callee, usize) -> bool>>) {

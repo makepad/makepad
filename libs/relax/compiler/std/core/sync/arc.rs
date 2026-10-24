@@ -209,6 +209,9 @@ impl<T: ?Sized> Arc<T> {
         Arc { ptr: ptr::NonNull::new_unchecked(ptr), _marker: crate::marker::PhantomData }
     }
 
+    // Non-inlined part of `drop` (real std's Arc::drop_slow): the value's drop glue stays out of
+    // every dropping caller, so the count decrement inlines there.
+    #[inline(never)]
     fn drop_slow(&mut self) {
         unsafe {
             ptr::drop_in_place(self.ptr.as_ptr());
@@ -241,6 +244,7 @@ impl<T: ?Sized> Clone for Arc<T> {
 }
 
 unsafe impl<#[may_dangle] T: ?Sized> Drop for Arc<T> {
+    #[inline]
     fn drop(&mut self) {
         let old = unsafe { ia::atomic_fetch_sub(strong_ptr(header_of(self.ptr.as_ptr())), 1usize, RELEASE) };
         if old != 1 {

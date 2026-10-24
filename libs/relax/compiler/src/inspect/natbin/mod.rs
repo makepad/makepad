@@ -119,6 +119,42 @@ fn dedupe(fns: &mut Vec<NativeFn>) {
     fns.dedup_by(|a, b| a.addr == b.addr && a.name == b.name);
 }
 
+/// The call frame information of an ELF file: the bytes from `.eh_frame_hdr` to the end of
+/// `.eh_frame` (whichever comes first), the virtual address of the first byte and of the header,
+/// and the file's PT_LOAD segments (file offset, vaddr, file size) to place it in a process.
+pub struct CfiImage {
+    pub lo: u64,
+    pub hdr: u64,
+    pub bytes: Vec<u8>,
+    pub loads: Vec<(u64, u64, u64)>,
+}
+
+/// `CfiImage` of the ELF file at `path` (None: not a 64-bit ELF, or no .eh_frame_hdr / .eh_frame
+/// laid out together in the file).
+pub fn elf_cfi(path: &str) -> Option<CfiImage> {
+    let b = std::fs::read(path).ok()?;
+    if !obj::is_elf(&b) {
+        return None;
+    }
+    let e = obj::parse_elf(&b)?;
+    let hdr = e.secs.iter().find(|s| s.name == ".eh_frame_hdr" && s.size > 0)?;
+    let ehf = e.secs.iter().find(|s| s.name == ".eh_frame" && s.size > 0)?;
+    // one file-linear range (the same vaddr - offset), else the copy would not keep their distance
+    if hdr.addr.wrapping_sub(hdr.off as u64) != ehf.addr.wrapping_sub(ehf.off as u64) {
+        return None;
+    }
+    let lo = hdr.addr.min(ehf.addr);
+    let hi = (hdr.addr + hdr.size as u64).max(ehf.addr + ehf.size as u64);
+    let off = (lo - hdr.addr + hdr.off as u64) as usize;
+    let bytes = b.get(off..off + (hi - lo) as usize)?.to_vec();
+    let u16a = |o: usize| b.get(o..o + 2).map_or(0, |x| u16::from_le_bytes([x[0], x[1]]) as u64);
+    let u32a = |o: usize| b.get(o..o + 4).map_or(0, |x| u32::from_le_bytes(x.try_into().unwrap()) as u64);
+    let u64a = |o: usize| b.get(o..o + 8).map_or(0, |x| u64::from_le_bytes(x.try_into().unwrap()));
+    let (phoff, phsz, phn) = (u64a(0x20) as usize, u16a(0x36) as usize, u16a(0x38) as usize);
+    let loads = (0..phn).map(|k| phoff + k * phsz).filter(|&p| u32a(p) == 1).map(|p| (u64a(p + 8), u64a(p + 16), u64a(p + 32))).collect();
+    Some(CfiImage { lo, hdr: hdr.addr, bytes, loads })
+}
+
 impl NativeBin {
     /// Reads the binary at `path` (thin or universal Mach-O: the host slice; ELF) and finds its debug
     /// info. Line tables and inline trees are read lazily per compile unit (`lines`, `inlined`).

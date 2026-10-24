@@ -113,6 +113,12 @@ pub fn collect_opts(secs: f64, hz: u64, ev: Ev, wall: bool, want: &dyn Fn(&super
     run
 }
 
+/// Stack samples of threads `tids` of another process, walked by its CFI (`vsnative pid=`).
+#[cfg(target_os = "linux")]
+pub fn collect_foreign(tids: &[u64], secs: f64, hz: u64, ev: Ev, cfi: &super::cfi::Foreign, cancel: &dyn Fn() -> bool) -> (Vec<Sample>, u64, Vec<String>) {
+    imp::collect_foreign(tids, secs, hz, ev, cfi, cancel)
+}
+
 #[cfg(target_os = "linux")]
 mod imp {
     use super::{Run, Sample};
@@ -126,10 +132,14 @@ mod imp {
     }
     const PAGE: usize = 4096;
     /// data pages of a ring (a power of two): at most, and the least a ring is opened with (one
-    /// sample with its stack copy is ~16.5 KB)
-    const RING_PAGES: usize = 256;
+    /// sample with a full stack copy is ~64 KB; the kernel copies only the live part, dyn_size)
+    const RING_PAGES: usize = 512;
     const MIN_PAGES: usize = 16;
-    const STACK_COPY: u32 = 16384;
+    /// bytes of the stack copied per sample: the most a sample record holds (its size is a u16;
+    /// the kernel clamps to what fits). 16 KB cut the race's draw stacks below draw_scene_inner
+    /// (large O3/O1 frames): the meter's roots (tick_frame, draw_view) were missing from half the
+    /// samples, so no inclusive time could be compared with native perf (lane RACE2)
+    const STACK_COPY: u32 = 65280;
     /// perf regs (x86): bx 1, bp 6, sp 7, ip 8, r12..r15 20..23 -- ascending order in a sample
     const REGS_MASK: u64 = (1 << 1) | (1 << 6) | (1 << 7) | (1 << 8) | (1 << 20) | (1 << 21) | (1 << 22) | (1 << 23);
 
@@ -221,14 +231,27 @@ mod imp {
     }
 
     fn drain(r: &Ring, out: &mut Vec<Sample>, lost: &mut u64) {
+        drain_with(r, out, lost, &|rec, os| parse(rec, os))
+    }
+
+    fn drain_with(r: &Ring, out: &mut Vec<Sample>, lost: &mut u64, parse: &dyn Fn(&[u8], u64) -> Option<Sample>) {
         use std::sync::atomic::{AtomicU64, Ordering};
         let data = r.base + PAGE;
         let size = (r.pages * PAGE) as u64;
         let head = unsafe { (*((r.base + 1024) as *const AtomicU64)).load(Ordering::Acquire) };
         let tail_p = (r.base + 1032) as *const AtomicU64;
         let mut tail = unsafe { (*tail_p).load(Ordering::Relaxed) };
-        // records can wrap: copy each out first
-        let copy = |off: u64, len: usize| -> Vec<u8> { (0..len as u64).map(|k| unsafe { *((data + ((off + k) % size) as usize) as *const u8) }).collect() };
+        // records can wrap: copy each out first (at most two runs: up to the end, then from the start)
+        let copy = |off: u64, len: usize| -> Vec<u8> {
+            let at = (off % size) as usize;
+            let first = len.min(size as usize - at);
+            let mut v = Vec::with_capacity(len);
+            unsafe {
+                v.extend_from_slice(std::slice::from_raw_parts((data + at) as *const u8, first));
+                v.extend_from_slice(std::slice::from_raw_parts(data as *const u8, len - first));
+            }
+            v
+        };
         while tail + 8 <= head {
             let h = copy(tail, 8);
             let ty = u32::from_ne_bytes(h[0..4].try_into().unwrap());
@@ -253,6 +276,72 @@ mod imp {
     /// One PERF_RECORD_SAMPLE: header, ip, pid/tid, period, regs (abi + 8 regs), stack (size,
     /// bytes, dyn_size); walked on the copied stack.
     fn parse(rec: &[u8], os_id: u64) -> Option<Sample> {
+        parse_walk(rec, os_id, &|regs, buf, read| crate::inspect::threads::walk_regs_with(regs, buf, read))
+    }
+
+    /// `parse` of another process's sample: its frames stepped by that process's CFI (`Foreign`).
+    fn parse_foreign(rec: &[u8], os_id: u64, cfi: &crate::inspect::cfi::Foreign) -> Option<Sample> {
+        parse_walk(rec, os_id, &|regs, buf, read| {
+            let mut n = 0;
+            let mut top = true;
+            while n < buf.len() && regs.rip != 0 {
+                buf[n] = regs.rip;
+                n += 1;
+                if cfi.step(regs, top, read) != crate::inspect::cfi::Step::Done {
+                    break;
+                }
+                top = false;
+            }
+            n
+        })
+    }
+
+    /// Samples of threads `tids` of another process (`vsnative pid=`), each walked by `cfi`
+    /// while sampling: (samples, lost batches, notes).
+    pub fn collect_foreign(tids: &[u64], secs: f64, hz: u64, ev: super::Ev, cfi: &crate::inspect::cfi::Foreign, cancel: &dyn Fn() -> bool) -> (Vec<Sample>, u64, Vec<String>) {
+        let mut notes = Vec::new();
+        let mut rings = Vec::new();
+        let mut pages = RING_PAGES;
+        let mut failed = 0;
+        for &t in tids {
+            match open(t, hz, ev, pages) {
+                Ok(r) => {
+                    pages = r.pages;
+                    rings.push(r);
+                }
+                Err(_) => failed += 1,
+            }
+        }
+        if failed > 0 {
+            notes.push(format!("{} of {} native threads not sampled (perf_event_open or the locked-memory budget)", failed, tids.len()));
+        }
+        let mut samples = Vec::new();
+        let mut lost = 0u64;
+        let tick = if rings.iter().any(|r| r.pages < 256) { 2 } else { 10 };
+        let parse = |rec: &[u8], os: u64| parse_foreign(rec, os, cfi);
+        let t0 = std::time::Instant::now();
+        while t0.elapsed().as_secs_f64() < secs && !cancel() {
+            std::thread::sleep(std::time::Duration::from_millis(tick));
+            for r in &rings {
+                drain_with(r, &mut samples, &mut lost, &parse);
+            }
+        }
+        for r in &rings {
+            drain_with(r, &mut samples, &mut lost, &parse);
+            unsafe {
+                munmap(r.base as *mut u8, (1 + r.pages) * PAGE);
+                close(r.fd);
+            }
+        }
+        if ev == super::Ev::Cpu {
+            for s in samples.iter_mut() {
+                s.weight = 1;
+            }
+        }
+        (samples, lost, notes)
+    }
+
+    fn parse_walk(rec: &[u8], os_id: u64, walk: &dyn Fn(&mut Regs, &mut [u64], &dyn Fn(u64) -> Option<u64>) -> usize) -> Option<Sample> {
         let u = |o: usize| -> Option<u64> { Some(u64::from_ne_bytes(rec.get(o..o + 8)?.try_into().ok()?)) };
         let mut o = 8 + 8 + 8;
         let weight = u(o)?;
@@ -277,7 +366,7 @@ mod imp {
             Some(u64::from_ne_bytes(stack.get(k..k + 8)?.try_into().ok()?))
         };
         let mut buf = [0u64; 96];
-        let n = crate::inspect::threads::walk_regs_with(&mut regs, &mut buf, &read);
+        let n = walk(&mut regs, &mut buf, &read);
         Some(Sample { os_id, frames: buf[..n].to_vec(), weight, t: crate::clock::wall_ns(), on_cpu: true })
     }
 
@@ -330,7 +419,7 @@ mod imp {
         let mut samples = Vec::new();
         let mut lost = 0u64;
         // small rings hold a few samples: drained more often
-        let tick = if rings.iter().any(|r| r.pages < 64) { 2 } else { 10 };
+        let tick = if rings.iter().any(|r| r.pages < 256) { 2 } else { 10 };
         let t0 = std::time::Instant::now();
         crate::inspect::activity::phase("sampling (perf rings)", 0);
         while t0.elapsed().as_secs_f64() < secs && !cancel() {
@@ -481,7 +570,7 @@ fn activity(names: &[super::Frame]) -> &'static str {
     }
 }
 
-fn pick(sel: &str) -> Box<dyn Fn(&super::threads::Thread) -> bool> {
+pub(crate) fn pick(sel: &str) -> Box<dyn Fn(&super::threads::Thread) -> bool> {
     let sel = sel.to_string();
     let owner = crate::owner::owner_tid();
     Box::new(move |t: &super::threads::Thread| match sel.as_str() {

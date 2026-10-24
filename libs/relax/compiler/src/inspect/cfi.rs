@@ -26,6 +26,9 @@ struct Module {
     hi: u64,
     /// address of the module's .eh_frame_hdr
     hdr: u64,
+    /// pcs of the module minus this = addresses in the CFI's bytes: 0 for this process's own
+    /// modules; another process's module (`Foreign`) reads a copy of its file's CFI
+    delta: u64,
 }
 
 struct Index {
@@ -61,7 +64,7 @@ pub fn refresh() {
                 }
             }
             if hdr != 0 && lo < hi {
-                out.push(Module { lo, hi, hdr });
+                out.push(Module { lo, hi, hdr, delta: 0 });
             }
         }
         0
@@ -500,7 +503,13 @@ pub fn step(r: &mut Regs, is_top: bool, read: &dyn Fn(u64) -> Option<u64>) -> St
 
 fn step_inner(r: &mut Regs, is_top: bool, read: &dyn Fn(u64) -> Option<u64>, need_rbp: &mut bool) -> Option<()> {
     let pc = if is_top { r.rip } else { r.rip.wrapping_sub(1) };
-    let m = module(pc)?;
+    step_in(module(pc)?, pc, r, read, need_rbp)
+}
+
+/// One step of the frame at `pc` (the lookup pc: rip, or rip - 1 for a return address) in module `m`.
+fn step_in(m: &Module, pc: u64, r: &mut Regs, read: &dyn Fn(u64) -> Option<u64>, need_rbp: &mut bool) -> Option<()> {
+    // the CFI's address of pc (another process's module: its copy here)
+    let pc = pc.wrapping_sub(m.delta);
     let fde = find_fde(m, pc)?;
     let mut c = Cur { p: fde };
     let mut len = c.u32() as u64;
@@ -550,4 +559,75 @@ fn step_inner(r: &mut Regs, is_top: bool, read: &dyn Fn(u64) -> Option<u64>, nee
     }
     *r = next;
     Some(())
+}
+
+/// The CFI of another process's modules (`vsnative pid=`: a native build's stacks walked here):
+/// each mapped ELF file's `.eh_frame_hdr` + `.eh_frame` copied from its file, at the process's
+/// load addresses. Read-only after `open`; `step` reads only these copies and the given stack.
+pub struct Foreign {
+    mods: Vec<Module>,
+    /// the copies the modules' `hdr` point into (never moved: boxed slices)
+    _bytes: Vec<Box<[u8]>>,
+    /// (lo, hi, file) of each module, for naming pcs
+    pub files: Vec<(u64, u64, String)>,
+}
+
+impl Foreign {
+    /// The executable mappings of process `pid` (from /proc/pid/maps) whose files have CFI.
+    pub fn open(pid: u32) -> Result<Foreign, String> {
+        let maps = std::fs::read_to_string(format!("/proc/{}/maps", pid)).map_err(|e| format!("cannot read /proc/{}/maps: {}", pid, e))?;
+        // per file: its mappings (start, end, file offset)
+        let mut by_file: Vec<(String, Vec<(u64, u64, u64)>)> = Vec::new();
+        for l in maps.lines() {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            if f.len() < 6 || !f[5].starts_with('/') {
+                continue;
+            }
+            let (Some((a, b)), Ok(o)) = (f[0].split_once('-'), u64::from_str_radix(f[2], 16)) else { continue };
+            let (Ok(a), Ok(b)) = (u64::from_str_radix(a, 16), u64::from_str_radix(b, 16)) else { continue };
+            match by_file.iter_mut().find(|x| x.0 == f[5]) {
+                Some(x) => x.1.push((a, b, o)),
+                None => by_file.push((f[5].to_string(), vec![(a, b, o)])),
+            }
+        }
+        let mut mods = Vec::new();
+        let mut bytes: Vec<Box<[u8]>> = Vec::new();
+        let mut files = Vec::new();
+        for (path, maps) in by_file {
+            let Some(img) = super::natbin::elf_cfi(&path) else { continue };
+            // the load bias: a mapping at file offset o sits where the PT_LOAD holding o says
+            let Some(bias) = maps.iter().find_map(|&(a, _, o)| img.loads.iter().find(|l| o >= l.0 && o < l.0 + l.2.max(1)).map(|l| a.wrapping_sub(l.1 + (o - l.0)))) else { continue };
+            let lo = maps.iter().map(|m| m.0).min().unwrap_or(0);
+            let hi = maps.iter().map(|m| m.1).max().unwrap_or(0);
+            let b: Box<[u8]> = img.bytes.into_boxed_slice();
+            // address here of the CFI's vaddr v: b + (v - img.lo)
+            let local_base = (b.as_ptr() as u64).wrapping_sub(img.lo);
+            mods.push(Module { lo, hi, hdr: local_base.wrapping_add(img.hdr), delta: bias.wrapping_sub(local_base) });
+            files.push((lo, hi, path));
+            bytes.push(b);
+        }
+        if mods.is_empty() {
+            return Err(format!("process {}: no mapped file with CFI", pid));
+        }
+        mods.sort_by_key(|m| m.lo);
+        files.sort_by_key(|f| f.0);
+        Ok(Foreign { mods, _bytes: bytes, files })
+    }
+
+    fn module(&self, pc: u64) -> Option<&Module> {
+        let k = self.mods.partition_point(|m| m.lo <= pc);
+        let m = self.mods.get(k.checked_sub(1)?)?;
+        (pc < m.hi).then_some(m)
+    }
+
+    /// `step` for a frame of that process (`read`: its copied stack).
+    pub fn step(&self, r: &mut Regs, is_top: bool, read: &dyn Fn(u64) -> Option<u64>) -> Step {
+        let pc = if is_top { r.rip } else { r.rip.wrapping_sub(1) };
+        let mut need_rbp = false;
+        match self.module(pc).and_then(|m| step_in(m, pc, r, read, &mut need_rbp)) {
+            Some(()) => Step::Done,
+            None if need_rbp => Step::NeedRbp,
+            None => Step::Fail,
+        }
+    }
 }

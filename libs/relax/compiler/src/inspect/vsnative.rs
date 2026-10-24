@@ -97,13 +97,13 @@ mod imp {
 
     /// pc -> file virtual address of the child's executable: its mappings of the file, and the
     /// file's PT_LOAD segments (offset -> vaddr).
-    struct Map {
+    pub(super) struct Map {
         maps: Vec<(u64, u64, u64)>,
         loads: Vec<(u64, u64, u64)>,
     }
 
     impl Map {
-        fn of(pid: u32, exe: &str) -> Map {
+        pub(super) fn of(pid: u32, exe: &str) -> Map {
             let canon = std::fs::canonicalize(exe).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| exe.to_string());
             let mut maps = Vec::new();
             if let Ok(t) = std::fs::read_to_string(format!("/proc/{}/maps", pid)) {
@@ -137,7 +137,7 @@ mod imp {
             }
             Map { maps, loads }
         }
-        fn vaddr(&self, pc: u64) -> Option<u64> {
+        pub(super) fn vaddr(&self, pc: u64) -> Option<u64> {
             let &(a, _, o) = self.maps.iter().find(|m| pc >= m.0 && pc < m.1)?;
             let foff = pc - a + o;
             let &(po, pv, _) = self.loads.iter().find(|l| foff >= l.0 && foff < l.0 + l.2)?;
@@ -146,6 +146,12 @@ mod imp {
     }
 
     pub fn run(req: &Req, out: &mut Out) {
+        if let Some(pid) = req.get("pid") {
+            #[cfg(target_arch = "x86_64")]
+            return super::stacks::run(req, out, pid);
+            #[cfg(not(target_arch = "x86_64"))]
+            return out.err(&format!("vsnative pid={}: another process's stacks are walked on x86_64 Linux only", pid));
+        }
         let secs = req.get("s").and_then(|v| v.parse::<f64>().ok()).unwrap_or(5.0).clamp(0.5, 60.0);
         let warm = req.num("warm_ms", 3000).min(120_000);
         let hz = req.num("hz", 1000).clamp(50, 4000);
@@ -324,7 +330,7 @@ mod imp {
         out.always("more: asm <fn> vs=rustc  asm top vs=rustc  counters");
     }
 
-    fn g(x: f64) -> String {
+    pub(super) fn g(x: f64) -> String {
         if x >= 1e9 {
             format!("{:.2}G", x / 1e9)
         } else if x >= 1e6 {
@@ -341,6 +347,316 @@ mod imp {
             return "-".into();
         }
         format!("{:.1}", a as f64 * 100.0 / t as f64)
+    }
+}
+
+/// `vsnative pid=<native pid> [s=10] [hz=1000] [ev=cpu] [threads=main] [nthreads=<name>|busy] [roots=a,b]
+/// [n=30] [tree=0] [min=0.1] [save=1]`: an already-running native build of the program (the same
+/// scene, the same pace), sampled WITH STACKS over the same window as this process: both sides'
+/// stacks expanded to source fns (the JIT's inline levels; the native build's DWARF inline tree)
+/// and keyed alike (`Type::fn` without generics), so self and inclusive time per fn compare 1:1 --
+/// the attribution table of a JIT-vs-native gap. `roots=` keeps the samples under those fns (the
+/// part of a frame a meter times) and cuts their stacks at the root.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod stacks {
+    use super::{Out, Req};
+    use crate::inspect::short;
+    use std::collections::HashMap;
+
+    /// The key both sides share: the last two path segments of the plain name (no generics, no
+    /// `<T as Trait>` qualifiers beyond T, no hash), a closure as `fn::{closure}`.
+    fn key(name: &str) -> String {
+        let n = name.replace("{{closure}}", "{closure}");
+        let n = match n.strip_prefix("{closure} in ") {
+            Some(rest) => format!("{}::{{closure}}", rest.split('<').next().unwrap_or(rest)),
+            None => n,
+        };
+        let n = n.split(" (inlined").next().unwrap_or(&n).to_string();
+        let n = n.trim_end_matches(" [unverified]").to_string();
+        let p = crate::inspect::asm_plain(&n);
+        let p = p.replace("::{closure}::{closure}", "::{closure}");
+        let segs: Vec<&str> = p.split("::").filter(|x| !x.is_empty()).collect();
+        let k = segs.len().saturating_sub(if segs.last() == Some(&"{closure}") { 3 } else { 2 });
+        segs[k..].join("::")
+    }
+
+    /// (user ms, system ms, voluntary switches, involuntary switches) of thread `tid` of `pid` so far.
+    fn tstat(pid: u32, tid: u64) -> (f64, f64, u64, u64) {
+        let tick_ms = 10.0; // USER_HZ = 100 on Linux
+        let st = std::fs::read_to_string(format!("/proc/{}/task/{}/stat", pid, tid)).unwrap_or_default();
+        let f: Vec<&str> = st.rsplit_once(')').map(|x| x.1.split_whitespace().collect()).unwrap_or_default();
+        let num = |k: usize| f.get(k).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+        let status = std::fs::read_to_string(format!("/proc/{}/task/{}/status", pid, tid)).unwrap_or_default();
+        let sw = |key: &str| status.lines().find_map(|l| l.strip_prefix(key)).and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
+        (num(11) * tick_ms, num(12) * tick_ms, sw("voluntary_ctxt_switches:"), sw("nonvoluntary_ctxt_switches:"))
+    }
+
+    fn busiest(pid: u32, n: usize) -> Vec<(u64, String)> {
+        let cpu = |t: &str| -> u64 {
+            std::fs::read_to_string(format!("/proc/{}/task/{}/stat", pid, t)).ok().and_then(|s| {
+                let f: Vec<&str> = s.rsplit_once(')')?.1.split_whitespace().collect();
+                Some(f.get(11)?.parse::<u64>().ok()? + f.get(12)?.parse::<u64>().ok()?)
+            }).unwrap_or(0)
+        };
+        let tids: Vec<String> = std::fs::read_dir(format!("/proc/{}/task", pid)).map(|d| d.flatten().filter_map(|e| e.file_name().to_str().map(|s| s.to_string())).collect()).unwrap_or_default();
+        let a: Vec<u64> = tids.iter().map(|t| cpu(t)).collect();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let mut v: Vec<(u64, u64, String)> = tids.iter().zip(&a).map(|(t, &c0)| {
+            let name = std::fs::read_to_string(format!("/proc/{}/task/{}/comm", pid, t)).unwrap_or_default().trim().to_string();
+            (cpu(t).saturating_sub(c0), t.parse().unwrap_or(0), name)
+        }).collect();
+        v.sort_by(|x, y| y.0.cmp(&x.0));
+        v.into_iter().take(n).map(|x| (x.1, x.2)).collect()
+    }
+
+    pub fn run(req: &Req, out: &mut Out, pid: &str) {
+        let Ok(pid) = pid.parse::<u32>() else { return out.err("pid=<the native build's process id>") };
+        let secs = req.get("s").and_then(|v| v.parse::<f64>().ok()).unwrap_or(10.0).clamp(0.5, 60.0);
+        let hz = req.num("hz", 1000).clamp(50, 4000);
+        let n = req.num("n", 30) as usize;
+        let depth = req.num("tree", 0) as usize;
+        let min = req.get("min").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.1);
+        let ev = match crate::inspect::prof::Ev::parse(req.get("ev").unwrap_or("cpu")) {
+            Ok(e) => e,
+            Err(e) => return out.err(&e),
+        };
+        let exe = match std::fs::read_link(format!("/proc/{}/exe", pid)) {
+            Ok(p) => p.to_string_lossy().into_owned(),
+            Err(e) => return out.err(&format!("no process {}: {}", pid, e)),
+        };
+        let cfi = match crate::inspect::cfi::Foreign::open(pid) {
+            Ok(c) => c,
+            Err(e) => return out.err(&e),
+        };
+        // the native threads: by name, else the busiest
+        let tids: Vec<(u64, String)> = match req.get("nthreads") {
+            Some(sel) if sel != "busy" => busiest(pid, 1 << 16).into_iter().filter(|(_, nm)| sel.split(',').any(|s| nm.starts_with(s))).collect(),
+            _ => busiest(pid, 2),
+        };
+        if tids.is_empty() {
+            return out.err(&format!("process {}: no thread matches nthreads=", pid));
+        }
+        let gone = out.gone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ids: Vec<u64> = tids.iter().map(|t| t.0).collect();
+        let spawned = {
+            let _k = crate::zone_alloc::kept();
+            std::thread::Builder::new().name("run-inspect-vsnative".into()).spawn(move || {
+                crate::inspect::heap::exclude_this_thread();
+                let r = crate::inspect::prof::collect_foreign(&ids, secs, hz, ev, &cfi, &|| false);
+                let _ = tx.send((r, cfi));
+            })
+        };
+        if spawned.is_err() {
+            return out.err("cannot start the sampling thread");
+        }
+        // user/system time and context switches of both sides' threads over the window: the
+        // samples see user time only (perf_event_paranoid 2), a meter of wall time sees all of it
+        let me = std::process::id();
+        let mine: Vec<u64> = {
+            let sel = crate::inspect::prof::pick(req.get("threads").unwrap_or("main"));
+            let mut ts = crate::inspect::threads::list();
+            crate::inspect::name_handles(&mut ts);
+            ts.into_iter().filter(|t| sel(t)).map(|t| t.os_id).collect()
+        };
+        let st0: Vec<(f64, f64, u64, u64)> = mine.iter().map(|&t| tstat(me, t)).chain(tids.iter().map(|t| tstat(pid, t.0))).collect();
+        let run = crate::inspect::prof::collect_ev(secs, hz, ev, &*crate::inspect::prof::pick(req.get("threads").unwrap_or("main")), &*gone);
+        let st1: Vec<(f64, f64, u64, u64)> = mine.iter().map(|&t| tstat(me, t)).chain(tids.iter().map(|t| tstat(pid, t.0))).collect();
+        let Ok(((nat, lost, mut notes), cfi)) = rx.recv_timeout(std::time::Duration::from_secs_f64(secs + 30.0)) else {
+            return out.err("the native sampling thread did not finish");
+        };
+        if gone() {
+            return;
+        }
+        // ours: expanded (inline levels as frames), outermost first
+        let mut partial = Vec::new();
+        let ours: Vec<(Vec<(String, String)>, u64)> = crate::inspect::calltree::expanded_raw(&run, &mut partial).into_iter().map(|(_, _, f, w)| (f.into_iter().map(|x| (x.name, x.tier)).collect(), w)).collect();
+        // native: each pc by the binary's symbols and inline tree
+        let map = super::imp::Map::of(pid, &exe);
+        let mut names: HashMap<u64, Vec<String>> = HashMap::new();
+        let mut theirs: Vec<(Vec<(String, String)>, u64)> = Vec::new();
+        let named = crate::inspect::asm::with_native_bin(&exe, |nb| {
+            let mut inl: HashMap<u64, Vec<crate::inspect::natbin::InlinedCall>> = HashMap::new();
+            for smp in &nat {
+                let mut fr: Vec<(String, String)> = Vec::new();
+                for (i, &pc) in smp.frames.iter().enumerate().rev() {
+                    let look = if i == 0 { pc } else { pc.wrapping_sub(1) };
+                    let v = names.entry(look).or_insert_with(|| {
+                        let Some(va) = map.vaddr(look) else {
+                            return vec![cfi.files.iter().find(|f| look >= f.0 && look < f.1).map_or_else(|| format!("{:#x}", look), |f| format!("{}+{:#x}", f.2.rsplit('/').next().unwrap_or(&f.2), look - f.0))];
+                        };
+                        let Some(f) = nb.fn_at(va) else { return vec![format!("{}+{:#x}", exe.rsplit('/').next().unwrap_or(&exe), va)] };
+                        let calls = inl.entry(f.addr).or_insert_with(|| nb.inlined(f.addr, f.addr + f.size));
+                        let mut here: Vec<&crate::inspect::natbin::InlinedCall> = calls.iter().filter(|c| c.ranges.iter().any(|r| va >= r.0 && va < r.1)).collect();
+                        here.sort_by_key(|c| std::cmp::Reverse(c.depth));
+                        // innermost first, the concrete fn last
+                        let mut v: Vec<String> = here.iter().map(|c| c.name.clone()).collect();
+                        v.push(f.name.clone());
+                        v
+                    });
+                    // outermost first
+                    fr.extend(v.iter().rev().enumerate().map(|(k, n)| (n.clone(), if k == 0 { "native".to_string() } else { "inl".to_string() })));
+                }
+                theirs.push((fr, smp.weight.max(1)));
+            }
+        });
+        if let Err(e) = named {
+            return out.err(&e);
+        }
+        let roots: Vec<String> = req.get("roots").map(|r| r.split(',').map(key).collect()).unwrap_or_default();
+        // keyed stacks under the roots (cut at the outermost root), weights in ms of CPU (cpu) or events
+        let unit_ms = if ev == crate::inspect::prof::Ev::Cpu { 1000.0 / hz as f64 } else { 1.0 };
+        let keyed = |v: &[(Vec<(String, String)>, u64)], tiers: &mut HashMap<String, HashMap<String, u64>>| -> (Vec<(Vec<String>, f64)>, f64) {
+            let mut outv = Vec::new();
+            let mut all = 0.0;
+            for (fr, w) in v {
+                let w = *w as f64 * unit_ms;
+                all += w;
+                let ks: Vec<String> = fr.iter().map(|f| key(&f.0)).collect();
+                let at = if roots.is_empty() { Some(0) } else { ks.iter().position(|k| roots.contains(k)) };
+                let Some(at) = at else { continue };
+                for (k, f) in ks.iter().zip(fr.iter()).skip(at) {
+                    if f.1 != "inl" {
+                        *tiers.entry(k.clone()).or_default().entry(f.1.clone()).or_default() += w as u64;
+                    }
+                }
+                outv.push((ks[at..].to_vec(), w));
+            }
+            (outv, all)
+        };
+        let mut jt: HashMap<String, HashMap<String, u64>> = HashMap::new();
+        let mut nt = HashMap::new();
+        let (j, jall) = keyed(&ours, &mut jt);
+        let (nv, nall) = keyed(&theirs, &mut nt);
+        let (tj, tn) = (run.secs.max(0.01), secs);
+        let tables = |v: &[(Vec<String>, f64)]| {
+            let mut selfm: HashMap<String, f64> = HashMap::new();
+            let mut incl: HashMap<String, f64> = HashMap::new();
+            let mut tot = 0.0;
+            for (ks, w) in v {
+                tot += w;
+                if let Some(l) = ks.last() {
+                    *selfm.entry(l.clone()).or_default() += w;
+                }
+                let mut seen: Vec<&String> = Vec::new();
+                for k in ks {
+                    if !seen.contains(&k) {
+                        *incl.entry(k.clone()).or_default() += w;
+                        seen.push(k);
+                    }
+                }
+            }
+            (selfm, incl, tot)
+        };
+        let (js, ji, jtot) = tables(&j);
+        let (ns, ni, ntot) = tables(&nv);
+        let (jr, nr) = (jtot / tj, ntot / tn);
+        let unit = if ev == crate::inspect::prof::Ev::Cpu { "ms/s".to_string() } else { format!("{}/s", ev.name()) };
+        let gap = jr - nr;
+        let tier_of = |k: &str| jt.get(k).map(|m| {
+            let mut v: Vec<(&String, &u64)> = m.iter().collect();
+            v.sort_by(|a, b| b.1.cmp(a.1));
+            let t: u64 = v.iter().map(|x| *x.1).sum();
+            v.iter().take(2).map(|(n, c)| if **c == t { n.to_string() } else { format!("{} {}%", n, **c * 100 / t.max(1)) }).collect::<Vec<_>>().join(" ")
+        }).unwrap_or_else(|| "-".into());
+        let mut srows: Vec<(f64, String)> = js.keys().chain(ns.keys()).map(|k| (js.get(k).copied().unwrap_or(0.0) / tj - ns.get(k).copied().unwrap_or(0.0) / tn, k.clone())).collect();
+        srows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
+        srows.dedup_by(|a, b| a.1 == b.1);
+        out.always(&format!(
+            "JIT {:.1} {} vs native {:.1} {} under {} ({:.2}x, gap {:+.1} {}); biggest self-time gap: {}",
+            jr, unit, nr, unit, if roots.is_empty() { "all stacks".to_string() } else { req.get("roots").unwrap_or("").to_string() }, jr / nr.max(1e-9), gap, unit,
+            srows.first().map_or("-".to_string(), |r| format!("{} {:+.2}", r.1, r.0))
+        ));
+        out.line("");
+        out.line(&format!("self time per fn ({}), sorted by JIT - native; cum = running share of the gap", unit));
+        out.line("| fn | JIT tier | JIT | native | delta | cum % |");
+        out.line("|---|---|---:|---:|---:|---:|");
+        let mut cum = 0.0;
+        for (d, k) in srows.iter().take(n) {
+            cum += d;
+            out.line(&format!("| {} | {} | {:.2} | {:.2} | {:+.2} | {:.0} |", short(&k.replace('|', "/"), 70), tier_of(k), js.get(k).copied().unwrap_or(0.0) / tj, ns.get(k).copied().unwrap_or(0.0) / tn, d, cum * 100.0 / gap.abs().max(1e-9)));
+        }
+        let neg: Vec<String> = srows.iter().rev().take(6).filter(|r| r.0 < 0.0).map(|r| format!("{} {:+.2}", r.1, r.0)).collect();
+        if !neg.is_empty() {
+            out.line(&format!("native slower: {}", neg.join(", ")));
+        }
+        let mut irows: Vec<(f64, String)> = ji.keys().chain(ni.keys()).map(|k| (ji.get(k).copied().unwrap_or(0.0) / tj - ni.get(k).copied().unwrap_or(0.0) / tn, k.clone())).collect();
+        irows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
+        irows.dedup_by(|a, b| a.1 == b.1);
+        out.line("");
+        out.line(&format!("inclusive time per fn ({}): the call trees the gap sits in", unit));
+        out.line("| fn | JIT tier | JIT | native | delta |");
+        out.line("|---|---|---:|---:|---:|");
+        for (d, k) in irows.iter().take(n) {
+            out.line(&format!("| {} | {} | {:.2} | {:.2} | {:+.2} |", short(&k.replace('|', "/"), 70), tier_of(k), ji.get(k).copied().unwrap_or(0.0) / tj, ni.get(k).copied().unwrap_or(0.0) / tn, d));
+        }
+        if depth > 0 {
+            // merged top-down tree: (JIT, native) per path
+            let mut tree: HashMap<Vec<String>, (f64, f64)> = HashMap::new();
+            for (ks, w) in &j {
+                for d in 1..=ks.len().min(depth) {
+                    tree.entry(ks[..d].to_vec()).or_default().0 += w / tj;
+                }
+            }
+            for (ks, w) in &nv {
+                for d in 1..=ks.len().min(depth) {
+                    tree.entry(ks[..d].to_vec()).or_default().1 += w / tn;
+                }
+            }
+            out.line("");
+            out.line(&format!("merged call tree to depth {} (JIT | native | delta, {}; rows with |delta| >= {})", depth, unit, min));
+            fn walk(tree: &HashMap<Vec<String>, (f64, f64)>, path: &mut Vec<String>, depth: usize, min: f64, out: &mut Out) {
+                let mut kids: Vec<(&Vec<String>, &(f64, f64))> = tree.iter().filter(|(p, _)| p.len() == path.len() + 1 && p[..path.len()] == path[..]).collect();
+                kids.sort_by(|a, b| (b.1 .0 - b.1 .1).abs().partial_cmp(&(a.1 .0 - a.1 .1).abs()).unwrap_or(std::cmp::Ordering::Equal));
+                for (p, v) in kids {
+                    if (v.0 - v.1).abs() < min {
+                        continue;
+                    }
+                    out.line(&format!("{}{}  {:.2} | {:.2} | {:+.2}", "  ".repeat(path.len()), short(p.last().unwrap(), 90), v.0, v.1, v.0 - v.1));
+                    if p.len() < depth {
+                        path.push(p.last().unwrap().clone());
+                        walk(tree, path, depth, min, out);
+                        path.pop();
+                    }
+                }
+            }
+            walk(&tree, &mut Vec::new(), depth, min, out);
+        }
+        if req.get("save") == Some("1") {
+            for (side, v, t) in [("jit", &j, tj), ("native", &nv, tn)] {
+                let mut folded: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
+                for (ks, w) in v.iter() {
+                    *folded.entry(ks.iter().map(|k| k.replace(';', ":")).collect::<Vec<_>>().join(";")).or_default() += w;
+                }
+                let path = std::env::temp_dir().join(format!("makepad-vsnative-{}-{}-{}.folded", std::process::id(), side, crate::inspect::now_ms()));
+                let text: String = folded.iter().map(|(k, w)| format!("{} {:.0}\n", k, w)).collect();
+                if std::fs::write(&path, text).is_ok() {
+                    out.always(&format!("saved {} stacks ({} ms of CPU over {:.1} s): {}", side, v.iter().map(|x| x.1).sum::<f64>() as u64, t, path.display()));
+                }
+            }
+        }
+        // per-thread OS time over the window, per second
+        let rows: Vec<String> = mine.iter().map(|&t| ("JIT".to_string(), format!("T{}", t))).chain(tids.iter().map(|t| ("native".to_string(), format!("{} T{}", t.1, t.0)))).zip(st0.iter().zip(&st1)).map(|((side, name), (a, b))| {
+            format!("| {} | {} | {:.1} | {:.1} | {:.0} | {:.0} |", side, name, (b.0 - a.0) / run.secs.max(0.01), (b.1 - a.1) / run.secs.max(0.01), (b.2 - a.2) as f64 / run.secs.max(0.01), (b.3 - a.3) as f64 / run.secs.max(0.01))
+        }).collect();
+        out.line("");
+        out.line("OS time of the sampled threads over the window (whole thread, not cut at the roots; 10-ms ticks)");
+        out.line("| side | thread | user ms/s | system ms/s | voluntary switches/s | involuntary/s |");
+        out.line("|---|---|---:|---:|---:|---:|");
+        for r in rows {
+            out.line(&r);
+        }
+        let tn_names: Vec<String> = tids.iter().map(|t| format!("{} (T{})", t.1, t.0)).collect();
+        out.always(&format!("note: native = {} pid {} threads {}; {:.1} {} of its CPU in the window, {:.0}% under the roots; JIT {:.1} {} on threads={}, {:.0}% under the roots", exe, pid, tn_names.join(", "), nall / tn, unit, ntot * 100.0 / nall.max(1e-9), jall / tj, unit, req.get("threads").unwrap_or("main"), jtot * 100.0 / jall.max(1e-9)));
+        out.always("note: keys are `Type::fn` without generics on both sides (JIT: inline levels expanded; native: the DWARF inline tree, needs debuginfo=2); a fn rustc inlined and we did not shows as self time of its caller natively");
+        if lost > 0 {
+            notes.push(format!("{} native sample batches lost (ring overflow)", lost));
+        }
+        for p in partial.iter().chain(run.notes.iter()).chain(notes.iter()) {
+            out.always(&format!("note: {}", p));
+        }
+        out.always(&format!("note: {}", crate::inspect::reliability::line(true)));
+        out.always("more: asm <fn> vs=rustc  asm top vs=rustc  prof view=tree");
     }
 }
 

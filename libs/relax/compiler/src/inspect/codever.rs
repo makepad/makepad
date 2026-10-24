@@ -354,7 +354,9 @@ impl Resolver {
                 break;
             }
             let (call, anchor) = (table[(c as usize - 1) * 2], table[(c as usize - 1) * 2 + 1]);
-            let def = self.fn_at(u, anchor);
+            // the callee's anchor (a position in its own body), else this level's own position
+            // (where the pc is in that fn: it lies in its body too)
+            let def = self.fn_at(u, anchor).or_else(|| self.fn_at(u, cur));
             let name = def.map_or_else(|| "(inlined fn)".to_string(), |d| crate::lower::display_path(&u.prog, d));
             stack.push((name, def, pstr(cur)));
             cur = call;

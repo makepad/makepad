@@ -4,6 +4,32 @@
 
 #![recursion_limit = "4096"]
 
+// Diagnostics never panic: std's print macros panic when a write fails (ENOSPC on the session
+// log in a full tmpfs /tmp aborted a fleet Sandbox inside a lazy compile, 2026-10-23), so in this
+// crate every print is a write whose error is dropped. Test builds keep std's captured macros.
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! eprintln {
+    () => {{ use ::std::io::Write as _; let _ = ::std::io::stderr().write_all(b"\n"); }};
+    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stderr().write_fmt(format_args!("{}\n", format_args!($($t)+))); }};
+}
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! eprint {
+    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stderr().write_fmt(format_args!($($t)+)); }};
+}
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! println {
+    () => {{ use ::std::io::Write as _; let _ = ::std::io::stdout().write_all(b"\n"); }};
+    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stdout().write_fmt(format_args!("{}\n", format_args!($($t)+))); }};
+}
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! print {
+    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stdout().write_fmt(format_args!($($t)+)); }};
+}
+
 pub use relax_base::*;
 
 pub mod lit;

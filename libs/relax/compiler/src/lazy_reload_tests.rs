@@ -296,7 +296,10 @@ fn specv_patch_before_verdict() {
         assert!(events.lines().any(|l| l.contains("patch_reverted") && l.contains("::value")), "{events}");
     } else {
         run(23);
+        let flagged = u.fns[id as usize].unverified.load(Ordering::Relaxed);
         assert!(u.refresh_verified(id), "a clean verdict verifies the slot");
+        // a clear outside sweep_verdicts goes to the next sweep (what waited for the verdict runs)
+        assert!(!flagged || crate::jit::verified_since_sweep(&u, id), "cleared outside a sweep: handed to the next one");
         // promotion: the normal RIR O3 starts from keeps the `&mut` parameter's noalias
         unsafe { crate::jit::build_normal(up, id) }.unwrap();
         let r = u.fns[id as usize].rir.as_ref().expect("RIR");

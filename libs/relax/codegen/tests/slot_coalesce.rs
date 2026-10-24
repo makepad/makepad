@@ -293,3 +293,198 @@ fn interfering_prefix_slots_stay_apart() {
     // B is written after the copy while C holds its bytes: apart; D = C[..16] still joins
     assert_eq!(copies(&f), 1, "{}", f.dump());
 }
+
+/// B = (n, 1); g(&B); C = B; [g(&B)]; return C.0 + C.1 -- `g` keeps no copy of its argument
+/// (f.nocapture) or may (no fact). `again`: B is handed to g once more while C is live (g may
+/// write B: they interfere).
+fn nocapture_build(fact: bool, again: bool) -> Func {
+    let mut f = Func::new("slot_coalesce_nocapture".into(), 0);
+    let n = f.vreg(Cls::I);
+    f.params.push(n);
+    f.rets.push(Cls::I);
+    let (sb, sc_) = (f.slot(16, 8), f.slot(16, 8));
+    f.block();
+    let v = |f: &mut Func| f.vreg(Cls::I);
+    let (pb, pc, one, a, b, s) = (v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f));
+    let g = Callee::Fn(5);
+    push(&mut f, 0, Inst::SlotAddr(pb, sb));
+    push(&mut f, 0, Inst::SlotAddr(pc, sc_));
+    push(&mut f, 0, Inst::Iconst(one, 1));
+    push(&mut f, 0, Inst::Store(Mem::Int(8, false), pb, 0, n));
+    push(&mut f, 0, Inst::Store(Mem::Int(8, false), pb, 8, one));
+    push(&mut f, 0, Inst::Call(g.clone(), vec![pb], vec![]));
+    push(&mut f, 0, Inst::Copy(pc, pb, 16));
+    if again {
+        push(&mut f, 0, Inst::Call(g.clone(), vec![pb], vec![]));
+    }
+    push(&mut f, 0, Inst::Load(Mem::Int(8, false), a, pc, 0));
+    push(&mut f, 0, Inst::Load(Mem::Int(8, false), b, pc, 8));
+    push(&mut f, 0, Inst::IBin(IOp::Add, U64, s, a, b));
+    f.blocks[0].term = Term::Ret(vec![s]);
+    if fact {
+        f.nocapture.push((g, 0, false));
+    }
+    f
+}
+
+#[test]
+fn slots_passed_to_nocapture_calls_join() {
+    let mut f = nocapture_build(true, false);
+    assert!(opt::coalesce_slot_copies(&mut f, true));
+    assert_eq!(copies(&f), 0, "the copy of a slot only handed to a nocapture call goes");
+}
+
+#[test]
+fn slots_passed_to_capturing_calls_stay_apart() {
+    let mut f = nocapture_build(false, false);
+    assert!(!opt::coalesce_slot_copies(&mut f, true));
+    assert_eq!(copies(&f), 1);
+}
+
+#[test]
+fn nocapture_call_writing_a_slot_while_its_partner_lives_keeps_them_apart() {
+    let mut f = nocapture_build(true, true);
+    assert!(!opt::coalesce_slot_copies(&mut f, true));
+    assert_eq!(copies(&f), 1);
+}
+
+/// f(n): A = (n, 2n); C = A (a move); flag = `moved`; C.0 = n + 5; then `if flag == 0 { A.0 }
+/// else { C.0 + C.1 }` -- A's read sits behind the drop flag, as a moved-from value's drop in an
+/// unwind cleanup does. `moved`: the flag is 1 at C's write, so A is dead there and A and C join;
+/// else A's read runs and they stay apart.
+fn build_flagged(moved: bool) -> Func {
+    let mut f = Func::new("slot_coalesce_flag".into(), 0);
+    let n = f.vreg(Cls::I);
+    f.params.push(n);
+    f.rets.push(Cls::I);
+    let (sa, sc_) = (f.slot(16, 8), f.slot(16, 8));
+    for _ in 0..4 {
+        f.block();
+    }
+    let v = |f: &mut Func| f.vreg(Cls::I);
+    let (pa, pc, flag, n2, n5, x, y, z, s) = (v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f));
+    push(&mut f, 0, Inst::SlotAddr(pa, sa));
+    push(&mut f, 0, Inst::SlotAddr(pc, sc_));
+    push(&mut f, 0, Inst::Iconst(flag, 0));
+    push(&mut f, 0, Inst::Store(Mem::Int(8, false), pa, 0, n));
+    push(&mut f, 0, Inst::IBinI(IOp::Mul, U64, n2, n, 2));
+    push(&mut f, 0, Inst::Store(Mem::Int(8, false), pa, 8, n2));
+    push(&mut f, 0, Inst::Copy(pc, pa, 16));
+    push(&mut f, 0, Inst::Iconst(flag, if moved { 1 } else { 0 }));
+    push(&mut f, 0, Inst::IBinI(IOp::Add, U64, n5, n, 5));
+    push(&mut f, 0, Inst::Store(Mem::Int(8, false), pc, 0, n5));
+    f.blocks[0].term = Term::Jump(1);
+    f.blocks[1].term = Term::Branch(flag, 3, 2);
+    push(&mut f, 2, Inst::Load(Mem::Int(8, false), x, pa, 0));
+    f.blocks[2].term = Term::Ret(vec![x]);
+    push(&mut f, 3, Inst::Load(Mem::Int(8, false), y, pc, 0));
+    push(&mut f, 3, Inst::Load(Mem::Int(8, false), z, pc, 8));
+    push(&mut f, 3, Inst::IBin(IOp::Add, U64, s, y, z));
+    f.blocks[3].term = Term::Ret(vec![s]);
+    f
+}
+
+#[test]
+fn a_read_behind_a_set_drop_flag_does_not_keep_the_moved_from_slot_live() {
+    let f = build_flagged(true);
+    f.verify().unwrap();
+    let want = run(&f, 10);
+    assert_eq!(want, 15 + 20);
+    let mut g = f.clone();
+    assert!(opt::coalesce_slot_copies(&mut g, true));
+    g.verify().unwrap();
+    assert_eq!(copies(&g), 0);
+    assert_eq!(run(&g, 10), want);
+}
+
+#[test]
+fn a_read_behind_a_clear_drop_flag_keeps_the_slots_apart() {
+    let f = build_flagged(false);
+    f.verify().unwrap();
+    let want = run(&f, 10);
+    assert_eq!(want, 10);
+    let mut g = f.clone();
+    opt::coalesce_slot_copies(&mut g, true);
+    assert_eq!(copies(&g), 1);
+    assert_eq!(run(&g, 10), want);
+}
+
+/// f(n): acc = 0; for i in 0..n { if i odd { H = Some(i) (tag 1, payload at 8) } else { H.tag = `none` }
+/// T = H; if T.tag != 2 { T.payload += 100; acc += T.payload } } -- an Option built in place and
+/// matched through a copy. `none` = 2: the None path's tag is known at the match, so the payload
+/// bytes the copy takes on that path are never read and H and T join (the payload write meets no
+/// live byte of H). `none` = 3: the "None" path reaches the payload too (it reads the previous
+/// iteration's payload of H), so they stay apart.
+fn build_tagged(none: i64) -> Func {
+    let mut f = Func::new("slot_coalesce_tag".into(), 0);
+    let n = f.vreg(Cls::I);
+    f.params.push(n);
+    f.rets.push(Cls::I);
+    let (sh, st) = (f.slot(16, 8), f.slot(16, 8));
+    for _ in 0..9 {
+        f.block();
+    }
+    let v = |f: &mut Func| f.vreg(Cls::I);
+    let (ph, pt, acc, i, c, r, one, k_none, x, c2, p, p2, i2, z) =
+        (v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f));
+    push(&mut f, 0, Inst::SlotAddr(ph, sh));
+    push(&mut f, 0, Inst::SlotAddr(pt, st));
+    push(&mut f, 0, Inst::Iconst(acc, 0));
+    push(&mut f, 0, Inst::Iconst(i, 0));
+    push(&mut f, 0, Inst::Iconst(one, 1));
+    push(&mut f, 0, Inst::Iconst(k_none, none));
+    // H starts as None with a zero payload (the payload of a never-Some H is read when none = 3)
+    push(&mut f, 0, Inst::Iconst(z, 0));
+    push(&mut f, 0, Inst::Store(Mem::Int(8, false), ph, 8, z));
+    f.blocks[0].term = Term::Jump(1);
+    push(&mut f, 1, Inst::ICmp(Cond::Lt, false, c, i, n));
+    f.blocks[1].term = Term::Branch(c, 2, 8);
+    push(&mut f, 2, Inst::IBinI(IOp::And, U64, r, i, 1));
+    f.blocks[2].term = Term::Branch(r, 3, 4);
+    // Some(i)
+    push(&mut f, 3, Inst::Store(Mem::Int(4, false), ph, 0, one));
+    push(&mut f, 3, Inst::Store(Mem::Int(8, false), ph, 8, i));
+    f.blocks[3].term = Term::Jump(5);
+    // "None": the tag only
+    push(&mut f, 4, Inst::Store(Mem::Int(4, false), ph, 0, k_none));
+    f.blocks[4].term = Term::Jump(5);
+    // T = H; match T.tag
+    push(&mut f, 5, Inst::Copy(pt, ph, 16));
+    push(&mut f, 5, Inst::Load(Mem::Int(4, false), x, pt, 0));
+    push(&mut f, 5, Inst::ICmpI(Cond::Ne, false, c2, x, 2));
+    f.blocks[5].term = Term::Branch(c2, 6, 7);
+    push(&mut f, 6, Inst::Load(Mem::Int(8, false), p, pt, 8));
+    push(&mut f, 6, Inst::IBinI(IOp::Add, U64, p2, p, 100));
+    push(&mut f, 6, Inst::Store(Mem::Int(8, false), pt, 8, p2));
+    push(&mut f, 6, Inst::IBin(IOp::Add, U64, acc, acc, p2));
+    f.blocks[6].term = Term::Jump(7);
+    push(&mut f, 7, Inst::IBinI(IOp::Add, U64, i2, i, 1));
+    push(&mut f, 7, Inst::Mov(i, i2));
+    f.blocks[7].term = Term::Jump(1);
+    f.blocks[8].term = Term::Ret(vec![acc]);
+    f
+}
+
+#[test]
+fn a_known_tag_on_the_none_path_lets_the_option_and_its_match_copy_join() {
+    let f = build_tagged(2);
+    f.verify().unwrap();
+    let want = run(&f, 10);
+    assert_eq!(want, (1 + 3 + 5 + 7 + 9) + 5 * 100);
+    let mut g = f.clone();
+    assert!(opt::coalesce_slot_copies(&mut g, true));
+    g.verify().unwrap();
+    assert_eq!(copies(&g), 0);
+    assert_eq!(run(&g, 10), want);
+}
+
+#[test]
+fn a_tag_that_reaches_the_payload_keeps_the_option_and_its_copy_apart() {
+    let f = build_tagged(3);
+    f.verify().unwrap();
+    let want = run(&f, 10);
+    let mut g = f.clone();
+    opt::coalesce_slot_copies(&mut g, true);
+    assert_eq!(copies(&g), 1);
+    assert_eq!(run(&g, 10), want);
+}

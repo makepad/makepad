@@ -7,6 +7,42 @@
 //!   makepad clean [-p <package>]           remove the workspace's <target>/relax (or one app's files)
 //!   makepad run [opts] <package> [cargo flags] [-- args]   boot a cargo package from source (run.rs)
 
+// Diagnostics never panic: std's print macros panic when a write fails (ENOSPC on the session
+// log in a full tmpfs /tmp aborted a fleet Sandbox inside a lazy compile, 2026-10-23), so in this
+// crate every print is a write whose error is dropped. Test builds keep std's captured macros.
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! eprintln {
+    ($($t:tt)*) => { stderr_line!($($t)*) };
+}
+/// One stderr line that never panics; for modules whose own `eprintln!` gates on diag::enabled.
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! stderr_line {
+    () => {{ use ::std::io::Write as _; let _ = ::std::io::stderr().write_all(b"\n"); }};
+    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stderr().write_fmt(format_args!("{}\n", format_args!($($t)+))); }};
+}
+#[cfg(test)]
+macro_rules! stderr_line {
+    ($($t:tt)*) => { ::std::eprintln!($($t)*) };
+}
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! eprint {
+    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stderr().write_fmt(format_args!($($t)+)); }};
+}
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! println {
+    () => {{ use ::std::io::Write as _; let _ = ::std::io::stdout().write_all(b"\n"); }};
+    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stdout().write_fmt(format_args!("{}\n", format_args!($($t)+))); }};
+}
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! print {
+    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stdout().write_fmt(format_args!($($t)+)); }};
+}
+
 /// First statement of a test that builds, runs or drops a JIT unit: the test runs alone in a
 /// child process of this test binary, and the calling process only checks its verdict. The JIT
 /// runtime's state is process-wide by design (one program per process): the unit a lazy compile

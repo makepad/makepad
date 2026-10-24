@@ -302,16 +302,28 @@ impl<T: ?Sized> Clone for Rc<T> {
     }
 }
 
+impl<T: ?Sized> Rc<T> {
+    // Non-inlined part of `drop` (real std's Rc::drop_slow): the value's drop glue stays out of
+    // every dropping caller, so the count decrement inlines there.
+    #[inline(never)]
+    unsafe fn drop_slow(&mut self) {
+        unsafe {
+            ptr::drop_in_place(self.ptr.as_ptr());
+            (*header_of(self.ptr.as_ptr())).weak -= 1;
+            if (*header_of(self.ptr.as_ptr())).weak == 0 {
+                free_block(header_of(self.ptr.as_ptr()));
+            }
+        }
+    }
+}
+
 unsafe impl<#[may_dangle] T: ?Sized> Drop for Rc<T> {
+    #[inline]
     fn drop(&mut self) {
         unsafe {
             (*header_of(self.ptr.as_ptr())).strong -= 1;
             if (*header_of(self.ptr.as_ptr())).strong == 0 {
-                ptr::drop_in_place(self.ptr.as_ptr());
-                (*header_of(self.ptr.as_ptr())).weak -= 1;
-                if (*header_of(self.ptr.as_ptr())).weak == 0 {
-                    free_block(header_of(self.ptr.as_ptr()));
-                }
+                self.drop_slow();
             }
         }
     }

@@ -20,7 +20,7 @@
 //! hook prints its startup line from the MAKEPAD_RUN_* metadata published before main.
 
 macro_rules! eprintln {
-    ($($arg:tt)*) => { if !crate::diag::enabled() { std::eprintln!($($arg)*); } };
+    ($($arg:tt)*) => { if !crate::diag::enabled() { stderr_line!($($arg)*); } };
 }
 
 // Callbacks without a session use the verbosity frozen by cmd_run_inner, never the environment.
