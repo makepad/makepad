@@ -5863,19 +5863,25 @@ impl<'a> Lcx<'a> {
 
     /// Assigns the parts of the value at `pl: t` to the assignee expression `a` (tuple, array,
     /// struct literal, `_`, `..` in a destructuring assignment; a place expression otherwise).
-    fn assign_parts(&mut self, a: ExprId, pl: &Place, t: TyId) {
+    /// Assigns the parts of the value at `pl` (type `t`) to assignee expression `a`. `src` is
+    /// None for a temporary (parts matched by `_` / `..` or not mentioned are dropped here),
+    /// Some(root) for a place (never dropped by the assignment; `root` is the local and field
+    /// path the place is in, when it is one, so a moved-out leaf clears that part's drop flag).
+    fn assign_parts(&mut self, a: ExprId, pl: &Place, t: TyId, src: Option<Option<(u32, Vec<(u32, u32)>)>>) {
         let ast = self.ast();
+        let temp = src.is_none();
+        let sub = |src: &Option<Option<(u32, Vec<(u32, u32)>)>>, vi: u32, fi: u32| src.as_ref().map(|r| r.as_ref().map(|(li, p)| { let mut p = p.clone(); p.push((vi, fi)); (*li, p) }));
         let is_rest = |x: ExprId| matches!(ast.expr(x).kind, ExprKind::Range(crate::ast::OptExprId::NONE, crate::ast::OptExprId::NONE, false));
         match &ast.expr(a).kind {
             ExprKind::Paren(x) if matches!(ast.expr(*x).kind, ExprKind::Range(crate::ast::OptExprId::NONE, crate::ast::OptExprId::NONE, false)) => {
-                if self.needs_drop_glue(t) {
+                if temp && self.needs_drop_glue(t) {
                     let ad = self.place_addr(pl, t);
                     self.drop_at(ad, t);
                 }
             }
-            ExprKind::Paren(x) => self.assign_parts(*x, pl, t),
+            ExprKind::Paren(x) => self.assign_parts(*x, pl, t, src),
             ExprKind::Underscore => {
-                if self.needs_drop_glue(t) {
+                if temp && self.needs_drop_glue(t) {
                     let ad = self.place_addr(pl, t);
                     self.drop_at(ad, t);
                 }
@@ -5902,10 +5908,10 @@ impl<'a> Lcx<'a> {
                     }
                     used[fi] = true;
                     let (fp, ft) = self.project(pl, t, 0, fi as u32);
-                    self.assign_parts(*x, &fp, ft);
+                    self.assign_parts(*x, &fp, ft, sub(&src, 0, fi as u32));
                 }
                 for fi in 0..m {
-                    if !used[fi] {
+                    if temp && !used[fi] {
                         let (fp, ft) = self.project(pl, t, 0, fi as u32);
                         if self.needs_drop_glue(ft) {
                             let ad = self.place_addr(&fp, ft);
@@ -5941,10 +5947,12 @@ impl<'a> Lcx<'a> {
                     }
                     used[fi] = true;
                     let ea = self.addr_add(base, (fi as u32 * stride) as i32);
-                    self.assign_parts(*x, &Place::Mem(ea, 0), et);
+                    // an array element is not a tracked field path: a leaf that would move a
+                    // droppable element out of a place is rejected by the move checker (E0508)
+                    self.assign_parts(*x, &Place::Mem(ea, 0), et, src.as_ref().map(|_| None));
                 }
                 for fi in 0..m {
-                    if !used[fi] && self.needs_drop_glue(et) {
+                    if temp && !used[fi] && self.needs_drop_glue(et) {
                         let ea = self.addr_add(base, (fi as u32 * stride) as i32);
                         self.drop_at(ea, et);
                     }
@@ -5976,10 +5984,10 @@ impl<'a> Lcx<'a> {
                     }
                     used[fi] = true;
                     let (fp, ft) = self.project(pl, t, vi, fi as u32);
-                    self.assign_parts(*x, &fp, ft);
+                    self.assign_parts(*x, &fp, ft, sub(&src, vi, fi as u32));
                 }
                 for fi in 0..nf {
-                    if !used[fi] {
+                    if temp && !used[fi] {
                         let (fp, ft) = self.project(pl, t, vi, fi as u32);
                         if self.needs_drop_glue(ft) {
                             let ad = self.place_addr(&fp, ft);
@@ -6012,11 +6020,11 @@ impl<'a> Lcx<'a> {
                             used[fi as usize] = true;
                         }
                         let (fp, ft) = self.project(pl, t, vi, fi);
-                        self.assign_parts(fe.expr, &fp, ft);
+                        self.assign_parts(fe.expr, &fp, ft, sub(&src, vi, fi));
                     }
                 }
                 for fi in 0..nf {
-                    if !used[fi] {
+                    if temp && !used[fi] {
                         let (fp, ft) = self.project(pl, t, vi, fi as u32);
                         if self.needs_drop_glue(ft) {
                             let ad = self.place_addr(&fp, ft);
@@ -6027,6 +6035,13 @@ impl<'a> Lcx<'a> {
             }
             _ => {
                 let v = self.read_place(pl, t);
+                // moved out of a place: that part of the root local is not dropped again
+                if let Some(Some((li, path))) = &src {
+                    if self.needs_drop_glue(t) {
+                        let (li, path) = (*li, path.clone());
+                        self.moved_field(li, &path);
+                    }
+                }
                 self.assign_to(a, v);
             }
         }
@@ -6444,11 +6459,21 @@ impl<'a> Lcx<'a> {
                 if is_assignee_pattern(self.ast(), *a) {
                     // destructuring assignment (rustc desugars `(a, b) = e` to
                     // `{ let (x, y) = e; a = x; b = y; }`): the value first, then each part is
-                    // assigned left to right; parts matched by `_` / `..` drop with the value
+                    // assigned left to right. A place `e` is matched in place, as the `let`
+                    // initializer is: parts matched by `_` / `..` or not mentioned neither move
+                    // nor drop, a leaf assignee moves its part out (tracked per field through
+                    // the root local's drop flags). Only a temporary drops its unmatched parts.
+                    if self.is_place_expr(*b) && self.b.coerce(b.0).is_none() {
+                        self.pos = self.ast().expr(*b).lo;
+                        let (pl, bt) = self.lower_place(*b);
+                        let root = self.field_move_path(*b);
+                        self.assign_parts(*a, &pl, bt, Some(root));
+                        return self.unit();
+                    }
                     let bt = self.body_ty(*b);
                     let v = self.lower_expr(*b);
                     let pl = self.val_to_place(v);
-                    self.assign_parts(*a, &pl, bt);
+                    self.assign_parts(*a, &pl, bt, None);
                     return self.unit();
                 }
                 let at = self.body_ty(*a);
