@@ -152,13 +152,13 @@ impl<T: crate::fmt::Debug> crate::fmt::Debug for ManuallyDrop<T> {
     }
 }
 
-impl<T> crate::ops::Deref for ManuallyDrop<T> {
+impl<T: ?Sized> crate::ops::Deref for ManuallyDrop<T> {
     type Target = T;
     fn deref(&self) -> &T {
         unsafe { &self.value }
     }
 }
-impl<T> crate::ops::DerefMut for ManuallyDrop<T> {
+impl<T: ?Sized> crate::ops::DerefMut for ManuallyDrop<T> {
     fn deref_mut(&mut self) -> &mut T {
         unsafe { &mut self.value }
     }
