@@ -130,7 +130,18 @@ impl<T> Vec<T> {
         Ok(())
     }
 
+    /// Real alloc's RawVecInner::reserve: only the capacity check inline, the growth and its
+    /// error handling behind a cold call (do_reserve_and_handle), so a caller that grows rarely
+    /// (`DrawVars::fit_dyn_uniforms` on every `set_uniform`) inlines a compare and a call.
+    #[inline]
     pub fn reserve(&mut self, additional: usize) {
+        if additional > self.capacity().wrapping_sub(self.len) {
+            self.do_reserve_and_handle(additional);
+        }
+    }
+
+    #[cold]
+    fn do_reserve_and_handle(&mut self, additional: usize) {
         if self.try_reserve(additional).is_err() {
             capacity_overflow();
         }

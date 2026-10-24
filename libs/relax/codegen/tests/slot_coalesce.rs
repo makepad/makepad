@@ -322,7 +322,7 @@ fn nocapture_build(fact: bool, again: bool) -> Func {
     push(&mut f, 0, Inst::IBin(IOp::Add, U64, s, a, b));
     f.blocks[0].term = Term::Ret(vec![s]);
     if fact {
-        f.nocapture.push((g, 0, false));
+        f.nocapture.push((g, 0, false, None));
     }
     f
 }
@@ -346,6 +346,109 @@ fn nocapture_call_writing_a_slot_while_its_partner_lives_keeps_them_apart() {
     let mut f = nocapture_build(true, true);
     assert!(!opt::coalesce_slot_copies(&mut f, true));
     assert_eq!(copies(&f), 1);
+}
+
+/// B = (n, 1); g(&B.0); C = B; g(&B.1); return C.0 + C.1 (`tail`: C.0 only) -- `g` keeps no copy
+/// of its argument and touches `ext` of it. Writing [0, 8), the second call writes only B.1,
+/// whose bytes in C are dead after it when only C.0 is read: B and C join. Only reading, it writes
+/// nothing: they join with C.1 read too (Arc::drop_slow reads the `&mut Arc` of reconcile's entry
+/// tuple). Not knowing its access, the call may write B.0 while C.0 is live: apart.
+fn nocapture_ext_build(ext: Extent, tail: bool) -> Func {
+    let mut f = Func::new("slot_coalesce_nocapture_ext".into(), 0);
+    let n = f.vreg(Cls::I);
+    f.params.push(n);
+    f.rets.push(Cls::I);
+    let (sb, sc_) = (f.slot(16, 8), f.slot(16, 8));
+    f.block();
+    let v = |f: &mut Func| f.vreg(Cls::I);
+    let (pb, pb8, pc, one, a, b, s) = (v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f));
+    let g = Callee::Fn(5);
+    push(&mut f, 0, Inst::SlotAddr(pb, sb));
+    push(&mut f, 0, Inst::IBinI(IOp::Add, U64, pb8, pb, 8));
+    push(&mut f, 0, Inst::SlotAddr(pc, sc_));
+    push(&mut f, 0, Inst::Iconst(one, 1));
+    push(&mut f, 0, Inst::Store(Mem::Int(8, false), pb, 0, n));
+    push(&mut f, 0, Inst::Store(Mem::Int(8, false), pb, 8, one));
+    push(&mut f, 0, Inst::Call(g.clone(), vec![pb], vec![]));
+    push(&mut f, 0, Inst::Copy(pc, pb, 16));
+    push(&mut f, 0, Inst::Call(g.clone(), vec![pb8], vec![]));
+    push(&mut f, 0, Inst::Load(Mem::Int(8, false), a, pc, 0));
+    if tail {
+        f.blocks[0].term = Term::Ret(vec![a]);
+    } else {
+        push(&mut f, 0, Inst::Load(Mem::Int(8, false), b, pc, 8));
+        push(&mut f, 0, Inst::IBin(IOp::Add, U64, s, a, b));
+        f.blocks[0].term = Term::Ret(vec![s]);
+    }
+    f.nocapture.push((g, 0, false, ext));
+    f
+}
+
+const RW8: Access = Access { read: (0, 8), write: (0, 8) };
+const R8: Access = Access { read: (0, 8), write: (0, 0) };
+
+#[test]
+fn nocapture_call_writing_only_dead_bytes_joins() {
+    let mut f = nocapture_ext_build(Some(RW8), true);
+    assert!(opt::coalesce_slot_copies(&mut f, true), "{}", f.dump());
+    assert_eq!(copies(&f), 0);
+}
+
+#[test]
+fn nocapture_call_writing_live_bytes_keeps_them_apart() {
+    let mut f = nocapture_ext_build(Some(RW8), false);
+    assert!(!opt::coalesce_slot_copies(&mut f, true));
+    assert_eq!(copies(&f), 1);
+}
+
+#[test]
+fn nocapture_call_only_reading_joins() {
+    let mut f = nocapture_ext_build(Some(R8), false);
+    assert!(opt::coalesce_slot_copies(&mut f, true), "{}", f.dump());
+    assert_eq!(copies(&f), 0);
+}
+
+#[test]
+fn nocapture_call_of_unknown_access_keeps_them_apart() {
+    let mut f = nocapture_ext_build(None, true);
+    assert!(!opt::coalesce_slot_copies(&mut f, true));
+    assert_eq!(copies(&f), 1);
+}
+
+/// param_escape's extent: loads, stores and copies at known offsets from the parameter and the
+/// extents of the calls it is passed to, shifted by where it is passed; an access at an offset
+/// not known (an add of a variable) makes it unknown.
+fn extent_callee(variable: bool) -> Func {
+    let mut f = Func::new("extent_callee".into(), 0);
+    let (p, x) = (f.vreg(Cls::I), f.vreg(Cls::I));
+    f.params.push(p);
+    f.params.push(x);
+    f.block();
+    let v = |f: &mut Func| f.vreg(Cls::I);
+    let (a, q, r, w) = (v(&mut f), v(&mut f), v(&mut f), v(&mut f));
+    push(&mut f, 0, Inst::Load(Mem::Int(8, false), a, p, 0));
+    push(&mut f, 0, Inst::IBinI(IOp::Add, U64, q, p, 8));
+    push(&mut f, 0, Inst::Store(Mem::Int(4, false), q, 4, a));
+    push(&mut f, 0, Inst::IBinI(IOp::Add, U64, r, p, 16));
+    push(&mut f, 0, Inst::Call(Callee::Fn(9), vec![r], vec![]));
+    if variable {
+        push(&mut f, 0, Inst::IBin(IOp::Add, U64, w, p, x));
+        push(&mut f, 0, Inst::Store(Mem::Int(1, false), w, 0, a));
+    }
+    f.blocks[0].term = Term::Ret(vec![]);
+    f
+}
+
+#[test]
+fn param_extent_from_accesses_and_calls() {
+    let sub = |c: &Callee, _k: usize| matches!(c, Callee::Fn(9)).then_some((false, Some(Access { read: (-2, 6), write: (0, 0) })));
+    // reads: [0, 8) and the call's [14, 22); writes: [12, 16)
+    assert_eq!(opt::param_escape(&extent_callee(false), 0, &sub), Some((false, Some(Access { read: (0, 22), write: (12, 16) }))));
+    assert_eq!(opt::param_escape(&extent_callee(true), 0, &sub), Some((false, None)));
+    let unknown = |c: &Callee, _k: usize| matches!(c, Callee::Fn(9)).then_some((false, None));
+    assert_eq!(opt::param_escape(&extent_callee(false), 0, &unknown), Some((false, None)));
+    // the second parameter is not used here: nothing is touched through it
+    assert_eq!(opt::param_escape(&extent_callee(false), 1, &sub), Some((false, Some(Access { read: (0, 0), write: (0, 0) }))));
 }
 
 /// f(n): A = (n, 2n); C = A (a move); flag = `moved`; C.0 = n + 5; then `if flag == 0 { A.0 }
@@ -414,17 +517,20 @@ fn a_read_behind_a_clear_drop_flag_keeps_the_slots_apart() {
 /// matched through a copy. `none` = 2: the None path's tag is known at the match, so the payload
 /// bytes the copy takes on that path are never read and H and T join (the payload write meets no
 /// live byte of H). `none` = 3: the "None" path reaches the payload too (it reads the previous
-/// iteration's payload of H), so they stay apart.
-fn build_tagged(none: i64) -> Func {
+/// iteration's payload of H), so they stay apart. `retest`: the match tests `T.tag == 2` and its
+/// None arm goes on to a second test `T.tag != 2` before the payload read (a `match` and the drop
+/// of the scrutinee after it): one condition, both edges the other way round.
+fn build_tagged(none: i64, retest: bool) -> Func {
     let mut f = Func::new("slot_coalesce_tag".into(), 0);
     let n = f.vreg(Cls::I);
     f.params.push(n);
     f.rets.push(Cls::I);
     let (sh, st) = (f.slot(16, 8), f.slot(16, 8));
-    for _ in 0..9 {
+    for _ in 0..10 {
         f.block();
     }
     let v = |f: &mut Func| f.vreg(Cls::I);
+    let (x2, c3) = (v(&mut f), v(&mut f));
     let (ph, pt, acc, i, c, r, one, k_none, x, c2, p, p2, i2, z) =
         (v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f));
     push(&mut f, 0, Inst::SlotAddr(ph, sh));
@@ -451,8 +557,17 @@ fn build_tagged(none: i64) -> Func {
     // T = H; match T.tag
     push(&mut f, 5, Inst::Copy(pt, ph, 16));
     push(&mut f, 5, Inst::Load(Mem::Int(4, false), x, pt, 0));
-    push(&mut f, 5, Inst::ICmpI(Cond::Ne, false, c2, x, 2));
-    f.blocks[5].term = Term::Branch(c2, 6, 7);
+    if retest {
+        push(&mut f, 5, Inst::ICmpI(Cond::Eq, false, c3, x, 2));
+        f.blocks[5].term = Term::Branch(c3, 9, 6);
+        push(&mut f, 9, Inst::Load(Mem::Int(4, false), x2, pt, 0));
+        push(&mut f, 9, Inst::ICmpI(Cond::Ne, false, c2, x2, 2));
+        f.blocks[9].term = Term::Branch(c2, 6, 7);
+    } else {
+        push(&mut f, 5, Inst::ICmpI(Cond::Ne, false, c2, x, 2));
+        f.blocks[5].term = Term::Branch(c2, 6, 7);
+        f.blocks[9].term = Term::Jump(7);
+    }
     push(&mut f, 6, Inst::Load(Mem::Int(8, false), p, pt, 8));
     push(&mut f, 6, Inst::IBinI(IOp::Add, U64, p2, p, 100));
     push(&mut f, 6, Inst::Store(Mem::Int(8, false), pt, 8, p2));
@@ -467,24 +582,28 @@ fn build_tagged(none: i64) -> Func {
 
 #[test]
 fn a_known_tag_on_the_none_path_lets_the_option_and_its_match_copy_join() {
-    let f = build_tagged(2);
-    f.verify().unwrap();
-    let want = run(&f, 10);
-    assert_eq!(want, (1 + 3 + 5 + 7 + 9) + 5 * 100);
-    let mut g = f.clone();
-    assert!(opt::coalesce_slot_copies(&mut g, true));
-    g.verify().unwrap();
-    assert_eq!(copies(&g), 0);
-    assert_eq!(run(&g, 10), want);
+    for retest in [false, true] {
+        let f = build_tagged(2, retest);
+        f.verify().unwrap();
+        let want = run(&f, 10);
+        assert_eq!(want, (1 + 3 + 5 + 7 + 9) + 5 * 100);
+        let mut g = f.clone();
+        assert!(opt::coalesce_slot_copies(&mut g, true), "retest {}", retest);
+        g.verify().unwrap();
+        assert_eq!(copies(&g), 0);
+        assert_eq!(run(&g, 10), want);
+    }
 }
 
 #[test]
 fn a_tag_that_reaches_the_payload_keeps_the_option_and_its_copy_apart() {
-    let f = build_tagged(3);
-    f.verify().unwrap();
-    let want = run(&f, 10);
-    let mut g = f.clone();
-    opt::coalesce_slot_copies(&mut g, true);
-    assert_eq!(copies(&g), 1);
-    assert_eq!(run(&g, 10), want);
+    for retest in [false, true] {
+        let f = build_tagged(3, retest);
+        f.verify().unwrap();
+        let want = run(&f, 10);
+        let mut g = f.clone();
+        opt::coalesce_slot_copies(&mut g, true);
+        assert_eq!(copies(&g), 1, "retest {}", retest);
+        assert_eq!(run(&g, 10), want);
+    }
 }

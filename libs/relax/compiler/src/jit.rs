@@ -6152,8 +6152,12 @@ impl Unit {
                 }
             }
             FnKey::Closure(_, _, parent) => self.verdict_state(*parent),
-            // the unverified-mode twin is never promoted: it exists to run under aliasing
-            FnKey::Plain(_) => Verdict::Unverifiable("unverified-mode twin".into()),
+            // the unverified-mode twin is never promoted: it exists to run under aliasing; its base's
+            // rejection is its own (code that inlined the twin is built again without it)
+            FnKey::Plain(b) => match self.verdict_state(*b) {
+                Verdict::Failed(e) => Verdict::Failed(e),
+                _ => Verdict::Unverifiable("unverified-mode twin".into()),
+            },
             _ => Verdict::Clean,
         }
     }
@@ -7753,7 +7757,9 @@ pub fn src_size(u: &Unit, id: u32) -> u32 {
             let b = u.prog.files[*file as usize].ast.block(crate::ast::BlockId(*ce & !crate::tcx::ASYNC_FN_BODY));
             (*file, b.lo, b.hi)
         }
-        FnKey::Sandbox(_) | FnKey::Plain(_) => return u32::MAX,
+        // (an unverified-mode twin is its base's body)
+        FnKey::Plain(b) => return src_size(u, *b),
+        FnKey::Sandbox(_) => return u32::MAX,
         FnKey::Closure(file, ce, _) => {
             let e = u.prog.files[*file as usize].ast.expr(crate::ast::ExprId(*ce));
             (*file, e.lo, e.hi)
@@ -7826,7 +7832,14 @@ fn callee_attrs(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, fns: &cra
         // binary_search_by: 48% of text_shape_raster)
         FnKey::Shim(_) if core_hint => relax_codegen::opt::ATTR_HINT,
         FnKey::Shim(_) | FnKey::Glue(..) | FnKey::Closure(..) => 0,
-        // twins are never inlined into anything (their callers are twins built from RIR)
+        // SPEC-V: an unverified-mode twin is its base's body lowered as unverified code; unverified
+        // code calls it where it passes `&mut` next to another pointer. Inlined into an unverified
+        // build it is that same code (no `noalias`, its own calls still to twins), so it inlines as
+        // its base would (rustc inlines the callee there: `set_material`'s 15 `set_uniform` calls).
+        // The build holds it as unverified code (O3Assembled::unverified_in): a failed verdict of
+        // the base builds it again. Never into verified code (which never calls twins).
+        FnKey::Plain(b) if into_unverified => return callee_attrs(prog, tcx, fns, core_crate, *b, inline_all, core_hint, true),
+        // sandbox twins are never inlined into anything (their callers are twins built from RIR)
         FnKey::Sandbox(_) | FnKey::Plain(_) => return None,
     })
 }
@@ -7861,6 +7874,9 @@ pub(crate) fn inline_attrs(prog: &crate::program::Program, d: DefId) -> u8 {
     let it = f.ast.item(def.item);
     let mut r = 0;
     for a in f.ast.list(it.attrs) {
+        if a.toks.hi > a.toks.lo && f.tok_text(a.toks.lo) == "cold" {
+            r |= relax_codegen::opt::ATTR_COLD_SRC;
+        }
         if a.toks.hi > a.toks.lo && f.tok_text(a.toks.lo) == "inline" {
             if (a.toks.lo..a.toks.hi).any(|i| f.tok_text(i) == "never") {
                 return 0;
@@ -9654,14 +9670,14 @@ unsafe fn tail_nocapture_facts(up: *mut Unit, id: u32, func: &mut relax_backend:
             }
             let r = match &c {
                 Callee::Fn(x) => known_nocapture(up, *x, k, 3, &|c| rir_for_fact(up, c, mode), &mut memo, &mut reads),
-                Callee::Host(s) => host_nocapture(&*up, *s).then_some(false),
+                Callee::Host(s) => host_nocapture(&*up, *s).then_some((false, None)),
                 _ => None,
             };
-            let Some(returns) = r else {
+            let Some((returns, ext)) = r else {
                 // an escape is left: no sibling call here, the other answers are not needed
                 return;
             };
-            f.nocapture.push((c, k as u32, returns));
+            f.nocapture.push((c, k as u32, returns, ext));
             new = true;
         }
         if !new {
@@ -9680,9 +9696,10 @@ fn host_nocapture(u: &Unit, s: relax_backend::rir::Sym) -> bool {
 }
 
 /// Whether callee `c` keeps no copy of its pointer argument `k` (Some: and whether it may return
-/// it), from its RIR (`rir`; None: not known, it may), calls it passes the pointer to asked in
-/// turn `depth` deep. The bodies read go to `reads` (dependencies of the asking body).
-unsafe fn known_nocapture(up: *mut Unit, c: u32, k: usize, depth: u32, rir: &dyn Fn(u32) -> Option<std::sync::Arc<relax_backend::rir::Func>>, memo: &mut Vec<(u32, usize, Option<bool>)>, reads: &mut Vec<u32>) -> Option<bool> {
+/// it, and the bytes it touches through it -- `Extent`), from its RIR (`rir`; None: not known, it
+/// may), calls it passes the pointer to asked in turn `depth` deep. The bodies read go to `reads`
+/// (dependencies of the asking body).
+unsafe fn known_nocapture(up: *mut Unit, c: u32, k: usize, depth: u32, rir: &dyn Fn(u32) -> Option<std::sync::Arc<relax_backend::rir::Func>>, memo: &mut Vec<(u32, usize, Option<(bool, relax_backend::rir::Extent)>)>, reads: &mut Vec<u32>) -> Option<(bool, relax_backend::rir::Extent)> {
     if let Some(&(_, _, v)) = memo.iter().find(|x| x.0 == c && x.1 == k) {
         return v;
     }
@@ -9695,7 +9712,7 @@ unsafe fn known_nocapture(up: *mut Unit, c: u32, k: usize, depth: u32, rir: &dyn
             let reads_c = std::cell::RefCell::new(std::mem::take(reads));
             let v = relax_codegen::opt::param_escape(&r, k, &|c2, k2| match c2 {
                 relax_backend::rir::Callee::Fn(x) if depth > 0 => known_nocapture(up, *x, k2, depth - 1, rir, &mut memo_c.borrow_mut(), &mut reads_c.borrow_mut()),
-                relax_backend::rir::Callee::Host(s) => host_nocapture(&*up, *s).then_some(false),
+                relax_backend::rir::Callee::Host(s) => host_nocapture(&*up, *s).then_some((false, None)),
                 _ => None,
             });
             *memo = memo_c.into_inner();
@@ -9758,7 +9775,7 @@ fn o3_nocapture_asks(root: &relax_backend::rir::Func, snap: &[(u32, std::sync::A
 /// them off the owner and asks again). coalesce_slot_copies joins the slots handed only to such
 /// calls (reconcile's entries reached Arc::drop_slow, which never runs, on the cold path of an
 /// `Option<Arc>` field; LLVM knows it nocapture from FunctionAttrs).
-unsafe fn o3_nocapture_facts(up: *mut Unit, id: u32, asks: &[(u32, u32)]) -> (Vec<(relax_backend::rir::Callee, u32, bool)>, Vec<u32>) {
+unsafe fn o3_nocapture_facts(up: *mut Unit, id: u32, asks: &[(u32, u32)]) -> (Vec<(relax_backend::rir::Callee, u32, bool, relax_backend::rir::Extent)>, Vec<u32>) {
     let missing = std::cell::RefCell::new(Vec::new());
     let have = |c: u32| -> Option<std::sync::Arc<relax_backend::rir::Func>> {
         let u = &*up;
@@ -9779,8 +9796,8 @@ unsafe fn o3_nocapture_facts(up: *mut Unit, id: u32, asks: &[(u32, u32)]) -> (Ve
     let (mut memo, mut reads) = (Vec::new(), Vec::new());
     let mut facts = Vec::new();
     for &(c, k) in asks {
-        if let Some(returns) = known_nocapture(up, c, k as usize, 3, &have, &mut memo, &mut reads) {
-            facts.push((relax_backend::rir::Callee::Fn(c), k, returns));
+        if let Some((returns, ext)) = known_nocapture(up, c, k as usize, 3, &have, &mut memo, &mut reads) {
+            facts.push((relax_backend::rir::Callee::Fn(c), k, returns, ext));
         }
     }
     reads.sort_unstable();
@@ -15320,7 +15337,8 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
     // its const_drain): fronted again in the next round, each up to REFRONTS times
     let mut refronted: HashMap<u32, u8> = Default::default();
     const REFRONTS: u8 = 3;
-    let fronts: std::cell::RefCell<Vec<(u32, DefId, Vec<TyId>)>> = Default::default();
+    // (slot, def, args, the base of an unverified-mode twin: its body is the base's, lowered as unverified code)
+    let fronts: std::cell::RefCell<Vec<(u32, DefId, Vec<TyId>, Option<u32>)>> = Default::default();
     // O1 builds a round's walk met that this thread prepares through a take and optimises itself
     // (o3_candidates_begin / o3_candidates_finish), not on the owner: upgrades of baseline RIR to
     // normal RIR (the root's and the candidates'), and the root's own RIR. Each slot once per
@@ -15526,9 +15544,11 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
         }
         let u = &mut *up;
         let f = &u.fns[c as usize];
-        let attr = match &f.key {
+        // (an unverified-mode twin: its base's body, lowered as unverified code)
+        let base_key = match &f.key { FnKey::Plain(b) => &u.fns[*b as usize].key, k => k };
+        let attr = match base_key {
             FnKey::Inst(d, _) if u.prog.def(*d).kind != DefKind::ForeignFn => inline_attrs(&u.prog, *d),
-            FnKey::Shim(_) | FnKey::Glue(..) => 0,
+            FnKey::Shim(_) | FnKey::Glue(..) if !matches!(f.key, FnKey::Plain(_)) => 0,
             FnKey::Closure(cf, _, parent) if u.has_body(*parent, *cf) => 0,
             _ => return,
         };
@@ -15542,9 +15562,10 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
         if force || cached_code || source_size <= src_toks || attr & relax_codegen::opt::ATTR_ALWAYS != 0
             || (single && source_size <= TIER1_SINGLE_SRC_TOKS) {
             if prefront && !fronted.contains(&c) {
-                if let FnKey::Inst(d, args) = &u.fns[c as usize].key {
+                let twin_of = match u.fns[c as usize].key { FnKey::Plain(b) => Some(b), _ => None };
+                if let FnKey::Inst(d, args) = &u.fns[twin_of.unwrap_or(c) as usize].key {
                     if matches!(u.prog.def(*d).kind, DefKind::Fn | DefKind::AssocFn) {
-                        fronts.borrow_mut().push((c, *d, args.clone()));
+                        fronts.borrow_mut().push((c, *d, args.clone(), twin_of));
                         return;
                     }
                 }
@@ -15744,10 +15765,14 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
     let tf = cpu_ns();
     TIER1_SNAP_FRONTS[0].fetch_add(more.len() as u64, Ordering::Relaxed);
     let mut ids = Vec::with_capacity(more.len() + ups.len());
-    for (c, d, args) in more {
+    for (c, d, args, twin_of) in more {
         fronted.insert(c);
         split_tried.borrow_mut().insert((c, false));
         ids.push((c, RirMode::Tier0));
+        if let Some(base) = twin_of {
+            prefront_twin(&front, c, base);
+            continue;
+        }
         let _preemptible = crate::preempt::Preemptible::on();
         typeck_ahead(&front, d, args, 1, false, true);
         let _want = WantConsts::on();
@@ -16229,7 +16254,8 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                 {
                     let mut a = UNVERIFIED_IN.lock().unwrap_or_else(|e| e.into_inner());
                     a.retain(|&(k, _, r)| k != up as usize || r != id);
-                    crate::zone_alloc::kept_with(|| for &c in &unverified_inl { a.push((up as usize, c, id)); });
+                    // (a twin by its base: the base's verdict decides)
+                    crate::zone_alloc::kept_with(|| for &c in &unverified_inl { a.push((up as usize, match u.fns[c as usize].key { FnKey::Plain(b) => b, _ => c }, id)); });
                 }
                 u.fns[id as usize].o3.store(true, Ordering::Relaxed);
                 if o3_first() {
@@ -17733,7 +17759,7 @@ unsafe fn o3_assemble(up: *mut Unit, (prog, tcx): (&Program, &Tcx), options: &cr
                     snap_counts.push((c, ck, cc));
                 }
             }
-            if root_unverified && fns[c as usize].unverified.load(Ordering::Relaxed) {
+            if root_unverified && (fns[c as usize].unverified.load(Ordering::Relaxed) || matches!(fns[c as usize].key, FnKey::Plain(_))) {
                 unverified_in.push(c);
             }
             snap.push((c, r.clone(), attrs));
