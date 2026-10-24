@@ -3299,10 +3299,11 @@ impl<'a> Lcx<'a> {
         };
         let instance = crate::instance::Instance::expect_resolve(&self.u.tcx, &self.u.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog), def, &args);
 
-        let addr = self.place_addr(&pl, pt);
+        // `&self`: the fat pointer when the place is unsized (`W<dyn Trait>`, `W<[T]>`)
+        let selfv = self.ref_to_place(&pl, pt);
         let self_t = self.u.tcx.tys.intern(TyKind::Ref(mutbl, pt, crate::types::RegionId::ERASED));
         let ret_t = self.u.tcx.tys.intern(TyKind::Ref(mutbl, target, crate::types::RegionId::ERASED));
-        let r = self.emit_instance(instance, vec![(Val::L(vec![addr]), self_t)], ret_t);
+        let r = self.emit_instance(instance, vec![(Val::L(selfv), self_t)], ret_t);
         let r = self.to_leaves(r, ret_t);
         if self.unsized_ty(target) {
             (Place::Regs(r), target)
@@ -6461,14 +6462,15 @@ impl<'a> Lcx<'a> {
                 self.want_mut = true;
                 let (pl, pt) = self.lower_place(*a);
                 self.want_mut = false;
-                let addr = self.place_addr(&pl, pt);
+                // `&mut self`: the fat pointer when the place is unsized
+                let selfv = self.ref_to_place(&pl, pt);
                 let bt = self.body_ty(*b);
                 let bt = m.args.get(1).copied().unwrap_or(bt);
                 let bv = self.lower_expr_coerced(*b, bt);
                 let instance = crate::instance::Instance::expect_resolve(&self.u.tcx, &self.u.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog), m.def, &m.args);
 
                 let rt = self.u.tcx.tys.intern(TyKind::Ref(true, pt, crate::types::RegionId::ERASED));
-                self.emit_instance(instance, vec![(Val::L(vec![addr]), rt), (bv, bt)], t);
+                self.emit_instance(instance, vec![(Val::L(selfv), rt), (bv, bt)], t);
                 self.unit()
             }
             ExprKind::AssignOp(op, a, b) => {
