@@ -510,8 +510,8 @@ impl Weather {
     }
 
     /// `ground` with no puddles: the damp ground between them, its dull sheen included. What the skyline's strip takes
-    /// for its own ground under a wet ground, the ground between the puddles, which it keeps where the floor does not
-    /// mirror (plan hdri-6 §5, fix wave 1). A dry ground is `ground`'s, bit for bit.
+    /// for its own ground under a wet ground: its near rise, and below the horizon the ground between the puddles (plan
+    /// hdri-6 §5, fix wave 1). A dry ground is `ground`'s, bit for bit.
     pub fn ground_damp(&self, d: Vec3f, ground: Vec3f, gain: Vec3f, sky_at: &dyn Fn(Vec3f) -> Vec3f) -> Vec3f {
         self.ground_with(d, ground, gain, sky_at, Puddles::Dry)
     }

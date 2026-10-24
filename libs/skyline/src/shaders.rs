@@ -64,11 +64,13 @@ script_mod! {
         lake_tex: texture_2d(float)
         lake_n: uniform(0.0)
         lake_eye: uniform(6.3)
+        // the near rise's distance (m: `NEAR_RISE_M`)
+        near_rise: uniform(500.0)
         // the share of the host's ground under standing water (`SkyLight::wet`): the land and the shore below the horizon are
         // water by it. 0: dry (the example's)
         wet: uniform(0.0)
-        // over a host's wet ground, the share of its floor's land below the horizon (`floor_at`) the strip leaves to the
-        // host's floor, which lays its puddles there (`SkyLight::floor_share`: the puddles' mean share); 0 elsewhere
+        // over a host's wet ground, the share of its flat ground below the horizon (`under_floor`) the strip leaves to
+        // the host's floor, which lays its puddles there (`SkyLight::floor_share`: the puddles' mean share); 0 elsewhere
         host_wet: uniform(0.0)
         // the horizon rings, RING x 4 texels: row 0 the sky at +1 degree, row 1 at +15 degrees, row 2 the host's ground,
         // row 3 the coast (x: 1 on land, 0 from SHORE_DEG out to sea; `SkyLight::ring_texels`, `coast_ring`)
@@ -144,25 +146,16 @@ script_mod! {
             // a lake stands on land columns only
             return vec3(sea, self.lake_at(u, al, px) * smoothstep(0.35, 0.6, g.x), self.wet * (1.0 - sea))
         }
-        // the share of the fragment under the horizon, where only the ground draws under a host's wet floor (`host_wet`),
-        // for a fragment whose centre is under it (as the ground's own `al > 0`), in the upright run; elsewhere 0. The
-        // ground gives way to the host's floor there (`floor_at`), so what is drawn before it and reaches under the
-        // horizon (the ranges, the front treeline, the glow) leaves that share out, or it would show through
+        // the share of the fragment under the horizon, for a fragment whose centre is under it (as the ground's own
+        // `al > 0`), in the upright run, under a host's wet floor (`host_wet`); elsewhere 0. There the strip's flat ground
+        // gives way to the host's floor at every depression (DrawSkyGround; the owner's D1 applied literally), only what
+        // stands keeping its own pixels, above the horizon: so what is drawn before the ground and reaches under the
+        // horizon (the ranges, the front treeline, the glow, the city's blit, the props in the scene list) leaves that
+        // share out, or it would show through
         under_floor: fn() -> float {
             let b = 0.0 - self.ang_raw(self.frag().y)
             if self.host_wet > 0.0 && self.mirror < 0.5 && b > 0.0 { return self.cover(b, self.px0()) }
             return 0.0
-        }
-        // the share of a pixel al rad below the horizon (raw elevation ang) in column g that is the strip's floor, the
-        // flat ground a host's wet floor lays its puddles on (DrawSkyGround, `host_wet`), where only the ground draws
-        // (`under_floor`). On the land (as `water_at` tells it from the sea) the near rise stands NEAR_RISE_M (500 m)
-        // off, its top g.y up: the rows down to its foot show the rise itself (`ground_d`), and water standing in front
-        // of it mirrors it, a near thing, from its foot down to its top's reflection, atan(2 EYE / 500 + tan g.y) (1.7
-        // degrees at Size 1), which the host's mirror about the horizon, a far scene's, cannot show; the strip keeps its
-        // own ground down to there (a puddle there shows the rise, about the ground's own colour), its floor below
-        floor_at: fn(g: vec4, al: float, ang: float) -> float {
-            let line = atan(2.0 * self.lake_eye / 500.0 + tan(g.y))
-            return (1.0 - smoothstep(0.0, 0.35, g.x) * (1.0 - self.cover(al - line, self.px0() * g.z))) * self.cover(0.0 - ang, self.px0())
         }
         // the sky at azimuth u, elevation el (rad): the low ring, toward the high one by +15 degrees
         sky_at: fn(u: float, el: float) -> vec3 { let a = self.ring_at(u, 0.125); return a + (self.ring_at(u, 0.375) - a) * clamp(el / 0.2617994, 0.0, 1.0) }
@@ -344,17 +337,17 @@ script_mod! {
             // over a host's wet floor (`host_wet`): by day the sea is the floor's water, by the floor's share (one
             // reflection runs from the sea onto the floor, the owner's D2): no base of its own, the host's ground
             // through it darkened as through a puddle (x 0.35 (1 - Fresnel)), the water shader mirroring at full
-            // strength. And on its floor (`floor_at`) the strip gives way to the host's: the share host_wet of the
-            // land there (its colour `cl`; in the sea's columns the coast's, the host's ground `gr`) is left clear,
-            // and its open water (the sea, faded from the host's coast by day, and a lake) is kept whole, so a lake's
-            // edge keeps its water and the cover is applied once; the host lays its puddles there (plan hdri-6 fix wave
-            // 1, the owner's D1)
+            // strength. And below the horizon (`under_floor`) the strip's flat ground gives way to the host's floor:
+            // the share host_wet of the land (its colour `cl`; in the sea's columns the coast's, the host's ground
+            // `gr`) is left clear at every depression, and its open water (the sea, faded from the host's coast by day,
+            // and a lake) is kept whole, so a lake's edge keeps its water and the cover is applied once; the host lays
+            // its puddles there (plan hdri-6 fix wave 1, the owner's D1 applied literally)
             if al > 0.0 && self.host_wet > 0.0 {
                 let u = self.view_raw().x; let gr = self.ring_at(u, 0.625); let coast = self.coast_at(u)
                 let fr = 0.02 + 0.98 * pow(clamp(1.0 - al, 0.0, 1.0), 5.0)
                 c = c + (gr * (0.35 * (1.0 - fr)) - c) * ((1.0 - max(land, coast)) * self.host_wet * self.day())
                 let ws = self.water_at(g, self.pix_view(self.view_raw()).x, al, self.px0() * g.z)
-                let gw = self.host_wet * (1.0 - max(ws.x * (1.0 - coast * self.day()), ws.y)) * self.floor_at(g, al, self.ang_raw(pp.y))
+                let gw = self.host_wet * (1.0 - max(ws.x * (1.0 - coast * self.day()), ws.y)) * self.under_floor()
                 var lc = cl
                 if ws.x > 0.0 { lc = gr }
                 return vec4(max(c * gm - lc * gw, vec3(0.0, 0.0, 0.0)), gm - gw)
@@ -368,9 +361,9 @@ script_mod! {
         // column's land share (the sea's columns keep their ground point, the shore's and the water's)
         ground_d: fn() -> float {
             let pp = self.frag(); let g = self.col_row(pp.x, 6.0); let al = 0.0 - self.ang_raw(pp.y) * g.z
-            if al <= 0.0 { return 500.0 }
+            if al <= 0.0 { return self.near_rise }
             let d = min(self.lake_eye / tan(al), 60000.0)
-            return d + (min(d, 500.0) - d) * g.x
+            return d + (min(d, self.near_rise) - d) * g.x
         }
         fragment: fn(){ let c = self.pixel(); self.fb0 = c; self.fb1 = vec4(0.0, 0.0, 0.0, c.w); self.fb2 = self.at_dist(c.w, self.ground_d()) }
     }

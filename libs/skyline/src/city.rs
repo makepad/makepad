@@ -298,13 +298,16 @@ script_mod! {
         }
     }
 
-    // The march's result in the scene list (and mirrored in the reflection run), at the march's depth, its lights too.
+    // The march's result in the scene list (and mirrored in the reflection run), at the march's depth, its lights too;
+    // under a host's wet floor only its share over the horizon (`under_floor`: what reaches under it stands behind the
+    // floor's water, as it stood behind the ground)
     mod.draw.DrawSkyCityBlit = mod.std.set_type_default() do #(DrawSkyCityBlit::script_shader(vm)){
         ..mod.draw.DrawQuad,
         ..mod.draw.SkyScene,
         ..mod.draw.SkyCityDepth,
         fragment: fn(){
-            let uv = self.up_uv(); let c = self.city_col.sample_nearest(uv); let lit = self.city_lit.sample_nearest(uv)
+            let uv = self.up_uv(); var c = self.city_col.sample_nearest(uv); var lit = self.city_lit.sample_nearest(uv)
+            if self.host_wet > 0.0 { let k = 1.0 - self.under_floor(); c = c * k; lit = vec4(lit.xyz * k, lit.w) }
             self.fb0 = c; self.fb1 = vec4(lit.xyz, c.w); self.fb2 = self.at_lit(c.w, lit.w, lit.xyz, lit.w)
         }
     }

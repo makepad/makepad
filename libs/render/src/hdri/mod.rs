@@ -433,10 +433,10 @@ impl Env {
     }
 
     /// Whether the skyline's strip gives way to this map's floor: under standing water (the puddles' share above 0,
-    /// with a sky: what `skyline_light` hands as `wet`) the app's strip keeps its own ground below the horizon but on
-    /// its floor, the flat ground in front of its near rise, where it leaves the puddles' mean share clear
-    /// (makepad_skyline's `SkyLight::floor_share`, plan hdri-6 fix wave 1), and the map lays its puddles there
-    /// (`under_band`). False without a skyline, a weather, a sky or a wet ground.
+    /// with a sky: what `skyline_light` hands as `wet`) the app's strip leaves the puddles' mean share of its flat
+    /// ground clear below the horizon, at every depression (makepad_skyline's `SkyLight::floor_share` and
+    /// `under_floor`, plan hdri-6 fix wave 1, the owner's D1), and the map lays its puddles there (`under_band`). False
+    /// without a skyline, a weather, a sky or a wet ground.
     fn gives_way(&self) -> bool {
         self.skyline.is_some() && self.atmo.is_some() && self.weather.as_ref().is_some_and(|weather| weather.puddle_share() > 0.0)
     }
@@ -585,9 +585,9 @@ impl Env {
     ///   (`Weather::puddle_share`, 0 on a dry ground or without a sky) and the
     ///   ground ring read with no puddles (`Weather::ground_damp`; the ground
     ///   ring itself when `wet` is 0): under a wet ground the strip keeps its
-    ///   own ground, the damp ring (its near rise down to its foot, its land,
-    ///   its lakes' bottoms), and on its floor, the flat ground in front of the
-    ///   rise, leaves the puddles' share clear (`SkyLight::floor_share` over a
+    ///   own ground, the damp ring (its near rise, its land, its lakes'
+    ///   bottoms), and below the horizon, its flat ground at every depression,
+    ///   leaves the puddles' share clear (`SkyLight::floor_share` over a
     ///   host's ground; plan hdri-6 §5, fix wave 1), where this map lays its
     ///   puddles, their water and what they mirror (`under_band`), so nothing
     ///   is mirrored twice.

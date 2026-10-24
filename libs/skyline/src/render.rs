@@ -163,6 +163,7 @@ impl SceneCtx<'_> {
         vars.set_uniform(cx, live_id!(sea_edge), &[crate::sea_edge_rad(self.p) as f32]);
         vars.set_uniform(cx, live_id!(lake_n), &[self.z.lakes.len() as f32]);
         vars.set_uniform(cx, live_id!(lake_eye), &[(crate::props::kit::EYE * self.p[P::Size]) as f32]);
+        vars.set_uniform(cx, live_id!(near_rise), &[crate::NEAR_RISE_M as f32]);
         vars.set_uniform(cx, live_id!(wet), &[l.own_wet()]);
         vars.set_uniform(cx, live_id!(host_wet), &[l.floor_share()]);
         bind_texture(cx, vars, live_id!(lake_tex), self.lakes);

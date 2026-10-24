@@ -124,17 +124,17 @@ impl SkyLight {
     }
 
     /// Whether the strip gives way to the host's floor below the horizon (`DrawSkyGround`): a host's ground
-    /// (`host_ground`) under standing water (`wet` > 0). The strip keeps its own ground there (its near rise down to
-    /// its foot whole) but on its floor, the flat ground in front of the rise, where it leaves the puddles' share clear
-    /// (`floor_share`) and the host lays its puddles as its own field lays them, their water and what they mirror (the
-    /// skyline at the mirrored elevation, through the host's weather), the strip's ground between them: so the band
-    /// and the host's floor below it are one floor (plan hdri-6 §5), the floor's dry ground never showing through (fix
-    /// wave 1, the owner's D1). The lakes and the sea stay the strip's.
+    /// (`host_ground`) under standing water (`wet` > 0). Only what stands keeps its own pixels, above the horizon; below
+    /// it the strip's flat ground leaves the puddles' share clear at every depression (`floor_share`) and the host lays
+    /// its puddles as its own field lays them, their water and what they mirror (the skyline at the mirrored elevation,
+    /// through the host's weather), the strip's ground between them: so the band and the host's floor below it are one
+    /// floor (plan hdri-6 §5), the floor's dry ground never showing through and the reflection starting right under
+    /// what stands (fix wave 1, the owner's D1 applied literally). The lakes and the sea stay the strip's.
     pub fn leaves_land(&self) -> bool {
         self.host_ground && self.wet > 0.0
     }
 
-    /// The share of its floor's land below the horizon (the shaders' `floor_at`) the strip leaves clear for the host's
+    /// The share of its flat ground below the horizon (the shaders' `under_floor`) the strip leaves clear for the host's
     /// floor (the shaders' `host_wet`): the puddles' mean share (`wet`, at most 1) where it gives way (`leaves_land`),
     /// else 0; the host lays its own puddles over that floor by it. The rest it keeps, its own ground; its open water
     /// (the sea, the lakes) it keeps whole.

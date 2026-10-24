@@ -393,6 +393,10 @@ script_mod! {
             }
             // by day the body is lit by the ambient and the sun (no normal: by its height)
             let day = self.day_lit(vec3(0.18, 0.18, 0.18), 1.0, 0.35 + 0.65 * max(sin(self.sun_el), 0.0))
+            // under a host's wet floor, in the scene list (not the props layer's own pass, over the sea), only its share
+            // over the horizon (`under_floor`: what reaches under it stands behind the floor's water, as it stood behind
+            // the ground)
+            if self.host_wet > 0.0 && self.parts_geom.w < 0.5 { let k = 1.0 - self.under_floor(); m = m * k; em = em * k }
             // at the instance's distance (m) there: a plane's, or the line's point the pixel sees; its lights there too
             self.fb0 = vec4(self.tone(if h1.w > 0.0 { h1.w } else { fd }, hzc, day) * m, m); self.fb1 = vec4(em, m); self.fb2 = self.at_lit(m, fd, em, fd)
         }

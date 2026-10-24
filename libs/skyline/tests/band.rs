@@ -1512,34 +1512,29 @@ fn a_wet_ground_mirrors_only_what_stands_above_it() {
     }
 }
 
-/// Where the strip's floor starts on the land at strip u (rad below the horizon, at the defaults' centred camera; the
-/// shaders' `floor_at`): the reflection of the near rise's top (`Zones::rise`, NEAR_RISE_M off) in water standing at
-/// its foot, atan(2 EYE / NEAR_RISE_M + tan(rise)). The rise's foot, atan(EYE / NEAR_RISE_M), is half of the first term.
-fn floor_line(p: &Params, z: &Zones, u: f64) -> f64 {
-    let eye = makepad_skyline::props::kit::EYE * p[P::Size];
-    (2.0 * eye / makepad_skyline::NEAR_RISE_M + z.rise(u).tan()).atan()
-}
-
-/// Plan hdri-6 §5, "so the band and the map's floor below it agree", and fix wave 1 (the owner's D1): over a host's
-/// ground (`host_ground`) under standing water (`wet` > 0) the strip keeps its own ground below the horizon and gives
-/// way to the host's floor only on its own floor (the shaders' `floor_at`: from half a pixel under the horizon,
-/// `under_floor`; on the land in front of its near rise, below the depth down to which water at the rise's foot
-/// mirrors the rise itself, `floor_line`), by the puddles' share (`SkyLight::floor_share`), where the host lays its
-/// puddles. The land down to there is the dry band's, bit for bit; the land and the shore on the floor are the dry
-/// band's kept by 1 - the share (its colour and its coverage). Everything else is the host's dry band: the sky, the
-/// city, the lakes (which keep their own Water reflections), and at night the sea from its distance out (bit for bit;
-/// by day it is the floor's water, `by_day_over_a_hosts_wet_floor_the_sea_is_the_floors_water`), by day and at night
-/// (`SkyLight::plan`, the decode). The app's scene: a shore in front of the sea (Sea distance 0.3) and lakes. Before fix round 1 the
-/// strip gave way from the horizon down: the floor's water mirrored the near rise right under it, a stripe of ground
-/// between the treeline and its reflection.
+/// Plan hdri-6 §5, "so the band and the map's floor below it agree", and fix wave 1 (the owner's D1 applied literally,
+/// the controller's ruling of 2026-10-24): over a host's ground (`host_ground`) under standing water (`wet` > 0) the
+/// strip's flat ground gives way to the host's floor below the horizon at every depression (the shaders'
+/// `under_floor`: from half a pixel under the horizon), by the puddles' share (`SkyLight::floor_share`), where the host
+/// lays its puddles; only what stands keeps its own pixels, above the horizon. The land and the shore below the horizon
+/// are the dry band's kept by 1 - the share (its colour and its coverage), whatever was drawn before the ground there
+/// (the ranges, the front treeline, the glow, the city, the props behind the near rise) giving way with it.
+/// Everything else is the host's dry band: the sky and what stands in it, the lakes (which keep their own Water
+/// reflections), and at night the sea from its distance out (bit for bit; by day it is the floor's water,
+/// `by_day_over_a_hosts_wet_floor_the_sea_is_the_floors_water`), by day and at night (`SkyLight::plan`, the decode).
+/// The app's scene, a shore in front of the sea (Sea distance 0.3) and lakes, and props_heavy's. Before (fix round 1):
+/// the land was the dry band's down to the reflection of the near rise's top, 1.8 degrees, a band of ground between the
+/// treeline and its reflection.
 #[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
-fn over_a_hosts_wet_ground_the_band_gives_way_on_its_floor() {
+fn over_a_hosts_wet_ground_the_band_gives_way_below_the_horizon() {
     const SHARE: f32 = 0.5;
-    let mut p = Params::default();
-    for (k, v) in [(P::SeaD, 0.3), (P::PrLake, 1.0)] { p.set(k as usize, v); }
+    let mut app = Params::default();
+    for (k, v) in [(P::SeaD, 0.3), (P::PrLake, 1.0)] { app.set(k as usize, v); }
+    for (scene, p) in [("app", Some(app)), ("props_heavy", baseline("props_heavy").map(|(p, _)| p))] {
+    let Some(p) = p else { eprintln!("no baseline props_heavy, skipped"); continue };
     let (z, edge, w) = (Zones::new(&p), makepad_skyline::sea_edge_rad(&p), 2048usize);
     let (px, eye) = (std::f64::consts::TAU / w as f64, makepad_skyline::props::kit::EYE * p[P::Size]);
-    assert!(!z.lakes.is_empty(), "the premise: lakes at seed 7");
+    assert!(scene != "app" || !z.lakes.is_empty(), "the premise: lakes at seed 7");
     // the coast the day's sea fades into over a host's ground (`coast_at`: the ring's two nearest entries)
     let coast = makepad_skyline::coast_ring(|u| z.land(u));
     let off_coast = |u: f64| { let i = (u * RING as f64 - 0.5).floor() as i64; [i, i + 1].iter().all(|&i| coast[i.rem_euclid(RING as i64) as usize] == 0.0) };
@@ -1547,9 +1542,10 @@ fn over_a_hosts_wet_ground_the_band_gives_way_on_its_floor() {
     let noon_host = SkyLight { host_ground: true, ground: [ground; RING], ..noon([1.2, 1.3, 1.5]) };
     for (name, light) in [("noon", noon_host), ("night", generator_light(-20.0))] {
         let (dry, wet) = (render_planned(&p, w, &light), render_planned(&p, w, &SkyLight { wet: SHARE, ..light.clone() }));
-        // texels kept by 1 - the share, and kept as the dry band: the land down to the floor, above the horizon, the sea
-        // (at night), the lakes; the first miss of each
-        let (mut kept, mut rise, mut above, mut sea, mut lake) = ((0usize, None), (0usize, None), (0usize, None), (0usize, None), (0usize, None));
+        let name = format!("{scene}, {name}");
+        // texels kept by 1 - the share, and kept as the dry band: above the horizon, the sea (at night), the lakes; the
+        // first miss of each
+        let (mut kept, mut above, mut sea, mut lake) = ((0usize, None), (0usize, None), (0usize, None), (0usize, None));
         let tally = |n: &mut (usize, Option<String>), ok: bool, what: String| if ok { n.0 += 1 } else if n.1.is_none() { n.1 = Some(what) };
         for y in 0..dry.h {
             let al = -row_el(&p, &dry, y);
@@ -1563,43 +1559,39 @@ fn over_a_hosts_wet_ground_the_band_gives_way_on_its_floor() {
                 // land clear of every lake by a twentieth of a texel too: the shader's cover is the CPU's to 2 % of a texel
                 // (`the_shaders_lakes_are_the_cpus`), so a texel whose edge comes nearer a shore may hold a sliver of lake
                 let by_lake = makepad_skyline::lakes::cover(&z.lakes, u, al, 1.1 * px, eye) > 0.0;
-                let line = floor_line(&p, &z, u);
-                if land > 0.95 && !by_lake && al < line - 1.5 * px { tally(&mut rise, t == d, what); }
-                else if (land > 0.95 && !by_lake && al > line + 1.5 * px) || (land < 0.05 && al > edge + 1.5 * px) {
+                if (land > 0.95 && !by_lake) || (land < 0.05 && al > edge + 1.5 * px) {
                     tally(&mut kept, (0..4).all(|c| (t[c] - (1.0 - SHARE) * d[c]).abs() <= 2e-3 * d[c].abs() + 1e-6), what);
                 }
-                else if land < 0.05 && al < edge - 1.5 * px && off_coast(u) { if name == "night" { tally(&mut sea, t == d, what); } }
+                else if land < 0.05 && al < edge - 1.5 * px && off_coast(u) { if name.ends_with("night") { tally(&mut sea, t == d, what); } }
                 // (a lake keeps its own share of the texel: the shader's cover is the CPU's to 0.1 %, `the_shaders_lakes_are_the_cpus`)
                 else if land > 0.95 && in_lake >= 0.999 { tally(&mut lake, (0..4).all(|c| (t[c] - d[c]).abs() <= 1e-3 * d[c].abs().max(1.0)), what); }
             }
         }
-        println!("{name}: {} texels of the floor's land and shore kept by 1 - the share, {} of the land down to the floor, {} above the horizon, {} of sea, {} of lakes as dry",
-            kept.0, rise.0, above.0, sea.0, lake.0);
-        let sea_least = if name == "night" { 200 } else { 0 };
-        for (what, n, least) in [("the floor's land and shore kept by 1 - the share", kept, 2000), ("the land down to the floor as dry", rise, 2000),
-            ("above the horizon as dry", above, 20000), ("sea as dry", sea, sea_least), ("lakes as dry", lake, 10)] {
+        println!("{name}: {} texels of the land and shore below the horizon kept by 1 - the share, {} above the horizon, {} of sea, {} of lakes as dry",
+            kept.0, above.0, sea.0, lake.0);
+        let (sea_least, lake_least) = (if scene == "app" && name.ends_with("night") { 200 } else { 0 }, if scene == "app" { 10 } else { 0 });
+        for (what, n, least) in [("the land and shore below the horizon kept by 1 - the share", kept, 2000),
+            ("above the horizon as dry", above, 20000), ("sea as dry", sea, sea_least), ("lakes as dry", lake, lake_least)] {
             assert!(n.1.is_none(), "{name}: {what} fails at {}", n.1.unwrap());
             assert!(n.0 >= least, "{name}, the premise: {} texels of {what}", n.0);
         }
     }
+    }
 }
 
-/// Plan hdri-6 fix wave 1 (review M2): over a host's wet ground a lake's edge keeps its own water whole. In a texel of
-/// the strip's floor a lake covers by cv the strip gives way to the host's floor by the share of the land alone
-/// (coverage 1 - share x (1 - cv)), and the lake's water, its colour and what it mirrors, stays as in the dry band:
-/// the texel is the dry band's less that share of the host's ground, the cut applied once (in `DrawSkyGround`). Above
-/// the floor (`floor_line`) a lake's edge is the dry band's. A lake's near shore lies at least LAKE_MIN_M x Size off,
-/// 1.8 degrees down, about where the floor starts (the reflection of the rise's top, 1.6 to 1.9 degrees down): the
-/// nearest lakes reach onto the floor at Size 0.5 (12 lakes a turn). All land with lakes, at Size 1 (2048 px) and 0.5
-/// (4096 px), at noon (and the coverage at night, the decode), share 0.5, every texel a lake covers by 0.2 to 0.8 (the
-/// CPU's `lakes::cover`; the shader's is it to 2 % of a texel). Before: the final cut the whole texel by its keep, the
-/// lake's water and mirror by cv twice.
+/// Plan hdri-6 fix wave 1 (review M2): over a host's wet ground a lake's edge keeps its own water whole. In a texel a
+/// lake covers by cv the strip gives way to the host's floor (below the horizon, `under_floor`) by the share of the
+/// land alone (coverage 1 - share x (1 - cv)), and the lake's water, its colour and what it mirrors, stays as in the
+/// dry band: the texel is the dry band's less that share of the host's ground, the cut applied once (in
+/// `DrawSkyGround`). All land with lakes, at Size 1 (2048 px) and 0.5 (4096 px), at noon (and the coverage at night,
+/// the decode), share 0.5, every texel a lake covers by 0.2 to 0.8 (the CPU's `lakes::cover`; the shader's is it to 2 %
+/// of a texel). Before: the final cut the whole texel by its keep, the lake's water and mirror by cv twice.
 #[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
 fn over_a_hosts_wet_ground_a_lakes_edge_keeps_its_water_whole() {
     const SHARE: f32 = 0.5;
     let ground = [0.30f32, 0.20, 0.10];
     let noon_host = SkyLight { host_ground: true, ground: [ground; RING], ..noon([1.2, 1.3, 1.5]) };
-    let (mut on, mut above) = (0usize, 0usize);
+    let mut on = 0usize;
     for (size, w) in [(1.0, 2048usize), (0.5, 4096)] {
     let mut p = Params::default();
     for (k, v) in [(P::Land, 1.0), (P::PrLake, 1.0), (P::Size, size)] { p.set(k as usize, v); }
@@ -1607,23 +1599,15 @@ fn over_a_hosts_wet_ground_a_lakes_edge_keeps_its_water_whole() {
     let (px, eye) = (std::f64::consts::TAU / w as f64, makepad_skyline::props::kit::EYE * p[P::Size]);
     for (name, light) in [("noon", noon_host.clone()), ("night", generator_light(-20.0))] {
         let (dry, wet) = (render_planned(&p, w, &light), render_planned(&p, w, &SkyLight { wet: SHARE, ..light.clone() }));
-        let (mut n, mut up, mut worst, mut miss) = (0usize, 0usize, 0.0f32, None);
+        let (mut n, mut worst, mut miss) = (0usize, 0.0f32, None);
         for y in 0..dry.h {
             let al = -row_el(&p, &dry, y);
             if al <= 1.5 * px { continue; }
             for x in 0..w {
                 let u = (x as f64 + 0.5) / w as f64;
-                let line = floor_line(&p, &z, u);
-                if (al - line).abs() <= 1.5 * px { continue; }
                 let cv = makepad_skyline::lakes::cover(&z.lakes, u, al, px, eye) as f32;
                 if !(cv > 0.2 && cv < 0.8) { continue; }
                 let (d, t) = (dry.texels[y * w + x], wet.texels[y * w + x]);
-                if al < line {
-                    // above the floor: the dry band's
-                    if t != d && miss.is_none() { miss = Some(format!("x {x}, row {y} (above the floor), cover {cv:.3}: wet {t:?}, dry {d:?}")); }
-                    up += 1;
-                    continue;
-                }
                 let want_a = 1.0 - SHARE * (1.0 - cv);
                 // the coverage: the CPU's cover to 2 % of a texel; the colour: the dry texel less the share of the
                 // ground it left
@@ -1640,13 +1624,13 @@ fn over_a_hosts_wet_ground_a_lakes_edge_keeps_its_water_whole() {
                 n += 1;
             }
         }
-        if name == "noon" { println!("Size {size}, {name}: {n} lake texels on the floor covered 0.2 to 0.8, the colour at most {:.2} % off the dry band less the ground left; {up} above the floor as dry", 100.0 * worst); }
-        else { println!("Size {size}, {name}: {n} lake texels on the floor covered 0.2 to 0.8, each kept by 1 - the share of its land; {up} above the floor as dry"); }
+        if name == "noon" { println!("Size {size}, {name}: {n} lake texels covered 0.2 to 0.8, the colour at most {:.2} % off the dry band less the ground left", 100.0 * worst); }
+        else { println!("Size {size}, {name}: {n} lake texels covered 0.2 to 0.8, each kept by 1 - the share of its land"); }
         assert!(miss.is_none(), "Size {size}, {name}: a lake's edge does not keep its water: {}", miss.unwrap());
-        (on, above) = (on + n, above + up);
+        on += n;
     }
     }
-    assert!(on >= 20 && above >= 20, "the premise: {on} lake texels on the floor and {above} above it covered 0.2 to 0.8");
+    assert!(on >= 20, "the premise: {on} lake texels covered 0.2 to 0.8");
 }
 
 /// Plan hdri-6 fix wave 1 (review I2, the owner's D2): by day over a host's ground under standing water the strip's sea

@@ -575,10 +575,9 @@ pub struct SkylineLight {
     pub sea_low: [[f32; 3]; RING],
     pub sea_high: [[f32; 3]; RING],
     /// The puddles' mean share of the map's ground (`Weather::puddle_share`; 0 without a wet ground, 1 at Wet ground
-    /// 1.00). Above 0 the strip keeps its own ground below the horizon but leaves this share of its floor clear, the
-    /// flat ground in front of its near rise (makepad_skyline's `SkyLight::floor_share`, over the map's ground), where
-    /// the map lays its own puddles, their water and what they mirror, as its field lays them, the strip's ground
-    /// between them (`Env::under_band`).
+    /// 1.00). Above 0 the strip leaves this share of its flat ground clear below the horizon, at every depression
+    /// (makepad_skyline's `SkyLight::floor_share`, over the map's ground), where the map lays its own puddles, their
+    /// water and what they mirror, as its field lays them, the strip's ground between them (`Env::under_band`).
     pub wet: f32,
     /// The map's ground ring as `ground_ring`, read with no puddles (`Weather::ground_damp`): the strip's own ground
     /// under a wet ground, the ground between the puddles (its near rise, its floor between the puddles, its lakes'
@@ -1268,24 +1267,26 @@ mod tests {
     }
 
     /// A band laid out as the app's strip draws it at seed 7 under a wet ground (plan hdri-6 fix wave 1), 1024 texels
-    /// round the turn (the preview bake's), square texels, the horizon 44.01 rows down: clear sky, a dark treeline (0.3
-    /// of the strip's own ground, the damp ring `ground_damp`, rows 40-42), the near rise in row 43 wholly above the
-    /// horizon, its face below it down to its foot and the water in front of it down to the depth where it mirrors the
-    /// rise, `line_deg` down (`floor_line_deg`), the strip's own ground kept whole; then its floor, from half a texel
-    /// under the horizon (makepad_skyline's `floor_at`, the line's edge antialiased over a texel), its ground kept by 1
-    /// - `share` (the strip leaves the puddles' mean share of it clear, `SkyLight::floor_share`), to the band's bottom,
-    /// 6.3 degrees down.
-    fn wet_floor_band(l: &SkylineLight, line_deg: f32, share: f32) -> SkylineBand {
+    /// round the turn (the preview bake's), square texels, the horizon 44.01 rows down: clear sky, the city's
+    /// silhouettes 1.4 to 3.9 degrees up with the sky between them (two columns of three), over a dark treeline (rows
+    /// 40-42; both 0.04 of the strip's own ground, the damp ring `ground_damp`, as dark against it as the app's at
+    /// night), the near rise in row 43 wholly above the horizon, and below the horizon the strip's flat ground, which
+    /// gives way to the map's floor at every depression (makepad_skyline's `under_floor`, from half a texel under the
+    /// horizon): its ground kept by 1 - `share` (the strip leaves the puddles' mean share of it clear,
+    /// `SkyLight::floor_share`), to the band's bottom, 6.3 degrees down. This is the strip's contract, which the GPU
+    /// band test `over_a_hosts_wet_ground_the_band_gives_way_below_the_horizon` holds the shaders to.
+    fn wet_floor_band(l: &SkylineLight, share: f32) -> SkylineBand {
         let (w, h, row) = (1024usize, 62usize, 360.0 / 1024.0);
         let top = 44.01 * row;
         let texels = (0..w * h)
             .map(|i| {
                 let (x, y) = (i % w, i / w);
                 let g = vec(l.ground_damp[x * RING / w]);
-                // the texel's centre in rows under the horizon, and the share of it that is the strip's floor
+                // the texel's centre in rows under the horizon, and the share of it under the horizon (`under_floor`)
                 let down = y as f32 + 0.5 - 44.01;
-                let floor = if down >= 0.5 { (down - line_deg / row + 0.5).clamp(0.0, 1.0) } else { 0.0 };
+                let floor = if down > 0.0 { (down + 0.5).min(1.0) } else { 0.0 };
                 let (t, a) = match y {
+                    33..=39 if (x / 8) % 3 != 0 => (g * 0.04, 1.0),
                     0..=39 => (Vec3f::default(), 0.0),
                     40..=42 => (g * 0.04, 1.0),
                     // the near rise, 0.2 to 0.35 degrees high, the trees standing on it over the rest of the texel
@@ -1298,25 +1299,17 @@ mod tests {
         SkylineBand::new(w, h, texels, Vec::new(), top, top - h as f32 * row)
     }
 
-    /// Where `wet_floor_band`'s floor starts at Size 1, degrees below the horizon (makepad_skyline's `floor_at`): the
-    /// reflection of the near rise's top (the top edge of row 43, 1.01 texels up) in water standing at its foot,
-    /// NEAR_RISE_M (500 m) off, seen from the strip's eye (EYE, 6.3 m up): atan(2 EYE / 500 + tan(top)), 1.8 degrees.
-    fn floor_line_deg() -> f32 {
-        (2.0 * 6.3f32 / 500.0 + (1.01f32 * 360.0 / 1024.0).to_radians().tan()).atan().to_degrees()
-    }
-
-    /// Plan hdri-6 fix wave 1 (I1, the owner's D1): under a wet ground no row by the horizon stands out. The strip keeps
-    /// its own ground below the horizon, its near rise and the water in front of it that mirrors the rise whole, and
-    /// leaves the puddles' share of its floor clear, where the map lays its puddles (`Env::under_band`). A band as the
-    /// app's strip draws it at seed 7 (`wet_floor_band`: the near rise in a row wholly above the horizon, as in the app),
-    /// the map read as the app's preview shows it: baked 1024 x 512 (the mean round the turn of each of the bake's rows)
-    /// and drawn between the bake's rows. By night and at noon, at Wet ground 0.2 (the fog kind's), 0.5 and 1.00: no row
-    /// within 1 degree of the horizon is brighter than both its neighbours a quarter of a degree above and below (a
-    /// stripe a texel or two of the strip high) by more than STRIPE_NOISE of it. Before (the strip giving way from the
-    /// horizon down): the floor's water mirrored the near rise right under the horizon, a stripe of ground between the
-    /// treeline and its reflection (by night at 1.00 about 30 % over both); with the strip's floor from the rise's foot
-    /// (0.72 degrees down), the ground down to the foot a stripe of three texels between the treeline and the floor's
-    /// water mirroring it (by night at 1.00 about 16 %).
+    /// Plan hdri-6 fix wave 1 (I1, the owner's D1 applied literally, the controller's ruling of 2026-10-24): under a wet
+    /// ground no band stands between the silhouettes and their reflection. Below the horizon the strip's flat ground
+    /// gives way to the map's floor by the puddles' share at every depression, only what stands keeping its own pixels
+    /// (above the horizon), and the map lays its puddles there (`Env::under_band`). A band as the app's strip draws it
+    /// at seed 7 (`wet_floor_band`), the map read as the app's preview shows it: baked 1024 x 512 (the mean round the
+    /// turn of each of the bake's rows) and drawn between the bake's rows. By night and at noon, at Wet ground 0.2 (the
+    /// fog kind's), 0.5 and 1.00: no row below the horizon down to the reflection (2 degrees) is brighter than both the
+    /// silhouettes (the mean of the rows 2 to 3 degrees up) and their reflection (the mean of the rows 2 to 3 degrees
+    /// down, at least its top row) by more than STRIPE_NOISE of it. Before (fix round 1: the strip's ground kept whole
+    /// down to the reflection of its near rise's top, 1.8 degrees): a band of ground between the treeline and its
+    /// reflection, by night at 1.00 29 % over both (at noon 26 %; at 0.5 2.8 and 1.7 %).
     #[test]
     fn under_a_wet_floor_no_row_by_the_horizon_stands_out() {
         const STRIPE_NOISE: f32 = 0.01;
@@ -1332,35 +1325,38 @@ mod tests {
                 let l = Env::new(&p).skyline_light();
                 let share = l.wet;
                 assert!(share > 0.0, "the premise: {name} at {wet} the strip gives way by {share}");
-                let (q, images) = with_band(&p, wet_floor_band(&l, floor_line_deg(), share));
+                let (q, images) = with_band(&p, wet_floor_band(&l, share));
                 let env = Env::new_with(&q, &images);
-                // each bake row's mean round the turn (the rows within 2 degrees of the horizon), and the preview's read
+                // each bake row's mean round the turn (the rows within 3 degrees of the horizon), and the preview's read
                 // between them
                 let row_mean = |j: usize| {
                     let el = 90.0 - (j as f32 + 0.5) * bake_row;
                     (0..1024).map(|i| lum(env.radiance(dir_at_u((i as f32 + 0.5) / 1024.0, el)))).sum::<f32>() / 1024.0
                 };
-                let rows: Vec<(usize, f32)> = (250..262).map(|j| (j, row_mean(j))).collect();
+                let rows: Vec<(usize, f32)> = (244..268).map(|j| (j, row_mean(j))).collect();
                 let mean = |el: f32| {
                     let y = (90.0 - el) / bake_row - 0.5;
                     let j = y.floor() as usize;
                     let at = |j: usize| rows.iter().find(|r| r.0 == j).expect("a bake row by the horizon").1;
                     at(j) + (at(j + 1) - at(j)) * (y - j as f32)
                 };
+                // the silhouettes, 2 to 3 degrees up, and their reflection, 2 to 3 degrees down: each the mean of its rows,
+                // the reflection at least as bright as its top row (its Fresnel term falls with depth, so the rows of the
+                // reflection just above it are brighter than its mean without standing out)
+                let window = |from: i32| (from..=from + 20).map(|k| mean(k as f32 * 0.05)).sum::<f32>() / 21.0;
+                let (silhouettes, reflection) = (window(40), window(-60).max(mean(-2.0)));
                 let (mut worst, mut at) = (f32::MIN, 0.0);
-                for k in -20..=20 {
-                    let el = k as f32 * 0.05;
-                    if el.abs() < 0.04 { continue; }
-                    let (got, up, down) = (mean(el), mean(el + 0.25), mean(el - 0.25));
-                    let excess = (got - up.max(down)) / got;
+                for k in 1..40 {
+                    let el = -(k as f32) * 0.05;
+                    let excess = (mean(el) - silhouettes.max(reflection)) / mean(el);
                     if excess > worst { (worst, at) = (excess, el); }
                 }
-                println!("{name}, Wet ground {wet} (share {share:.3}): the most a row stands out {:.2} % (at {at:.2} deg)", 100.0 * worst);
+                println!("{name}, Wet ground {wet} (share {share:.3}): the silhouettes {silhouettes:.4e}, their reflection {reflection:.4e}; the most a row stands over both {:.2} % (at {at:.2} deg)", 100.0 * worst);
                 out.push((name, wet, worst, at));
             }
         }
         for (name, wet, worst, at) in out {
-            assert!(worst <= STRIPE_NOISE, "{name}, Wet ground {wet}: the row at {at:.2} degrees stands {:.1} % over both its neighbours", 100.0 * worst);
+            assert!(worst <= STRIPE_NOISE, "{name}, Wet ground {wet}: the row at {at:.2} degrees stands {:.1} % over both the silhouettes and their reflection", 100.0 * worst);
         }
     }
 
@@ -1384,9 +1380,9 @@ mod tests {
             p.sky.weather = Some(WeatherParams { wet_ground: 0.5, ..WeatherParams::default() });
             let bare = Env::new(&p);
             let l = bare.skyline_light();
-            let (q, images) = with_band(&p, wet_floor_band(&l, floor_line_deg(), l.wet));
+            let (q, images) = with_band(&p, wet_floor_band(&l, l.wet));
             let env = Env::new_with(&q, &images);
-            let (q, images) = with_band(&p, wet_floor_band(&l, floor_line_deg(), 0.0));
+            let (q, images) = with_band(&p, wet_floor_band(&l, 0.0));
             let opaque = Env::new_with(&q, &images);
             let weather = env.weather.as_ref().expect("a wet ground has a weather");
             let (mut wet, mut dry, mut worst) = (0usize, 0usize, 0.0f32);
