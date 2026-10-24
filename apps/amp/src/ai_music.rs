@@ -18,9 +18,13 @@
 //!    on one GPU, which renders faster than the song plays (DESIGN: 4090
 //!    ~4x, 5090 ~6x real time for YuE2), so more GPUs serve more songs, not
 //!    one song faster;
-//! 3. writes it as an Ogg Vorbis file with its title, prompt, lyrics and the
-//!    model in its tags into the "Amp AI" music folder, a normal local folder
-//!    of the library, and says it is ready ([`AiEvent::Ready`]).
+//! 3. times the lyrics by the model's own score (the hub's song-timing
+//!    artifact; estimated from the song's structure without one, see
+//!    `lyrics.rs`) and writes the song as an Ogg Vorbis file with its title,
+//!    prompt, lyrics, timed lyrics (SYNCEDLYRICS, enhanced LRC), the writer's
+//!    translation and the model in its tags into the "AI music" folder, a
+//!    normal local folder of the library, and says it is ready
+//!    ([`AiEvent::Ready`]).
 //!
 //! Cancel and Restart bump the epoch the UI shares with the worker: the
 //! running writer turn or hub job sees it at its next poll and is cancelled
@@ -31,9 +35,10 @@
 //! when running from a checkout (so they can be edited live), else the copy
 //! built in.
 
+use crate::lyrics::{self, Timing};
 use crate::worker::{send, Message};
 use makepad_ai_hub::job::{self, FixedRouter, FleetRouter, GenRouter, GenerateError, Want};
-use makepad_ai_hub::protocol::{ChatMessageJson, GenerateRequestJson};
+use makepad_ai_hub::protocol::{ChatMessageJson, GenerateRequestJson, SongTimingJson, SONG_TIMING_FORMAT};
 use makepad_ai_hub::registry::Domain;
 use makepad_micro_serde::*;
 use makepad_strict_json as json;
@@ -58,6 +63,10 @@ pub const LOOP_TAIL_MS: u32 = 30_000;
 pub const FOLDER_NAME: &str = "AI music";
 /// The tag that marks a file as made here.
 pub const SOURCE_TAG: &str = "AI generated";
+/// The languages the writer can translate the lyrics into; the first is
+/// the default. The last entry turns translation off.
+pub const LANGUAGES: [&str; 11] = ["English", "Dutch", "German", "French", "Spanish", "Italian", "Portuguese", "Japanese", "Chinese", "Korean", NO_TRANSLATION];
+pub const NO_TRANSLATION: &str = "No translation";
 
 /// Transcript size (bytes of text) above which the oldest turns are
 /// compacted into the songs-so-far summary.
@@ -105,6 +114,29 @@ pub struct SongPrompt {
     pub length: f64,
     /// Where it was made: the model, the node and its GPU.
     pub made_on: String,
+    /// The writer's translation of the lyrics (same sections and lines), and
+    /// its language; none when the lyrics are in that language already.
+    pub translation: Option<String>,
+    pub language: Option<String>,
+    /// The timed lyrics (enhanced LRC, `lyrics::to_lrc`) once made, and where
+    /// the times came from ("score" or "estimated").
+    pub synced: Option<String>,
+    pub timing: Option<String>,
+}
+
+impl SongPrompt {
+    /// The lyrics with their times and translation: as made, else (a song
+    /// from before timing, or one being made) estimated from its length.
+    pub fn timed_lyrics(&self) -> Option<lyrics::TimedLyrics> {
+        if self.lyrics.trim().is_empty() {
+            return None;
+        }
+        let translation = self.translation.as_deref().unwrap_or("");
+        match (&self.synced, self.timing.as_deref().and_then(Timing::parse)) {
+            (Some(lrc), Some(timing)) => Some(lyrics::from_lrc(lrc, translation, timing)),
+            _ => Some(lyrics::estimate(&self.lyrics, translation, self.length.max(self.seconds.unwrap_or(0.0)))),
+        }
+    }
 }
 
 
@@ -121,7 +153,9 @@ pub struct ReadySong {
 pub enum AiCommand {
     /// Write and render the next song. `epoch` is the shared epoch when the
     /// command was sent: a later Cancel or Restart cancels it.
-    Next { request: String, model: String, minutes: u32, epoch: u64 },
+    /// `id` names this song's events; `language`: the one to translate the
+    /// lyrics into ([`LANGUAGES`]).
+    Next { id: u64, request: String, model: String, minutes: u32, language: String, epoch: u64 },
     /// Keep the current conversation aside and start a fresh one.
     NewConversation,
     /// List the fleet's music models.
@@ -129,21 +163,22 @@ pub enum AiCommand {
 }
 
 /// What the worker says. `epoch` is the Next's: the UI drops what belongs
-/// to a Next it cancelled since.
+/// to a Next it cancelled since; `id` is the song being made.
 pub enum AiEvent {
     Models(Vec<MusicModel>),
     /// The prompt field and model of the last run, read at start.
-    Restored { request: String, model: String, minutes: u32 },
+    Restored { request: String, model: String, minutes: u32, language: String },
     /// What the next song is at: a stage and a fraction in permille.
-    Stage { epoch: u64, text: String, permille: u16 },
-    /// The writer's answer for the song being made.
-    Song { epoch: u64, song: SongPrompt },
-    Ready { epoch: u64, song: ReadySong },
-    Failed { epoch: u64, error: String },
-    Cancelled { epoch: u64 },
+    Stage { epoch: u64, id: u64, text: String, permille: u16 },
+    /// The writer's answer for the song being made (`index` into the
+    /// conversation's songs).
+    Song { epoch: u64, id: u64, index: usize, song: SongPrompt },
+    Ready { epoch: u64, id: u64, song: ReadySong },
+    Failed { epoch: u64, id: u64, error: String },
+    Cancelled { epoch: u64, id: u64 },
     /// Who works on the next song now, in words ("Claude Code on this
     /// Mac", "yue2-3b on 10.0.0.235 · RTX 4090").
-    Where { epoch: u64, text: String },
+    Where { epoch: u64, id: u64, text: String },
     /// The songs of the conversation, oldest first (made ones have a path).
     Songs(Vec<SongPrompt>),
     /// The writer conversation as text, for the expand view.
@@ -250,16 +285,22 @@ pub fn parse_song(answer: &str, model: &str) -> Result<SongPrompt, String> {
         Some(json::Value::F64(f)) => Some(*f),
         _ => None,
     };
-    let song = SongPrompt {
+    let mut song = SongPrompt {
         title: text("title").filter(|t| !t.is_empty()).ok_or("the writer gave no title")?,
         model: model.to_string(),
         prompt: text("prompt").filter(|t| !t.is_empty()).ok_or("the writer gave no prompt")?,
         lyrics: text("lyrics").unwrap_or_default(),
+        translation: text("translation").filter(|t| !t.is_empty()),
         score_mode: text("score_mode").unwrap_or_default(),
         seconds: number("seconds"),
         steps: number("steps").map(|s| s as u32),
         ..SongPrompt::default()
     };
+    // YuE2 sings every word it is given: only its section tags and the
+    // words to sing go to it (no directions, no lines about the band).
+    if model.starts_with("yue2") && !song.lyrics.is_empty() {
+        song.lyrics = lyrics::clean_for_yue2(&song.lyrics).trim_end().to_string();
+    }
     Ok(song)
 }
 
@@ -399,61 +440,143 @@ fn first_chorus_line(lyrics: &str) -> String {
 }
 
 /// The writer's next user turn.
-pub fn next_turn(request: &str, model: &str, minutes: u32) -> String {
+pub fn next_turn(request: &str, model: &str, minutes: u32, language: &str) -> String {
     let unit = if minutes == 1 { "minute" } else { "minutes" };
-    format!("Music model: {model}\nSong length: about {minutes} {unit}\nMy request: {}\nWrite the next song.", request.trim())
+    let language = if language == NO_TRANSLATION || language.is_empty() { "none".to_string() } else { language.to_string() };
+    format!("Music model: {model}\nSong length: about {minutes} {unit}\nTranslation language: {language}\nMy request: {}\nWrite the next song.", request.trim())
 }
 
 // ---- the worker ------------------------------------------------------------
 
-/// The ai-music worker: one command at a time; `epoch` is shared with the
-/// UI, which bumps it to cancel what runs.
+/// A render finished: what the conversation's record of the song learns.
+struct Made {
+    /// The conversation it belongs to (a New conversation since drops it).
+    generation: u64,
+    index: usize,
+    song: SongPrompt,
+}
+
+/// The ai-music worker. The writer is one conversation, so its turns run
+/// here one after another; each song then renders on a thread of its own
+/// on whichever fleet GPU the hub's router picks, so two songs being made
+/// run on two GPUs at once. `epoch` is shared with the UI, which bumps it
+/// to cancel all that runs.
 pub fn run(rx: Receiver<AiCommand>, epoch: Arc<AtomicU64>, tx: SyncSender<Message>) {
     let dir = session_dir();
     let mut session = Session::load(&dir);
+    let mut generation = 0u64;
+    let (made_tx, made_rx) = std::sync::mpsc::channel::<Made>();
     send(&tx, Message::AiMusic(AiEvent::Conversation(session.render())));
     send(&tx, Message::AiMusic(AiEvent::Songs(session.songs.clone())));
-    if let Some((request, model, minutes)) = load_settings(&dir) {
-        send(&tx, Message::AiMusic(AiEvent::Restored { request, model, minutes }));
+    if let Some((request, model, minutes, language)) = load_settings(&dir) {
+        send(&tx, Message::AiMusic(AiEvent::Restored { request, model, minutes, language }));
     }
-    while let Ok(command) = rx.recv() {
+    loop {
+        let command = match rx.recv_timeout(POLL) {
+            Ok(command) => Some(command),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        // Renders that finished: the record gets the file, length, maker
+        // and timed lyrics.
+        let mut changed = false;
+        for made in made_rx.try_iter() {
+            if made.generation != generation {
+                continue;
+            }
+            if let Some(record) = session.songs.get_mut(made.index) {
+                *record = made.song;
+                changed = true;
+            }
+        }
+        if changed {
+            session.save(&dir);
+            send(&tx, Message::AiMusic(AiEvent::Songs(session.songs.clone())));
+        }
         match command {
-            AiCommand::Models => send(&tx, Message::AiMusic(AiEvent::Models(fleet_models()))),
-            AiCommand::NewConversation => {
+            None => {}
+            Some(AiCommand::Models) => send(&tx, Message::AiMusic(AiEvent::Models(fleet_models()))),
+            Some(AiCommand::NewConversation) => {
                 Session::archive(&dir);
                 session = Session::default();
+                generation += 1;
                 send(&tx, Message::AiMusic(AiEvent::Conversation(String::new())));
                 send(&tx, Message::AiMusic(AiEvent::Songs(Vec::new())));
             }
-            AiCommand::Next { request, model, minutes, epoch: at } => {
-                save_settings(&dir, &request, &model, minutes);
-                let cancelled = || epoch.load(Ordering::SeqCst) != at;
-                let event = match next_song(&mut session, &dir, &request, &model, minutes, at, &cancelled, &tx) {
-                    Ok(song) => AiEvent::Ready { epoch: at, song },
-                    Err(GenerateError::Cancelled) => AiEvent::Cancelled { epoch: at },
+            Some(AiCommand::Next { id, request, model, minutes, language, epoch: at }) => {
+                save_settings(&dir, &request, &model, minutes, &language);
+                let shared = epoch.clone();
+                let cancelled = move || shared.load(Ordering::SeqCst) != at;
+                let job = Job { epoch: at, id, tx: tx.clone() };
+                let (index, song) = match write_song_text(&mut session, &dir, &request, &model, minutes, &language, &job, &cancelled) {
+                    Ok(written) => written,
                     Err(error) => {
-                        log!("amp: ai-music: {error}");
-                        AiEvent::Failed { epoch: at, error: error.to_string() }
+                        job.finish(Err(error));
+                        continue;
                     }
                 };
-                send(&tx, Message::AiMusic(event));
+                let made_tx = made_tx.clone();
+                let started = std::thread::Builder::new().name("ai-music-render".into()).spawn(move || {
+                    let fleet = Arc::new(FleetRouter { installed_only: true });
+                    let result = render_song(song, minutes, &job, &cancelled, fleet);
+                    if let Ok(ready) = &result {
+                        let _ = made_tx.send(Made { generation, index, song: ready.song.clone() });
+                    }
+                    job.finish(result);
+                });
+                if let Err(error) = started {
+                    send(&tx, Message::AiMusic(AiEvent::Failed { epoch: at, id, error: format!("cannot start the render: {error}") }));
+                }
             }
         }
     }
 }
 
-fn stage(tx: &SyncSender<Message>, epoch: u64, text: &str, permille: u16) {
-    send(tx, Message::AiMusic(AiEvent::Stage { epoch, text: text.to_string(), permille }));
+/// One song being made: where its events go.
+struct Job {
+    epoch: u64,
+    id: u64,
+    tx: SyncSender<Message>,
 }
 
-/// The prompt field and the model, kept beside the conversation.
-fn load_settings(dir: &Path) -> Option<(String, String, u32)> {
+impl Job {
+    fn send(&self, event: AiEvent) {
+        send(&self.tx, Message::AiMusic(event));
+    }
+
+    fn stage(&self, text: &str, permille: u16) {
+        self.send(AiEvent::Stage { epoch: self.epoch, id: self.id, text: text.to_string(), permille });
+    }
+
+    fn at(&self, text: String) {
+        self.send(AiEvent::Where { epoch: self.epoch, id: self.id, text });
+    }
+
+    fn finish(&self, result: Result<ReadySong, GenerateError>) {
+        let (epoch, id) = (self.epoch, self.id);
+        self.send(match result {
+            Ok(song) => AiEvent::Ready { epoch, id, song },
+            Err(GenerateError::Cancelled) => AiEvent::Cancelled { epoch, id },
+            Err(error) => {
+                log!("amp: ai-music: {error}");
+                AiEvent::Failed { epoch, id, error: error.to_string() }
+            }
+        });
+    }
+}
+
+/// The prompt field, the model, the length and the translation language,
+/// kept beside the conversation.
+fn load_settings(dir: &Path) -> Option<(String, String, u32, String)> {
     let text = std::fs::read_to_string(dir.join("settings.txt")).ok()?;
     let mut request = None;
     let mut model = None;
     let mut minutes = LENGTHS[0];
+    let mut language = LANGUAGES[0].to_string();
     for line in text.lines() {
-        if let Some(v) = line.strip_prefix("minutes ") {
+        if let Some(v) = line.strip_prefix("language ") {
+            language = Some(v.trim()).filter(|v| LANGUAGES.contains(v)).unwrap_or(LANGUAGES[0]).to_string();
+        } else if let Some(v) = line.strip_prefix("minutes ") {
             minutes = v.trim().parse().ok().filter(|m| LENGTHS.contains(m)).unwrap_or(minutes);
         } else if let Some(v) = line.strip_prefix("model ") {
             model = Some(v.trim().to_string());
@@ -461,36 +584,36 @@ fn load_settings(dir: &Path) -> Option<(String, String, u32)> {
             request = Some(v.replace("\\n", "\n"));
         }
     }
-    Some((request?, model?, minutes))
+    Some((request?, model?, minutes, language))
 }
 
-fn save_settings(dir: &Path, request: &str, model: &str, minutes: u32) {
-    let text = format!("model {model}\nminutes {minutes}\nrequest {}\n", request.replace('\n', "\\n"));
+fn save_settings(dir: &Path, request: &str, model: &str, minutes: u32, language: &str) {
+    let text = format!("model {model}\nminutes {minutes}\nlanguage {language}\nrequest {}\n", request.replace('\n', "\\n"));
     if let Err(error) = std::fs::create_dir_all(dir).and_then(|_| std::fs::write(dir.join("settings.txt"), text)) {
         log!("amp: cannot save the ai-music settings: {error}");
     }
 }
 
-fn next_song(
+/// The writer's next song, added to the conversation: its index there and
+/// the song.
+fn write_song_text(
     session: &mut Session,
     dir: &Path,
     request: &str,
     model: &str,
     minutes: u32,
-    epoch: u64,
+    language: &str,
+    job: &Job,
     cancelled: &dyn Fn() -> bool,
-    tx: &SyncSender<Message>,
-) -> Result<ReadySong, GenerateError> {
-    let folder = music_folder().ok_or_else(|| GenerateError::Failed("no home folder for the songs".into()))?;
-    // 1. The writer.
-    stage(tx, epoch, "writing", 0);
+) -> Result<(usize, SongPrompt), GenerateError> {
+    job.stage("writing", 0);
     let system = writer_system(model).map_err(GenerateError::Failed)?;
     if session.compact(COMPACT_AT) > 0 {
         session.save(dir);
     }
-    let turn = next_turn(request, model, minutes);
+    let turn = next_turn(request, model, minutes, language);
     let writer = writer_hub().map_err(GenerateError::Unavailable)?;
-    send(tx, Message::AiMusic(AiEvent::Where { epoch, text: format!("Claude Code on {}", node_name(&writer)) }));
+    job.at(format!("Claude Code on {}", node_name(&writer)));
     let ask = GenerateRequestJson {
         model: WRITER_MODEL.to_string(),
         domain: Some("chat".to_string()),
@@ -514,88 +637,74 @@ fn next_song(
         .clone()
         .or_else(|| answer.artifacts.iter().find(|a| a.content_type.starts_with("text/")).map(|a| String::from_utf8_lossy(&a.bytes).into_owned()))
         .ok_or_else(|| GenerateError::Failed("the writer answered nothing".into()))?;
-    let song = parse_song(&text, model).map_err(GenerateError::Failed)?;
+    let mut song = parse_song(&text, model).map_err(GenerateError::Failed)?;
+    // A translation is in the asked language; one equal to the lyrics is none.
+    if song.translation.as_deref().is_some_and(|t| t.trim() == song.lyrics.trim()) || language == NO_TRANSLATION {
+        song.translation = None;
+    }
+    // The language asked for (none: translation off), kept also when the
+    // lyrics were in it already.
+    song.language = Some(language.to_string()).filter(|l| l != NO_TRANSLATION && !l.is_empty());
     session.turns.push(Turn { role: "user".into(), text: turn });
     session.turns.push(Turn { role: "assistant".into(), text: text.trim().to_string() });
     session.songs.push(song.clone());
     session.save(dir);
-    send(tx, Message::AiMusic(AiEvent::Conversation(session.render())));
-    send(tx, Message::AiMusic(AiEvent::Songs(session.songs.clone())));
-    send(tx, Message::AiMusic(AiEvent::Song { epoch, song: song.clone() }));
+    let index = session.songs.len() - 1;
+    job.send(AiEvent::Conversation(session.render()));
+    job.send(AiEvent::Songs(session.songs.clone()));
+    job.send(AiEvent::Song { epoch: job.epoch, id: job.id, index, song: song.clone() });
+    Ok((index, song))
+}
 
-    // 2. The song.
-    stage(tx, epoch, "queued", 0);
+/// Render the written song and file it. `route` is the hub's fleet router
+/// over the GPUs that have the model ready (a job never makes a node
+/// download weights): it picks one that is up and admits work (a hub
+/// restarting or paused is skipped; an interrupted job is rerouted by the
+/// job client), so no node is named here.
+fn render_song(song: SongPrompt, minutes: u32, job: &Job, cancelled: &dyn Fn() -> bool, route: Arc<dyn GenRouter>) -> Result<ReadySong, GenerateError> {
+    let folder = music_folder().ok_or_else(|| GenerateError::Failed("no home folder for the songs".into()))?;
+    job.stage("queued", 0);
     let started = Instant::now();
-    let seed = SystemTime::now().duration_since(UNIX_EPOCH).map_or(7, |d| d.as_nanos() as u64 & 0x7fff_ffff);
-    // AMP_AI_MUSIC_NODE pins the renders to one hub (`host:port` or a URL);
-    // else the fleet's best node by ETA. A node that cannot run the model
-    // (a hub built without CUDA) is skipped for the next one.
-    let pinned = std::env::var("AMP_AI_MUSIC_NODE").ok().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).map(|n| {
-        if n.starts_with("https://") || n.starts_with("http://") { n } else { format!("https://{n}") }
-    });
-    let mut skip: Vec<String> = Vec::new();
-    let output = loop {
-        let picked = Arc::new(std::sync::Mutex::new(None::<String>));
-        let router: Arc<dyn GenRouter> = Arc::new(NamingRouter { pinned: pinned.clone(), skip: skip.clone(), picked: picked.clone() });
-        let mut named = false;
-        let result = job::generate(
-            router,
-            job::process_origin("amp-ai-music"),
-            Domain::Music,
-            music_request(&song, seed, minutes),
-            Want::Outputs { media: 1, text: 0 },
-            cancelled,
-            &mut |text, permille| {
-                if !named {
-                    if let Some(node) = picked.lock().ok().and_then(|p| p.clone()) {
-                        named = true;
-                        send(tx, Message::AiMusic(AiEvent::Where { epoch, text: format!("{} on {}", song.model, node_label(&node)) }));
-                    }
-                }
-                stage(tx, epoch, text, permille)
-            },
-            POLL,
-        );
-        let node = picked.lock().ok().and_then(|p| p.clone());
-        match result {
-            Ok(output) => break output,
-            Err(GenerateError::Unavailable(reason)) => {
-                return Err(GenerateError::Unavailable(format!("no GPU hub available for {}: {reason}", song.model)));
+    let seed = SystemTime::now().duration_since(UNIX_EPOCH).map_or(7, |d| d.as_nanos() as u64 & 0x7fff_ffff) ^ job.id;
+    let picked = Arc::new(std::sync::Mutex::new(None::<String>));
+    let router: Arc<dyn GenRouter> = Arc::new(NamingRouter { route, picked: picked.clone() });
+    let mut shown: Option<String> = None;
+    let output = job::generate(
+        router,
+        job::process_origin("amp-ai-music"),
+        Domain::Music,
+        music_request(&song, seed, minutes),
+        // The audio, and for yue2 its score and the score's timeline.
+        Want::All,
+        cancelled,
+        &mut |text, permille| {
+            // The node, named as soon as it is picked (and again when the
+            // job is rerouted to another).
+            let node = picked.lock().ok().and_then(|p| p.clone());
+            if node.is_some() && node != shown {
+                shown = node.clone();
+                job.at(format!("{} on {}", song.model, node_label(node.as_deref().unwrap_or_default())));
             }
-            Err(GenerateError::Failed(error)) if cannot_run(&error) && pinned.is_none() => {
-                let Some(node) = node else { return Err(GenerateError::Failed(error)) };
-                log!("amp: ai-music: {} cannot run {}: {error}; trying another node", node_name(&node), song.model);
-                skip.push(node);
-            }
-            Err(GenerateError::Failed(error)) if cannot_run(&error) => {
-                return Err(GenerateError::Unavailable(format!("no GPU hub available for {}: {error}", song.model)));
-            }
-            Err(GenerateError::Failed(error)) if error.contains("insufficient VRAM") => {
-                return Err(GenerateError::Unavailable(format!("no GPU has room for {} right now (it needs about 14 GB): {error}", song.model)));
-            }
-            Err(error) => return Err(error),
-        }
-    };
+            job.stage(text, permille)
+        },
+        POLL,
+    )
+    .map_err(|error| match error {
+        GenerateError::Unavailable(reason) => GenerateError::Unavailable(format!("no GPU on the fleet can make {} now: {reason}", song.model)),
+        error => error,
+    })?;
     let render_seconds = started.elapsed().as_secs_f64();
     let wav = output
         .artifacts
         .iter()
         .find(|a| a.content_type.starts_with("audio/"))
         .ok_or_else(|| GenerateError::Failed(format!("{} returned no audio", output.model)))?;
-
-    // 3. The file.
-    stage(tx, epoch, "saving", 1000);
+    job.stage("saving", 1000);
     let audio = makepad_audio_decode::decode_any(&wav.bytes).map_err(|e| GenerateError::Failed(format!("the song's audio: {e:?}")))?;
     let seconds = audio.frames() as f64 / audio.rate.max(1) as f64;
+    let mut song = song;
+    time_lyrics(&mut song, &output.artifacts, seconds);
     let path = write_song(&folder, &song, &output.model, &audio).map_err(GenerateError::Failed)?;
-    let made_on = format!("{} on {}", output.model, node_label(&output.node));
-    if let Some(record) = session.songs.last_mut() {
-        record.path = path.to_string_lossy().into_owned();
-        record.length = seconds;
-        record.made_on = made_on.clone();
-    }
-    session.save(dir);
-    send(tx, Message::AiMusic(AiEvent::Songs(session.songs.clone())));
     log!(
         "amp: ai-music: \"{}\" {:.0} s of audio rendered by {} on {} in {:.0} s (x{:.1} real time)",
         song.title,
@@ -605,16 +714,30 @@ fn next_song(
         render_seconds,
         seconds / render_seconds.max(0.001)
     );
-    let mut song = song;
     song.path = path.to_string_lossy().into_owned();
     song.length = seconds;
-    song.made_on = made_on;
-    Ok(ReadySong { path: path.to_string_lossy().into_owned(), song, seconds, render_seconds })
+    song.made_on = format!("{} on {}", output.model, node_label(&output.node));
+    Ok(ReadySong { path: song.path.clone(), song, seconds, render_seconds })
 }
 
-/// A job error that means the node cannot run the model at all.
-fn cannot_run(error: &str) -> bool {
-    error.contains("needs a CUDA device") || error.contains("model unavailable")
+/// Time the lyrics by the song-timing artifact (the model's own score),
+/// else estimate them from the structure and the length.
+fn time_lyrics(song: &mut SongPrompt, artifacts: &[makepad_ai_hub::client::ArtifactBytes], seconds: f64) {
+    if song.lyrics.trim().is_empty() {
+        return;
+    }
+    let score = artifacts
+        .iter()
+        .filter(|a| a.content_type.starts_with("application/json"))
+        .filter_map(|a| SongTimingJson::deserialize_json(std::str::from_utf8(&a.bytes).ok()?).ok())
+        .find(|t| t.format == SONG_TIMING_FORMAT);
+    let translation = song.translation.as_deref().unwrap_or("");
+    let timed = score
+        .as_ref()
+        .and_then(|t| lyrics::time_from_score(&song.lyrics, translation, t, seconds))
+        .unwrap_or_else(|| lyrics::estimate(&song.lyrics, translation, seconds));
+    song.synced = Some(lyrics::to_lrc(&timed));
+    song.timing = Some(timed.timing.name().to_string());
 }
 
 /// A node by its host ("this machine" for the one Amp runs on).
@@ -640,22 +763,19 @@ fn short_gpu(name: &str) -> String {
     name.trim_start_matches("NVIDIA ").trim_start_matches("GeForce ").trim().to_string()
 }
 
-/// The fleet router (or the pinned node) that remembers the node it picked
-/// and leaves out the ones that could not run the model.
+/// A router that remembers the node it picked, so the page can name it.
 struct NamingRouter {
-    pinned: Option<String>,
-    skip: Vec<String>,
+    route: Arc<dyn GenRouter>,
     picked: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl GenRouter for NamingRouter {
+    fn use_idle_admission(&self, domain: &str, request: &GenerateRequestJson) -> bool {
+        self.route.use_idle_admission(domain, request)
+    }
+
     fn route(&self, domain: &str, request: &GenerateRequestJson, excluded: &[String]) -> Result<job::GenPick, String> {
-        let mut excluded = excluded.to_vec();
-        excluded.extend(self.skip.iter().cloned());
-        let pick = match &self.pinned {
-            Some(node) => FixedRouter(node.clone()).route(domain, request, &excluded)?,
-            None => FleetRouter { installed_only: false }.route(domain, request, &excluded)?,
-        };
+        let pick = self.route.route(domain, request, excluded)?;
         if let Ok(mut picked) = self.picked.lock() {
             *picked = Some(pick.base_url.clone());
         }
@@ -729,6 +849,14 @@ fn write_song(folder: &Path, song: &SongPrompt, model: &str, audio: &makepad_aud
     if !song.lyrics.is_empty() {
         tags.push(("LYRICS".to_string(), song.lyrics.clone()));
     }
+    if let (Some(synced), Some(timing)) = (&song.synced, &song.timing) {
+        tags.push(("SYNCEDLYRICS".to_string(), synced.clone()));
+        tags.push(("LYRICS_TIMING".to_string(), if timing == "score" { "from the model's score".to_string() } else { "estimated".to_string() }));
+    }
+    if let (Some(translation), Some(language)) = (&song.translation, &song.language) {
+        tags.push(("TRANSLATION".to_string(), translation.clone()));
+        tags.push(("TRANSLATION_LANGUAGE".to_string(), language.clone()));
+    }
     let options = makepad_audio_encode::EncodeOptions { tags, ..Default::default() };
     let bytes = makepad_audio_encode::encode_vorbis(audio.rate, audio.channels, &audio.pcm_interleaved_f32, &options)
         .map_err(|e| format!("encoding the song: {e}"))?;
@@ -739,6 +867,57 @@ fn write_song(folder: &Path, song: &SongPrompt, model: &str, audio: &makepad_aud
 
 // ---- the UI thread's side -------------------------------------------------
 
+/// What the page's right side shows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Inspect {
+    /// The song's lyrics in time with the music.
+    Lyrics,
+    /// Its style, length, what made it, its file.
+    Song,
+    /// The writer conversation.
+    Chat,
+}
+
+/// A song being made: its id, what it is at, who works on it.
+#[derive(Clone, Debug)]
+pub struct Making {
+    pub id: u64,
+    /// When it was asked for (app seconds), for the elapsed time.
+    pub started_at: f64,
+    pub stage: String,
+    pub permille: u16,
+    /// Who works on it ("Claude Code on this Mac", "yue2-3b on 10.0.0.235 · RTX 4090").
+    pub at_work: String,
+    /// The written song (its index into the conversation's songs).
+    pub song: Option<(usize, SongPrompt)>,
+}
+
+impl Making {
+    /// Its step, in words: what happens and who does it.
+    pub fn step(&self) -> String {
+        let who = if self.at_work.is_empty() { String::new() } else { format!(" · {}", self.at_work) };
+        match self.stage.as_str() {
+            "" => "Waiting for the writer (it writes one song at a time)".to_string(),
+            "writing" => format!("Writing the song{who}"),
+            "queued" => format!("Waiting for a GPU{who}"),
+            "saving" => "Saving to the AI music playlist".to_string(),
+            stage => {
+                let mut stage = stage.to_string();
+                if let Some(first) = stage.get(..1) {
+                    stage = first.to_uppercase() + &stage[1..];
+                }
+                format!("{stage}{who}")
+            }
+        }
+    }
+
+    /// The step with its percentage and elapsed time.
+    pub fn line(&self, now: f64) -> String {
+        let pct = if self.permille > 0 { format!(" · {}%", self.permille / 10) } else { String::new() };
+        format!("{}{pct} · {}", self.step(), clock(now - self.started_at))
+    }
+}
+
 /// The AI music page's state, on the UI thread.
 pub struct AiMode {
     /// Songs keep coming (Start pressed, Stop not).
@@ -747,27 +926,23 @@ pub struct AiMode {
     pub models: Vec<MusicModel>,
     /// The song length asked for, in minutes (one of [`LENGTHS`]).
     pub minutes: u32,
-    /// A Next runs on the worker.
-    pub busy: bool,
-    /// What the running Next is at.
-    pub stage: String,
-    pub permille: u16,
-    /// Who works on it ("Claude Code on this Mac", "yue2-3b on 10.0.0.235 · RTX 4090").
-    pub at_work: String,
-    /// When it was asked for (app seconds), for the elapsed time.
-    pub started_at: f64,
-    /// The song being made, once the writer gave it.
-    pub making: Option<SongPrompt>,
+    /// The songs being made, oldest first (each on the GPU the fleet gave it).
+    pub jobs: Vec<Making>,
+    pub next_id: u64,
     /// The next song, made, waiting for the library to list its file.
     pub ready: Vec<ReadySong>,
     /// The next song, in the queue.
     pub queued: Vec<ReadySong>,
     /// The songs of the conversation, oldest first.
     pub songs: Vec<SongPrompt>,
-    /// The row picked for its lyrics and prompt (an index into `songs`).
+    /// The row picked for its lyrics and prompt (an index into `songs`);
+    /// none: the playing AI song (else the newest).
     pub selected: Option<usize>,
-    /// The inspector shows the writer conversation instead of a song.
-    pub show_conversation: bool,
+    pub inspect: Inspect,
+    /// The right side fills the page (the song list hidden).
+    pub big: bool,
+    /// The language the writer translates the lyrics into ([`LANGUAGES`]).
+    pub language: String,
     /// Skip was pressed with no song ready: the next one starts when made.
     pub skip_waiting: bool,
     /// A song just made: its row is highlighted until then (app seconds).
@@ -785,17 +960,15 @@ impl Default for AiMode {
             model: DEFAULT_MODEL.to_string(),
             models: Vec::new(),
             minutes: LENGTHS[0],
-            busy: false,
-            stage: String::new(),
-            permille: 0,
-            at_work: String::new(),
-            started_at: 0.0,
-            making: None,
+            jobs: Vec::new(),
+            next_id: 1,
             ready: Vec::new(),
             queued: Vec::new(),
             songs: Vec::new(),
             selected: None,
-            show_conversation: false,
+            inspect: Inspect::Lyrics,
+            big: false,
+            language: LANGUAGES[0].to_string(),
             skip_waiting: false,
             fresh: None,
             error: None,
@@ -812,35 +985,29 @@ pub fn clock(seconds: f64) -> String {
 }
 
 impl AiMode {
-    /// The running song's step, in words: what happens and who does it.
-    pub fn step(&self) -> String {
-        let who = if self.at_work.is_empty() { String::new() } else { format!(" · {}", self.at_work) };
-        match self.stage.as_str() {
-            "" | "writing" => format!("Writing the song{who}"),
-            "queued" => format!("Waiting for a GPU{who}"),
-            "saving" => "Saving to the AI music playlist".to_string(),
-            stage => {
-                let mut stage = stage.to_string();
-                if let Some(first) = stage.get(..1) {
-                    stage = first.to_uppercase() + &stage[1..];
-                }
-                format!("{stage}{who}")
-            }
-        }
+    pub fn busy(&self) -> bool {
+        !self.jobs.is_empty()
     }
 
-    /// The page's one status line, under the controls.
+    pub fn job_mut(&mut self, id: u64) -> Option<&mut Making> {
+        self.jobs.iter_mut().find(|j| j.id == id)
+    }
+
+    /// The page's one status line, under the controls: each song being made
+    /// with the node it got.
     pub fn status(&self, now: f64) -> String {
         if let Some(error) = &self.error {
             return error.clone();
         }
-        if self.skip_waiting && self.busy {
-            let pct = if self.permille > 0 { format!(" {}%", self.permille / 10) } else { String::new() };
-            return format!("Skipping: the next song is generating{pct}; it starts as soon as it is ready");
+        if self.skip_waiting {
+            if let Some(job) = self.jobs.first() {
+                let pct = if job.permille > 0 { format!(" {}%", job.permille / 10) } else { String::new() };
+                return format!("Skipping: the next song is generating{pct}; it starts as soon as it is ready");
+            }
         }
-        if self.busy {
-            let pct = if self.permille > 0 { format!(" · {}%", self.permille / 10) } else { String::new() };
-            return format!("Song {}: {}{pct} · {}", self.songs.iter().filter(|s| !s.path.is_empty()).count() + 1, self.step(), clock(now - self.started_at));
+        if !self.jobs.is_empty() {
+            let made = self.songs.iter().filter(|s| !s.path.is_empty()).count();
+            return self.jobs.iter().enumerate().map(|(n, job)| format!("Song {}: {}", made + n + 1, job.line(now))).collect::<Vec<_>>().join("  ·  ");
         }
         if let Some(next) = self.queued.first().or(self.ready.first()) {
             let more = self.queued.len() + self.ready.len();
@@ -850,7 +1017,7 @@ impl AiMode {
         if self.on {
             "On: the next song starts being made when this one starts playing".to_string()
         } else {
-            "Type what you want to hear, pick a model and press Start. Songs are made on your AI hub and go to the “AI music” playlist.".to_string()
+            "Type what you want to hear, pick a model and press Start. Songs are made on your AI hub's GPUs and go to the “AI music” playlist.".to_string()
         }
     }
 
@@ -955,9 +1122,12 @@ mod tests {
     }
 
     /// The whole path on the real fleet: the writer on the pinned claude-cli
-    /// hub, the song on a GPU node, the tagged file. Run on a pool node:
-    /// `AMP_AI_LIVE=1 MAKEPAD_AI_HUB=<claude-cli hub> HOME=<scratch>
-    /// cargo test --release -p makepad-app-amp live_song -- --ignored --nocapture`.
+    /// hub, the song on a GPU node, the timed lyrics, the tagged file. Run on
+    /// a pool node: `AMP_AI_LIVE=1 MAKEPAD_AI_HUB=<claude-cli hub> HOME=<scratch>
+    /// cargo test --release -p makepad-app-amp live_song -- --ignored --nocapture`
+    /// (AMP_AI_LIVE_REQUEST / _MINUTES / _LANGUAGE / _MODEL change the ask;
+    /// AMP_AI_LIVE_NODE renders on that one hub instead of the fleet's pick,
+    /// for testing a hub build).
     #[test]
     #[ignore]
     fn live_song_through_the_fleet() {
@@ -968,12 +1138,23 @@ mod tests {
         let mut session = Session::default();
         let (tx, rx) = std::sync::mpsc::sync_channel(4096);
         let model = std::env::var("AMP_AI_LIVE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+        let asked = std::env::var("AMP_AI_LIVE_REQUEST").unwrap_or_else(|_| DEFAULT_REQUEST.to_string());
+        let minutes: u32 = std::env::var("AMP_AI_LIVE_MINUTES").ok().and_then(|m| m.parse().ok()).unwrap_or(1);
+        let language = std::env::var("AMP_AI_LIVE_LANGUAGE").unwrap_or_else(|_| "Dutch".to_string());
         let started = Instant::now();
         for n in 0..2 {
-            let request = if n == 0 { DEFAULT_REQUEST } else { "EDM christmas music, a wide variety: something very different from the last song" };
-            let song = next_song(&mut session, &dir, request, &model, 1, 0, &|| false, &tx).unwrap_or_else(|e| panic!("{e}"));
+            let request = if n == 0 { asked.clone() } else { format!("{asked}, a wide variety: something very different from the last song") };
+            let job = Job { epoch: 0, id: n, tx: tx.clone() };
+            let (_, written) = write_song_text(&mut session, &dir, &request, &model, minutes, &language, &job, &|| false).unwrap_or_else(|e| panic!("{e}"));
+            let route: Arc<dyn GenRouter> = match std::env::var("AMP_AI_LIVE_NODE") {
+                Ok(node) => Arc::new(FixedRouter(node)),
+                Err(_) => Arc::new(FleetRouter { installed_only: true }),
+            };
+            let song = render_song(written, minutes, &job, &|| false, route).unwrap_or_else(|e| panic!("{e}"));
             let bytes = std::fs::read(&song.path).unwrap();
             assert!(bytes.starts_with(b"OggS"));
+            println!("LIVE record {n}: {}", song.song.serialize_json());
+            assert!(song.song.synced.is_some() && song.song.timing.is_some());
             let decoded = makepad_audio_decode::decode_any(&bytes).unwrap();
             println!(
                 "LIVE song {n}: \"{}\" {:.1} s audio, rendered on {} in {:.1} s (x{:.2} real time), file {}",

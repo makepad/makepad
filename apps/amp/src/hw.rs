@@ -1625,6 +1625,10 @@ fn palette_defaults(vm: &mut ScriptVm) -> String {
     set("HwNavButton.draw_text.color_down", hex(panel_text));
     set("HwPanelTitle.draw_text.color", hex(panel_text));
     set("HwPanelText.draw_text.color", hex(panel_muted));
+    // The AI song's lyrics read like the panel's text, the sung line in the accent.
+    set("HwLyrics.ink", hex(panel_text));
+    set("HwLyrics.muted", hex(panel_muted));
+    set("HwLyrics.accent", hex(accent));
     set("HwKey.draw_bg.glow_ink", hex(accent));
     set("HwKeyIcon.draw_icon.color", "mod.widgets.HwKeyButton.draw_text.color".into());
     // The caption buttons: the caption's ink (or the screen text), the accent.

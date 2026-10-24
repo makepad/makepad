@@ -8,7 +8,9 @@
 //! guidance?: cfg, seconds?: upper bound}`. Artifacts: `audio/wav` (unless
 //! `score_only`) and the score as text (`.abc`) whenever one exists, so a
 //! client can show it, let the user edit chords/melody and send it back as
-//! `score` to re-render.
+//! `score` to re-render; then the song's timeline from that score
+//! (`application/json`, [`SongTimingJson`]): where each section starts and
+//! ends and the sung notes in it, which a client times lyrics with.
 //!
 //! Progress is fine-grained: weight upload (bytes), score tokens, codec
 //! tokens with an ETA from the score's own length, flow-matching steps and
@@ -18,6 +20,8 @@ use crate::backend::{
     ArtifactData, BackendCtx, CancelToken, ContentBackend, GenerateParams, ProgressSink,
 };
 use crate::error::AssetAiError;
+use crate::protocol::SongTimingJson;
+use makepad_micro_serde::SerJson;
 
 pub const SAMPLE_RATE: u32 = 48_000;
 
@@ -37,6 +41,8 @@ pub struct Yue2Job {
 /// What one job produced.
 pub struct Yue2Output {
     pub score: Option<String>,
+    /// The score's timeline (sections and sung notes), when it has bars.
+    pub timing: Option<SongTimingJson>,
     /// Interleaved stereo; empty for `score_only`.
     pub audio: Vec<f32>,
 }
@@ -174,6 +180,13 @@ impl ContentBackend for Yue2Backend {
                 bytes: score.into_bytes(),
             });
         }
+        if let Some(timing) = out.timing {
+            artifacts.push(ArtifactData {
+                content_type: "application/json",
+                ext: "json",
+                bytes: timing.serialize_json().into_bytes(),
+            });
+        }
         if artifacts.is_empty() {
             return Err(AssetAiError::Backend("yue2 produced nothing".into()));
         }
@@ -200,7 +213,8 @@ mod native {
     use crate::backend::{BackendCtx, CancelToken, ProgressSink};
     use crate::error::AssetAiError;
     use makepad_ai_common::DiffusionError;
-    use makepad_ai_music::yue2::{yue2_abc_seconds, Yue2Cot, Yue2Request, Yue2Sampling};
+    use crate::protocol::{SongNoteJson, SongSectionJson, SongTimingJson, SONG_TIMING_FORMAT, SONG_TIMING_VERSION};
+    use makepad_ai_music::yue2::{yue2_score_timing, Yue2Cot, Yue2Request, Yue2Sampling, Yue2ScoreTiming};
     use makepad_ai_music::yue2_pipeline::{Yue2Pipeline, Yue2Progress, Yue2Vae};
     use std::path::PathBuf;
     use std::time::Instant;
@@ -339,19 +353,15 @@ mod native {
             let plan = pipe
                 .plan(&request, &Yue2Sampling::ABC, &mut sink)
                 .map_err(|e| gen_err("yue2 score", e))?;
+            let timing = plan.abc.as_deref().and_then(yue2_score_timing);
             if job.score_only {
-                return Ok(Yue2Output { score: plan.abc, audio: Vec::new() });
+                return Ok(Yue2Output { timing: timing.map(timing_json), score: plan.abc, audio: Vec::new() });
             }
             let mut semantic = Yue2Sampling::SEMANTIC;
             if let Some(seconds) = job.max_seconds {
                 semantic.max_tokens = ((seconds * 25.0) as usize).clamp(semantic.min_tokens, semantic.max_tokens);
             }
-            codec_expect.set(plan
-                .abc
-                .as_deref()
-                .and_then(yue2_abc_seconds)
-                .map(|s| (s * 25.0).min(semantic.max_tokens as f64))
-                .unwrap_or(0.0));
+            codec_expect.set(timing.as_ref().map(|t| (t.seconds * 25.0).min(semantic.max_tokens as f64)).unwrap_or(0.0));
             let codec = pipe
                 .semantic(&request, &plan, &semantic, &mut sink)
                 .map_err(|e| gen_err("yue2 codec", e))?;
@@ -366,7 +376,25 @@ mod native {
                 plan.abc_ids.len(),
                 codec.tokens.len()
             );
-            Ok(Yue2Output { score: plan.abc, audio })
+            Ok(Yue2Output { timing: timing.map(timing_json), score: plan.abc, audio })
+        }
+    }
+
+    fn timing_json(timing: Yue2ScoreTiming) -> SongTimingJson {
+        SongTimingJson {
+            format: SONG_TIMING_FORMAT.to_string(),
+            version: SONG_TIMING_VERSION,
+            seconds: timing.seconds,
+            sections: timing
+                .sections
+                .into_iter()
+                .map(|s| SongSectionJson {
+                    name: s.name,
+                    start: s.start,
+                    end: s.end,
+                    notes: s.notes.into_iter().map(|(start, length)| SongNoteJson { start, length }).collect(),
+                })
+                .collect(),
         }
     }
 }
@@ -408,14 +436,21 @@ mod tests {
     fn stub_emits_wav_and_score() {
         let mut backend = Yue2Backend::with_stub(
             "yue2-3b",
-            Box::new(|_, _, _| Ok(Yue2Output { score: Some("X:1".into()), audio: vec![0.1, -0.1, 0.2, -0.2] })),
+            Box::new(|_, _, _| Ok(Yue2Output {
+                score: Some("X:1".into()),
+                timing: Some(SongTimingJson { seconds: 1.0, ..SongTimingJson::default() }),
+                audio: vec![0.1, -0.1, 0.2, -0.2],
+            })),
         );
         let arts = backend
             .generate(&params(|_| {}), &mut |_, _| {}, &CancelToken::new())
             .unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(arts.len(), 2);
+        assert_eq!(arts.len(), 3);
         assert_eq!(arts[0].content_type, "audio/wav");
         assert_eq!(arts[1].ext, "abc");
+        assert_eq!(arts[2].content_type, "application/json");
+        let timing = <SongTimingJson as makepad_micro_serde::DeJson>::deserialize_json(std::str::from_utf8(&arts[2].bytes).unwrap()).unwrap();
+        assert_eq!(timing.seconds, 1.0);
     }
 
     #[test]
@@ -424,7 +459,7 @@ mod tests {
             "yue2-3b",
             Box::new(|job, _, _| {
                 assert!(job.score_only);
-                Ok(Yue2Output { score: Some("X:1".into()), audio: vec![] })
+                Ok(Yue2Output { score: Some("X:1".into()), timing: None, audio: vec![] })
             }),
         );
         let arts = backend

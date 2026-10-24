@@ -852,6 +852,10 @@ fn guarded_altstack(size: usize) -> u64 {
 /// The highest address of the calling thread's stack (0: unknown). Called in normal context
 /// (jit::ensure_altstack); fault handlers read the recorded value to bound frame walks.
 pub fn stack_hi_of_self() -> u64 {
+    // a program stack (relax_base::stack::on_program_stack) replaces the OS thread's while it runs
+    if let Some((_, hi)) = crate::stack::program_stack_bounds() {
+        return hi as u64;
+    }
     #[cfg(target_os = "macos")]
     unsafe {
         extern "C" {

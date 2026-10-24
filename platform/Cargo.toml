@@ -22,6 +22,7 @@ harness = false
 [dependencies]
 makepad-relax = { workspace = true }
 makepad-alloc-epoch = { path = "../libs/alloc_epoch", version = "1.0.0" }
+makepad-stack = { path = "../libs/stack", version = "1.0.0" }
 makepad-studio-protocol = { path = "./studio", version = "0.1.0" }
 makepad-futures = { path = "../libs/futures", version = "1.0.0" }
 makepad-shared-bytes = { path = "../libs/shared_bytes", version = "1.0.0" }

@@ -1,0 +1,12 @@
+[package]
+name = "relax-live-closure-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# A program tests/live_closure_app/run.py edits while it runs (LIVEICE).
+[[bin]]
+name = "relax-live-closure-app"
+path = "src/main.rs"
+
+[workspace]

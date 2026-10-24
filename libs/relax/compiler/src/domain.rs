@@ -1145,10 +1145,11 @@ fn launch_main(upn: usize, id: DomainId, base: u64, target: u64, arg: u64, packa
                 Err(p) => end(id, DomainState::Crashed(format!("{}: {}", p.kind, p.message))),
             }
         };
-        match &around {
+        // the program's main runs on a program stack (large, lazily committed, guarded)
+        crate::stack::on_program_stack(crate::jit::program_stack_changed, || match &around {
             Some(a) => a(&mut run),
             None => run(),
-        }
+        });
         if let Some(x) = domains().iter_mut().find(|x| x.info.id == id) {
             x.thread_done = true;
         }

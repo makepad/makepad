@@ -244,24 +244,61 @@ pub fn yue2_chunk_ranges(frames: usize, prefix_tokens: usize) -> Vec<(usize, usi
         .collect()
 }
 
-/// Song length implied by an ABC score (first `Q:` tempo, first `M:`
-/// meter, bars of the first voice, `Z<n>` multi-bar rests counted as n).
-/// Used for honest progress/ETA of the codec stage (25 tokens per second);
-/// `None` when the score carries no countable bars.
-pub fn yue2_abc_seconds(abc: &str) -> Option<f64> {
+/// One section of a score (a `% verse` comment line starts one): when it
+/// starts and ends, and the notes the first voice (the vocal melody in
+/// YuE2's scores) starts in it, as `(onset, length)` in seconds. Tied notes
+/// are one note.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Yue2ScoreSection {
+    /// The comment's text, lower case ("verse", "pre-chorus").
+    pub name: String,
+    pub start: f64,
+    pub end: f64,
+    pub notes: Vec<(f64, f64)>,
+}
+
+/// The timeline a score sets: its length and its sections.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Yue2ScoreTiming {
+    pub seconds: f64,
+    pub sections: Vec<Yue2ScoreSection>,
+}
+
+/// The timeline of an ABC score as YuE2 writes it: the first `Q:` tempo,
+/// the first `M:` meter and `L:` unit; time runs by the bars of the first
+/// voice (`Z<n>` multi-bar rests count n), notes sit in their bar by their
+/// lengths. The codec stage sings the score at that tempo (25 tokens a
+/// second), so this is the song's own timeline: the progress/ETA of the
+/// codec stage and where each section and sung note is in the audio.
+/// `None` when the score has no countable bars.
+pub fn yue2_score_timing(abc: &str) -> Option<Yue2ScoreTiming> {
     let mut meter = (4.0f64, 4.0f64);
+    let mut unit: Option<f64> = None; // L:, as a fraction of a whole note
     let mut tempo: Option<(f64, f64)> = None; // (unit as a fraction of a whole, bpm)
     let mut first_voice: Option<String> = None;
     let mut in_first = false;
     let mut header_done = false;
+    // Position: whole bars so far, and units into the current bar.
     let mut bars = 0.0f64;
+    let mut in_bar = 0.0f64;
+    // Sections by bar position; notes as (bar, units into it, units long).
+    let mut sections: Vec<(String, f64)> = Vec::new();
+    let mut notes: Vec<(f64, f64, f64)> = Vec::new();
+    let mut tie_open = false;
     let frac = |t: &str| -> Option<f64> {
         let (a, b) = t.trim().split_once('/')?;
         Some(a.trim().parse::<f64>().ok()? / b.trim().parse::<f64>().ok()?)
     };
     for raw in abc.lines() {
         let line = raw.trim();
-        if line.is_empty() || line.starts_with('%') {
+        if let Some(comment) = line.strip_prefix('%') {
+            let name = comment.trim().to_lowercase();
+            if !name.is_empty() && !name.starts_with('%') {
+                sections.push((name, bars));
+            }
+            continue;
+        }
+        if line.is_empty() {
             continue;
         }
         if let Some(rest) = line.strip_prefix("M:") {
@@ -274,10 +311,16 @@ pub fn yue2_abc_seconds(abc: &str) -> Option<f64> {
             }
             continue;
         }
+        if let Some(rest) = line.strip_prefix("L:") {
+            if unit.is_none() {
+                unit = frac(rest);
+            }
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("Q:") {
             if tempo.is_none() {
-                if let Some((unit, bpm)) = rest.split_once('=') {
-                    if let (Some(u), Ok(b)) = (frac(unit), bpm.trim().parse::<f64>()) {
+                if let Some((u, bpm)) = rest.split_once('=') {
+                    if let (Some(u), Ok(b)) = (frac(u), bpm.trim().parse::<f64>()) {
                         tempo = Some((u, b));
                     }
                 }
@@ -298,7 +341,7 @@ pub fn yue2_abc_seconds(abc: &str) -> Option<f64> {
             continue;
         }
         if line.len() >= 2 && line.as_bytes()[1] == b':' && line.as_bytes()[0].is_ascii_alphabetic() {
-            continue; // other header fields (X:, T:, L:, K:)
+            continue; // other header fields (X:, T:, K:)
         }
         if !in_first && first_voice.is_some() {
             continue;
@@ -306,37 +349,106 @@ pub fn yue2_abc_seconds(abc: &str) -> Option<f64> {
         header_done = true;
         let bytes = line.as_bytes();
         let mut i = 0;
-        let mut in_chord = false;
+        // A note's length: digits, then '/' and digits ("3/2", "/", "//").
+        let length = |i: &mut usize| -> f64 {
+            let start = *i;
+            while *i < bytes.len() && bytes[*i].is_ascii_digit() {
+                *i += 1;
+            }
+            let mut len = if *i > start { std::str::from_utf8(&bytes[start..*i]).unwrap_or("1").parse::<f64>().unwrap_or(1.0) } else { 1.0 };
+            while *i < bytes.len() && bytes[*i] == b'/' {
+                *i += 1;
+                let d0 = *i;
+                while *i < bytes.len() && bytes[*i].is_ascii_digit() {
+                    *i += 1;
+                }
+                let d = if *i > d0 { std::str::from_utf8(&bytes[d0..*i]).unwrap_or("2").parse::<f64>().unwrap_or(2.0) } else { 2.0 };
+                len /= d.max(1.0);
+            }
+            len
+        };
         while i < bytes.len() {
             match bytes[i] {
-                b'"' => in_chord = !in_chord,
-                b'|' if !in_chord => {
+                b'"' => {
+                    // A chord symbol: skipped.
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != b'"' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                b'|' => {
                     if i + 1 < bytes.len() && bytes[i + 1] == b'|' {
                         i += 1;
                     }
                     bars += 1.0;
+                    in_bar = 0.0;
+                    i += 1;
                 }
-                b'Z' if !in_chord => {
-                    let mut j = i + 1;
-                    while j < bytes.len() && bytes[j].is_ascii_digit() {
-                        j += 1;
-                    }
-                    if j > i + 1 {
-                        if let Ok(n) = std::str::from_utf8(&bytes[i + 1..j]).unwrap_or("1").parse::<f64>() {
-                            bars += n - 1.0;
-                        }
-                    }
+                b'Z' => {
+                    i += 1;
+                    let n = length(&mut i);
+                    bars += (n - 1.0).max(0.0);
+                    tie_open = false;
                 }
-                _ => {}
+                b'z' | b'x' => {
+                    i += 1;
+                    in_bar += length(&mut i);
+                    tie_open = false;
+                }
+                b'-' => {
+                    tie_open = true;
+                    i += 1;
+                }
+                b'^' | b'_' | b'=' | b'A'..=b'G' | b'a'..=b'g' => {
+                    while i < bytes.len() && matches!(bytes[i], b'^' | b'_' | b'=') {
+                        i += 1;
+                    }
+                    if i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+                        i += 1;
+                    }
+                    while i < bytes.len() && matches!(bytes[i], b'\'' | b',') {
+                        i += 1;
+                    }
+                    let len = length(&mut i);
+                    match notes.last_mut() {
+                        // A tie continues the note before it.
+                        Some(last) if tie_open => last.2 += len,
+                        _ => notes.push((bars, in_bar, len)),
+                    }
+                    in_bar += len;
+                    tie_open = false;
+                }
+                b'%' => break,
+                _ => i += 1,
             }
-            i += 1;
         }
     }
-    let (unit, bpm) = tempo.unwrap_or((0.25, 120.0));
-    if bars <= 0.0 || bpm <= 0.0 || unit <= 0.0 {
+    let (beat, bpm) = tempo.unwrap_or((0.25, 120.0));
+    let unit = unit.unwrap_or(if meter.0 / meter.1 < 0.75 { 1.0 / 16.0 } else { 1.0 / 8.0 });
+    if bars <= 0.0 || bpm <= 0.0 || beat <= 0.0 || unit <= 0.0 {
         return None;
     }
-    Some(bars * (meter.0 / meter.1) / unit * 60.0 / bpm)
+    let bar_s = (meter.0 / meter.1) / beat * 60.0 / bpm;
+    let unit_s = unit / beat * 60.0 / bpm;
+    let seconds = bars * bar_s;
+    let mut out: Vec<Yue2ScoreSection> = Vec::new();
+    if sections.first().map_or(true, |s| s.1 > 0.0) {
+        sections.insert(0, (String::new(), 0.0));
+    }
+    for (n, (name, at)) in sections.iter().enumerate() {
+        let start = at * bar_s;
+        let end = sections.get(n + 1).map_or(seconds, |next| next.1 * bar_s);
+        out.push(Yue2ScoreSection { name: name.clone(), start, end, notes: Vec::new() });
+    }
+    out.retain(|s| s.end > s.start);
+    for (bar, at, len) in notes {
+        let onset = bar * bar_s + at * unit_s;
+        if let Some(section) = out.iter_mut().rev().find(|s| s.start <= onset + 1e-9) {
+            section.notes.push((onset, len * unit_s));
+        }
+    }
+    Some(Yue2ScoreTiming { seconds, sections: out })
 }
 
 pub const YUE2_NAMESPACE: &str = "yue2";
@@ -408,8 +520,33 @@ mod tests {
     fn abc_duration_counts_first_voice_bars() {
         let abc = "X:1\nM:4/4\nL:1/32\nQ:1/4=120\nV: Vocal clef=treble name=\"V\"\nV: Ins clef=treble\nK:C\nV: Vocal\nZ|\"Am\"z32|c32|\nV: Ins\nZ4|\nV: Vocal\nZ2|\n";
         // Vocal: Z (1) + 2 bars + Z2 (2) = 5 bars of 4/4 at 120 bpm = 10 s.
-        assert_eq!(yue2_abc_seconds(abc), Some(10.0));
-        assert_eq!(yue2_abc_seconds("no bars here"), None);
+        assert_eq!(yue2_score_timing(abc).map(|t| t.seconds), Some(10.0));
+        assert_eq!(yue2_score_timing("no bars here"), None);
+    }
+
+    #[test]
+    fn score_sections_and_sung_notes() {
+        // From a YuE2 song (130 bpm, 4/4, L:1/32: a bar is 60/130*4 s, a
+        // unit an eighth of a beat).
+        let abc = "X:1\nT:\nM:4/4\nL:1/32\nQ:1/4=130\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:Gm\n% intro\nV: Vocal\n\"Gm\"z32|\"Eb\"z32|\nV: Ins\nb16z16|g32|\n% verse\nV: Vocal\n\"Gm\"z8c4d4d4d4d4f4|\"Eb\"f8B8B8z8|\nV: Ins\nZ2|\n% chorus\nV: Vocal\n\"Bb\"d'8f4d'8f8c'4-|\"F\"c'16-c'4z4a4a4|\nV: Ins\nZ2|\n% outro\nV: Vocal\nZ|\nV: Ins\nZ|\n";
+        let t = yue2_score_timing(abc).unwrap();
+        let bar = 60.0 / 130.0 * 4.0;
+        let unit = 60.0 / 130.0 / 8.0;
+        assert!((t.seconds - 7.0 * bar).abs() < 1e-9);
+        let names: Vec<&str> = t.sections.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["intro", "verse", "chorus", "outro"]);
+        assert!((t.sections[1].start - 2.0 * bar).abs() < 1e-9 && (t.sections[1].end - 4.0 * bar).abs() < 1e-9);
+        // Intro: no sung notes; verse: nine ("Snow is falling on the city lights").
+        assert!(t.sections[0].notes.is_empty());
+        let verse = &t.sections[1].notes;
+        assert_eq!(verse.len(), 9);
+        assert!((verse[0].0 - (2.0 * bar + 8.0 * unit)).abs() < 1e-9);
+        assert!((verse[6].0 - 3.0 * bar).abs() < 1e-9);
+        // Chorus: the tied c' (4 + 16 + 4 units) is one note.
+        let chorus = &t.sections[2].notes;
+        assert_eq!(chorus.len(), 7);
+        assert!((chorus[4].1 - 24.0 * unit).abs() < 1e-9);
+        assert!(t.sections[3].notes.is_empty());
     }
 
     #[test]

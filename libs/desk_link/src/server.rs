@@ -97,6 +97,8 @@ pub enum Control {
     Keyframe,
     /// `split::*` for the stream.
     Split(u8),
+    /// The viewer's display refresh (Hz, 0 = not known).
+    Refresh(u16),
     Clipboard(String),
     Stats { frame: u32, decode_us: u32, present_us: u32 },
 }
@@ -500,6 +502,7 @@ impl SessionCtx {
                     ClientMsg::SelectScreen { index } => Some(Control::SelectScreen(index)),
                     ClientMsg::RequestKeyframe => Some(Control::Keyframe),
                     ClientMsg::SetSplit { split } => Some(Control::Split(split)),
+                    ClientMsg::Refresh { hz } => Some(Control::Refresh(hz)),
                     ClientMsg::Clipboard { text } => Some(Control::Clipboard(text)),
                     ClientMsg::Stats { frame, decode_us, present_us } => Some(Control::Stats { frame, decode_us, present_us }),
                     ClientMsg::Hello { .. } => return Err("a second hello".into()),

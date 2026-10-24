@@ -9,7 +9,8 @@
 //! port = 8790
 //! screen = primary        # the screen a viewer that names none gets: primary or a connector name
 //! kbps = 0                # stream rate, 0 = by picture size
-//! fps = 60                # the rate the encoder plans for
+//! fps = 120               # at most this many pictures a second; the stream runs at the lowest of
+//!                         # this, the streamed screen's refresh and the watching viewers' refresh
 //! chroma = 444           # 444 (every pixel's colour: sharp text; the default, for viewers whose
 //!                         # decoder takes it) or 420
 //! split = tiles           # a GPU with several encode engines: tiles (each picture in bands, one
@@ -61,7 +62,7 @@ impl Default for DeskLinkSettings {
             port: makepad_desk_link::DEFAULT_PORT,
             screen: "primary".into(),
             kbps: 0,
-            fps: 60,
+            fps: 120,
             split: Split::Tiles,
             full_chroma: true,
             fleet_dir: None,
@@ -186,7 +187,7 @@ mod tests {
         assert!(!DeskLinkSettings::parse("enabled = maybe").enabled);
         let s = DeskLinkSettings::parse("enabled = on\nhost = 10.0.0.166\nport = 9000\nkbps = 30000 # LAN\nfps = 999");
         assert!(s.enabled);
-        assert_eq!((s.host.as_str(), s.port, s.kbps, s.fps), ("10.0.0.166", 9000, 30000, 60));
+        assert_eq!((s.host.as_str(), s.port, s.kbps, s.fps), ("10.0.0.166", 9000, 30000, 120));
         assert!(s.allow_peers.is_empty());
         let s = DeskLinkSettings::parse("allow_peers = 10.0.0.222, 10.0.0.230");
         assert_eq!(s.allow_peers, vec!["10.0.0.222".parse::<IpAddr>().unwrap(), "10.0.0.230".parse().unwrap()]);

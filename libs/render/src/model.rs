@@ -400,7 +400,7 @@ impl AnimPart {
 /// Where those values came from is an asset-import concern. Runtime code only
 /// consumes this generic contract and supplies a complete model-space pose.
 pub struct DrivenPart {
-    pub connection: String,
+    pub connection: std::sync::Arc<str>,
     pub pivot: Vec3f,
     pub anchor: Vec3f,
     pub radius: f32,
@@ -2609,7 +2609,7 @@ fn build_driven_parts(
         }
         let layers = stream.layers(json, bin);
         out.push(DrivenPart {
-            connection: def.connection,
+            connection: def.connection.into(),
             pivot: def.pivot,
             anchor: def.anchor,
             radius: def.radius,

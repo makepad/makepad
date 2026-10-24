@@ -4,7 +4,7 @@ use crate::typeck::Body;
 use crate::types::{TyId, TyKind};
 
 // EXCEPTION(N4): root-slot closure storage until per-place capture codegen
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub struct ClosureStorage {
     pub fields: Vec<TyId>,
     pub roots: Vec<u32>,

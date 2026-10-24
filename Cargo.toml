@@ -250,6 +250,7 @@ workspace.members = [
     "tools/map_tiles",
     "tools/map_bake",
     "libs/remote",
+    "libs/stack",
     "tools/service_host",
     "tools/agents",
     "tools/ci",
@@ -452,6 +453,7 @@ relax-session = { path = "libs/relax/session", version = "0.1.0" }
 relax-types = { path = "libs/relax/types", version = "0.1.0" }
 relax-provided-fixture = { path = "tools/run/fixture", version = "0.1.0" }
 makepad-live-id = { path = "libs/live_id", version = "1.0.0" }
+makepad-stack = { path = "libs/stack", version = "1.0.0" }
 makepad-remote = { path = "libs/remote", version = "0.1.0" }
 makepad-strict-json = { path = "libs/strict_json", version = "0.1.0" }
 makepad-gpu-trace = { path = "libs/gpu_trace", version = "1.0.0" }
@@ -530,12 +532,6 @@ opt-level = 1
 # math AOT overflows the stack.
 [profile.release.package.makepad-stitch]
 incremental = false
-
-# The Arcade frontend: only the app crate itself (the edit-hot 100k lines of
-# src/) compiles incrementally; the engine and gameplay crates stay whole
-# (non-incremental, thin-local LTO), which measured 25-40 % faster scene draw.
-[profile.release.package.makepad-sandbox]
-incremental = true
 
 #[profile.dev.package.makepad-live-tokenizer]
 #opt-level = 3

@@ -384,15 +384,42 @@ impl Layouts {
         tcx.try_normalize_erasing_regions(lcx.prog, env, ty).unwrap_or(ty)
     }
 
+    /// A closure's environment. Its type names the file version whose body made it: the
+    /// storages of every lowered body are recorded (`note_closure_storages`), so a closure of a
+    /// version a live edit replaced keeps the environment that version gave it. Only the
+    /// current version is derived from the owner's type check here (a replaced version's
+    /// expression ids name other expressions, or none, in the current body).
     pub fn closure_storage(&self, prog: &crate::program::Program, tcx: &Tcx, ty: TyId) -> ClosureStorage {
         let ty = tcx.tys.erase_regions(ty);
         if let Some(storage) = self.closure_storage.get(&ty) { return storage; }
-        let TyKind::Closure(_, ce, crate::types::ClosureArgs { parent_args: owner, .. }) = tcx.tys.kind(ty) else { panic!("closure storage for non-closure") };
+        let TyKind::Closure(file, ce, crate::types::ClosureArgs { parent_args: owner, .. }) = tcx.tys.kind(ty) else { panic!("closure storage for non-closure") };
         let TyKind::FnDef(def, args, _) = tcx.tys.kind(*owner) else { panic!("closure owner") };
         let body = crate::typeck::codegen_body(prog, tcx, *def, tcx.tys.list(*args));
+        if body.file != *file {
+            panic!("the environment of a closure of a replaced version of {} (expression {}) is unknown: no body of that version was lowered in this process",
+                prog.file_paths.get(*file as usize).map_or("?", |p| p.as_str()), ce & !crate::tcx::ASYNC_FN_BODY);
+        }
         let storage = ClosureStorage::for_codegen(prog, tcx, &body, *ce);
         self.closure_storage.insert(ty, storage.clone());
         storage
+    }
+
+    /// Records the environments `storages` (closure expression, storage) that codegen body `body`
+    /// gives its closures, under their closure types. The body being lowered is the truth for its
+    /// version: a recorded storage that differs (the owner was checked again) is replaced.
+    pub fn note_closure_storages<'a>(&self, prog: &crate::program::Program, tcx: &Tcx, body: &crate::typeck::Body, storages: impl Iterator<Item = (u32, &'a ClosureStorage)>) {
+        for (ce, storage) in storages {
+            if ce & crate::tcx::ASYNC_FN_BODY != 0 || !body.has_expr(crate::ast::ExprId(ce)) {
+                continue;
+            }
+            let ty = tcx.tys.erase_regions(tcx.normalize_erasing_regions(prog, crate::tcx::TypingEnv::fully_monomorphized(prog), body.ty(crate::ast::ExprId(ce))));
+            if !matches!(tcx.tys.kind(ty), TyKind::Closure(f, e, _) if *f == body.file && *e == ce) {
+                continue;
+            }
+            if self.closure_storage.get(&ty).as_ref() != Some(storage) {
+                self.closure_storage.insert(ty, storage.clone());
+            }
+        }
     }
 
     pub fn closure_storage_layout(&self, lcx: &LayoutCx<'_>, tcx: &Tcx, ty: TyId) -> Layout {

@@ -807,7 +807,7 @@ fn check(pipe: &Yue2Pipeline, vae_dir: Option<&Path>, dir: &Path, stage: &str, b
         let sem = read_i32(&dir.join("semantic.i32"));
         println!(
             "abc duration estimate {:?} s vs oracle song {:.1} s",
-            makepad_ai_music::yue2::yue2_abc_seconds(&abc),
+            makepad_ai_music::yue2::yue2_score_timing(&abc).map(|t| t.seconds),
             sem.len() as f64 / 25.0
         );
     }

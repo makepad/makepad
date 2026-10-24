@@ -208,7 +208,7 @@ fn run(settings: Settings, desktop: &mut dyn Desktop) {
                                 key_wanted = true;
                             }
                         }
-                        Control::Clipboard(_) | Control::Stats { .. } | Control::Split(_) => {}
+                        Control::Clipboard(_) | Control::Stats { .. } | Control::Split(_) | Control::Refresh(_) => {}
                     }
                 }
                 ToUi::Closed { session, reason } => {

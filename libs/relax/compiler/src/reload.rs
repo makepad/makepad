@@ -4124,6 +4124,9 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
     let mut loads_seen = jit::DEFERRED_LOADS.load(std::sync::atomic::Ordering::Relaxed);
     let mut events = watch_events::Watch::new(files.iter().map(|f| f.0.as_str()));
     if crate::run::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) { eprintln!("makepad live: watching {} source files; session log {}", files.len(), live_log_path()); }
+    // the readiness signal for tools and tests, whatever the log verbosity: MAKEPAD_RUN_LIVE_READY=<file>
+    // gets the watched file count once the watcher runs (edits saved from now on are seen)
+    if let Some(ready) = std::env::var_os("MAKEPAD_RUN_LIVE_READY") { let _ = std::fs::write(ready, format!("{}\n", files.len())); }
     let mut undos: Vec<Undo> = Vec::new();
     // SPEC-V: patches that ran before their verdict
     let mut pending: Vec<PendingPatch> = Vec::new();

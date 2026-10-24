@@ -452,6 +452,7 @@ pub mod portable {
     }
 
     extern "C" {
+        fn __relax_on_program_stack(f: extern "C" fn(*mut u8), arg: *mut u8);
         fn __relax_domain_base() -> u64;
         fn __relax_domain_enter(base: u64, token: u64);
         fn __relax_domain_reserve(base: u64) -> u64;
@@ -461,9 +462,14 @@ pub mod portable {
     extern "system" fn windows_thread_start(p: *mut c_void) -> DWORD {
         // first, before anything that may name a static
         unsafe { __relax_domain_enter((*(p as *const StartArg)).domain, (*(p as *const StartArg)).token) };
+        // the thread's body runs on a program stack (relax_base::stack::on_program_stack)
+        unsafe { __relax_on_program_stack(start_body, p as *mut u8) };
+        0
+    }
+
+    extern "C" fn start_body(p: *mut u8) {
         let a = unsafe { alloc::boxed::Box::from_raw(p as *mut StartArg) };
         (a.f)(a.arg);
-        0
     }
 
     /// CreateThread with `stack_size` reserved (STACK_SIZE_PARAM_IS_A_RESERVATION, as real std).

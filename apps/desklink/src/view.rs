@@ -118,6 +118,16 @@ pub struct RemoteView {
     /// 1:1 device pixels instead of fit-to-window.
     #[rust]
     pub one_to_one: bool,
+    /// Fit to window at a whole-number scale (each remote pixel a whole block of device pixels:
+    /// nothing resampled) when the picture fits at 1x or more; a smaller window still scales down.
+    #[rust(true)]
+    pub integer_scale: bool,
+    /// Device pixels per remote pixel as last drawn, and whether that is a whole block (no
+    /// resampling).
+    #[rust]
+    pub scale: f64,
+    #[rust]
+    pub whole: bool,
     /// The local pointer, for the 1:1 view's pan.
     #[rust]
     pointer: Vec2d,
@@ -218,15 +228,20 @@ impl RemoteView {
         self.draw_bg.redraw(cx);
     }
 
-    fn place(&self, cx: &Cx2d, view: Rect) -> Rect {
+    /// Where the picture goes, on whole device pixels (a fractional offset would blur every
+    /// pixel): 1:1, fit at a whole-number scale, or fit (letterboxed, aspect locked).
+    /// Returns the rect and whether every remote pixel is a whole block of device pixels.
+    fn place(&self, cx: &Cx2d, view: Rect) -> (Rect, bool) {
         let [w, h] = self.size;
         if w == 0 || h == 0 {
-            return Rect::default();
+            return (Rect::default(), false);
         }
         let (w, h) = (w as f64, h as f64);
+        let dpi = cx.current_dpi_factor();
+        // the view in device pixels
+        let (vx, vy, vw, vh) = (view.pos.x * dpi, view.pos.y * dpi, view.size.x * dpi, view.size.y * dpi);
+        let to_logical = |x: f64, y: f64, sw: f64, sh: f64| Rect { pos: dvec2(x.round() / dpi, y.round() / dpi), size: dvec2(sw / dpi, sh / dpi) };
         if self.one_to_one {
-            let dpi = cx.current_dpi_factor();
-            let size = dvec2(w / dpi, h / dpi);
             // larger than the view: it follows the pointer (pointer at an edge shows that edge)
             let axis = |view_pos: f64, view_len: f64, len: f64, at: f64| {
                 if len <= view_len {
@@ -236,12 +251,13 @@ impl RemoteView {
                     view_pos - (len - view_len) * t
                 }
             };
-            return Rect { pos: dvec2(axis(view.pos.x, view.size.x, size.x, self.pointer.x), axis(view.pos.y, view.size.y, size.y, self.pointer.y)), size };
+            return (to_logical(axis(vx, vw, w, self.pointer.x * dpi), axis(vy, vh, h, self.pointer.y * dpi), w, h), true);
         }
-        // aspect locked, letterboxed
-        let scale = (view.size.x / w).min(view.size.y / h);
-        let size = dvec2(w * scale, h * scale);
-        Rect { pos: view.pos + (view.size - size) * 0.5, size }
+        let fit = (vw / w).min(vh / h);
+        let whole = self.integer_scale && fit >= 1.0;
+        let scale = if whole { fit.floor() } else { fit };
+        let (sw, sh) = (w * scale, h * scale);
+        (to_logical(vx + (vw - sw) * 0.5, vy + (vh - sh) * 0.5, sw, sh), whole)
     }
 }
 
@@ -251,11 +267,14 @@ impl Widget for RemoteView {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         let view = cx.walk_turtle(walk);
         self.draw_bg.draw_abs(cx, view);
-        let rect = self.place(cx, view);
+        let (rect, whole) = self.place(cx, view);
         self.placement = Placement { rect };
+        self.scale = rect.size.x * cx.current_dpi_factor() / self.size[0].max(1) as f64;
+        self.whole = whole;
         let full_h = self.size[1].max(1) as f64;
-        // scaled: a sharper (bicubic) resample keeps text crisp; 1:1 samples pixels as they are
-        self.draw_nv12.sharp = if self.one_to_one { 0.0 } else { 1.0 };
+        // whole device-pixel blocks (1:1, 2x, ...): each remote pixel as it is (nearest); scaled
+        // otherwise: a sharper (bicubic) resample keeps text crisp
+        self.draw_nv12.sharp = if whole { 2.0 } else { 1.0 };
         for part in &self.parts {
             // each part's rows of the placed picture: the parts tile it exactly
             let top = rect.pos.y + rect.size.y * part.y0 as f64 / full_h;
@@ -392,8 +411,12 @@ impl Widget for ConnList {
 
 /// The overlay's rate line (always shown): fixed field widths in a monospaced face, so it
 /// never jitters as the digits change.
-pub fn rate_line(fps: f64, mbps: f64) -> String {
-    format!("{:>3.0} fps {:>6.1} Mbit/s", fps.clamp(0.0, 999.0), mbps.clamp(0.0, 9999.9))
+/// Pictures shown a second and the rate, then what the desktop streams at (`stream`: its `Rate`)
+/// and this display's refresh (`display`, 0 = not measured yet).
+pub fn rate_line(fps: f64, mbps: f64, stream: Option<u16>, display: u32) -> String {
+    let stream = stream.map_or("…".to_string(), |s| s.to_string());
+    let display = if display == 0 { "…".to_string() } else { display.to_string() };
+    format!("{:>3.0} fps {:>6.1} Mbit/s · stream {stream}/s · display {display} Hz", fps.clamp(0.0, 999.0), mbps.clamp(0.0, 9999.9))
 }
 
 /// The per-stage latency line ("Latency details"), fixed widths too.

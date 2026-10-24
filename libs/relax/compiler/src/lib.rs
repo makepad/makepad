@@ -1003,7 +1003,10 @@ fn cmd_test(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
         jit::watchdog(runtime.watchdog_ms);
         let up: *mut jit::Unit = &mut *u;
         let r = if runtime.test_domains <= 1 {
-            unsafe { jit::call_jit(up, entry, 0) }
+            // the program's main on a program stack (large, lazily committed, guarded)
+            let mut r = None;
+            crate::stack::on_program_stack(jit::program_stack_changed, || r = Some(unsafe { jit::call_jit(up, entry, 0) }));
+            r.expect("program main returned")
         } else {
             // the same test at the same time in N domains of this unit (domain 0 + N-1 new
             // blocks), each on its own thread: a static shared between them fails its asserts

@@ -275,7 +275,9 @@ pub struct CustomMaterialInstance {
 }
 
 pub struct ModelPartPose {
-    pub connection: String,
+    /// shared with the model's driven part ([`DrivenPartInfo::connection_shared`]): posing a part
+    /// every frame copies a reference, not the name
+    pub connection: std::sync::Arc<str>,
     pub transform: Mat4f,
 }
 
@@ -335,6 +337,8 @@ impl Clone for ModelPartPose {
 #[derive(Clone, Debug)]
 pub struct DrivenPartInfo<'a> {
     pub connection: &'a str,
+    /// the same name, shared: what a [`ModelPartPose`] for this part holds
+    pub connection_shared: &'a std::sync::Arc<str>,
     pub pivot: Vec3f,
     pub anchor: Vec3f,
     pub radius: f32,

@@ -11,7 +11,7 @@ use std::io::{self, Write};
 #[cfg(feature = "server")]
 pub mod server;
 
-pub const VERSION: u16 = 3;
+pub const VERSION: u16 = 4;
 pub const DEFAULT_PORT: u16 = 8790;
 /// The largest message either side accepts (a key frame of a big desktop fits many times over).
 pub const MAX_MESSAGE: usize = 16 << 20;
@@ -117,6 +117,9 @@ pub enum ClientMsg {
     RequestKeyframe,
     /// How a desktop with several encode engines shares them: `split::*` (for every viewer).
     SetSplit { split: u8 },
+    /// The viewer's display refresh in Hz (measured from its vsync; 0 = not known): the desktop
+    /// streams at most this many pictures a second.
+    Refresh { hz: u16 },
     /// `keycode` is makepad's `KeyCode` index; `mods` [`mods`] bits.
     Key { down: bool, keycode: u32, mods: u8 },
     /// The pointer in the stream picture, 0..=65535 on both axes.
@@ -152,6 +155,10 @@ pub enum ServerMsg {
     Pong { client_ns: u64, server_ns: u64 },
     /// The stream now shows another screen (or the same one at a new size).
     Stream { screen: u32, stream: [u32; 2] },
+    /// The pictures a second the desktop streams at now (its own display's refresh, the
+    /// watching viewers' and its settings' cap, whichever is lowest); sent after the Welcome and
+    /// on every change. A still desktop sends fewer.
+    Rate { fps: u16 },
     Clipboard { text: String },
     Bye { reason: String },
 }
@@ -257,6 +264,7 @@ mod tag {
     pub const SELECT_SCREEN: u8 = 4;
     pub const REQUEST_KEYFRAME: u8 = 5;
     pub const SET_SPLIT: u8 = 6;
+    pub const REFRESH: u8 = 7;
     pub const KEY: u8 = 10;
     pub const POINTER: u8 = 11;
     pub const BUTTON: u8 = 12;
@@ -275,6 +283,7 @@ mod tag {
     pub const STREAM: u8 = 105;
     pub const CLIPBOARD_S: u8 = 106;
     pub const BYE: u8 = 107;
+    pub const RATE: u8 = 108;
 }
 
 impl ClientMsg {
@@ -297,6 +306,11 @@ impl ClientMsg {
             ClientMsg::SetSplit { split } => {
                 let mut o = Out::new(SET_SPLIT);
                 o.u8(*split);
+                o.done()
+            }
+            ClientMsg::Refresh { hz } => {
+                let mut o = Out::new(REFRESH);
+                o.u16(*hz);
                 o.done()
             }
             ClientMsg::Key { down, keycode, mods } => {
@@ -357,6 +371,7 @@ impl ClientMsg {
             SELECT_SCREEN => ClientMsg::SelectScreen { index: r.u32()? },
             REQUEST_KEYFRAME => ClientMsg::RequestKeyframe,
             SET_SPLIT => ClientMsg::SetSplit { split: r.u8()? },
+            REFRESH => ClientMsg::Refresh { hz: r.u16()? },
             KEY => ClientMsg::Key { down: r.bool()?, keycode: r.u32()?, mods: r.u8()? },
             POINTER => ClientMsg::Pointer { x: r.u16()?, y: r.u16()? },
             BUTTON => ClientMsg::Button { down: r.bool()?, button: r.u8()? },
@@ -418,6 +433,11 @@ impl ServerMsg {
                 o.str(reason);
                 o.done()
             }
+            ServerMsg::Rate { fps } => {
+                let mut o = Out::new(RATE);
+                o.u16(*fps);
+                o.done()
+            }
         }
     }
 
@@ -445,6 +465,7 @@ impl ServerMsg {
             STREAM => ServerMsg::Stream { screen: r.u32()?, stream: [r.u32()?, r.u32()?] },
             CLIPBOARD_S => ServerMsg::Clipboard { text: r.str()? },
             BYE => ServerMsg::Bye { reason: r.str()? },
+            RATE => ServerMsg::Rate { fps: r.u16()? },
             _ => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unknown server message {ty}"))),
         })
     }
@@ -585,6 +606,7 @@ mod tests {
         round_client(ClientMsg::SelectScreen { index: 2 });
         round_client(ClientMsg::RequestKeyframe);
         round_client(ClientMsg::SetSplit { split: split::INTERLEAVE });
+        round_client(ClientMsg::Refresh { hz: 120 });
         round_client(ClientMsg::Key { down: true, keycode: 42, mods: mods::SHIFT | mods::LOGO });
         round_client(ClientMsg::Pointer { x: 65535, y: 12 });
         round_client(ClientMsg::Button { down: false, button: button::RIGHT });
@@ -615,6 +637,7 @@ mod tests {
         round_server(ServerMsg::Stream { screen: 0, stream: [2560, 1440] });
         round_server(ServerMsg::Clipboard { text: String::new() });
         round_server(ServerMsg::Bye { reason: "the WM quits".into() });
+        round_server(ServerMsg::Rate { fps: 120 });
     }
 
     #[test]

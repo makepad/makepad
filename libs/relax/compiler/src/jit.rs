@@ -1097,6 +1097,20 @@ pub fn reassert_signals() {
     os::fault::reassert();
 }
 
+/// The calling thread moved to or from a program stack (relax_base::stack::on_program_stack):
+/// the stack bounds cached per thread (fault reports, frame walks, heap samples) are read again.
+pub(crate) fn program_stack_changed() {
+    let _ = STACK_HI.try_with(|c| if c.get() != 0 { c.set(os::fault::stack_hi_of_self()) });
+    crate::inspect::heap::stack_changed();
+}
+
+/// Runs `f(arg)` (a program thread's body: Relax std's thread start) on a program stack: a large
+/// lazily committed reservation with a guard (relax_base::stack::on_program_stack), so deep
+/// recursion and big stack buffers fit, and an overrun faults on the guard as a stack overflow.
+extern "C" fn relax_on_program_stack(f: extern "C" fn(*mut u8), arg: *mut u8) {
+    crate::stack::on_program_stack(program_stack_changed, || f(arg));
+}
+
 /// Gives the calling thread its fault stack (once), so a stack overflow in JIT code on a thread
 /// the program started is still reported. Called on the thread's first lazy compile /
 /// thread-local block and from the fault handler.
@@ -18846,6 +18860,10 @@ pub(crate) fn loader_symbol(name: &[u8]) -> Option<usize> {
         b"__relax_domain_failed" => Some(crate::domain::thread_finished as *const () as usize),
         b"__relax_domain_name" => Some(crate::domain::relax_domain_name as *const () as usize),
         b"__relax_tls_fixed" => Some(os::tls::relax_tls_fixed as *const () as usize),
+        b"__relax_on_program_stack" => Some(relax_on_program_stack as *const () as usize),
+        b"__relax_sstack" => Some(crate::sstack::relax_sstack as *const () as usize),
+        b"__relax_sstack_grow" => Some(crate::sstack::relax_sstack_grow as *const () as usize),
+        b"__relax_sstack_trim" => Some(crate::sstack::relax_sstack_trim as *const () as usize),
         b"__relax_key_create" => Some(crate::domain_threads::key_create as *const () as usize),
         b"__relax_key_delete" => Some(crate::domain_threads::key_delete as *const () as usize),
         b"__relax_key_get" => Some(crate::domain_threads::key_get as *const () as usize),

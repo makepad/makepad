@@ -147,7 +147,7 @@ fn open_streams(size: [u32; 2], fps: u32, kbps: u32, split: Split, full_chroma: 
 
 fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + Sync>) {
     // the streams, for (size, split); dropping them ends their workers
-    let mut streams: Option<(Vec<Stream>, [u32; 2], (Split, bool), bool)> = None;
+    let mut streams: Option<(Vec<Stream>, [u32; 2], (Split, bool, u32), bool)> = None;
     let (done_tx, done_rx) = channel::<Done>();
     let mut in_flight = 0usize;
     // the tiles of the picture being encoded: (frame, parts received, messages)
@@ -179,7 +179,7 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
     // encoded near lossless (it stays so until a picture changes something)
     let last_change = std::cell::Cell::new(Instant::now());
     let refining: std::cell::Cell<Option<u32>> = std::cell::Cell::new(None);
-    let take = |d: Done, streams: &Option<(Vec<Stream>, [u32; 2], (Split, bool), bool)>, gathering: &mut Vec<Option<Vec<u8>>>, failed: &mut bool, fail: &mut dyn FnMut(String)| {
+    let take = |d: Done, streams: &Option<(Vec<Stream>, [u32; 2], (Split, bool, u32), bool)>, gathering: &mut Vec<Option<Vec<u8>>>, failed: &mut bool, fail: &mut dyn FnMut(String)| {
         let (i, frame, built_ns, encoded_ns, key, out) = d;
         let Some((list, _, _, tiles)) = streams else { return };
         let parts = if *tiles { list.len() } else { 1 };
@@ -250,7 +250,7 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
                     key_wanted = true;
                     wake();
                 }
-                if streams.as_ref().is_none_or(|(_, s, sp, _)| *s != size || *sp != (split, full_chroma)) {
+                if streams.as_ref().is_none_or(|(_, s, sp, _)| *s != size || *sp != (split, full_chroma, fps)) {
                     while in_flight > 0 {
                         let Ok(d) = done_rx.recv() else { return };
                         in_flight -= 1;
@@ -261,7 +261,7 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
                         Ok(list) => {
                             let tiles = split == Split::Tiles && list.len() > 1;
                             gathering = vec![None; if tiles { list.len() } else { 0 }];
-                            streams = Some((list, size, (split, full_chroma), tiles));
+                            streams = Some((list, size, (split, full_chroma, fps), tiles));
                             key_wanted = true;
                         }
                         Err(e) => {

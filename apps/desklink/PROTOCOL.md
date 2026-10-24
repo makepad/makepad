@@ -1,4 +1,4 @@
-# Desk Link protocol, version 3
+# Desk Link protocol, version 4
 
 Desk Link is how a viewer (this app) sees and drives a desktop (the window manager's
 `desk_link` server, `apps/wm/src/desk_link/`). It runs between machines on one LAN only: no
@@ -56,6 +56,7 @@ Fixed-size fields are little-endian. `str` and `bytes` are `u32 LE length` + byt
 | 4 | SelectScreen | `index u32` (into `Welcome.screens`) |
 | 5 | RequestKeyframe | — (sent by the viewer after a decode error) |
 | 6 | SetSplit | `split u8` (0 one engine, 1 tiles, 2 interleave: how a desktop with several encode engines shares them, for every viewer) |
+| 7 | Refresh | `hz u16`: the viewer's display refresh, measured from its vsync (0 = not known). Sent after Hello and on every change. |
 | 10 | Key | `down bool, keycode u32 (makepad KeyCode index), mods u8 (1 shift, 2 control, 4 alt, 8 logo)` |
 | 11 | Pointer | `x u16, y u16`: position over the stream picture, 0..=65535 on each axis |
 | 12 | Button | `down bool, button u8 (0 left, 1 right, 2 middle, 3 back, 4 forward)` |
@@ -82,6 +83,7 @@ Gamepad buttons: bit 0 A, 1 B, 2 X, 3 Y, 4 left shoulder, 5 right shoulder, 6 se
 | 105 | Stream | `screen u32, stream_w u32, stream_h u32` (the stream shows another screen now) |
 | 106 | Clipboard | `text str` |
 | 107 | Bye | `reason str` (then the desktop closes) |
+| 108 | Rate | `fps u16`: the pictures a second the desktop streams at now: the lowest of its settings' cap (`fps`, default 120), its streamed screen's refresh and every watching viewer's `Refresh`. Sent after Welcome and on every change; a still desktop sends fewer. |
 
 Screens are in desktop device pixels. `input = false` means viewer input is not injected (for
 example, no `/dev/uinput` access); `input_note` says why.

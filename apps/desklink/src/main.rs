@@ -48,6 +48,7 @@ script_mod! {
                             host_input := TextInput{width: Fill empty_text: "host:port"}
                             add_host := Button{width: Fill text: "Connect"}
                             one_to_one := CheckBox{text: "1:1 pixels"}
+                            integer_scale := CheckBox{text: "Whole-pixel scale" active: true}
                             details := CheckBox{text: "Latency details"}
                             screen_next := Button{width: Fill text: "Next screen"}
                             split_mode := Button{width: Fill text: "Engines: tiles"}
@@ -89,6 +90,20 @@ pub struct App {
     pad_poll: NextFrame,
     #[rust]
     tick: Timer,
+    /// Measures this display's refresh (vsync to vsync), told to every desktop.
+    #[rust]
+    vsync: NextFrame,
+    #[rust]
+    vsync_times: Vec<f64>,
+    /// The window is fullscreen: the panel hides (the picture gets the whole screen) and shows
+    /// while the pointer is at the screen's left edge.
+    #[rust]
+    fullscreen: bool,
+    #[rust]
+    panel_shown: bool,
+    /// The window's inner size in device pixels (fullscreen: the screen's backing size).
+    #[rust]
+    window_px: [u32; 2],
     #[rust]
     stats_log: bool,
     /// The engine split asked of the desktop (`proto::split::*`; desktops start with tiles).
@@ -307,9 +322,9 @@ impl App {
         }
         let Some(c) = self.conns.get(self.selected) else { return };
         let picture = c.latest.lock().unwrap().take();
-        let (state, welcome, cursor, offset, fps, mbps, warning) = {
+        let (state, welcome, cursor, offset, fps, mbps, warning, stream_fps) = {
             let s = c.shared.lock().unwrap();
-            (s.state.clone().unwrap_or(State::Connecting), s.welcome.clone(), s.cursor, s.offset_ns, s.fps, s.mbps, s.warning.clone())
+            (s.state.clone().unwrap_or(State::Connecting), s.welcome.clone(), s.cursor, s.offset_ns, s.fps, s.mbps, s.warning.clone(), s.stream_fps)
         };
         let remote = self.remote(cx);
         let Some(mut view) = remote.borrow_mut::<RemoteView>() else { return };
@@ -336,8 +351,11 @@ impl App {
         if let (Some(w), true) = (&welcome, self.details) {
             let screen = w.screens.get(w.screen as usize).map(|s| s.name.clone()).unwrap_or_default();
             lines.push(format!("{} · {screen} {}x{}{}", w.server, w.stream[0], w.stream[1], if w.input { String::new() } else { format!(" · {}", w.input_note) }));
+            // how the picture is shown: the window in device pixels, the scale (whole: each remote
+            // pixel a whole block, nothing resampled)
+            lines.push(format!("window {}x{} px{} · scale {:.4}{}", self.window_px[0], self.window_px[1], if self.fullscreen { " (fullscreen)" } else { "" }, view.scale, if view.whole { " whole-pixel" } else { " resampled" }));
         }
-        lines.push(view::rate_line(fps, mbps));
+        lines.push(view::rate_line(fps, mbps, stream_fps, crate::conn::DISPLAY_HZ.load(std::sync::atomic::Ordering::Acquire)));
         // view only (the desktop cannot inject input): always said, never a silent dead mouse
         if let Some(w) = welcome.as_ref().filter(|w| !w.input) {
             lines.push(if w.input_note.is_empty() { "input unavailable on this host".to_string() } else { w.input_note.clone() });
@@ -449,6 +467,40 @@ impl App {
     }
 }
 
+/// The side panel's width (points).
+const PANEL_W: f64 = 250.0;
+
+impl App {
+    fn show_panel(&mut self, cx: &mut Cx, on: bool) {
+        self.panel_shown = on;
+        self.ui.splitter(cx, ids!(split)).set_align(cx, SplitterAlign::FromA(if on { PANEL_W } else { 0.0 }));
+        self.remote(cx).redraw(cx);
+    }
+
+    /// Starts measuring the display's refresh: [`Self::vsync_frame`] over the next frames.
+    fn measure_refresh(&mut self, cx: &mut Cx) {
+        self.vsync_times.clear();
+        self.vsync = cx.new_next_frame();
+    }
+
+    /// One vsync of the measurement; after 40 intervals the median one gives the refresh (Hz),
+    /// which every connection tells its desktop (it streams at most that many pictures).
+    fn vsync_frame(&mut self, cx: &mut Cx, time: f64) {
+        self.vsync_times.push(time);
+        if self.vsync_times.len() <= 40 {
+            self.vsync = cx.new_next_frame();
+            return;
+        }
+        let mut dts: Vec<f64> = self.vsync_times.windows(2).map(|w| w[1] - w[0]).filter(|d| *d > 0.0).collect();
+        self.vsync_times.clear();
+        dts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        if let Some(dt) = dts.get(dts.len() / 2) {
+            let hz = (1.0 / dt).round().clamp(1.0, 1000.0) as u32;
+            crate::conn::DISPLAY_HZ.store(hz, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
 /// `--dump-check <file>`: the hardware decoder over an Annex-B dump (one access unit per
 /// coded picture; parameter sets go with the picture after them).
 fn dump_check(path: &str) -> ! {
@@ -519,6 +571,7 @@ impl MatchEvent for App {
             dump_check(args.get(i + 1).map(String::as_str).unwrap_or(""));
         }
         self.stats_log = args.iter().any(|a| a == "--stats");
+        self.panel_shown = true;
         if let Some(path) = args.windows(2).find(|w| w[0] == "--dump-play").map(|w| w[1].clone()) {
             let gpu = !args.iter().any(|a| a == "--cpu-decode");
             let still = args.windows(2).find(|w| w[0] == "--still").and_then(|w| w[1].parse().ok());
@@ -528,6 +581,7 @@ impl MatchEvent for App {
             self.tick = cx.start_interval(1.0);
             return;
         }
+        self.measure_refresh(cx);
         for (name, host, port, discovered) in hosts() {
             self.add(cx, name, host, port, discovered);
         }
@@ -561,6 +615,12 @@ impl MatchEvent for App {
         if let Some(on) = self.ui.check_box(cx, ids!(details)).changed(actions) {
             self.details = on;
             self.remote(cx).redraw(cx);
+        }
+        if let Some(on) = self.ui.check_box(cx, ids!(integer_scale)).changed(actions) {
+            if let Some(mut v) = self.remote(cx).borrow_mut::<RemoteView>() {
+                v.integer_scale = on;
+                v.redraw(cx);
+            }
         }
         if let Some(on) = self.ui.check_box(cx, ids!(one_to_one)).changed(actions) {
             if let Some(mut v) = self.remote(cx).borrow_mut::<RemoteView>() {
@@ -621,6 +681,28 @@ impl AppMain for App {
         if let Event::GameInputConnected(_) = event {
             self.pad_poll = cx.new_next_frame();
         }
+        if let Some(e) = self.vsync.is_event(event) {
+            self.vsync_frame(cx, e.time);
+        }
+        if let Event::WindowGeomChange(e) = event {
+            // another screen (a 120 Hz panel, a 60 Hz external one): measured again
+            self.measure_refresh(cx);
+            let g = &e.new_geom;
+            self.window_px = [(g.inner_size.x * g.dpi_factor).round() as u32, (g.inner_size.y * g.dpi_factor).round() as u32];
+            if g.is_fullscreen != self.fullscreen {
+                self.fullscreen = g.is_fullscreen;
+                self.show_panel(cx, !self.fullscreen);
+            }
+        }
+        if let (Event::MouseMove(e), true) = (event, self.fullscreen) {
+            // fullscreen: the panel shows at the left edge and hides once the pointer is back
+            // over the picture
+            if e.abs.x <= 2.0 && !self.panel_shown {
+                self.show_panel(cx, true);
+            } else if e.abs.x > PANEL_W + 40.0 && self.panel_shown {
+                self.show_panel(cx, false);
+            }
+        }
         if self.pad_poll.is_event(event).is_some() {
             self.poll_pads(cx);
         }
@@ -630,11 +712,11 @@ impl AppMain for App {
                 c.send(ClientMsg::Stats { frame, decode_us, present_us });
             }
             if self.stats_log {
-                let (fps, mbps, rtt) = self.current().map(|c| {
+                let (fps, mbps, rtt, stream_fps) = self.current().map(|c| {
                     let s = c.shared.lock().unwrap();
-                    (s.fps, s.mbps, s.rtt_ms.unwrap_or(0.0))
+                    (s.fps, s.mbps, s.rtt_ms.unwrap_or(0.0), s.stream_fps)
                 }).unwrap_or_default();
-                eprintln!("desklink stats: rtt {rtt:.2} ms · {}", format!("{} · {}", view::latency_line(&self.latency), view::rate_line(fps, mbps)));
+                eprintln!("desklink stats: rtt {rtt:.2} ms · {}", format!("{} · {}", view::latency_line(&self.latency), view::rate_line(fps, mbps, stream_fps, crate::conn::DISPLAY_HZ.load(std::sync::atomic::Ordering::Acquire))));
             }
         }
         if let Event::Draw(_) = event {

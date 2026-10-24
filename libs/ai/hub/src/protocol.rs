@@ -1733,3 +1733,42 @@ pub struct SpeechTimingsJson {
     pub version: u32,
     pub words: Vec<WordTimingJson>,
 }
+
+/// `SongTimingJson::format`.
+pub const SONG_TIMING_FORMAT: &str = "song-timing";
+/// `SongTimingJson::version`.
+pub const SONG_TIMING_VERSION: u32 = 1;
+
+/// One section of a song as the model planned it: its name in the score
+/// ("verse", "pre-chorus", "" before the first marker), when it starts and
+/// ends, and the sung notes in it (empty for an instrumental section).
+/// Seconds from the start of the audio.
+#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
+pub struct SongSectionJson {
+    pub name: String,
+    pub start: f64,
+    pub end: f64,
+    pub notes: Vec<SongNoteJson>,
+}
+
+/// One sung note: when it starts and how long it lasts (a tie is one note).
+#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
+pub struct SongNoteJson {
+    pub start: f64,
+    pub length: f64,
+}
+
+/// The `application/json` artifact a music job adds after its audio when
+/// the model planned the song before singing it (yue2: the timeline of its
+/// own score, which the codec stage sings at the score's tempo). A client
+/// times lyrics with it: each lyric section to its score section, the
+/// lines over the sung notes. `seconds` is the score's length; the audio
+/// may be cut shorter by the request's `seconds`.
+#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
+pub struct SongTimingJson {
+    /// Always [`SONG_TIMING_FORMAT`].
+    pub format: String,
+    pub version: u32,
+    pub seconds: f64,
+    pub sections: Vec<SongSectionJson>,
+}

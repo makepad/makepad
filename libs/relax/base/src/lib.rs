@@ -42,6 +42,7 @@ pub mod pool;
 pub mod query;
 pub mod preempt;
 pub mod stack;
+pub mod sstack;
 pub mod arena;
 pub mod json;
 pub mod diag;

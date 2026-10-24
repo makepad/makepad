@@ -54,6 +54,9 @@ mod worker;
 mod ai;
 mod ai_music;
 mod ai_page;
+mod ai_songs;
+mod lyrics;
+mod lyrics_view;
 use crate::ai_music::AiMode;
 mod ai_schema;
 mod theme_manager;
@@ -127,7 +130,7 @@ script_mod! {
             flow: Right
             spacing: 10
             align: Align{y: 0.5}
-            num := mod.widgets.HwPanelText{width: 22 text: ""}
+            num := mod.widgets.HwPanelText{width: 30 text: ""}
             View{
                 width: Fill
                 height: Fit
@@ -137,7 +140,7 @@ script_mod! {
                 style := mod.widgets.HwPanelText{width: Fill max_lines: 1 text_overflow: TextOverflow.Ellipsis text: "" draw_text +: {text_style: theme.font_regular{font_size: 8.5}}}
             }
             length := mod.widgets.HwPanelText{width: 38 text: ""}
-            status := mod.widgets.HwPanelText{width: 140 max_lines: 2 text_overflow: TextOverflow.Ellipsis text: ""}
+            status := mod.widgets.HwPanelText{width: 96 max_lines: 2 text_overflow: TextOverflow.Ellipsis text: ""}
             play_cap := mod.widgets.HwKey{width: Fit height: 26 inset: 3 flow: Right spacing: 6 align: Align{x: 0.5 y: 0.5} padding: Inset{left: 10 right: 10}
                 play_icon := mod.widgets.HwKeyButton{text: "\u{f04b}" width: Fit draw_text +: {text_style: theme.font_icons{font_size: 9.0}}}
                 play := mod.widgets.HwKeyText{text: "Play" width: Fit}
@@ -853,7 +856,7 @@ script_mod! {
                                             height: Fill
                                             flow: Right
                                             spacing: 12
-                                            View{
+                                            ai_list := View{
                                                 width: Fill
                                                 height: Fill
                                                 flow: Down
@@ -864,34 +867,26 @@ script_mod! {
                                                     flow: Right
                                                     spacing: 10
                                                     padding: Inset{left: 8 right: 8 bottom: 2}
-                                                    mod.widgets.HwPanelText{width: 22 text: "#"}
+                                                    mod.widgets.HwPanelText{width: 30 text: "#"}
                                                     mod.widgets.HwPanelText{width: Fill text: "Song"}
                                                     mod.widgets.HwPanelText{width: 38 text: "Time"}
-                                                    mod.widgets.HwPanelText{width: 140 text: "Status"}
+                                                    mod.widgets.HwPanelText{width: 96 text: "Status"}
                                                     View{width: 68 height: 1}
                                                 }
-                                                ai_rows := ScrollYView{
-                                                    width: Fill
-                                                    height: Fill
-                                                    flow: Down
-                                                    spacing: 2
-                                                    ai_empty := mod.widgets.HwPanelText{width: Fill padding: Inset{left: 8 top: 8} text: "No songs yet. Press Start: the first song takes about a minute, then each next one is made while the last plays."}
-                                                    ai_row_0 := AiRow{}
-                                                    ai_row_1 := AiRow{}
-                                                    ai_row_2 := AiRow{}
-                                                    ai_row_3 := AiRow{}
-                                                    ai_row_4 := AiRow{}
-                                                    ai_row_5 := AiRow{}
-                                                    ai_row_6 := AiRow{}
-                                                    ai_row_7 := AiRow{}
-                                                    ai_row_8 := AiRow{}
-                                                    ai_row_9 := AiRow{}
-                                                    ai_row_10 := AiRow{}
-                                                    ai_row_11 := AiRow{}
+                                                ai_empty := mod.widgets.HwPanelText{width: Fill padding: Inset{left: 8 top: 8} text: "No songs yet. Press Start: the first song takes about a minute, then each next one is made while the last plays."}
+                                                // Every song, newest first, virtualised (ai_songs.rs).
+                                                ai_rows := mod.widgets.AiSongs{
+                                                    list := PortalList{
+                                                        width: Fill
+                                                        height: Fill
+                                                        AiRow := AiRow{visible: true}
+                                                    }
                                                 }
                                             }
+                                            // The picked (else the playing) song: its lyrics in time
+                                            // with the music, what made it, or the writer chat.
                                             ai_inspect := View{
-                                                width: 240
+                                                width: 280
                                                 height: Fill
                                                 flow: Down
                                                 spacing: 8
@@ -900,14 +895,40 @@ script_mod! {
                                                     height: Fit
                                                     flow: Right
                                                     spacing: 6
+                                                    align: Align{y: 0.5}
+                                                    ai_show_lyrics_cap := mod.widgets.HwKey{width: Fit height: 28 inset: 3 padding: Inset{left: 10 right: 10} draw_bg +: {has_led: 1.0 role: 46.0}
+                                                        ai_show_lyrics := mod.widgets.HwKeyText{text: "Lyrics" width: Fit}
+                                                    }
                                                     ai_show_song_cap := mod.widgets.HwKey{width: Fit height: 28 inset: 3 padding: Inset{left: 10 right: 10} draw_bg +: {has_led: 1.0 role: 46.0}
-                                                        ai_show_song := mod.widgets.HwKeyText{text: "Lyrics & prompt" width: Fit}
+                                                        ai_show_song := mod.widgets.HwKeyText{text: "Song" width: Fit}
                                                     }
                                                     ai_show_chat_cap := mod.widgets.HwKey{width: Fit height: 28 inset: 3 padding: Inset{left: 10 right: 10} draw_bg +: {has_led: 1.0 role: 46.0}
                                                         ai_show_chat := mod.widgets.HwKeyText{text: "Writer chat" width: Fit}
                                                     }
+                                                    View{width: Fill height: 1}
+                                                    ai_big_cap := mod.widgets.HwKey{width: 34 height: 28 inset: 3 align: Align{x: 0.5 y: 0.5}
+                                                        ai_big := mod.widgets.HwKeyButton{text: "\u{f065}" width: Fit draw_text +: {text_style: theme.font_icons{font_size: 10.0}}}
+                                                    }
                                                 }
-                                                ScrollYView{
+                                                ai_lyrics_pane := View{
+                                                    width: Fill
+                                                    height: Fill
+                                                    flow: Down
+                                                    spacing: 6
+                                                    ai_lyrics_title := mod.widgets.HwPanelTitle{width: Fill text: ""}
+                                                    ai_lyrics_info := mod.widgets.HwPanelText{width: Fill text: ""}
+                                                    View{
+                                                        width: Fill
+                                                        height: Fit
+                                                        flow: Right
+                                                        spacing: 8
+                                                        align: Align{y: 0.5}
+                                                        mod.widgets.HwPanelText{width: Fill text: "Translate new songs to"}
+                                                        ai_language := mod.widgets.HwDropDown{width: 128 height: 28 labels: ["English", "Dutch", "German", "French", "Spanish", "Italian", "Portuguese", "Japanese", "Chinese", "Korean", "No translation"]}
+                                                    }
+                                                    ai_lyrics := mod.widgets.HwLyrics{}
+                                                }
+                                                ai_detail := ScrollYView{
                                                     width: Fill
                                                     height: Fill
                                                     flow: Down
@@ -1196,6 +1217,9 @@ pub struct App {
     /// The model picker shows `ai.models`.
     #[rust]
     ai_models_shown: bool,
+    /// The page-filling lyrics as last applied.
+    #[rust]
+    ai_big_shown: Option<bool>,
     /// The AI page's frames while a song is made (its bar, the elapsed time).
     #[rust]
     ai_frame: NextFrame,
@@ -3229,6 +3253,8 @@ impl AppMain for App {
         crate::layout::script_mod(vm);
         crate::eq::script_mod(vm);
         crate::micro::script_mod(vm);
+        crate::lyrics_view::script_mod(vm);
+        crate::ai_songs::script_mod(vm);
         crate::connection::script_mod(vm);
         makepad_app_aichat::script_mod(vm);
         makepad_widgets_feedback::script_mod(vm);

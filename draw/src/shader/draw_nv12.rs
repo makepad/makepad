@@ -50,8 +50,9 @@ script_mod! {
             let py = clamp(p.y, 0.0, h - 1.0)
             // 4:2:0: the chroma plane is half size, a 2x2 block per sample; 4:4:4: a sample per pixel
             let sub = mix(0.5, 1.0, self.chroma_full)
-            let cw = floor((w + 1.0) * sub)
-            let ch = floor((h + 1.0) * sub)
+            // the chroma plane's size: ceil(w / 2) x ceil(h / 2), or w x h
+            let cw = floor(w * sub + 0.5)
+            let ch = floor(h * sub + 0.5)
             let yb = floor(self.nv12.sample(vec2((px + 0.5) / w, (py + 0.5) / h)).x * 255.0 + 0.5)
             let c = self.nv12_next.sample(vec2((floor(px * sub) + 0.5) / cw, (floor(py * sub) + 0.5) / ch))
             return vec3(yb, floor(c.x * 255.0 + 0.5), floor(c.y * 255.0 + 0.5))
@@ -108,6 +109,10 @@ script_mod! {
             let s = self.src.xy + self.pos * self.src.zw - vec2(0.5, 0.5)
             let f = s - floor(s)
             let p = floor(s)
+            if self.sharp > 1.5 {
+                // whole device-pixel blocks of each source pixel: the pixel as it is
+                return vec4(self.nv12_rgb(floor(s + vec2(0.5, 0.5))), 1.0) * self.opacity
+            }
             if self.sharp > 0.5 {
                 let wx = self.cubic_weights(f.x)
                 let wy = self.cubic_weights(f.y)
@@ -147,7 +152,8 @@ pub struct DrawNv12 {
     /// 1: the picture is two plane textures ([`DrawNv12::set_planes`]).
     #[live]
     pub planar: f32,
-    /// 1: a sharper (Catmull-Rom bicubic) scale instead of the bilinear one; no frame blend.
+    /// 1: a sharper (Catmull-Rom bicubic) scale instead of the bilinear one; 2: nearest (each
+    /// source pixel a whole block of output pixels: 1:1, 2x, ...); no frame blend for either.
     #[live]
     pub sharp: f32,
     /// 1: the planar picture's chroma is 4:4:4 (full size).

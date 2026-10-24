@@ -53,6 +53,9 @@ pub struct Latency {
     pub total: f64,
 }
 
+/// This display's refresh (Hz; 0 = not measured yet): every connection tells its desktop.
+pub static DISPLAY_HZ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 #[derive(Clone, Debug, Default)]
 pub struct Shared {
     pub state: Option<State>,
@@ -67,6 +70,8 @@ pub struct Shared {
     /// Pictures and bytes per second, over the last second.
     pub fps: f64,
     pub mbps: f64,
+    /// The pictures a second the desktop streams at (its `Rate`; a still desktop sends fewer).
+    pub stream_fps: Option<u16>,
     pub warning: Option<String>,
 }
 
@@ -273,9 +278,18 @@ impl Net {
         let mut last_ping = Instant::now() - Duration::from_secs(10);
         let mut second = (Instant::now(), 0u32, 0usize);
         let mut last_heard = Instant::now();
+        // the display refresh last told to the desktop
+        let mut told_hz = 0u32;
         let result = loop {
             if self.stop.load(Ordering::Acquire) {
                 break Ok("closed".into());
+            }
+            let hz = DISPLAY_HZ.load(Ordering::Acquire);
+            if hz != told_hz {
+                told_hz = hz;
+                if let Err(e) = proto::write_all(&mut stream, &ClientMsg::Refresh { hz: hz.min(u16::MAX as u32) as u16 }.encode()) {
+                    break Err(format!("write: {e}"));
+                }
             }
             if last_ping.elapsed() >= Duration::from_secs(1) {
                 last_ping = Instant::now();
@@ -375,6 +389,10 @@ impl Net {
                             w.screen = screen;
                             w.stream = size;
                         }
+                        self.signal.set();
+                    }
+                    ServerMsg::Rate { fps } => {
+                        self.shared.lock().unwrap().stream_fps = Some(fps);
                         self.signal.set();
                     }
                     ServerMsg::Clipboard { .. } => {}

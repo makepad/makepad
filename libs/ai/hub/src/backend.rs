@@ -1775,6 +1775,13 @@ pub fn backend_provisioned(name: &str) -> bool {
         #[cfg(feature = "python-backends")]
         "flashworld" => crate::world_backend::flashworld_provisioned(),
         "music3" => crate::music3_backend::music3_provisioned(),
+        // YuE2 runs on the CUDA store only (no CPU/Metal path): a hub built
+        // without the CUDA kernels, or on a box without a device, must not
+        // advertise it, so the fleet router never sends it a song.
+        #[cfg(feature = "audio")]
+        "yue2" => makepad_ai_common::backend::gpu_device_available(),
+        #[cfg(not(feature = "audio"))]
+        "yue2" => false,
         // The vision tower and its language session have no CPU path: Metal
         // on macOS, CUDA on Windows/Linux, probed once and memoised.
         "vision" => crate::vision_backend::vision_provisioned(),

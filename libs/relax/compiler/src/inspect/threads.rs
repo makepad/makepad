@@ -812,6 +812,9 @@ mod imp {
     /// main thread: called once per thread, outside any capture).
     #[cfg(target_arch = "x86_64")]
     pub fn stack_hi_of_self() -> u64 {
+        if let Some((_, hi)) = crate::stack::program_stack_bounds() {
+            return hi as u64;
+        }
         extern "C" {
             fn pthread_getattr_np(t: usize, attr: *mut u64) -> i32;
             fn pthread_attr_getstack(attr: *const u64, addr: *mut usize, size: *mut usize) -> i32;

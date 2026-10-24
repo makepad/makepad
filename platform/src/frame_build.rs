@@ -1213,23 +1213,28 @@ impl Cx {
             pass.clear[0] = [c.x, c.y, c.z, c.w];
             pass.load[0] = load::CLEAR;
         } else {
-            let attachments = self.passes[pass_id].color_textures.clone();
-            if attachments.len() > 4 {
-                fb.gap("a pass has more than four colour attachments");
-            }
-            for (i, attachment) in attachments.iter().take(4).enumerate() {
-                let original = attachment.texture.texture_id();
-                let tid = if picking { self.pick.twin(&mut self.textures, original, false).texture_id() } else { original };
-                pass.color[i] = self.fb_attachment(fb, tid, tw, th, false);
-                let initial = self.textures[tid].take_initial();
-                let (action, color) = match attachment.clear_color {
-                    DrawPassClearColor::InitWith(c) => (if initial { load::CLEAR } else { load::LOAD }, c),
-                    DrawPassClearColor::ClearWith(c) => (load::CLEAR, c),
-                };
-                pass.load[i] = if picking { load::CLEAR } else if self.passes[pass_id].color_scratch { load::DONT_CARE } else { action };
-                pass.clear[i] = if picking { [0.0; 4] } else { [color.x, color.y, color.z, color.w] };
-                pass.layer[i] = attachment.cube_face.unwrap_or(0);
-            }
+            // the attachments copied aside (self is borrowed mutably below) on the secondary stack:
+            // no heap allocation per pass per frame
+            makepad_stack::with_frame(|f| {
+                let n = self.passes[pass_id].color_textures.len();
+                let attachments = f.slice_from_fn(n, |i| self.passes[pass_id].color_textures[i].clone());
+                if attachments.len() > 4 {
+                    fb.gap("a pass has more than four colour attachments");
+                }
+                for (i, attachment) in attachments.iter().take(4).enumerate() {
+                    let original = attachment.texture.texture_id();
+                    let tid = if picking { self.pick.twin(&mut self.textures, original, false).texture_id() } else { original };
+                    pass.color[i] = self.fb_attachment(fb, tid, tw, th, false);
+                    let initial = self.textures[tid].take_initial();
+                    let (action, color) = match attachment.clear_color {
+                        DrawPassClearColor::InitWith(c) => (if initial { load::CLEAR } else { load::LOAD }, c),
+                        DrawPassClearColor::ClearWith(c) => (load::CLEAR, c),
+                    };
+                    pass.load[i] = if picking { load::CLEAR } else if self.passes[pass_id].color_scratch { load::DONT_CARE } else { action };
+                    pass.clear[i] = if picking { [0.0; 4] } else { [color.x, color.y, color.z, color.w] };
+                    pass.layer[i] = attachment.cube_face.unwrap_or(0);
+                }
+            });
         }
         if let Some(depth) = self.passes[pass_id].depth_texture.clone() {
             let tid = if picking { self.pick.twin(&mut self.textures, depth.texture_id(), true).texture_id() } else { depth.texture_id() };
