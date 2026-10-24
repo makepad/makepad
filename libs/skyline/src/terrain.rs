@@ -311,6 +311,27 @@ script_mod! {
 #[derive(Script, ScriptHook)] #[repr(C)]
 pub struct DrawSkyTrees { #[deref] pub draw_super: DrawQuad, #[live] pub copy: f32 }
 
+/// The last meshes `trees` built (by their key, with the pixel size, and the arc they hold), so the Skylines of one
+/// process that draw the same trees build them once: a host's strip in two parts (`SkyLight::plan`) re-renders both at
+/// each step of a held Size drag, where the trees are most of a step's CPU (plan 6's final review, M7). The two newest.
+static SHARED_TREES: std::sync::Mutex<Vec<(u64, [u64; 2], std::sync::Arc<TreeMesh>)>> = std::sync::Mutex::new(Vec::new());
+
+/// The mesh `build` makes for trees `key` over arc `arc`, from SHARED_TREES when it holds it.
+fn shared_trees(key: u64, arc: [f64; 2], build: impl FnOnce() -> TreeMesh) -> std::sync::Arc<TreeMesh> {
+    let arc = arc.map(f64::to_bits);
+    let hit = SHARED_TREES.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(k, a, _)| *k == key && *a == arc).map(|(.., m)| m.clone());
+    if let Some(m) = hit { return m; }
+    let m = std::sync::Arc::new(build());
+    let mut last = SHARED_TREES.lock().unwrap_or_else(|e| e.into_inner());
+    last.retain(|(k, a, _)| !(*k == key && *a == arc));
+    last.push((key, arc, m.clone()));
+    if last.len() > 2 { last.remove(0); }
+    m
+}
+
+/// Forgets the shared meshes (`SHARED_TREES`), so the next view builds its trees: a cold measure's.
+pub fn forget_shared_trees() { SHARED_TREES.lock().unwrap_or_else(|e| e.into_inner()).clear(); }
+
 /// The single trees of a view: the coverage target; the mesh (rebuilt when the trees' parameters or the pixel size change,
 /// or the view leaves the arc it holds) with its key, arc (start, length) and index count; the last build's trees,
 /// vertices, triangles and CPU ms.
@@ -327,9 +348,9 @@ impl Trees {
         let (part, key) = (v.span < 0.5, p.hash(TREE_KEYS, &[px0])); let want = if part { arc(v.u0, v.u0 + v.span) } else { [0.0, 1.0] };
         if !self.mesh.as_ref().is_some_and(|(k, a, ..)| *k == key && (a[1] >= 1.0 || fract(want[0] - a[0]) + want[1] <= a[1])) {
             let (t0, ga) = (Cx::monotonic_now(), if part { arc(v.u0 - 0.5 * v.span, v.u0 + 1.5 * v.span) } else { [0.0, 1.0] });
-            let m = trees(&sc.z.rng, p, px0, (ga[1] < 1.0).then(|| (fract(ga[0]), fract(ga[0] + ga[1]))));
+            let m = shared_trees(key, ga, || trees(&sc.z.rng, p, px0, (ga[1] < 1.0).then(|| (fract(ga[0]), fract(ga[0] + ga[1])))));
             let (geom, n) = (self.mesh.take().map_or_else(|| Geometry::new(cx), |m| m.2), m.i.len());
-            self.stats = (m.trees, m.v.len() / 9, n / 3, 0.0); geom.update(cx, m.i, m.v);
+            self.stats = (m.trees, m.v.len() / 9, n / 3, 0.0); geom.update(cx, m.i.clone(), m.v.clone());
             (self.stats.3, self.mesh) = ((Cx::monotonic_now() - t0) * 1000.0, Some((key, ga, geom, n)));
         }
         let Self { draw_trees: dt, target, mesh, .. } = self;

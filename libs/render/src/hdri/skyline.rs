@@ -9,7 +9,9 @@
 //! the rain and the fog scatter forward round it, over the distance it burns
 //! at (`Env::city_lit`, `Weather::light_through`), a light over the sky too.
 //! A wet ground mirrors the strip over the same distance and does not veil it
-//! again along the floor (`Env::over_city`, `Env::base_layer`).
+//! again along the floor (`Env::over_city`, `Env::base_layer`), and the strip's
+//! own water, whose distance is what it mirrors, is veiled up the mirror as
+//! a puddle is (`SkylineBand::mirrored`, `eye_m`).
 //!
 //! The engine never touches the GPU and does not depend on makepad-skyline: the
 //! strip is plain data. Its convention is the skyline's: rows linear in
@@ -41,6 +43,14 @@ pub const SKIRT_HOLD_SAMPLES: usize = 128;
 /// texel of the bottom row from drawing a streak down.
 pub const SKIRT_BLUR_DEG: f32 = 2.0;
 
+/// A texel below the horizon is taken for what the strip's water mirrors (`SkylineBand::mirrored`) from MIRROR_FROM
+/// times the farthest the strip's own ground reads there, wholly from MIRROR_TO times it: past what a bilinear read
+/// between two rows of ground makes of their distances (a third more by the horizon at 1 degree rows), short of what the
+/// water mirrors 2.5 degrees down at Size 1 (the treeline 3.5 times as far, the city ten times). makepad_skyline holds
+/// its bands to the same two (its MIRROR_FROM and MIRROR_TO; the app's test keeps them equal).
+pub const MIRROR_FROM: f32 = 1.5;
+pub const MIRROR_TO: f32 = 2.5;
+
 /// The skyline's strip, as the app rendered it.
 #[derive(Clone, PartialEq)]
 pub struct SkylineBand {
@@ -60,6 +70,11 @@ pub struct SkylineBand {
     /// Elevation of the top row's top edge and the bottom row's bottom edge, degrees.
     pub top_deg: f32,
     pub bottom_deg: f32,
+    /// The strip's eye over its own ground, m (makepad_skyline's `ground_eye_m`: its eye height, over the nearest its
+    /// off-centre columns scale the ground by): at a depression al the strip's own ground, and what stands on it, reads
+    /// no farther than eye_m / tan(al), so a texel below the horizon whose distance runs well past that shows what the
+    /// strip's water mirrors (`mirrored`). 0: not handed, and no texel is taken for a mirror.
+    pub eye_m: f32,
 }
 
 /// The size and the range, not the texels: an `ImageSet` is printed whole.
@@ -89,7 +104,31 @@ impl SkylineBand {
                 *d = 0.0;
             }
         }
-        SkylineBand { w, h, texels, dist, light: Vec::new(), top_deg, bottom_deg }
+        SkylineBand { w, h, texels, dist, light: Vec::new(), top_deg, bottom_deg, eye_m: 0.0 }
+    }
+
+    /// This band with the strip's eye over its ground (`eye_m`, the app's handoff); one that is not finite or not
+    /// above 0 is 0 (no texel taken for a mirror).
+    pub fn with_eye(mut self, eye_m: f32) -> SkylineBand {
+        self.eye_m = if eye_m.is_finite() && eye_m > 0.0 { eye_m } else { 0.0 };
+        self
+    }
+
+    /// How much of a texel along `d` whose distance is `far` (m) shows what the strip's water mirrors, 0..1 (plan
+    /// hdri-6 fix wave 2, F4): its distance against the farthest the strip's own ground reads there, eye_m / tan(al) (al
+    /// the depression of `d`, held to the band's bottom row's in its skirt, which carries that row's distance): 0 up to
+    /// MIRROR_FROM times that, 1 from MIRROR_TO times it, smooth between (a texel's distance is the mean of what it
+    /// shows, and a lake's edge mixes the two). 0 above the horizon and for a band without `eye_m`.
+    pub fn mirrored(&self, d: Vec3f, far: f32) -> f32 {
+        if !(self.eye_m > 0.0 && d.y < 0.0) {
+            return 0.0;
+        }
+        let al = (-d.y).min(1.0).asin().min((-self.bottom_deg).to_radians());
+        if !(al > 0.0) {
+            return 0.0;
+        }
+        let ground = self.eye_m / al.tan();
+        smooth((far / ground - MIRROR_FROM) / (MIRROR_TO - MIRROR_FROM))
     }
 
     /// This band with the light plane `light` (`SkylineBand::light`, the app's handoff), made safe as `new` makes the
@@ -639,7 +678,7 @@ mod tests {
 
     fn band(top: f32, bottom: f32, rgba: [f32; 4]) -> SkylineBand {
         let (w, h) = (64, 16);
-        SkylineBand { w, h, texels: vec![rgba; w * h], dist: Vec::new(), light: Vec::new(), top_deg: top, bottom_deg: bottom }
+        SkylineBand { w, h, texels: vec![rgba; w * h], dist: Vec::new(), light: Vec::new(), top_deg: top, bottom_deg: bottom, eye_m: 0.0 }
     }
     fn with_band(p: &HdriParams, b: SkylineBand) -> (HdriParams, ImageSet) {
         let mut p = p.clone();
@@ -731,7 +770,7 @@ mod tests {
                 if y < h - 1 { [0.1, 0.2, 0.3, 1.0] } else if x % 8 == 0 { [4.0, 3.0, 2.0, 1.0] } else { [0.05, 0.05, 0.1, 0.5] }
             })
             .collect();
-        SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: 12.0, bottom_deg: -4.0 }
+        SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: 12.0, bottom_deg: -4.0, eye_m: 0.0 }
     }
 
     /// The band runs on into its skirt: over its lowest FADE_DEG its texels blend into the skirt, which below the band's
@@ -846,7 +885,7 @@ mod tests {
         let (w, h) = (360, 8);
         let land = [0.02, 0.02, 0.02, 1.0];
         let texels = (0..w * h).map(|i| if i / w == h - 1 && (144..216).contains(&(i % w)) { [3.0, 3.2, 3.5, 1.0] } else { land }).collect();
-        let band = SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: 20.0, bottom_deg: -6.0 };
+        let band = SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: 20.0, bottom_deg: -6.0, eye_m: 0.0 };
         let light = |c: Vec3f| 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z;
         let mut night = HdriParams::default();
         night.sky.sun.mode = "manual".to_string();
@@ -910,7 +949,7 @@ mod tests {
         let (w, h) = (360, 4);
         let mut t = vec![[0.0; 4]; w * h];
         for y in 0..h { t[y * w + 90] = [1.0, 1.0, 1.0, 1.0]; } // a post at strip u = 90.5/360
-        let b = SkylineBand { w, h, texels: t, dist: Vec::new(), light: Vec::new(), top_deg: 2.0, bottom_deg: -2.0 };
+        let b = SkylineBand { w, h, texels: t, dist: Vec::new(), light: Vec::new(), top_deg: 2.0, bottom_deg: -2.0, eye_m: 0.0 };
         let u_post = 90.5 / 360.0;
         // direction whose equirect u is u_post (+ 30 deg after a 30-degree turn)
         assert!(b.sample(dir_at_u(u_post, 0.0), 0.0)[3] > 0.9);
@@ -926,7 +965,7 @@ mod tests {
         let (w, h) = (360, 4);
         let mut t = vec![[0.0; 4]; w * h];
         for y in 0..h { t[y * w + 180] = [1.0, 1.0, 1.0, 1.0]; }
-        let b = SkylineBand { w, h, texels: t, dist: Vec::new(), light: Vec::new(), top_deg: 2.0, bottom_deg: -2.0 };
+        let b = SkylineBand { w, h, texels: t, dist: Vec::new(), light: Vec::new(), top_deg: 2.0, bottom_deg: -2.0, eye_m: 0.0 };
         assert!(b.sample(dir(0.5, 0.0), 0.0)[3] > 0.9, "x/w = 0.5 is north");
         assert_eq!(b.sample(dir(0.5, 3.0), 0.0), [0.0; 4], "above the band");
         assert_eq!(b.sample(dir(0.5, -3.0), 0.0), [0.0; 4], "below the band");
@@ -1126,7 +1165,7 @@ mod tests {
         // Column c is x/w = (c + 0.5)/w, azimuth (x/w - 0.5) * 360; row r spans 10 - r t .. 10 - (r + 1) t.
         let (column, row) = ((210.0 / texel_deg) as usize, (5.0 / texel_deg) as usize - 1);
         texels[row * w + column] = [bright, bright, bright, 1.0];
-        let (q, images) = with_band(&p, SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: 10.0, bottom_deg: 0.0 });
+        let (q, images) = with_band(&p, SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: 10.0, bottom_deg: 0.0, eye_m: 0.0 });
         (q, images, 30.0 + 0.5 * texel_deg, 5.0 + 0.5 * texel_deg)
     }
 
@@ -1190,7 +1229,7 @@ mod tests {
                 [c(), c(), c(), 1.0]
             })
             .collect();
-        let b = SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: 12.0, bottom_deg: -3.0 };
+        let b = SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: 12.0, bottom_deg: -3.0, eye_m: 0.0 };
         let (peaks, skirt) = (b.peaks(), b.skirt());
         for _ in 0..300 {
             // the band and its skirt: -40 to +20 degrees
@@ -1494,7 +1533,7 @@ mod tests {
         let el = top - (row as f32 + 0.5) * (top - bottom) / h as f32;
         let mut texels = vec![[0.0f32; 4]; w * h];
         texels[row * w + 90] = [40.0, 30.0, 20.0, 0.0];
-        let (q, images) = with_band(&p, SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: top, bottom_deg: bottom });
+        let (q, images) = with_band(&p, SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: top, bottom_deg: bottom, eye_m: 0.0 });
         let (plain, city) = (Env::new(&p), Env::new_with(&q, &images));
         let u = 90.5 / w as f32;
         let (up, down) = (dir_at_u(u, el), dir_at_u(u, -el));
@@ -1523,7 +1562,7 @@ mod tests {
         let el = top - (row as f32 + 0.5) * (top - bottom) / h as f32;
         let mut texels = vec![[0.0f32; 4]; w * h];
         texels[row * w + 90] = [40.0, 30.0, 20.0, 0.0];
-        let (q, images) = with_band(&p, SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: top, bottom_deg: bottom });
+        let (q, images) = with_band(&p, SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: top, bottom_deg: bottom, eye_m: 0.0 });
         let (plain, city) = (Env::new(&p), Env::new_with(&q, &images));
         let u = 90.5 / w as f32;
         let (up, down) = (dir_at_u(u, el), dir_at_u(u, -el));
@@ -1547,7 +1586,7 @@ mod tests {
         let mut texels = vec![[0.0f32; 4]; w * h];
         // a light 11.5 degrees up, as in `a_puddle_mirrors_a_city_light_above_it`
         texels[8 * w + 90] = [40.0, 30.0, 20.0, 0.0];
-        let band = SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: 20.0, bottom_deg: -4.0 };
+        let band = SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: 20.0, bottom_deg: -4.0, eye_m: 0.0 };
         let (u, radius) = (90.5 / w as f32, 0.5f32.to_radians());
         for wet in [0.0, 1.0] {
             let mut p = HdriParams { lights: vec![], ..HdriParams::default() };
@@ -1639,7 +1678,7 @@ mod tests {
             let c = if y <= 4 { l.ring_low[x] } else { l.ground_ring[x] };
             [c[0], c[1], c[2], 1.0]
         }).collect();
-        let (q, images) = with_band(&p, SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: top, bottom_deg: bottom });
+        let (q, images) = with_band(&p, SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: top, bottom_deg: bottom, eye_m: 0.0 });
         let city = Env::new_with(&q, &images);
         let k = plain.scale();
         let light = |c: Vec3f| 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z;
@@ -1912,7 +1951,7 @@ mod tests {
         for k in 0..40 {
             texels[(4 + k % 16) * w + 100 + 3 * k] = [40.0, 30.0, 20.0, 1.0];
         }
-        let city = SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: 3.0, bottom_deg: -4.0 };
+        let city = SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: 3.0, bottom_deg: -4.0, eye_m: 0.0 };
         let (q, images) = with_band(&p, city.clone());
         let built = Env::new_with(&q, &images);
         let bloom = |env: &Env| env.studio.caster(0).and_then(|c| c.bloom()).map(|b| b.energy());
@@ -1965,7 +2004,7 @@ mod tests {
         texels[(h - 1) * w + 10] = [f32::NAN, 0.5, 0.5, 1.0];
         texels[(h - 1) * w + 70] = [0.5, f32::INFINITY, 0.5, f32::NEG_INFINITY];
         texels[2 * w + 40] = [0.5, 0.5, 0.5, 7.0];
-        let raw = SkylineBand { w, h, texels: texels.clone(), dist: Vec::new(), light: Vec::new(), top_deg: 10.0, bottom_deg: -5.0 };
+        let raw = SkylineBand { w, h, texels: texels.clone(), dist: Vec::new(), light: Vec::new(), top_deg: 10.0, bottom_deg: -5.0, eye_m: 0.0 };
         let below = |b: &SkylineBand, u: f32| b.sample_skirted(&b.skirt(), dir_at_u(u, -5.0 - 0.5 * SKIRT_DEG), 0.0);
         // the premise: far from both, half a turn round, the raw skirt is NaN
         assert!(below(&raw, 0.75).iter().any(|c| !c.is_finite()), "the premise: one NaN poisons the skirt round the turn");
@@ -2357,6 +2396,83 @@ mod tests {
             assert!(close3(mirrored, want, 1e-3), "{el} deg, a {a}, share {share}: the puddle shows {mirrored:?}, the lights as the rain shows them, by Fresnel {want:?}");
             let aside = dir_at_u(u + 10.0 / 360.0, -el);
             assert_eq!(city.radiance(aside), plain.radiance(aside), "{el} deg: 10 degrees round the turn the puddle mirrors the sky alone");
+        }
+    }
+
+    /// Plan hdri-6 fix wave 2 (F4, the final review's M3): the strip's sea mirrors what stands above the horizon and its
+    /// distance plane hands the distance of what it mirrors, which is veiled along the mirror's direction over that
+    /// distance, as the puddle beside it is (`over_city`), not along the texel's own ray down, which the weather ends on
+    /// its floor short of it. The rain kind at night (its own wetness), an opaque sea texel 2.5 degrees down at Size 1
+    /// (the strip's eye 6.3 m up: its own ground lies 144 m off there) showing the city 1.5 km off: the veil over 1.5 km
+    /// up the mirror, the city's own, and a light there through the rain up the mirror too. The strip's ground there
+    /// (100 m off) as before, bit for bit, and a band handed without its eye along the ray down.
+    #[test]
+    fn under_the_rain_kind_a_sea_texel_veils_what_it_mirrors_over_its_distance() {
+        let p = rain_kind(-20.0, None);
+        let s = [0.4, 0.3, 0.2, 1.0];
+        let env = |far: f32, eye: f32, share: f32| {
+            let (b, _) = block_band(s, -2.0, Some(far));
+            let b = if share > 0.0 { lit(b, share, far) } else { b };
+            let (q, images) = with_band(&p, b.with_eye(eye));
+            Env::new_with(&q, &images)
+        };
+        let u = block_band(s, -2.0, None).1;
+        let (d, v) = (dir_at_u(u, -2.5), dir_at_u(u, 2.5));
+        let sea = env(1500.0, 6.3, 0.0);
+        let rain = sea.weather.as_ref().expect("rain draws");
+        let k = sea.scale();
+        let veil = |d: Vec3f, c: Vec3f, far: f32| rain.veil_within(d, c, sea.weather_sun, sea.dome, far);
+        let (up, down) = (through(&sea, v, 1500.0), through(&sea, d, 1500.0));
+        println!("a sea texel 2.5 degrees down mirroring the city 1.5 km off passes {up:.4} up the mirror, {down:.4} along the ray down");
+        assert!(up < 0.5 * down, "the premise: the ray down ends on the floor well short of 1.5 km ({up} up the mirror, {down} down)");
+        let (got, want) = (sea.radiance(d), veil(v, rgb(s), 1500.0) * k);
+        assert!(close3(got, want, 1e-5), "the sea {got:?}, veiled up the mirror over 1.5 km {want:?} (along the ray down {:?})", veil(d, rgb(s), 1500.0) * k);
+        // a light it mirrors: through the rain up the mirror over the distance it burns at
+        let lights = env(1500.0, 6.3, 1.0);
+        let want = (veil(v, Vec3f::default(), 1500.0) + rgb(s) * rain.light_through(v, 1500.0)) * k;
+        assert!(close3(lights.radiance(d), want, 1e-5), "the sea's mirrored light {:?}, through up the mirror {want:?}", lights.radiance(d));
+        // the strip's own ground there, as before; a band without its eye along the ray down
+        assert_eq!(env(100.0, 6.3, 0.0).radiance(d), env(100.0, 0.0, 0.0).radiance(d), "the ground 100 m off");
+        let blind = env(1500.0, 0.0, 0.0).radiance(d);
+        assert!(close3(blind, veil(d, rgb(s), 1500.0) * k, 1e-5), "without its eye {blind:?}: along the ray down");
+    }
+
+    /// Plan hdri-6 fix wave 2 (F5, the final review's M4): at the rain kind's own wetness the puddles lie in a field, and
+    /// where the mirror shows the strip the share of the floor's view it takes is the field's (`Weather::mirror_share`,
+    /// `Puddles::Field`): Fresnel's term inside a puddle, the damp ground's dull sheen between them, not the puddles'
+    /// mean share (`Puddles::Even`). Under the rain kind at night an opaque lit block 2 km off, 6 to 18 degrees up and
+    /// 120 degrees round: the floor 12 degrees down mirrors it, veiled once over its 2 km, by the field's share, inside a
+    /// puddle and between two, where the mean share would be off by more than the tolerance.
+    #[test]
+    fn at_the_rain_kinds_own_wetness_the_puddles_mirror_the_city_by_their_field() {
+        use crate::hdri::weather::Puddles;
+        let p = rain_kind(-20.0, None);
+        let s = [40.0, 30.0, 20.0, 1.0];
+        let (w, h, top) = (360usize, 24usize, 20.5f32);
+        let in_block = |i: usize| (2..=14).contains(&(i / w)) && (30..150).contains(&(i % w));
+        let texels = (0..w * h).map(|i| if in_block(i) { s } else { [0.0; 4] }).collect();
+        let dist = (0..w * h).map(|i| if in_block(i) { 2000.0 } else { 0.0 }).collect();
+        let (q, images) = with_band(&p, SkylineBand::new(w, h, texels, dist, top, top - h as f32));
+        let (plain, city) = (Env::new(&p), Env::new_with(&q, &images));
+        let rain = city.weather.as_ref().expect("rain draws");
+        let k = city.scale();
+        let el = 12.0f32;
+        // a look into a puddle and one between two, round the block's middle
+        let looks: Vec<f32> = (0..10000).map(|i| (40.0 + i as f32 * 0.01) / 360.0).collect();
+        let cover = |u: f32| rain.puddle_cover(dir_at_u(u, -el), Puddles::Field);
+        let inside = looks.iter().copied().find(|&u| cover(u) >= 0.99).expect("a puddle 12 degrees down");
+        let between = looks.iter().copied().find(|&u| cover(u) <= 0.01).expect("ground between the puddles 12 degrees down");
+        println!("the rain kind's own wet ground: the puddles' mean share {:.3}", rain.puddle_share());
+        for (name, u) in [("inside a puddle", inside), ("between the puddles", between)] {
+            let (up, down) = (dir_at_u(u, el), dir_at_u(u, -el));
+            let own = rain.veil_within(up, rgb(s), city.weather_sun, city.dome, 2000.0) * k;
+            let sky_seen = veil_of(&city, down, plain.radiance(up) * (1.0 / k)) * k;
+            let mirrored = city.radiance(down) - plain.radiance(down);
+            let (field, even) = (rain.mirror_share(down, Puddles::Field), rain.mirror_share(down, Puddles::Even));
+            let (want, mean) = ((own - sky_seen) * field, (own - sky_seen) * even);
+            println!("{name} (cover {:.3}): the floor mirrors {:.4}, by the field's share {field:.4} {:.4}, by the mean share {even:.4} {:.4}", cover(u), mirrored.x, want.x, mean.x);
+            assert!(close3(mirrored, want, 1e-4), "{name}: the floor mirrors {mirrored:?}, the city veiled once by the field's share {want:?}");
+            assert!(!close3(mean, want, 1e-2), "the premise, {name}: the mean share's {mean:?} is the field's {want:?}");
         }
     }
 }

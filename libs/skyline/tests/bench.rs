@@ -38,7 +38,7 @@ impl Bench {
         } else {
             let (target, s) = &mut self.core;
             if self.mode != Mode::Cached { (s.drawn, s.city.key) = (None, None); }
-            if self.mode == Mode::Cold { (s.zones, s.cols, s.props.key, s.trees.mesh) = (None, None, None, None); }
+            if self.mode == Mode::Cold { (s.zones, s.cols, s.props.key, s.trees.mesh) = (None, None, None, None); makepad_skyline::terrain::forget_shared_trees(); }
             cx.make_child_pass(&target.pass);
             target.record(cx, v.w, v.h, |cx| s.draw_view(cx, rect, v, p, true, &makepad_skyline::SkyLight::example()));
         }

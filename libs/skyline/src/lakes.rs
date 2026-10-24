@@ -23,11 +23,34 @@ const CELLS: usize = 36;
 const TRIES: usize = 3;
 
 /// The lakes of `p` around `z` (`Zones::new` keeps them): a share of the 36 cells of the turn (the slider's, as many over
-/// Size) each tries up to three places for a lake and keeps the first that fits. Every draw is a hash of its cell and
-/// stream (layer 1950), so the zones' other layers never move, and a lake moves only when an earlier one takes its place.
-/// Dense enough to be seen: at Lakes 0.6 and the default land the median of 40 seeds has three to four lakes at least
-/// half a texel deep (`depth`) in a strip 1024 texels round the turn.
+/// Size) each tries up to three places for a lake and keeps the first that fits (`place_all`). Every draw is a hash of
+/// its cell and stream (layer 1950), so the zones' other layers never move, and a lake moves only when an earlier one
+/// takes its place. Dense enough to be seen: at Lakes 0.6 and the default land the median of 40 seeds has three to four
+/// lakes at least half a texel deep (`depth`) in a strip 1024 texels round the turn.
+/// The water shader takes LAKES_MAX of them. Where more were placed (n), it keeps LAKES_MAX spread round the whole turn,
+/// the (2 i + 1) n / (2 LAKES_MAX)-th in bearing order for i = 0 .. LAKES_MAX, so no stretch of the turn loses its lakes
+/// to the cap (plan 6's final review, M5); and it says so in the log, once for each seed and count it binds at.
 pub fn place(z: &Zones, p: &Params) -> Vec<Lake> {
+    let all = place_all(z, p);
+    let n = all.len();
+    if n <= LAKES_MAX { return all; }
+    log_cap(p.seed, n);
+    (0..LAKES_MAX).map(|i| all[(2 * i + 1) * n / (2 * LAKES_MAX)]).collect()
+}
+
+/// Says in the log that the lake cap binds: `n` lakes placed for seed `seed`, LAKES_MAX kept. Once for each (seed, n) in
+/// a row, so a held drag that keeps them does not repeat it.
+fn log_cap(seed: u32, n: usize) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST: AtomicU64 = AtomicU64::new(u64::MAX);
+    let key = (seed as u64) << 32 | n as u64;
+    if LAST.swap(key, Ordering::Relaxed) != key {
+        makepad_widgets::log!("skyline: seed {seed} places {n} lakes; the water shader takes {LAKES_MAX}, spread round the turn");
+    }
+}
+
+/// Every lake `place` chooses from, in bearing order (cell by cell round the turn), each clear of the ones before it.
+pub fn place_all(z: &Zones, p: &Params) -> Vec<Lake> {
     let (amount, k) = (p[P::PrLake], p[P::Size]);
     let mut out: Vec<Lake> = Vec::new();
     if amount <= 0.0 { return out; }
@@ -52,7 +75,6 @@ pub fn place(z: &Zones, p: &Params) -> Vec<Lake> {
             (on_land && off_lines && clear).then_some(Lake { u, d, half_u, half_d })
         };
         if let Some(l) = (0..TRIES).find_map(fits) { out.push(l); }
-        if out.len() == LAKES_MAX { break; }
     }
     out
 }
@@ -125,6 +147,35 @@ mod tests {
         }
         assert!(seen > 100, "the premise: lakes were placed ({seen})");
         assert!(nearest < 250.0 && farthest > 1500.0, "the shores span {nearest} .. {farthest} m x Size");
+    }
+    /// The final review's M5 (decision D5): where more than LAKES_MAX lakes are placed, the ones kept are spread round
+    /// the whole turn, not the first LAKES_MAX in cell order, which left the end of the turn without lakes. Over 40 seeds
+    /// at Lakes 1 and Size 0.5 (every cell tries) and 1: on the seeds the cap binds at, the kept lakes are LAKES_MAX of the
+    /// placed ones in bearing order, the first and the last within n / LAKES_MAX of the turn's two ends (n placed) and
+    /// no two that many placed lakes or more apart; below the cap every placed lake is kept, as before.
+    #[test]
+    fn the_lakes_kept_are_spread_round_the_turn() {
+        let (mut bound, mut under, mut most) = (0, 0, 0);
+        for seed in 0..40 {
+            for k in [0.5, 1.0] {
+                let (p, z) = with(seed, 1.0, k);
+                let all = place_all(&z, &p);
+                let n = all.len();
+                if n <= LAKES_MAX {
+                    assert_eq!(z.lakes, all, "seed {seed}, Size {k}: below the cap every lake is kept");
+                    under += 1;
+                    continue;
+                }
+                (bound, most) = (bound + 1, most.max(n));
+                let at: Vec<usize> = z.lakes.iter().map(|l| all.iter().position(|a| a == l).expect("a kept lake is a placed one")).collect();
+                let step = n.div_ceil(LAKES_MAX);
+                assert_eq!(at.len(), LAKES_MAX, "seed {seed}, Size {k}");
+                assert!(at[0] < step && at[LAKES_MAX - 1] >= n - step, "seed {seed}, Size {k}: of {n} placed the {at:?}-th kept, not to the turn's ends");
+                assert!(at.windows(2).all(|w| w[1] > w[0] && w[1] - w[0] <= step), "seed {seed}, Size {k}: of {n} placed the {at:?}-th kept, not spread");
+            }
+        }
+        println!("the cap binds at {bound} of 80 (seed, Size), at most {most} lakes placed; below it at {under}");
+        assert!(bound > 10 && under > 10, "the premise: the cap binds at some and not at others ({bound}, {under})");
     }
     /// More with the slider, none at 0; Size times as large, about as many over Size.
     #[test]

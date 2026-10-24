@@ -26,16 +26,30 @@ fn register(vm: &mut ScriptVm) {
 
 fn render_band(p: &Params, w: usize) -> Band { render_band_lit(p, w, &SkyLight::example()) }
 
+/// How long `render_band_lit` asks for a band again before it gives up (s): a time, not a count of rounds, since each
+/// round reads three planes back and takes longer on a loaded machine (plan 6's final review, M6).
+const SETTLE_S: f64 = 240.0;
+
+/// What differs between two bands read back in successive rounds: their size, or the first plane that differs.
+fn differs(a: &Band, b: &Band) -> Option<&'static str> {
+    if (a.w, a.h) != (b.w, b.h) { Some("size") }
+    else if a.texels != b.texels { Some("colour") }
+    else if a.dist != b.dist { Some("distance plane") }
+    else if a.light != b.light { Some("light plane") }
+    else { None }
+}
+
 /// The band at `p`, `w` px wide, lit by `light`, on a fresh Cx and GPU session.
 fn render_band_lit(p: &Params, w: usize, light: &SkyLight) -> Band {
     let (cx, rig, hal, info, _one) = open_rig(true);
     // Pipelines compile on first use and the first draws into a new layout can be skipped, so the band is
-    // requested again until two successive bands agree (the first ones may fail or come back partial).
+    // requested again until two successive bands agree (the first ones may fail or come back partial), for up to
+    // SETTLE_S; giving up, it says what differed last.
     let mut last: Option<Band> = None;
-    let mut round = 0;
+    let (mut round, mut differed, start) = (0, String::new(), Cx::monotonic_now());
     let band = loop {
         round += 1;
-        assert!(round <= 8, "the band never settled");
+        assert!(round == 1 || Cx::monotonic_now() - start < SETTLE_S, "the band never settled in {SETTLE_S} s ({} rounds): {differed}", round - 1);
         let (tx, rx) = mpsc::channel();
         {
             let mut c = cx.borrow_mut();
@@ -66,8 +80,12 @@ fn render_band_lit(p: &Params, w: usize, light: &SkyLight) -> Band {
             std::thread::sleep(std::time::Duration::from_millis(2));
             assert!(Cx::monotonic_now() - t0 < 300.0, "band timed out");
         };
-        let Ok(b) = got else { last = None; continue }; // the warm-up rounds can fail
-        if last.as_ref().is_some_and(|l| (l.w, l.h) == (b.w, b.h) && l.texels == b.texels && l.dist == b.dist && l.light == b.light) { break b; }
+        let Ok(b) = got else { (last, differed) = (None, "the last round came back without a band".into()); continue }; // the warm-up rounds can fail
+        match last.as_ref().map(|l| differs(l, &b)) {
+            Some(None) => break b,
+            Some(Some(plane)) => differed = format!("the last two bands differed in their {plane}"),
+            None => differed = "the last round's band had none before it to agree with".into(),
+        }
         last = Some(b);
     };
     hal.close(info.session);
@@ -2140,5 +2158,49 @@ fn the_band_hands_its_light() {
         assert!(sharp != 1.0 || (n_win_d > 50 && win_off * 100 <= n_win_d), "the windows' light: {win_off} of {n_win_d} burn over 1 % off the march's depth");
         assert!(n_sky > 10000 && n_ground > 10000 && ground_lit * 10 < n_ground, "Sharpness {sharp}: {n_sky} sky, {n_ground} ground texels ({ground_lit} with a trace of light)");
         assert!(n_halo > 10 && far_halo <= if sharp < 1.0 { 6000.0 } else { 0.01 }, "Sharpness {sharp}: {n_halo} halo texels, {far_halo}");
+    }
+}
+
+/// Plan hdri-6 fix wave 2 (F4): a host takes a texel below the horizon for what the strip's water mirrors where its
+/// distance runs past MIRROR_FROM times `ground_eye_m` / tan(al) (the engine's `SkylineBand::mirrored`), and veils it up
+/// the mirror. So on bare land (Land 1, no lakes) no texel below the horizon, ground or what stands on it, reads past
+/// that, at Size 1 and 2 and with the camera off-centre (Off 0.6, where a column's ground lies up to 2.5 times as far);
+/// and by day with the sea and lakes (Sea distance 0.3, Lakes 1) many read past MIRROR_TO times it, and every texel past
+/// MIRROR_FROM is water: it shows what the band without reflections (Water reflections 0) does not.
+#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn only_the_water_reads_past_the_strips_own_ground() {
+    use makepad_skyline::{ground_eye_m, MIRROR_FROM, MIRROR_TO};
+    let light = noon([1.2, 1.3, 1.5]);
+    // each texel below the horizon (its row's middle) and its distance over the farthest the strip's ground reads there
+    let below = |p: &Params, b: &Band| -> Vec<(usize, f64)> {
+        let eye = ground_eye_m(p);
+        (0..b.h).flat_map(|y| (0..b.w).map(move |x| (y, x))).filter_map(|(y, x)| {
+            let (al, i) = (-row_el(p, b, y), y * b.w + x);
+            (al > 0.0).then(|| (i, b.dist[i] as f64 / (eye / al.tan())))
+        }).collect()
+    };
+    for (k, off) in [(1.0, 0.0), (2.0, 0.0), (1.0, 0.6)] {
+        let mut p = sized(&Params::default(), k);
+        p.set(P::Off as usize, off);
+        let mut land = p.clone();
+        for (q, v) in [(P::Land, 1.0), (P::PrLake, 0.0)] { land.set(q as usize, v); }
+        let b = render_band_lit(&land, 1024, &light);
+        let ground = below(&land, &b);
+        let worst = ground.iter().map(|t| t.1).fold(0.0, f64::max);
+        println!("Size {k}, Off {off}: over bare land {} texels below the horizon read at most {worst:.3} times the ground's bound", ground.len());
+        assert!(ground.len() > 10000 && worst <= MIRROR_FROM, "Size {k}, Off {off}: bare land reads {worst} times the ground's bound");
+        if off > 0.0 { continue; }
+        let mut wet = p.clone();
+        for (q, v) in [(P::SeaD, 0.3), (P::PrLake, 1.0)] { wet.set(q as usize, v); }
+        let mut flat = wet.clone();
+        flat.set(P::PrRefl as usize, 0.0);
+        let (bw, bf) = (render_band_lit(&wet, 1024, &light), render_band_lit(&flat, 1024, &light));
+        let seen = below(&wet, &bw);
+        let past: Vec<usize> = seen.iter().filter(|t| t.1 > MIRROR_FROM).map(|t| t.0).collect();
+        let far = seen.iter().filter(|t| t.1 >= MIRROR_TO).count();
+        let dry: Vec<usize> = past.iter().copied().filter(|&i| bw.texels[i] == bf.texels[i]).collect();
+        println!("Size {k}: with the sea and lakes {} texels read past {MIRROR_FROM} times the ground's bound ({far} past {MIRROR_TO}), {} of them not water", past.len(), dry.len());
+        assert!(far > 500, "Size {k}: the premise: the water reads past the ground's bound ({far} texels)");
+        assert!(dry.is_empty(), "Size {k}: {} texels past the ground's bound show no water, the first {:?}", dry.len(), dry.first().map(|&i| (i % bw.w, i / bw.w, bw.dist[i])));
     }
 }

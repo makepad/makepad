@@ -727,7 +727,7 @@ fn with_skyline_on_a_blooming_map_is_cheap() {
             *texel = [30.0, 24.0, 16.0, 1.0];
         }
     }
-    let band = Arc::new(SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: 10.0, bottom_deg: -2.0 });
+    let band = Arc::new(SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: 10.0, bottom_deg: -2.0, eye_m: 0.0 });
     let (mut builds, mut attaches) = (Vec::new(), Vec::new());
     for _ in 0..5 {
         let t = Instant::now();
@@ -763,7 +763,7 @@ fn held_strip() -> Arc<SkylineBand> {
             }
         }
     }
-    Arc::new(SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: top, bottom_deg: bottom })
+    Arc::new(SkylineBand { w, h, texels, dist: Vec::new(), light: Vec::new(), top_deg: top, bottom_deg: bottom, eye_m: 0.0 })
 }
 
 /// A held drag's bake with the skyline on, against the same bake without it (plan hdri-5

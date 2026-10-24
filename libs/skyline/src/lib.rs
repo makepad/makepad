@@ -97,6 +97,20 @@ pub const NEAR_RISE_M: f64 = 500.0;
 /// 6e4; the shaders' literal 60000), inside the half float's range of the distance target.
 pub const FAR_M: f64 = 6e4;
 
+/// The strip's eye over its own ground (m) as a host bounds its ground's distance by (the engine's
+/// `SkylineBand::eye_m`): EYE x Size, over the nearest the off-centre camera scales a column's ground by (`terrain::warp`'s
+/// t, 1 - Off at the least), so at a depression al no texel of the strip's ground, or of what stands on it, reads
+/// farther than this / tan(al) (`DrawSkyGround`'s `ground_d`), and one that reads well past it shows what the water
+/// mirrors (`Band::dist`: the water hands the distance of what it mirrors).
+pub fn ground_eye_m(p: &Params) -> f64 {
+    crate::props::kit::EYE * p[P::Size] / (1.0 - p[P::Off]).max(0.1)
+}
+/// The engine's MIRROR_FROM and MIRROR_TO (makepad_render's `hdri::skyline`, the app holds them equal): a host takes a
+/// texel below the horizon for what the water mirrors from MIRROR_FROM times `ground_eye_m` / tan(al), wholly from
+/// MIRROR_TO times it.
+pub const MIRROR_FROM: f64 = 1.5;
+pub const MIRROR_TO: f64 = 2.5;
+
 #[cfg(test)]
 mod tests {
     use super::*;

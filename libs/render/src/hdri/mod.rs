@@ -729,12 +729,44 @@ impl Env {
         let (k, c) = self.under_band(d, s, without, at);
         let (s, light) = if k == 1.0 { (s, light) } else { (s.map(|c| c * k), light.map(|l| skyline::TexelLight { lum: l.lum * k, ..l })) };
         match &self.weather {
-            Some(weather) => match self.city_lit(weather, d, s, light) {
-                None => skyline::over_veiled(s, c, &|x| self.city_veil(weather, d, far, x)),
-                Some((surface, lit)) => skyline::over_veiled(surface, c, &|x| self.city_veil(weather, d, far, x)) + lit,
-            },
+            Some(weather) => {
+                // (what the strip's water mirrors is veiled up the mirror, `mirrored`)
+                let m = self.mirrored(d, far);
+                let veil = |x| self.strip_veil(weather, d, far, m, x);
+                match self.city_lit(weather, d, m, s, light) {
+                    None => skyline::over_veiled(s, c, &veil),
+                    Some((surface, lit)) => skyline::over_veiled(surface, c, &veil) + lit,
+                }
+            }
             None => skyline::over_veiled(s, c, &|x| x),
         }
+    }
+
+    /// How much of the strip texel along `d`, `far` m off, shows what the strip's water mirrors (`SkylineBand::mirrored`,
+    /// plan hdri-6 fix wave 2): the light of what stands above the horizon, run down to the water and on to the eye over
+    /// `far`. Its veil and its lights' run up the mirror, (d.x, -d.y, d.z), as a puddle's (`over_city`), not along `d`,
+    /// whose path the weather ends on its floor short of `far` (`strip_veil`, `city_lit`). 0 without a distance, above
+    /// the horizon, and for a band handed without the strip's eye.
+    fn mirrored(&self, d: Vec3f, far: Option<f32>) -> f32 {
+        match (&self.skyline, far) {
+            (Some((band, _)), Some(far)) => band.mirrored(d, far),
+            _ => 0.0,
+        }
+    }
+
+    /// `city_veil` for a strip texel along `d`, `m` of it what the strip's water mirrors (`mirrored`): that share veiled
+    /// up the mirror, (d.x, -d.y, d.z), over `far`, the rest along `d`. Both are affine in `x`, and so is the blend. At
+    /// m 0, `city_veil` along `d` itself.
+    fn strip_veil(&self, weather: &weather::Weather, d: Vec3f, far: Option<f32>, m: f32, x: Vec3f) -> Vec3f {
+        if !(m > 0.0) {
+            return self.city_veil(weather, d, far, x);
+        }
+        let up = self.city_veil(weather, vec3f(d.x, -d.y, d.z), far, x);
+        if m >= 1.0 {
+            return up;
+        }
+        let down = self.city_veil(weather, d, far, x);
+        down + (up - down) * m
     }
 
     /// `seen`, the map's sky along `v` above the horizon (veiled, its bolt in), with the skyline's strip laid over it where
@@ -752,7 +784,7 @@ impl Env {
             Some((s, far, light)) if s != [0.0; 4] => {
                 let veil = |x| self.city_veil(weather, v, far, x);
                 // the texel's surface, and its light as the weather shows it on top (none: the texel all surface, + 0 exactly)
-                let split = self.city_lit(weather, v, s, light);
+                let split = self.city_lit(weather, v, 0.0, s, light);
                 let (surface, lit) = split.unwrap_or((s, Vec3f::default()));
                 let behind = 1.0 - s[3];
                 let covered = far.map(|_| {
@@ -772,13 +804,15 @@ impl Env {
 
     /// Texel `s` along `d` split into its surface and its light as the weather shows the light (plan hdri-6 R4: the
     /// city's lights shine through rain and fog): the surface (`TexelLight::split`) for `city_veil` to veil, and the
-    /// light by `Weather::light_through` over the distance it burns at, the forward-scattered share kept. None where
-    /// the texel has no light, the band no light plane, or the weather veils nothing (a weather with rain and fog at 0
-    /// draws as before, bit for bit).
-    fn city_lit(&self, weather: &weather::Weather, d: Vec3f, s: [f32; 4], light: Option<skyline::TexelLight>) -> Option<([f32; 4], Vec3f)> {
+    /// light by `Weather::light_through` over the distance it burns at, the forward-scattered share kept; `m` of it, the
+    /// share the strip's water mirrors (`mirrored`), up the mirror. None where the texel has no light, the band no light
+    /// plane, or the weather veils nothing (a weather with rain and fog at 0 draws as before, bit for bit).
+    fn city_lit(&self, weather: &weather::Weather, d: Vec3f, m: f32, s: [f32; 4], light: Option<skyline::TexelLight>) -> Option<([f32; 4], Vec3f)> {
         let light = light.filter(|_| weather.veils())?;
         let (surface, lit) = light.split(s);
-        Some((surface, lit * weather.light_through(d, light.far)))
+        let (down, up) = (|| weather.light_through(d, light.far), || weather.light_through(vec3f(d.x, -d.y, d.z), light.far));
+        let through = if !(m > 0.0) { down() } else if m >= 1.0 { up() } else { let a = down(); a + (up() - a) * m };
+        Some((surface, lit * through))
     }
 
     /// The veil the skyline's strip gets along `d` (`base_at`, `over_city`): the rain haze and the fog over the distance

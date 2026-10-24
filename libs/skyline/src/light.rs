@@ -647,6 +647,16 @@ mod tests {
         assert_ne!(a.hash(), sh.hash());
         let mut w = a.clone(); w.wet = 0.5;
         assert_ne!(a.hash(), w.hash());
-        assert_eq!(SkyLight { wet: 0.0, ..a.clone() }.hash(), a.hash(), "a dry light hashes as it did");
+    }
+    /// A dry light hashes as it did before the wet ground (plan hdri-6 §5), so a dry sky keeps its keys: the example and
+    /// a day light with every other field set, against their hashes recorded at makepad 40bee3851.
+    #[test]
+    fn a_dry_light_hashes_as_it_did() {
+        let day = SkyLight { sun_u: 0.3, sun_el_deg: 25.0, sun_rgb: [1.2, 1.1, 0.9], ambient_rgb: [0.3, 0.35, 0.45],
+            ring_low: std::array::from_fn(|i| [0.2 + i as f32 / 256.0, 0.3, 0.5]), ground: [[0.1, 0.09, 0.08]; RING],
+            lights_by_day: 0.25, design_gain: 2.0, decode: true, night_haze: 0.8, host_ground: true, night_light_share: 0.6,
+            sea_sky: Some(([[0.5, 0.6, 0.7]; RING], [[0.3, 0.4, 0.6]; RING])), ..SkyLight::example() };
+        assert_eq!(SkyLight::example().hash(), 0x90ed_383a_d3e6_f7e2, "the example");
+        assert_eq!(day.hash(), 0xb5d8_4398_a902_f253, "a day light");
     }
 }
