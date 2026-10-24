@@ -2208,7 +2208,10 @@ impl Cache {
     /// in the same order gives every reloc to one block (a slice iterator's pointer and its end
     /// pointer) the one block, not a fresh block per reloc.
     fn enc_sym(&mut self, u: &Unit, s: Sym, e: &mut E, rw: &mut Vec<u32>) -> Option<()> {
-        let k = u.syms.kind(s.id)?;
+        let Some(k) = u.syms.kind(s.id) else {
+            self.why("symbol without a kind");
+            return None;
+        };
         match k {
             SymKind::Rt(n) => {
                 e.u8(1);
@@ -2235,7 +2238,11 @@ impl Cache {
             }
             SymKind::Foreign(_) => {
                 // by its definition: the address comes from the same lookup a fresh compile makes
-                let d = self.canon_foreign(u, foreign_def_of(u, s)?);
+                let Some(d) = foreign_def_of(u, s) else {
+                    self.why("foreign symbol without a definition");
+                    return None;
+                };
+                let d = self.canon_foreign(u, d);
                 e.u8(4);
                 let mut cr = Vec::new();
                 self.enc_def(u, d, e, &mut cr);
@@ -2789,6 +2796,7 @@ impl Cache {
                 if trace_on() {
                     let w = match r {
                         Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) => format!("slot/thunk key {}", crate::syms::stable_fn_name(u, *x)),
+                        Reloc::Sym(s) => format!("{} ({})", self.last_why, crate::syms::describe(u, *s)),
                         _ => self.last_why.to_string(),
                     };
                     trace_lookup(u, id, &format!("unstorable:{}", w));
@@ -3819,7 +3827,8 @@ pub fn write_trace() {
     if let Ok(p) = std::env::var("MAKEPAD_RUN_CACHE_TRACE") {
         // ({pid}: one file per process -- a program's build scripts run under the same env)
         let p = p.replace("{pid}", &std::process::id().to_string());
-        if let Some(t) = TRACE.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        // (the whole trace each time: the quit write and the exit both write it)
+        if let Some(t) = TRACE.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             let _ = std::fs::write(p, t);
         }
     }
@@ -3964,7 +3973,7 @@ fn kind_code(k: RelocKind) -> u8 {
         RelocKind::A64LdrLo12X => 4,
         RelocKind::Imm32 => 5,
         RelocKind::A64MovzMovk => 6,
-        RelocKind::A64CoverageBit(_) => unreachable!("coverage disables the code cache"),
+        RelocKind::A64CoverageBit { .. } => unreachable!("coverage disables the code cache"),
         RelocKind::X64Branch32 => 7,
         RelocKind::A64Branch26 => 8,
     }

@@ -1887,7 +1887,9 @@ pub struct FontFamily {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FontMemberDef {
-    handle: ScriptHandle,
+    // The family can outlive the script object it was read from. Keep its
+    // resource rooted until deferred loading and every later draw are done.
+    handle: Option<ScriptHandleRef>,
     resource_path: String,
     id: String,
     asc: f32,
@@ -2195,7 +2197,7 @@ fn append_lazy_fallbacks(vm: &mut ScriptVm, members: &mut Vec<FontMemberDef>) {
             continue;
         };
         members.push(FontMemberDef {
-            handle: ScriptHandle::ZERO,
+            handle: None,
             resource_path,
             id: fallback.asset.id.to_string(),
             asc: fallback.asset.ascender,
@@ -2305,7 +2307,7 @@ impl ScriptHook for FontFamily {
                     continue;
                 };
                 self.members.push(FontMemberDef {
-                    handle: handle_ref.as_handle(),
+                    handle: Some(handle_ref.clone()),
                     resource_path,
                     id: kv
                         .key

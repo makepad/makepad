@@ -399,9 +399,11 @@ pub(crate) fn compile_items_impl(items: Vec<crate::parse::Item>, src_len: usize,
     };
     #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     let (install, upgrade) = crate::native_vec::install_lanes();
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     let vector = if native.is_some() && lowered.parallel_safe { crate::native_vec::compile_at(&flat, install) } else { None };
     // four-lane code at install on an eight-lane host: eight lanes once hot (not when the frame
     // is too large for eight)
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     let upgrade = upgrade && vector.as_ref().is_some_and(|v| v.1 == 4) && flat.frame_words <= crate::native_vec::MAX_FRAME_WORDS_X8;
     #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     let _ = backend;

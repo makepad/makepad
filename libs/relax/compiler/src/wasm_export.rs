@@ -60,7 +60,7 @@ fn shake_blocks(f: &mut Func, hits: &HashMap<(u64, u64), bool>, trap: bool, keep
     use relax_backend::rir::Term;
     let cov = |i: &Inst| -> Option<bool> {
         match i {
-            Inst::Coverage { word, mask } => hits.get(&(*word, *mask)).copied(),
+            Inst::Coverage { word, mask, .. } => hits.get(&(*word, *mask)).copied(),
             _ => None,
         }
     };
@@ -543,6 +543,13 @@ fn force_union(up: *mut Unit, hits: &HashMap<String, std::collections::HashSet<(
     let mut missing: Vec<&str> = hits.keys().filter(|k| !captured_keys.contains(*k)).map(String::as_str).collect();
     missing.sort_unstable();
     if !missing.is_empty() {
+        if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
+            for key in &missing {
+                let slots: Vec<_> = (0..u.fns.len() as u32).filter(|id| crate::jit::slot_key(u, *id) == *key)
+                    .map(|id| (id, u.fns[id as usize].compiled, tried.contains(&id))).collect();
+                eprintln!("wasm export: missing union key {key}: slots (id, compiled, tried) {slots:?}");
+            }
+        }
         return Err(format!("union: {} training functions were not captured:\n{}", missing.len(), missing.join("\n")));
     }
     // Ahead/inlined bodies can already have RIR without installed native code.
@@ -983,7 +990,15 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
         return;
     }
     if let Ok(manifest) = std::env::var("MAKEPAD_RUN_WASM_EXPORT_FUNCTIONS") {
-        let keys = reached.iter().map(|id| crate::jit::slot_key(u, *id)).collect::<Vec<_>>();
+        // A shipping body includes its inline instances even when those instances
+        // need no standalone wasm entry. Use provenance from these exact bodies,
+        // not historical inline/dependency lists (which also include nounwind
+        // queries), registered slots, or observed coverage.
+        let mut included: std::collections::BTreeSet<u32> = reached.iter().copied().collect();
+        if !block_profile() {
+            for id in &reached { included.extend(funcs[id].inl_slots.iter().copied()); }
+        }
+        let keys = included.iter().map(|id| crate::jit::slot_key(u, *id)).collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>();
         if let Err(error) = std::fs::write(&manifest, format!("makepad-shipped-functions/1\n{}\n", keys.join("\n"))) {
             eprintln!("wasm export: function manifest {manifest}: {error}");
             FAILED.store(true, std::sync::atomic::Ordering::Release);
@@ -1034,6 +1049,11 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
         }
         let fl = fl.replace("%p", &std::process::id().to_string());
         let _ = std::fs::write(&fl, txt);
+        let mut aliases = String::from("slot\toffset\tbytes\n");
+        for (id, offset, len) in &out.stats.fn_alias_ranges {
+            aliases.push_str(&format!("{id}\t{offset}\t{len}\n"));
+        }
+        let _ = std::fs::write(format!("{}.aliases", fl), aliases);
         let parents = CLOSURE_PARENTS.lock().unwrap_or_else(|e| e.into_inner());
         let origins = CLOSURE_ORIGINS.lock().unwrap_or_else(|e| e.into_inner());
         let via = CLOSURE_VIA.lock().unwrap_or_else(|e| e.into_inner());
@@ -1388,7 +1408,10 @@ fn keep_closure(funcs: &mut BTreeMap<u32, Func>, u: &Unit, whole: bool) -> Resul
     work.extend(funcs.keys().copied());
     work.retain(|id| (*id as usize) < u.fns.len() && (whole || crate::jit::keep_reachable(u, *id)));
     // The embedder's callback contract is independent of which callbacks the
-    // training workload happened to invoke. Compile their complete closure too.
+    // training workload happened to invoke. Shipping compiles their complete
+    // closure. Block mode still validates the names, but preserves its traced
+    // bodies and annotated keep_reachable closure instead of making every web
+    // callback (and effectively the application) a whole-function root.
     let mut required = std::collections::BTreeSet::new();
     if let Ok(names) = std::env::var("MAKEPAD_RUN_WASM_EXPORT_ROOTS") {
         let roots = ROOTS.lock().unwrap_or_else(|e| e.into_inner());
@@ -1396,7 +1419,18 @@ fn keep_closure(funcs: &mut BTreeMap<u32, Func>, u: &Unit, whole: bool) -> Resul
             let id = roots.iter().find(|(_, n)| n.as_deref() == Some(name)).map(|(id, _)| *id)
                 .ok_or_else(|| format!("required glue export {name} is not defined"))?;
             required.insert(id);
-            work.push(id);
+            if whole {
+                work.push(id);
+            } else if !funcs.contains_key(&id) {
+                // Keep the exported body even when no training input entered it.
+                // It goes through normal block shaking, not the whole-body set.
+                let up = crate::jit::current_unit();
+                let body = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+                    crate::owner::call(crate::owner::Class::Program, || crate::zone_alloc::kept_with(|| unsafe { crate::jit::export_rir(up, id, false) }))
+                )).unwrap_or_else(|_| Err("compiler panicked".into()))
+                    .map_err(|error| format!("required glue export {name} cannot compile: {error}"))?;
+                funcs.insert(id, body);
+            }
         }
     }
     let mut kept = std::collections::BTreeSet::new();
@@ -1473,6 +1507,19 @@ fn keep_closure(funcs: &mut BTreeMap<u32, Func>, u: &Unit, whole: bool) -> Resul
     let mut vtables = CLOSURE_VTABLES.lock().unwrap_or_else(|e| e.into_inner());
     vtables.clear();
     if let Ok(path) = std::env::var("MAKEPAD_RUN_WASM_EXPORT_FNLIST") {
+        // Printed closure-type arguments can coincide across owner instances.
+        // Join evidence to module ranges by slot, never by the display key.
+        let mut inline_rows = String::from("emitted_slot\temitted\tcontext\tparent_context\tinlined_slot\tinlined\n");
+        let mut inline_keys = HashMap::new();
+        for (id, f) in funcs.iter() {
+            let emitted = crate::jit::slot_key(u, *id);
+            for (index, (slot, (call, _))) in f.inl_slots.iter().zip(&f.inl).enumerate() {
+                let key = inline_keys.entry(*slot).or_insert_with(|| crate::jit::slot_key(u, *slot));
+                inline_rows.push_str(&format!("{id}\t{emitted}\t{}\t{}\t{slot}\t{key}\n", index + 1,
+                    relax_backend::rir::pos_ctx(*call)));
+            }
+        }
+        let _ = std::fs::write(format!("{}.inlines", path.replace("%p", &std::process::id().to_string())), inline_rows);
         // A later retained constructor can materialize a table first discovered
         // through data. Classify after the entire optimized-body fixpoint.
         let mut code_data = BTreeMap::new();

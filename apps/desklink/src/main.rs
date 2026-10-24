@@ -458,8 +458,11 @@ fn dump_check(path: &str) -> ! {
         std::process::exit(2)
     });
     let nals = annex_b::split_annex_b(&data);
+    // .h265 / .hevc: HEVC (a check of what this machine's decoder takes), else H.264
+    let hevc = path.ends_with(".h265") || path.ends_with(".hevc");
+    let codec = if hevc { StreamVideoCodec::Hevc } else { StreamVideoCodec::H264 };
     // the viewer's decoder: GPU pictures where the platform has them
-    let mut decoder = VideoStreamDecoder::new_gpu(StreamVideoCodec::H264).unwrap_or_else(|e| {
+    let mut decoder = VideoStreamDecoder::new_gpu(codec).unwrap_or_else(|e| {
         eprintln!("desklink: hardware decoder: {e:?}");
         std::process::exit(2)
     });
@@ -469,9 +472,15 @@ fn dump_check(path: &str) -> ! {
     for nal in nals {
         unit.extend_from_slice(&[0, 0, 0, 1]);
         unit.extend_from_slice(nal);
-        let ty = annex_b::nal_unit_type(nal);
-        if ty == 1 || ty == 5 {
-            keys += (ty == 5) as u32;
+        let (vcl, key) = if hevc {
+            let ty = annex_b::hevc_nal_unit_type(nal);
+            (ty < 32, (16..=21).contains(&ty))
+        } else {
+            let ty = annex_b::nal_unit_type(nal);
+            (ty == 1 || ty == 5, ty == 5)
+        };
+        if vcl {
+            keys += key as u32;
             match decoder.push_packet(&unit, pictures) {
                 Ok(frames) => {
                     for f in frames {
@@ -490,10 +499,15 @@ fn dump_check(path: &str) -> ! {
         decoded += frames.len();
     }
     println!(
-        "dump-check: {pictures} pictures ({keys} IDR), {decoded} decoded at {}x{} ({gpu} as GPU pictures), {:.1} ms per picture",
+        "dump-check: {pictures} pictures ({keys} IDR), {decoded} decoded at {}x{} ({gpu} as GPU pictures), {:.1} ms per picture, hardware decoder: {}",
         size.0,
         size.1,
-        started.elapsed().as_secs_f64() * 1000.0 / pictures.max(1) as f64
+        started.elapsed().as_secs_f64() * 1000.0 / pictures.max(1) as f64,
+        match decoder.hardware() {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "not reported",
+        }
     );
     std::process::exit(if decoded > 0 && decoded as i64 == pictures { 0 } else { 1 });
 }

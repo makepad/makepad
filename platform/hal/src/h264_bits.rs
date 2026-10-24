@@ -85,12 +85,14 @@ pub const NAL_IDR: u8 = 5;
 pub const NAL_SPS: u8 = 7;
 pub const NAL_PPS: u8 = 8;
 
-/// Everything the parameter sets say about a low-latency stream: 4:2:0 8-bit, progressive,
+/// Everything the parameter sets say about a low-latency stream: 4:2:0 or 4:4:4 8-bit, progressive,
 /// P frames referencing one previous frame, POC type 2 (output order = decode order).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StreamParams {
-    /// 66 baseline, 77 main, 100 high.
+    /// 66 baseline, 77 main, 100 high, 244 high 4:4:4 predictive.
     pub profile_idc: u8,
+    /// 1: 4:2:0, 3: 4:4:4 (high profiles only write it).
+    pub chroma_format_idc: u8,
     /// level_idc (51 = 5.1).
     pub level_idc: u8,
     /// The picture, in pixels (even sizes); the coded size is this rounded up to macroblocks,
@@ -117,9 +119,11 @@ impl StreamParams {
     pub fn mbs_h(&self) -> u32 {
         self.height.div_ceil(16)
     }
-    /// frame_crop_right_offset / frame_crop_bottom_offset in 4:2:0 crop units (2 pixels).
+    /// frame_crop_right_offset / frame_crop_bottom_offset in crop units (4:2:0: 2 pixels each
+    /// way; 4:4:4: 1 pixel).
     pub fn crop(&self) -> (u32, u32) {
-        ((self.mbs_w() * 16 - self.width) / 2, (self.mbs_h() * 16 - self.height) / 2)
+        let unit = if self.chroma_format_idc == 3 { 1 } else { 2 };
+        ((self.mbs_w() * 16 - self.width) / unit, (self.mbs_h() * 16 - self.height) / unit)
     }
 
     /// seq_parameter_set_rbsp() (id 0).
@@ -137,7 +141,10 @@ impl StreamParams {
         w.u(8, self.level_idc as u32);
         w.ue(0); // seq_parameter_set_id
         if matches!(self.profile_idc, 100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135) {
-            w.ue(1); // chroma_format_idc 4:2:0
+            w.ue(self.chroma_format_idc as u32);
+            if self.chroma_format_idc == 3 {
+                w.bit(false); // separate_colour_plane_flag
+            }
             w.ue(0); // bit_depth_luma_minus8
             w.ue(0); // bit_depth_chroma_minus8
             w.bit(false); // qpprime_y_zero_transform_bypass_flag
@@ -249,6 +256,7 @@ mod tests {
     fn params(width: u32, height: u32) -> StreamParams {
         StreamParams {
             profile_idc: 100,
+            chroma_format_idc: 1,
             level_idc: 51,
             width,
             height,

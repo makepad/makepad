@@ -485,7 +485,7 @@ impl RealtimeSession {
                 fps: 30,
                 bitrate_kbps: 4_000,
                 keyint: 60,
-                low_latency: true,
+                low_latency: true, full_chroma: false,
             };
             match h264::VideoStreamEncoder::new(options) {
                 Ok(encoder) => *encoder_slot = Some(encoder),

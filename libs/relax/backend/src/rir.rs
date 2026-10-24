@@ -431,8 +431,8 @@ pub enum RelocKind {
     A64MovzMovk,
     /// An arm64 coverage probe's leading NOP. `target` is the bitmap word;
     /// after bit `bit` is set, the embedder may atomically replace the NOP
-    /// with a branch over the seven-instruction probe. Not a cached fixup.
-    A64CoverageBit(u8),
+    /// with a branch over `words` instructions. Not a cached fixup.
+    A64CoverageBit { bit: u8, words: u32 },
     /// x64: the disp32 of a `call`/`jmp` at `at` (ends the instruction): value - (base + at + 4);
     /// a target out of reach is branched to through a veneer (`link_with`)
     X64Branch32,
@@ -631,8 +631,8 @@ pub fn link_with(code: &mut [u8], base: u64, relocs: &[RelocAt], value: &dyn Fn(
         };
         let wr32 = |c: &mut [u8], o: usize, w: u32| c[o..o + 4].copy_from_slice(&w.to_le_bytes());
         match r.kind {
-            RelocKind::A64CoverageBit(bit) => {
-                if bit >= 64 || at % 4 != 0 || at + 28 > code.len() || rd32(code, at)? != 0xD503_201F {
+            RelocKind::A64CoverageBit { bit, words } => {
+                if bit >= 64 || words == 0 || words >= 1 << 25 || at % 4 != 0 || at + words as usize * 4 > code.len() || rd32(code, at)? != 0xD503_201F {
                     return Err(format!("invalid coverage probe at {}", at));
                 }
             }
@@ -857,7 +857,9 @@ pub enum Inst {
     /// must outlive the code and must not alias program memory. This is an
     /// observable trace effect, but does not invalidate program loads. Native
     /// backends lower it after optimisation; it is never persisted in a cache.
-    Coverage { word: u64, mask: u64 },
+    /// `disabled` names a thread-local u64: zero during runtime execution,
+    /// all ones while the compiler evaluates an initializer on this thread.
+    Coverage { word: u64, mask: u64, disabled: Sym },
     Iconst(VReg, i64),
     Fconst(VReg, u64, bool),
     Mov(VReg, VReg),
@@ -1256,6 +1258,10 @@ pub struct Func {
     /// own context is the parent's --, a position inside the inlined fn naming it). Machine code
     /// carries it in its pc map (`inline_pc_entries`).
     pub inl: Vec<(u64, u64)>,
+    /// Exact function instance copied at each inline context, parallel to `inl`.
+    /// Source positions alone cannot distinguish generic instances. This is body
+    /// provenance, not a call edge or an observation that the body executed.
+    pub inl_slots: Vec<u32>,
     /// Where the source's named locals live (makepad inspect `locals`): side metadata only --
     /// no pass reads it to decide anything, passes that rename vregs or slots map it, and the
     /// back end turns it into per-call-site locations in the pc map (`vars_pc_entries`).
@@ -1325,13 +1331,16 @@ impl Func {
         for (c, _) in &mut self.nounwind_inputs {
             f(c);
         }
+        for c in &mut self.inl_slots {
+            f(c);
+        }
     }
 
     /// Structural equality of everything but `name`, with the function slots each side names
     /// compared through its own map (`ma` for self, `mb` for `o`; block counts by bits). With
     /// injective maps: the bodies are equal up to a renaming of their slots.
     pub fn same_body_mapped(&self, ma: &mut dyn FnMut(u32) -> u32, o: &Func, mb: &mut dyn FnMut(u32) -> u32) -> bool {
-        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline, full, owned, nonnull, ranged, dyn_calls, naked, inl, dbg, halves } = self;
+        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline, full, owned, nonnull, ranged, dyn_calls, naked, inl, inl_slots, dbg, halves } = self;
         let callee_eq = |a: &Callee, ma: &mut dyn FnMut(u32) -> u32, b: &Callee, mb: &mut dyn FnMut(u32) -> u32| match (a, b) {
             (Callee::Fn(x), Callee::Fn(y)) => ma(*x) == mb(*y),
             (Callee::CFn(x, xs), Callee::CFn(y, ys)) => ma(*x) == mb(*y) && xs == ys,
@@ -1380,6 +1389,8 @@ impl Func {
             && *dyn_calls == o.dyn_calls
             && *naked == o.naked
             && *inl == o.inl
+            && inl_slots.len() == o.inl_slots.len()
+            && inl_slots.iter().zip(&o.inl_slots).all(|(x, y)| ma(*x) == mb(*y))
             && *dbg == o.dbg
             && *halves == o.halves
     }
@@ -1387,7 +1398,7 @@ impl Func {
     /// A hash of what `same_body_mapped` compares, the function slots replaced by `m(slot)`.
     pub fn hash_body_mapped<H: std::hash::Hasher>(&self, h: &mut H, m: &mut dyn FnMut(u32) -> u32) {
         use std::hash::Hash;
-        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline, full, owned, nonnull, ranged, dyn_calls, naked, inl, dbg, halves } = self;
+        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline, full, owned, nonnull, ranged, dyn_calls, naked, inl, inl_slots, dbg, halves } = self;
         fn callee<H: std::hash::Hasher>(c: &Callee, h: &mut H, m: &mut dyn FnMut(u32) -> u32) {
             match c {
                 Callee::Fn(x) => {
@@ -1447,6 +1458,10 @@ impl Func {
             v.hash(h);
         }
         (baseline, full, owned, nonnull, ranged, dyn_calls, naked, inl, dbg).hash(h);
+        inl_slots.len().hash(h);
+        for x in inl_slots {
+            m(*x).hash(h);
+        }
         // (only when present: bodies without the hint keep the hash they had before it existed)
         if !halves.is_empty() {
             halves.hash(h);
@@ -1591,7 +1606,7 @@ pub fn inline_pc_entries(f: &Func) -> impl Iterator<Item = (u32, u64)> + '_ {
 
 impl Func {
     pub fn new(name: String, file: u32) -> Func {
-        Func { name, blocks: Vec::new(), vregs: Vec::new(), slots: Vec::new(), params: Vec::new(), rets: Vec::new(), file, noalias: Vec::new(), withheld_noalias: Vec::new(), plain_calls: false, deref: Vec::new(), cabi: None, sret: None, sret_callees: Vec::new(), nocapture: Vec::new(), nounwind_inputs: Vec::new(), baseline: false, full: false, owned: Vec::new(), nonnull: Vec::new(), ranged: Vec::new(), dyn_calls: Vec::new(), naked: false, inl: Vec::new(), dbg: Vec::new(), halves: Vec::new() }
+        Func { name, blocks: Vec::new(), vregs: Vec::new(), slots: Vec::new(), params: Vec::new(), rets: Vec::new(), file, noalias: Vec::new(), withheld_noalias: Vec::new(), plain_calls: false, deref: Vec::new(), cabi: None, sret: None, sret_callees: Vec::new(), nocapture: Vec::new(), nounwind_inputs: Vec::new(), baseline: false, full: false, owned: Vec::new(), nonnull: Vec::new(), ranged: Vec::new(), dyn_calls: Vec::new(), naked: false, inl: Vec::new(), inl_slots: Vec::new(), dbg: Vec::new(), halves: Vec::new() }
     }
     pub fn vreg(&mut self, c: Cls) -> VReg {
         self.vregs.push(c);

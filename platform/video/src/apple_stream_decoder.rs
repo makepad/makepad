@@ -46,6 +46,15 @@ extern "C" {
     fn CVPixelBufferGetIOSurface(buffer: CVPixelBufferRef) -> *mut c_void;
 }
 
+/// kCVPixelFormatType_444YpCbCr8BiPlanarVideoRange ('444v'): luma, then CbCr at every pixel.
+const PIXEL_444V: u32 = u32::from_be_bytes(*b"444v");
+
+#[link(name = "VideoToolbox", kind = "framework")]
+extern "C" {
+    fn VTSessionCopyProperty(session: *mut c_void, key: *const c_void, allocator: *const c_void, value_out: *mut *const c_void) -> OSStatus;
+    static kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder: *const c_void;
+}
+
 /// A decoded pixel buffer held for a `DecodedPicture`: back to the decoder's pool when released.
 struct HeldPixelBuffer(CVPixelBufferRef);
 
@@ -84,7 +93,8 @@ unsafe extern "C" fn decode_output_callback(
         if !surface.is_null() {
             let handle = IOSurfaceGetID(surface) as u64;
             let held = HeldPixelBuffer(CVPixelBufferRetain(image_buffer));
-            let gpu = Some(DecodedPicture { handle, _keep: std::sync::Arc::new(held) });
+            let full_chroma = CVPixelBufferGetPixelFormatType(image_buffer) == PIXEL_444V;
+            let gpu = Some(DecodedPicture { handle, full_chroma, _keep: std::sync::Arc::new(held) });
             guard.frames.push(DecodedFrame { width, height, nv12: Vec::new(), pts_100ns, gpu });
             return;
         }
@@ -203,16 +213,21 @@ impl AppleStreamDecoder {
         let mut session: VTDecompressionSessionRef = std::ptr::null_mut();
         // GPU output: 420v pixel buffers on global IOSurfaces (the HAL imports them by id) that
         // Metal can sample, plane by plane
+        // a 4:4:4 stream (High 4:4:4 Predictive, profile_idc 244) stays 4:4:4 on the GPU; the CPU
+        // form is always tight NV12
+        let full_chroma = matches!(self.codec, StreamVideoCodec::H264) && sps.get(1) == Some(&244);
+        let number = |v: u32| -> ObjcId { msg_send![class!(NSNumber), numberWithUnsignedInt: v] };
         let destination: ObjcId = if self.gpu {
-            let number = |v: u32| -> ObjcId { msg_send![class!(NSNumber), numberWithUnsignedInt: v] };
             let yes: ObjcId = msg_send![class!(NSNumber), numberWithBool: YES];
             let global_key: ObjcId = msg_send![class!(NSString), stringWithUTF8String: c"IOSurfaceIsGlobal".as_ptr()];
             let surface_props: ObjcId = msg_send![class!(NSDictionary), dictionaryWithObject: yes forKey: global_key];
             let keys = [kCVPixelBufferPixelFormatTypeKey as ObjcId, kCVPixelBufferIOSurfacePropertiesKey as ObjcId, kCVPixelBufferMetalCompatibilityKey as ObjcId];
-            let values = [number(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange), surface_props, yes];
+            let values = [number(if full_chroma { PIXEL_444V } else { kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange }), surface_props, yes];
             msg_send![class!(NSDictionary), dictionaryWithObjects: values.as_ptr() forKeys: keys.as_ptr() count: keys.len()]
         } else {
-            std::ptr::null_mut()
+            let keys = [kCVPixelBufferPixelFormatTypeKey as ObjcId];
+            let values = [number(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)];
+            msg_send![class!(NSDictionary), dictionaryWithObjects: values.as_ptr() forKeys: keys.as_ptr() count: keys.len()]
         };
         let create_status = VTDecompressionSessionCreate(
             std::ptr::null(),
@@ -347,6 +362,22 @@ impl AppleStreamDecoder {
             .frames
             .drain(..)
             .collect())
+    }
+
+    /// Whether the session decodes on the hardware decoder (None before a session exists).
+    pub fn hardware(&self) -> Option<bool> {
+        if self.session.is_null() {
+            return None;
+        }
+        unsafe {
+            let mut value: *const c_void = std::ptr::null();
+            if VTSessionCopyProperty(self.session as *mut c_void, kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder, std::ptr::null(), &mut value) != 0 || value.is_null() {
+                return None;
+            }
+            let on = value == kCFBooleanTrue as *const c_void;
+            CFRelease(value);
+            Some(on)
+        }
     }
 
     pub fn flush(&mut self) -> Result<Vec<DecodedFrame>, VideoFileError> {

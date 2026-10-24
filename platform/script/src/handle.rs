@@ -7,7 +7,7 @@ use std::fmt::Debug;
 
 /// A Rust-held reference to a script handle: a GC root while it lives (roots.rs).
 #[relax_api(plain)]
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct ScriptHandleRef {
     pub(crate) roots: *const crate::roots::ScriptRoots,

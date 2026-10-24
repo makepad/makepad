@@ -254,6 +254,8 @@ impl Net {
             authorization: credential.authorization(&fingerprint),
             screen: -1,
             paused: self.paused.load(Ordering::Acquire),
+            // Apple Silicon's VideoToolbox decodes 4:4:4 H.264 on its hardware decoder
+            caps: if cfg!(target_vendor = "apple") { proto::caps::FULL_CHROMA } else { 0 },
         };
         proto::write_all(&mut stream, &hello.encode()).map_err(|e| format!("hello: {e}"))?;
         stream.set_read_timeout(Some(Duration::from_millis(1))).map_err(|e| e.to_string())?;

@@ -560,7 +560,7 @@ impl<T: Clone> Vec<T> {
         unsafe {
             let start = im::ptr_add_mut(self.ptr.as_ptr(), self.len);
             if im::is_copy::<T>() {
-                if crate::mem::size_of::<T>() == 1 {
+                if im::is_primitive_scalar::<T>() && crate::mem::size_of::<T>() == 1 {
                     let byte: u8 = im::ptr_read(&value as *const T as *const u8);
                     im::write_bytes(start as *mut u8, byte, n);
                 } else {
@@ -624,9 +624,9 @@ impl<T: PartialEq> Vec<T> {
 
 /// `vec![elem; n]`
 pub fn from_elem<T: Clone>(elem: T, n: usize) -> Vec<T> {
-    // real alloc's SpecFromElem + IsZero: a Copy value whose bytes are all zero becomes one
-    // zeroed allocation (calloc: untouched pages stay unmapped until written)
-    if n > 0 && !is_zst::<T>() && unsafe { im::is_copy::<T>() } && all_zero_bytes(&elem) {
+    // Like real alloc's scalar IsZero implementations. Copy alone does not make a byte
+    // scan valid: aggregates can have uninitialized padding or inactive enum storage.
+    if n > 0 && primitive_is_zero(&elem) {
         let layout = Vec::<T>::layout_for(n);
         if layout.size() > isize::MAX as usize {
             capacity_overflow();
@@ -646,7 +646,10 @@ pub fn from_elem<T: Clone>(elem: T, n: usize) -> Vec<T> {
     v
 }
 
-fn all_zero_bytes<T>(v: &T) -> bool {
+fn primitive_is_zero<T>(v: &T) -> bool {
+    if !unsafe { im::is_primitive_scalar::<T>() } {
+        return false;
+    }
     let n = crate::mem::size_of::<T>();
     let p = v as *const T as *const u8;
     // one compare of the value's bits for scalar sizes, as real alloc's IsZero impls do
@@ -658,17 +661,9 @@ fn all_zero_bytes<T>(v: &T) -> bool {
             4 => return crate::ptr::read_unaligned(p as *const u32) == 0,
             8 => return crate::ptr::read_unaligned(p as *const u64) == 0,
             16 => return crate::ptr::read_unaligned(p as *const u128) == 0,
-            _ => {}
+            _ => return false,
         }
     }
-    let mut i = 0;
-    while i < n {
-        if unsafe { im::ptr_read(im::ptr_add(p, i)) } != 0 {
-            return false;
-        }
-        i += 1;
-    }
-    true
 }
 
 /// extend_with's length guard (real alloc's SetLenOnDrop): the elements written so far count

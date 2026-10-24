@@ -49,6 +49,7 @@ struct NativeProbe {
     pc: u64,
     word: u64,
     mask: u64,
+    skip: u32,
 }
 static PROBES: Mutex<Vec<NativeProbe>> = Mutex::new(Vec::new());
 
@@ -63,8 +64,8 @@ pub(crate) fn installed(unit: &Unit, base: u64, relocs: &[relax_backend::rir::Re
     let _k = crate::zone_alloc::kept();
     let mut probes = PROBES.lock().unwrap_or_else(|e| e.into_inner());
     for r in relocs {
-        if let (relax_backend::rir::RelocKind::A64CoverageBit(bit), relax_backend::rir::Reloc::Value(word)) = (r.kind, r.target) {
-            probes.push(NativeProbe { unit: unit as *const Unit as usize, pc: base + r.at as u64, word, mask: 1 << bit });
+        if let (relax_backend::rir::RelocKind::A64CoverageBit { bit, words }, relax_backend::rir::Reloc::Value(word)) = (r.kind, r.target) {
+            probes.push(NativeProbe { unit: unit as *const Unit as usize, pc: base + r.at as u64, word, mask: 1 << bit, skip: 0x1400_0000 | words });
         }
     }
 }
@@ -87,7 +88,7 @@ pub unsafe fn retire_native(unit: *const Unit) {
         // probe can finish its idempotent atomic OR. fill_code writes through
         // the writable alias and flushes the executable instruction cache.
         crate::os::mem::fill_code(p.pc, 4, |bytes| {
-            (&*(bytes.as_mut_ptr() as *const std::sync::atomic::AtomicU32)).store(0x1400_0007, Ordering::Release);
+            (&*(bytes.as_mut_ptr() as *const std::sync::atomic::AtomicU32)).store(p.skip, Ordering::Release);
         });
         false
     });
@@ -134,7 +135,7 @@ pub fn instrument(up: *const Unit, slot: u32, f: &mut Func) {
             continue;
         }
         let positioned = b.pos.len() == b.insts.len();
-        b.insts.insert(0, Inst::Coverage { word: bit as *const AtomicU64 as u64, mask });
+        b.insts.insert(0, Inst::Coverage { word: bit as *const AtomicU64 as u64, mask, disabled: unsafe { &*up }.rs.coverage_disabled });
         if positioned {
             b.pos.insert(0, range.pos[bi]);
         }
@@ -168,7 +169,7 @@ pub fn retire(f: &mut Func) {
         let mut kept = 0;
         for k in 0..b.insts.len() {
             let covered = match b.insts[k] {
-                Inst::Coverage { word, mask } => {
+                Inst::Coverage { word, mask, .. } => {
                     // Only instrument() makes these effects. RECORD owns the
                     // aligned atomic words for the lifetime of every JIT tier.
                     unsafe { (*(word as *const AtomicU64)).load(Ordering::Relaxed) & mask != 0 }
@@ -205,7 +206,7 @@ pub fn retire(f: &mut Func) {
         let positioned = b.pos.len() == b.insts.len();
         let mut kept = 0;
         for k in 0..b.insts.len() {
-            if let Inst::Coverage { word, mask } = b.insts[k] {
+            if let Inst::Coverage { word, mask, .. } = b.insts[k] {
                 if !active.insert((word, mask)) { continue; }
                 undo.push((word, mask));
             }

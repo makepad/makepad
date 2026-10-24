@@ -8,7 +8,9 @@
 //! window pass   C as one quad, then the window's cursor list (LAST tier)
 //!  └ picture    w/4 x 3h/2 shared BGRA8: NV12 packed (makepad_video's nv12_picture layout):
 //!     │         rows 0..h four luma samples per texel (DrawNv12Luma), rows h..3h/2
-//!     │         U0 V0 U1 V1 per texel, 2x2 averages of C (DrawNv12Chroma)
+//!     │         U0 V0 U1 V1 per texel, 2x2 averages of C (DrawNv12Chroma); for 4:4:4
+//!     │         (`Want::full_chroma`) w/4 x 3h: each chroma row the U V pairs of every pixel
+//!     │         of one source row, over two texture rows
 //!     └ C       the whole desktop, every overlay and popup of it (nested), no cursor
 //! ```
 //!
@@ -45,19 +47,26 @@ script_mod! {
         }
     }
 
-    // Two chroma samples (each the average of a 2x2 block: one bilinear tap at its centre),
-    // memory order U0 V0 U1 V1.
+    // Two chroma samples, memory order U0 V0 U1 V1: 4:2:0 each the average of a 2x2 block (one
+    // bilinear tap at its centre); 4:4:4 (`full`) two neighbouring pixels of one row as they
+    // are, a source row over two texture rows (its left half, then its right half).
     mod.widgets.DrawNv12Chroma = set_type_default() do #(DrawNv12Chroma::script_shader(vm)) {
         ..mod.draw.DrawQuad
         image: texture_2d(float)
         source: vec4(0.0, 0.0, 1.0, 1.0)
         extent: vec2(1.0, 1.0)
+        full: 0.0
         pixel: fn() {
             let t = floor(self.pos * self.rect_size)
             let inv = vec2(1.0 / self.extent.x, 1.0 / self.extent.y)
-            let p0 = vec2(self.source.x + t.x * 4.0 + 1.0, self.source.y + t.y * 2.0 + 1.0)
+            // which half of its source row this texture row holds (Splash shaders have no `mod`)
+            let half = t.y - floor(t.y * 0.5) * 2.0
+            let full_p = vec2(self.source.x + half * self.rect_size.x * 2.0 + t.x * 2.0 + 0.5, self.source.y + floor(t.y * 0.5) + 0.5)
+            let sub_p = vec2(self.source.x + t.x * 4.0 + 1.0, self.source.y + t.y * 2.0 + 1.0)
+            let p0 = mix(sub_p, full_p, self.full)
+            let step = mix(2.0, 1.0, self.full)
             let c0 = self.image.sample(p0 * inv).xyz
-            let c1 = self.image.sample((p0 + vec2(2.0, 0.0)) * inv).xyz
+            let c1 = self.image.sample((p0 + vec2(step, 0.0)) * inv).xyz
             let cu = vec3(-0.1146, -0.3854, 0.5)
             let cv = vec3(0.5, -0.4542, -0.0458)
             let u0 = (128.0 + 224.0 * dot(c0, cu)) / 255.0
@@ -102,6 +111,9 @@ pub struct DrawNv12Chroma {
     source: Vec4f,
     #[live]
     extent: Vec2f,
+    /// 1: 4:4:4 (every pixel's chroma), 0: 4:2:0.
+    #[live]
+    full: f32,
 }
 
 /// What the WM wants captured: the streamed screen's rect in desktop pixels and the picture
@@ -110,6 +122,8 @@ pub struct DrawNv12Chroma {
 pub struct Want {
     pub screen_px: [u32; 4],
     pub stream: [u32; 2],
+    /// 4:4:4: chroma at every pixel (the picture is w/4 x 3h).
+    pub full_chroma: bool,
 }
 
 /// Shared between the WM's Desk Link (writes `want`) and the `DeskCapture` widget (draws it):
@@ -188,7 +202,8 @@ impl Widget for DeskCapture {
         let mut picture = st.picture.take().unwrap_or_else(|| RenderTarget::new(cx, "wm_desk_link_picture"));
         let mut frame = st.frame.take().unwrap_or_else(|| WindowFrame::new_with_name(cx, "wm_desk_link"));
         // shared (another GPU user reads it by its handle) and kept between pictures
-        let resized = picture.ensure(cx, (w / 4, h + h / 2), RenderTargetFormat::SharedBgra8);
+        let chroma_rows = if want.full_chroma { h * 2 } else { h / 2 };
+        let resized = picture.ensure(cx, (w / 4, h + chroma_rows), RenderTargetFormat::SharedBgra8);
         if resized {
             st.drawn = 0;
         }
@@ -223,7 +238,8 @@ impl Widget for DeskCapture {
         self.draw_chroma.draw_vars.set_texture(0, frame.texture());
         self.draw_chroma.source = source;
         self.draw_chroma.extent = extent;
-        self.draw_chroma.draw_abs(cx, Rect { pos: dvec2(0.0, h as f64), size: dvec2((w / 4) as f64, (h / 2) as f64) });
+        self.draw_chroma.full = if want.full_chroma { 1.0 } else { 0.0 };
+        self.draw_chroma.draw_abs(cx, Rect { pos: dvec2(0.0, h as f64), size: dvec2((w / 4) as f64, chroma_rows as f64) });
         picture.end(cx);
 
         self.draw_frame.draw_vars.set_texture(0, frame.texture());
@@ -237,5 +253,35 @@ impl Widget for DeskCapture {
         }
         *cx.global::<CaptureState>() = st;
         DrawStep::done()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use makepad_widgets::makepad_draw::makepad_platform::makepad_script::script_eval;
+    use makepad_widgets::*;
+
+    /// The capture shaders compile on every backend: a shader that does not draws nothing, and
+    /// the stream carries zero chroma (a green picture) with no error anywhere else.
+    #[test]
+    fn capture_shaders_compile_on_every_backend() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            super::script_mod(vm);
+            for (name, backend, value) in [
+                ("luma", "metal", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.widgets.DrawNv12Luma, "metal", false)})),
+                ("luma", "hlsl", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.widgets.DrawNv12Luma, "hlsl", false)})),
+                ("luma", "glsl", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.widgets.DrawNv12Luma, "glsl", false)})),
+                ("luma", "wgsl", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.widgets.DrawNv12Luma, "wgsl", false)})),
+                ("chroma", "metal", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.widgets.DrawNv12Chroma, "metal", false)})),
+                ("chroma", "hlsl", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.widgets.DrawNv12Chroma, "hlsl", false)})),
+                ("chroma", "glsl", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.widgets.DrawNv12Chroma, "glsl", false)})),
+                ("chroma", "wgsl", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.widgets.DrawNv12Chroma, "wgsl", false)})),
+            ] {
+                let text = vm.heap().string_with(value, |_heap, text| text.to_string()).expect("the compiler answers with source");
+                assert!(!text.starts_with("ERRORS"), "{name} on {backend} did not compile: {text}");
+            }
+        });
     }
 }

@@ -28,7 +28,8 @@ pub enum Fence {
 }
 
 pub enum Job {
-    Picture { handle: u64, size: [u32; 2], fence: Fence, built_ns: u64, fps: u32, kbps: u32, split: Split },
+    /// `refine`: the last picture again at a near-lossless QP (the desktop held still).
+    Picture { handle: u64, size: [u32; 2], fence: Fence, built_ns: u64, fps: u32, kbps: u32, split: Split, full_chroma: bool, refine: bool },
     Keyframe,
     /// The picture texture's registration `handle` is released (after the pictures queued
     /// before it were encoded).
@@ -90,16 +91,23 @@ struct Work {
     ready: GpuReady,
     frame: u32,
     key: bool,
+    refine: bool,
     built_ns: u64,
 }
 
 /// A worker's answer: (stream, frame, built, encoded, key, Annex-B or the failure).
 type Done = (usize, u32, u64, u64, bool, Result<Vec<u8>, String>);
 
+/// A picture whose bitstream is no bigger than this per stream changed nothing visible (a redraw
+/// of the same desktop): the desktop is still.
+const STILL_BYTES: usize = 4096;
+/// Still this long: the next picture is a refinement (near lossless).
+const REFINE_AFTER: Duration = Duration::from_millis(120);
+
 /// The streams for `size` with `split` on this machine's engines: each a worker thread owning
 /// its encoder. Bands are whole macroblock rows except the last, so they cover the picture's rows
 /// exactly once (pixel-exact seams).
-fn open_streams(size: [u32; 2], fps: u32, kbps: u32, split: Split, done: &Sender<Done>) -> Result<Vec<Stream>, String> {
+fn open_streams(size: [u32; 2], fps: u32, kbps: u32, split: Split, full_chroma: bool, done: &Sender<Done>) -> Result<Vec<Stream>, String> {
     let engines = VideoStreamEncoder::engines().max(1) as usize;
     let n = if split == Split::Off || size[1] < 64 { 1 } else { engines };
     let tiles = split == Split::Tiles && n > 1;
@@ -110,7 +118,7 @@ fn open_streams(size: [u32; 2], fps: u32, kbps: u32, split: Split, done: &Sender
         let (y0, rows) = if tiles { (band * i as u32, if i + 1 == n { size[1] - band * i as u32 } else { band }) } else { (0, size[1]) };
         // an interleaved stream carries every n-th picture
         let stream_fps = if tiles { fps } else { (fps / n as u32).max(1) };
-        let options = VideoStreamEncoderOptions { codec: StreamVideoCodec::H264, width: size[0], height: rows, fps: stream_fps, bitrate_kbps: kbps, keyint: 0, low_latency: true };
+        let options = VideoStreamEncoderOptions { codec: StreamVideoCodec::H264, width: size[0], height: rows, fps: stream_fps, bitrate_kbps: kbps, keyint: 0, low_latency: true, full_chroma };
         let tile = StreamTile { engine: i as u32, y0, source_height: size[1] };
         let mut encoder = VideoStreamEncoder::new_tile(options, tile).map_err(|e| format!("{e:?}"))?;
         super::note(&format!("desk link stream {}/{n}{}: {}", i + 1, if n == 1 { "" } else if tiles { " (tiles)" } else { " (interleaved)" }, encoder.description()));
@@ -122,10 +130,11 @@ fn open_streams(size: [u32; 2], fps: u32, kbps: u32, split: Split, done: &Sender
                 while let Ok(w) = rx.recv() {
                     if w.key {
                         encoder.request_keyframe();
+                    } else if w.refine {
+                        encoder.request_refinement();
                     }
                     let out = encoder.push_shared_texture(w.handle, w.ready, w.frame as i64).map_err(|e| format!("{e:?}")).map(|packets| packets.into_iter().flat_map(|p| p.data).collect::<Vec<u8>>());
-                    let key = w.key;
-                    if done.send((i, w.frame, w.built_ns, makepad_hal::clock_ns(), key, out)).is_err() {
+                    if done.send((i, w.frame, w.built_ns, makepad_hal::clock_ns(), w.key, out)).is_err() {
                         return;
                     }
                 }
@@ -138,7 +147,7 @@ fn open_streams(size: [u32; 2], fps: u32, kbps: u32, split: Split, done: &Sender
 
 fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + Sync>) {
     // the streams, for (size, split); dropping them ends their workers
-    let mut streams: Option<(Vec<Stream>, [u32; 2], Split, bool)> = None;
+    let mut streams: Option<(Vec<Stream>, [u32; 2], (Split, bool), bool)> = None;
     let (done_tx, done_rx) = channel::<Done>();
     let mut in_flight = 0usize;
     // the tiles of the picture being encoded: (frame, parts received, messages)
@@ -166,12 +175,22 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
         }
     };
     // a worker's answer: a tile waits for its picture's other tiles, an interleaved picture goes
-    let take = |d: Done, streams: &Option<(Vec<Stream>, [u32; 2], Split, bool)>, gathering: &mut Vec<Option<Vec<u8>>>, failed: &mut bool, fail: &mut dyn FnMut(String)| {
+    // the last picture that changed something, and since which picture the still desktop is
+    // encoded near lossless (it stays so until a picture changes something)
+    let last_change = std::cell::Cell::new(Instant::now());
+    let refining: std::cell::Cell<Option<u32>> = std::cell::Cell::new(None);
+    let take = |d: Done, streams: &Option<(Vec<Stream>, [u32; 2], (Split, bool), bool)>, gathering: &mut Vec<Option<Vec<u8>>>, failed: &mut bool, fail: &mut dyn FnMut(String)| {
         let (i, frame, built_ns, encoded_ns, key, out) = d;
         let Some((list, _, _, tiles)) = streams else { return };
         let parts = if *tiles { list.len() } else { 1 };
         match out {
             Ok(data) => {
+                // a big picture changed something; the first near-lossless one is the refinement
+                // itself (big too)
+                if data.len() > STILL_BYTES && !key && refining.get().is_none_or(|since| frame > since) {
+                    last_change.set(Instant::now());
+                    refining.set(None);
+                }
                 let msg = proto::encode_video(frame, key, built_ns, encoded_ns, 0, (i as u8, parts as u8, list[i].y0), &data);
                 if parts == 1 {
                     send(msg);
@@ -212,7 +231,13 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
                 streams = None;
                 key_wanted = true;
             }
-            Job::Picture { handle, size, fence, built_ns, fps, kbps, split } => {
+            Job::Picture { handle, size, fence, built_ns, fps, kbps, split, full_chroma, refine } => {
+                // still (no picture, or pictures that change nothing) for REFINE_AFTER: near-lossless
+                // pictures from this one on, until one changes something
+                if refining.get().is_none() && (refine || last_change.get().elapsed() >= REFINE_AFTER) {
+                    refining.set(Some(frame));
+                }
+                let refine = refining.get().is_some();
                 if std::mem::take(&mut failed) {
                     // a failed or device-replaced encoder is opened again (its next picture a key frame)
                     while in_flight > 0 {
@@ -225,18 +250,18 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
                     key_wanted = true;
                     wake();
                 }
-                if streams.as_ref().is_none_or(|(_, s, sp, _)| *s != size || *sp != split) {
+                if streams.as_ref().is_none_or(|(_, s, sp, _)| *s != size || *sp != (split, full_chroma)) {
                     while in_flight > 0 {
                         let Ok(d) = done_rx.recv() else { return };
                         in_flight -= 1;
                         take(d, &streams, &mut gathering, &mut failed, &mut fail);
                     }
                     streams = None;
-                    match open_streams(size, fps, kbps, split, &done_tx) {
+                    match open_streams(size, fps, kbps, split, full_chroma, &done_tx) {
                         Ok(list) => {
                             let tiles = split == Split::Tiles && list.len() > 1;
                             gathering = vec![None; if tiles { list.len() } else { 0 }];
-                            streams = Some((list, size, split, tiles));
+                            streams = Some((list, size, (split, full_chroma), tiles));
                             key_wanted = true;
                         }
                         Err(e) => {
@@ -267,7 +292,7 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
                         readies.push(clone_ready(&readies[0]));
                     }
                     for (s, ready) in list.iter().zip(readies) {
-                        let _ = s.tx.send(Work { handle, ready, frame, key, built_ns });
+                        let _ = s.tx.send(Work { handle, ready, frame, key, refine, built_ns });
                         in_flight += 1;
                     }
                     // a picture's tiles are complete before the next picture starts
@@ -284,7 +309,7 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
                         in_flight -= 1;
                         take(d, &streams, &mut gathering, &mut failed, &mut fail);
                     }
-                    let _ = list[frame as usize % n].tx.send(Work { handle, ready, frame, key, built_ns });
+                    let _ = list[frame as usize % n].tx.send(Work { handle, ready, frame, key, refine, built_ns });
                     in_flight += 1;
                     // answers that came meanwhile go out at once
                     while let Ok(d) = done_rx.try_recv() {

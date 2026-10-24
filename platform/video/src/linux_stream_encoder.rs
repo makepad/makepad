@@ -18,6 +18,7 @@ fn last_error() -> VideoFileError {
 pub(crate) struct LinuxStreamEncoder {
     id: u64,
     key_wanted: bool,
+    refine_wanted: bool,
     keyint: u32,
     since_key: u32,
     out: Vec<u8>,
@@ -32,11 +33,11 @@ impl LinuxStreamEncoder {
         if options.width % 4 != 0 {
             return Err(VideoFileError::new(format!("stream width {} must be a multiple of 4", options.width)));
         }
-        let id = hal::hal_stream_encoder_open(options.width, options.height, options.fps, options.bitrate_kbps, engine);
+        let id = hal::hal_stream_encoder_open(options.width, options.height, options.fps, options.bitrate_kbps, engine, if options.full_chroma { hal::FULL_CHROMA } else { 0 });
         if id == 0 {
             return Err(last_error());
         }
-        Ok(Self { id, key_wanted: true, keyint: options.keyint, since_key: 0, out: Vec::new() })
+        Ok(Self { id, key_wanted: true, refine_wanted: false, keyint: options.keyint, since_key: 0, out: Vec::new() })
     }
 
     pub fn description(&self) -> String {
@@ -80,12 +81,17 @@ impl LinuxStreamEncoder {
             GpuReady::SyncFile(fd) => fd.into_raw_fd(),
         };
         let (flags, key) = self.flags();
-        let bytes = hal::hal_stream_encoder_texture(self.id, handle, source_height, y0, sync, flags);
+        let refine = if std::mem::take(&mut self.refine_wanted) && !key { hal::REFINE } else { 0 };
+        let bytes = hal::hal_stream_encoder_texture(self.id, handle, source_height, y0, sync, flags | refine);
         self.take(bytes, key, pts_100ns)
     }
 
     pub fn request_keyframe(&mut self) {
         self.key_wanted = true;
+    }
+
+    pub fn request_refinement(&mut self) {
+        self.refine_wanted = true;
     }
 
     pub fn set_bitrate_kbps(&mut self, kbps: u32) {

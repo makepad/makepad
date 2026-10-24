@@ -150,7 +150,7 @@ pub struct ShownPart {
 enum PartTex {
     /// A decoder's GPU picture: its luma and chroma planes as textures over its memory (the
     /// picture held so the decoder does not reuse it meanwhile).
-    Gpu { luma: Texture, chroma: Texture, _picture: DecodedPicture },
+    Gpu { luma: Texture, chroma: Texture, full_chroma: bool, _picture: DecodedPicture },
     /// CPU NV12 in a texture of its own (replaced in place).
     Cpu(Texture),
 }
@@ -165,7 +165,7 @@ impl RemoteView {
                 Some(picture) => {
                     let luma = cx.import_picture_plane(picture.handle, PicturePlane::Luma);
                     let chroma = cx.import_picture_plane(picture.handle, PicturePlane::Chroma);
-                    PartTex::Gpu { luma, chroma, _picture: picture }
+                    PartTex::Gpu { luma, chroma, full_chroma: picture.full_chroma, _picture: picture }
                 }
                 None => {
                     // the same part's CPU texture is written again in place
@@ -254,13 +254,15 @@ impl Widget for RemoteView {
         let rect = self.place(cx, view);
         self.placement = Placement { rect };
         let full_h = self.size[1].max(1) as f64;
+        // scaled: a sharper (bicubic) resample keeps text crisp; 1:1 samples pixels as they are
+        self.draw_nv12.sharp = if self.one_to_one { 0.0 } else { 1.0 };
         for part in &self.parts {
             // each part's rows of the placed picture: the parts tile it exactly
             let top = rect.pos.y + rect.size.y * part.y0 as f64 / full_h;
             let bottom = rect.pos.y + rect.size.y * (part.y0 + part.size[1]) as f64 / full_h;
             let [pw, ph] = part.size;
             match &part.tex {
-                PartTex::Gpu { luma, chroma, .. } => self.draw_nv12.set_planes(luma, chroma, pw, ph, VideoColor::BT709),
+                PartTex::Gpu { luma, chroma, full_chroma, .. } => self.draw_nv12.set_planes(luma, chroma, pw, ph, VideoColor::BT709, *full_chroma),
                 PartTex::Cpu(t) => self.draw_nv12.set_nv12(t, pw, ph, VideoColor::BT709, None),
             }
             // a draw call per part: each samples its own textures

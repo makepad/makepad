@@ -1,4 +1,4 @@
-//! desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS]: a headless Desk Link viewer for
+//! desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--split tiles|interleave|off]: a headless Desk Link viewer for
 //! checks. It connects with this machine's fleet credential, prints the Welcome, counts the
 //! pictures and bytes, pings once a second (RTT), and with `--input` moves the desktop's pointer
 //! between two points twice a second, timing each move until the desktop's own Cursor message
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let Some(target) = args.get(1).filter(|a| !a.starts_with("--")) else {
-        eprintln!("usage: desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS]");
+        eprintln!("usage: desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--split tiles|interleave|off]");
         std::process::exit(2);
     };
     let secs: u64 = args.windows(2).find(|w| w[0] == "--secs").and_then(|w| w[1].parse().ok()).unwrap_or(10);
@@ -22,21 +22,27 @@ fn main() {
     // --flap MS: pause and resume every MS milliseconds (the desktop releases its picture
     // texture whenever nobody watches: a lifetime test)
     let flap: Option<u64> = args.windows(2).find(|w| w[0] == "--flap").and_then(|w| w[1].parse().ok());
+    // --split: how the desktop shares its encode engines (for every viewer), asked after the Welcome
+    let split = args.windows(2).find(|w| w[0] == "--split").map(|w| match w[1].as_str() {
+        "tiles" => proto::split::TILES,
+        "interleave" => proto::split::INTERLEAVE,
+        _ => proto::split::OFF,
+    });
     let (host, port) = match target.rsplit_once(':') {
         Some((h, p)) if p.parse::<u16>().is_ok() => (h.to_string(), p.to_string()),
         _ => (target.clone(), proto::DEFAULT_PORT.to_string()),
     };
-    if let Err(e) = run(&host, &port, secs, input, paused, flap) {
+    if let Err(e) = run(&host, &port, secs, input, paused, flap, split) {
         eprintln!("probe: {e}");
         std::process::exit(1);
     }
 }
 
-fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Option<u64>) -> Result<(), String> {
+fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Option<u64>, split: Option<u8>) -> Result<(), String> {
     let credential = fleet_auth::own_credential().ok_or("no fleet credential")?;
     let (mut stream, fp) = SocketStream::connect_capture(host, port).map_err(|e| format!("connect: {e}"))?;
     println!("probe: certificate {}", makepad_network::tls::to_hex(&fp));
-    let hello = ClientMsg::Hello { version: proto::VERSION, name: "probe".into(), authorization: credential.authorization(&fp), screen: -1, paused };
+    let hello = ClientMsg::Hello { version: proto::VERSION, name: "probe".into(), authorization: credential.authorization(&fp), screen: -1, paused, caps: proto::caps::FULL_CHROMA };
     proto::write_all(&mut stream, &hello.encode()).map_err(|e| e.to_string())?;
     stream.set_read_timeout(Some(Duration::from_millis(1))).map_err(|e| e.to_string())?;
     stream.set_write_timeout(Some(Duration::from_millis(5))).map_err(|e| e.to_string())?;
@@ -86,9 +92,13 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
         }
         while let Some((ty, payload)) = inbox.next().map_err(|e| e.to_string())? {
             match ServerMsg::decode(ty, &payload).map_err(|e| e.to_string())? {
-                ServerMsg::Welcome { screens, screen, stream, input, input_note, server, .. } => {
+                ServerMsg::Welcome { screens, screen, stream: stream_size, input, input_note, server, .. } => {
                     welcomed = true;
-                    println!("probe: welcome from {server}: screen {screen} of {} ({stream:?}), input {}{}", screens.len(), input, if input { String::new() } else { format!(" ({input_note})") });
+                    if let Some(split) = split {
+                        proto::write_all(&mut stream, &ClientMsg::SetSplit { split }.encode()).map_err(|e| e.to_string())?;
+                        proto::write_all(&mut stream, &ClientMsg::RequestKeyframe.encode()).map_err(|e| e.to_string())?;
+                    }
+                    println!("probe: welcome from {server}: screen {screen} of {} ({stream_size:?}), input {}{}", screens.len(), input, if input { String::new() } else { format!(" ({input_note})") });
                 }
                 ServerMsg::Refused { reason } => return Err(format!("refused: {reason}")),
                 ServerMsg::Bye { reason } => return Err(format!("bye: {reason}")),

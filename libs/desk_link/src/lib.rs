@@ -11,7 +11,7 @@ use std::io::{self, Write};
 #[cfg(feature = "server")]
 pub mod server;
 
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 pub const DEFAULT_PORT: u16 = 8790;
 /// The largest message either side accepts (a key frame of a big desktop fits many times over).
 pub const MAX_MESSAGE: usize = 16 << 20;
@@ -56,6 +56,12 @@ pub mod mods {
 }
 
 /// Pointer buttons (`Button::button`).
+/// `ClientMsg::Hello` capabilities of the viewer's decoder.
+pub mod caps {
+    /// Decodes 4:4:4 H.264 (High 4:4:4 Predictive) on its hardware decoder.
+    pub const FULL_CHROMA: u32 = 1;
+}
+
 /// `ClientMsg::SetSplit` values: one stream, tiles (each picture in bands, one per engine, at
 /// once) or interleave (whole pictures, the engines in turn).
 pub mod split {
@@ -101,7 +107,8 @@ pub enum ClientMsg {
     /// First message. `authorization` is the fleet proof (`MKC2 ...`) bound to the server's
     /// certificate; `screen` < 0 asks for the server's default screen; `paused` opens the
     /// session without video (a background session of the viewer's list).
-    Hello { version: u16, name: String, authorization: String, screen: i32, paused: bool },
+    /// `caps`: what the viewer's decoder takes (`caps::*`).
+    Hello { version: u16, name: String, authorization: String, screen: i32, paused: bool, caps: u32 },
     /// Stop / restart video (Resume starts with a key frame). The session and its pings stay.
     Pause,
     Resume,
@@ -274,9 +281,9 @@ impl ClientMsg {
     pub fn encode(&self) -> Vec<u8> {
         use tag::*;
         match self {
-            ClientMsg::Hello { version, name, authorization, screen, paused } => {
+            ClientMsg::Hello { version, name, authorization, screen, paused, caps } => {
                 let mut o = Out::new(HELLO);
-                o.u16(*version).str(name).str(authorization).i32(*screen).u8(*paused as u8);
+                o.u16(*version).str(name).str(authorization).i32(*screen).u8(*paused as u8).u32(*caps);
                 o.done()
             }
             ClientMsg::Pause => Out::new(PAUSE).done(),
@@ -344,7 +351,7 @@ impl ClientMsg {
         use tag::*;
         let mut r = In { b: payload };
         Ok(match ty {
-            HELLO => ClientMsg::Hello { version: r.u16()?, name: r.str()?, authorization: r.str()?, screen: r.i32()?, paused: r.bool()? },
+            HELLO => ClientMsg::Hello { version: r.u16()?, name: r.str()?, authorization: r.str()?, screen: r.i32()?, paused: r.bool()?, caps: r.u32()? },
             PAUSE => ClientMsg::Pause,
             RESUME => ClientMsg::Resume,
             SELECT_SCREEN => ClientMsg::SelectScreen { index: r.u32()? },
@@ -572,7 +579,7 @@ mod tests {
 
     #[test]
     fn client_messages_round_trip() {
-        round_client(ClientMsg::Hello { version: VERSION, name: "viewer".into(), authorization: "MKC2 a.lan.9.ff".into(), screen: -1, paused: true });
+        round_client(ClientMsg::Hello { version: VERSION, name: "viewer".into(), authorization: "MKC2 a.lan.9.ff".into(), screen: -1, paused: true, caps: caps::FULL_CHROMA });
         round_client(ClientMsg::Pause);
         round_client(ClientMsg::Resume);
         round_client(ClientMsg::SelectScreen { index: 2 });

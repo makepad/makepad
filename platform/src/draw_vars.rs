@@ -98,7 +98,9 @@ impl ScriptHook for DrawVars {
         DrawVars::prune_stale_object_shader_cache(vm);
 
         if !apply.is_default() && !apply.is_animate() {
-            #[cfg(not(target_arch = "wasm32"))]
+            // Pack keys include more than the shared shader functions. Record
+            // each applied key even when compilation reuses a cached program.
+            #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
             if vm.host.cx().draw_shaders.packs.is_recording() {
                 if let Some(io_self) = value.as_object() {
                     DrawVars::record_shader_pack_entry(vm, io_self);
@@ -1243,11 +1245,6 @@ impl DrawVars {
 
             #[cfg(not(makepad_precompiled_shaders))]
             {
-                // A web build recording a shader pack (a trace host's pass 1): every shader that
-                // compiles here, the shaders the run really compiles, whatever made them.
-                if vm.host.cx().draw_shaders.packs.is_recording() {
-                    DrawVars::record_shader_pack_entry(vm, io_self);
-                }
                 let Some((output, code)) = Self::compile_glsl(vm, io_self, const_table) else {
                     return;
                 };

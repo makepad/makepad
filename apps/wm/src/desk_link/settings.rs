@@ -10,6 +10,8 @@
 //! screen = primary        # the screen a viewer that names none gets: primary or a connector name
 //! kbps = 0                # stream rate, 0 = by picture size
 //! fps = 60                # the rate the encoder plans for
+//! chroma = 444           # 444 (every pixel's colour: sharp text; the default, for viewers whose
+//!                         # decoder takes it) or 420
 //! split = tiles           # a GPU with several encode engines: tiles (each picture in bands, one
 //!                         # per engine, at once: the lowest latency), interleave (whole pictures,
 //!                         # the engines in turn: the most pictures per second) or off
@@ -44,6 +46,7 @@ pub struct DeskLinkSettings {
     pub kbps: u32,
     pub fps: u32,
     pub split: Split,
+    pub full_chroma: bool,
     pub fleet_dir: Option<PathBuf>,
     /// The only peers served (`allow_peers`).
     pub allow_peers: Vec<IpAddr>,
@@ -60,6 +63,7 @@ impl Default for DeskLinkSettings {
             kbps: 0,
             fps: 60,
             split: Split::Tiles,
+            full_chroma: true,
             fleet_dir: None,
             allow_peers: Vec::new(),
             dump: None,
@@ -111,6 +115,11 @@ impl DeskLinkSettings {
                 }
                 "kbps" => value.parse().map(|k| s.kbps = k).is_ok(),
                 "fps" => value.parse::<u32>().ok().filter(|f| (1..=240).contains(f)).map(|f| s.fps = f).is_some(),
+                "chroma" => match value {
+                    "444" => { s.full_chroma = true; true }
+                    "420" => { s.full_chroma = false; true }
+                    _ => false,
+                },
                 "split" => match value {
                     "tiles" => { s.split = Split::Tiles; true }
                     "interleave" => { s.split = Split::Interleave; true }

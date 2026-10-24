@@ -35,6 +35,9 @@ fn failed(error: String) {
 
 /// Flag of the encode calls: this picture is a key frame (IDR, parameter sets first).
 pub const KEY: u32 = 1;
+/// Flag of `hal_stream_encoder_texture`: the same picture as the last one again at a
+/// near-lossless QP (a still desktop's refinement).
+pub const REFINE: u32 = 2;
 
 /// The text of this thread's last failed stream-encoder op (its first `out.len()` bytes); its
 /// length is returned.
@@ -55,12 +58,16 @@ pub fn hal_stream_encoder_engines() -> u32 {
     StreamEncoder::engines()
 }
 
+/// Flag of `hal_stream_encoder_open`: 4:4:4 (High 4:4:4 Predictive); the texture pictures hold
+/// full-resolution chroma (see `hal_stream_encoder_texture`).
+pub const FULL_CHROMA: u32 = 1;
+
 /// Opens an H.264 stream of `width` x `height` pictures (width % 4 == 0, height even) planned
-/// for `fps` at `kbps` (0: a rate for the size), encoded on engine `engine`. Its number, 0 when
-/// this machine cannot (the error says why).
+/// for `fps` at `kbps` (0: a rate for the size), encoded on engine `engine`, `flags`
+/// (`FULL_CHROMA`). Its number, 0 when this machine cannot (the error says why).
 #[makepad_relax_api::relax_api]
-pub fn hal_stream_encoder_open(width: u32, height: u32, fps: u32, kbps: u32, engine: u32) -> u64 {
-    match StreamEncoder::open(width, height, fps, kbps, engine as usize) {
+pub fn hal_stream_encoder_open(width: u32, height: u32, fps: u32, kbps: u32, engine: u32, flags: u32) -> u64 {
+    match StreamEncoder::open(width, height, fps, kbps, engine as usize, flags & FULL_CHROMA != 0) {
         Ok(encoder) => {
             let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             crate::lock(&ENCODERS).get_or_insert_with(Default::default).insert(id, Arc::new(Mutex::new(Open { encoder, out: Vec::new() })));
@@ -102,9 +109,10 @@ fn encode(encoder: u64, f: impl FnOnce(&mut StreamEncoder) -> Result<Vec<u8>, St
     }
 }
 
-/// Encodes the picture in the registered DMA-BUF image `handle` (`hal_dmabuf_register`: NV12
-/// packed into BGRA8 texels, `width/4` a row, the luma rows then the chroma rows of a
-/// `source_height` tall picture), from its row `y0` on (this encoder's height of them: a tile),
+/// Encodes the picture in the registered DMA-BUF image `handle` (`hal_dmabuf_register`: YUV
+/// packed into BGRA8 texels, `width/4` a row, the luma rows then the interleaved CbCr rows of a
+/// `source_height` tall picture: 4:2:0 half as many chroma rows; 4:4:4 one per luma row, each two
+/// texture rows), from its row `y0` on (this encoder's height of them: a tile),
 /// once the sync_file `sync_fd` has signalled (taken over; -1 when the picture's GPU work is
 /// complete). The bitstream's length, -1 when it failed.
 #[makepad_relax_api::relax_api]
@@ -123,7 +131,7 @@ pub fn hal_stream_encoder_texture(encoder: u64, handle: u64, source_height: u32,
         if !e.on_device(&image.dev) {
             return Err("the GPU device was replaced: the encoder must be opened again".into());
         }
-        e.encode_rows(image.image, size, source_height, y0, sync, flags & KEY != 0)
+        e.encode_rows(image.image, size, source_height, y0, sync, flags & KEY != 0, flags & REFINE != 0)
     })
 }
 

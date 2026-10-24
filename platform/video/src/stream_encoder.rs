@@ -45,6 +45,9 @@ pub struct VideoStreamEncoderOptions {
     /// control the platform offers — the live-session use case cares about
     /// per-frame turnaround, not offline quality.
     pub low_latency: bool,
+    /// 4:4:4 chroma (H.264 High 4:4:4 Predictive) instead of 4:2:0: sharp colour edges (text).
+    /// Linux's encoder, from texture pictures.
+    pub full_chroma: bool,
 }
 
 impl Default for VideoStreamEncoderOptions {
@@ -57,6 +60,7 @@ impl Default for VideoStreamEncoderOptions {
             bitrate_kbps: 4_000,
             keyint: 30,
             low_latency: true,
+            full_chroma: false,
         }
     }
 }
@@ -134,6 +138,10 @@ impl VideoStreamEncoder {
         if tile.y0 != 0 || tile.source_height != options.height || tile.engine != 0 {
             return Err(VideoFileError::new("tiled stream encoding is Linux's"));
         }
+        #[cfg(not(target_os = "linux"))]
+        if options.full_chroma {
+            return Err(VideoFileError::new("4:4:4 stream encoding is Linux's"));
+        }
         if options.width == 0 || options.height == 0 || options.width % 2 != 0 || options.height % 2 != 0 {
             return Err(VideoFileError::new(format!(
                 "invalid stream encoder frame size {}x{} (must be nonzero and even)",
@@ -160,6 +168,11 @@ impl VideoStreamEncoder {
 
     pub fn options(&self) -> &VideoStreamEncoderOptions {
         &self.options
+    }
+
+    /// The band of the pushed pictures this encoder takes.
+    pub fn tile(&self) -> StreamTile {
+        self.tile
     }
 
     /// Encodes one tightly packed RGB8 (`width*height*3` bytes) frame.
@@ -233,6 +246,14 @@ impl VideoStreamEncoder {
         return self.os.description();
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         return format!("{:?} {}x{} {} fps {} kbit/s", self.options.codec, self.options.width, self.options.height, self.options.fps, self.options.bitrate_kbps);
+    }
+
+    /// Makes the NEXT pushed shared-texture picture a refinement: the same picture as the last
+    /// one (a still desktop) again at a near-lossless QP, sharp text and edges at once (Linux; a
+    /// no-op elsewhere).
+    pub fn request_refinement(&mut self) {
+        #[cfg(target_os = "linux")]
+        self.os.request_refinement();
     }
 
     /// Forces the NEXT pushed frame to be a keyframe (SPS/PPS + IDR) — call

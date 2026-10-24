@@ -912,8 +912,11 @@ impl Model {
     /// A finished AI song (a local file the index knows): next in the queue,
     /// or playing now when `now` (nothing of the AI plays, or the last one
     /// is replaying its end while it waited).
-    pub fn ai_enqueue(&mut self, item: QueueItem, now: bool) {
-        self.queue.play_next(item);
+    /// `at`: its place among the hand-queued tracks (after the AI songs
+    /// queued before it, so they play in the order made).
+    pub fn ai_enqueue(&mut self, item: QueueItem, at: usize, now: bool) {
+        let at = if now { 0 } else { at.min(self.queue.user.len()) };
+        self.queue.user.insert(at, item);
         if now {
             self.ai_waiting = false;
             let next = self.queue.advance();
@@ -1091,6 +1094,11 @@ impl Model {
         if (self.queue.driving || self.queue.parked) && self.queue.upcoming_len() > 0 {
             let next = self.queue.advance();
             self.start(next);
+        } else if self.ai_hold {
+            // An AI song with none made after it yet: the next one starts
+            // the moment it is (ai_page.rs), the playing one goes on.
+            self.ai_waiting = true;
+            self.changed();
         } else {
             self.transport(Transport::Next);
         }

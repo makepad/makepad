@@ -141,6 +141,8 @@ pub mod intrinsics_mem {
         /// `T: Copy` for this instantiation (a constant per instance): std's Copy fast paths
         /// (real std specializes Clone-for-Copy into memcpy)
         pub fn is_copy<T>() -> bool;
+        /// Integer, float, bool or char: every byte belongs to the scalar value.
+        pub fn is_primitive_scalar<T>() -> bool;
         /// `T: Freeze` for this instantiation: no UnsafeCell outside indirection (rustc's auto
         /// trait)
         pub fn is_freeze<T>() -> bool;

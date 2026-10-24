@@ -39,16 +39,17 @@ struct Profile {
 }
 
 impl Profile {
-    fn new() -> Box<Self> {
+    /// High (4:2:0), or High 4:4:4 Predictive when `full_chroma`.
+    fn new(full_chroma: bool) -> Box<Self> {
         let mut p = Box::new(Profile {
-            h264: vk::VideoEncodeH264ProfileInfoKHR::default().std_profile_idc(vk::StdVideoH264ProfileIdc::HIGH),
+            h264: vk::VideoEncodeH264ProfileInfoKHR::default().std_profile_idc(if full_chroma { vk::StdVideoH264ProfileIdc::HIGH_444_PREDICTIVE } else { vk::StdVideoH264ProfileIdc::HIGH }),
             usage: vk::VideoEncodeUsageInfoKHR::default()
                 .video_usage_hints(vk::VideoEncodeUsageFlagsKHR::STREAMING)
                 .video_content_hints(vk::VideoEncodeContentFlagsKHR::DESKTOP)
                 .tuning_mode(vk::VideoEncodeTuningModeKHR::ULTRA_LOW_LATENCY),
             info: vk::VideoProfileInfoKHR::default()
                 .video_codec_operation(vk::VideoCodecOperationFlagsKHR::ENCODE_H264)
-                .chroma_subsampling(vk::VideoChromaSubsamplingFlagsKHR::TYPE_420)
+                .chroma_subsampling(if full_chroma { vk::VideoChromaSubsamplingFlagsKHR::TYPE_444 } else { vk::VideoChromaSubsamplingFlagsKHR::TYPE_420 })
                 .luma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
                 .chroma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8),
             list: vk::VideoProfileListInfoKHR::default(),
@@ -106,6 +107,8 @@ struct Encoder {
     quality_level: u32,
     fps: u32,
     max_bitrate: u64,
+    /// 4:4:4 (High 4:4:4 Predictive) instead of 4:2:0.
+    full_chroma: bool,
 }
 
 unsafe impl Send for Encoder {}
@@ -128,11 +131,20 @@ struct Picture {
     bitrate: Option<u32>,
     /// The rate control in effect when this picture's coding scope begins.
     current_kbps: Option<u32>,
+    /// A refinement: the same picture again at `REFINE_QP` (rate control off), near lossless.
+    refine: bool,
+    /// Rate control is off when this picture's coding scope begins (after a refinement).
+    rc_off_now: bool,
 }
 
-fn default_kbps(w: u32, h: u32, fps: u32) -> u32 {
-    // about 0.12 bits per pixel per frame: a sharp desktop at LAN rates
-    ((w as u64 * h as u64 * fps.max(1) as u64 * 12 / 100) / 1000).clamp(2_000, 400_000) as u32
+/// The QP of a refinement picture: near lossless (text and edges as they are).
+const REFINE_QP: i32 = 10;
+
+fn default_kbps(w: u32, h: u32, fps: u32, full_chroma: bool) -> u32 {
+    // quality first (a LAN): about 0.3 bits per pixel per frame for 4:2:0, 0.45 for 4:4:4 (twice
+    // the samples); the encoder's own maximum caps it
+    let per_mille: u64 = if full_chroma { 450 } else { 300 };
+    ((w as u64 * h as u64 * fps.max(1) as u64 * per_mille / 1000) / 1000).clamp(2_000, 1_000_000) as u32
 }
 
 /// H.264 level value -> StdVideoH264LevelIdc.
@@ -250,13 +262,15 @@ unsafe fn buffer(dev: &Device, size: u64, usage: vk::BufferUsageFlags, profile: 
 }
 
 impl Encoder {
-    /// Everything a stream of `size` needs, or why this GPU cannot encode it.
-    fn new(dev: Arc<Device>, size: [u32; 2], fps: u32) -> Result<Self, String> {
+    /// Everything a stream of `size` needs (4:4:4 when `full_chroma`), or why this GPU cannot
+    /// encode it.
+    fn new(dev: Arc<Device>, size: [u32; 2], fps: u32, full_chroma: bool) -> Result<Self, String> {
         let video = dev.video_encode.as_ref().ok_or("this GPU has no hardware H.264 encode queue")?;
         if size[0] == 0 || size[1] == 0 || size[0] % 4 != 0 || size[1] % 2 != 0 {
             return Err(format!("stream size {}x{}: the width must be a multiple of 4 and the height even", size[0], size[1]));
         }
-        let profile = Profile::new();
+        let profile = Profile::new(full_chroma);
+        let picture_format = if full_chroma { vk::Format::G8_B8R8_2PLANE_444_UNORM } else { vk::Format::G8_B8R8_2PLANE_420_UNORM };
         unsafe {
             // capabilities of the profile
             let mut h264_caps = vk::VideoEncodeH264CapabilitiesKHR::default();
@@ -290,9 +304,9 @@ impl Encoder {
                 let formats = dev.instance.get_physical_device_video_format_properties(dev.physical, &info).map_err(|e| format!("video formats: {e:?}"))?;
                 formats
                     .iter()
-                    .find(|f| f.format == vk::Format::G8_B8R8_2PLANE_420_UNORM && f.image_type == vk::ImageType::TYPE_2D)
+                    .find(|f| f.format == picture_format && f.image_type == vk::ImageType::TYPE_2D)
                     .map(|f| PictureFormat { format: f.format, flags: f.image_create_flags, tiling: f.image_tiling })
-                    .ok_or_else(|| format!("the encoder takes no NV12 pictures for {usage:?}"))
+                    .ok_or_else(|| format!("the encoder takes no {picture_format:?} pictures for {usage:?}"))
             };
             let src_format = format_of(vk::ImageUsageFlags::VIDEO_ENCODE_SRC_KHR | vk::ImageUsageFlags::TRANSFER_DST, &mut list)?;
             let mut list = profile.list;
@@ -334,6 +348,7 @@ impl Encoder {
                 quality_level: 0,
                 fps: fps.max(1),
                 max_bitrate: encode_caps.max_bitrate,
+                full_chroma,
             };
             for req in dev.raw.get_video_session_memory_requirements(session).map_err(error)? {
                 let ty = dev
@@ -358,20 +373,24 @@ impl Encoder {
             let level = level_for(size[0], size[1], fps);
             let level = level.min(std_level_value(h264_caps.max_level_idc).max(31));
             let params = StreamParams {
-                profile_idc: 100,
+                profile_idc: if full_chroma { 244 } else { 100 },
+                chroma_format_idc: if full_chroma { 3 } else { 1 },
                 level_idc: level,
                 width: size[0],
                 height: size[1],
                 log2_max_frame_num_minus4: (LOG2_MAX_FRAME_NUM - 4) as u8,
                 max_num_ref_frames: 1,
-                cabac: true,
+                // CAVLC for 4:4:4: NVIDIA's encoder fails the command buffer
+                // (ERROR_INITIALIZATION_FAILED) for High 4:4:4 Predictive with CABAC
+                cabac: !full_chroma,
                 transform_8x8: true,
                 pic_init_qp_minus26: 0,
                 chroma_qp_index_offset: 0,
                 full_range: false,
             };
             // the coded size may exceed the macroblock-rounded size (granularity): cropped
-            let (crop_right, crop_bottom) = ((coded[0] - size[0]) / 2, (coded[1] - size[1]) / 2);
+            let crop_unit = if full_chroma { 1 } else { 2 };
+            let (crop_right, crop_bottom) = ((coded[0] - size[0]) / crop_unit, (coded[1] - size[1]) / crop_unit);
             let vui = vk::StdVideoH264SequenceParameterSetVui {
                 flags: vk::StdVideoH264SpsVuiFlags::default()
                     .video_signal_type_present_flag(1)
@@ -393,9 +412,9 @@ impl Encoder {
                     .frame_mbs_only_flag(1)
                     .frame_cropping_flag((crop_right != 0 || crop_bottom != 0) as u32)
                     .vui_parameters_present_flag(1),
-                profile_idc: vk::StdVideoH264ProfileIdc::HIGH,
+                profile_idc: if full_chroma { vk::StdVideoH264ProfileIdc::HIGH_444_PREDICTIVE } else { vk::StdVideoH264ProfileIdc::HIGH },
                 level_idc: std_level(level),
-                chroma_format_idc: vk::StdVideoH264ChromaFormatIdc::TYPE_420,
+                chroma_format_idc: if full_chroma { vk::StdVideoH264ChromaFormatIdc::TYPE_444 } else { vk::StdVideoH264ChromaFormatIdc::TYPE_420 },
                 log2_max_frame_num_minus4: params.log2_max_frame_num_minus4,
                 pic_order_cnt_type: vk::StdVideoH264PocType::TYPE_2,
                 max_num_ref_frames: params.max_num_ref_frames,
@@ -489,7 +508,9 @@ impl Encoder {
                 enc.stamps = Some(dev.raw.create_query_pool(&vk::QueryPoolCreateInfo::default().query_type(vk::QueryType::TIMESTAMP).query_count(2), None).map_err(error)?);
             }
             let families = [dev.family, video.family];
-            let plane_bytes = size[0] as u64 * size[1] as u64 * 3 / 2;
+            // luma, then the interleaved chroma (4:2:0: a quarter of the samples; 4:4:4: all)
+            let luma = size[0] as u64 * size[1] as u64;
+            let plane_bytes = if full_chroma { luma * 3 } else { luma * 3 / 2 };
             let align = caps.min_bitstream_buffer_size_alignment.max(1);
             let bitstream_size = BITSTREAM_BYTES.div_ceil(align) * align;
             for cb in cbs {
@@ -562,7 +583,10 @@ impl Encoder {
         let mut h264_rc_now = vk::VideoEncodeH264RateControlInfoKHR::default().gop_frame_count(u32::MAX).idr_period(u32::MAX).temporal_layer_count(1);
         let mut rc_now = vk::VideoEncodeRateControlInfoKHR::default();
         let mut begin = vk::VideoBeginCodingInfoKHR::default().video_session(self.session).video_session_parameters(self.params).reference_slots(&begin_slots);
-        if let Some(layer) = layer_now.as_ref() {
+        if pic.rc_off_now {
+            rc_now = rc_now.rate_control_mode(vk::VideoEncodeRateControlModeFlagsKHR::DISABLED);
+            begin = begin.next_video_encode_rate_control_info_khr(&mut rc_now);
+        } else if let Some(layer) = layer_now.as_ref() {
             rc_now = rc_now
                 .rate_control_mode(vk::VideoEncodeRateControlModeFlagsKHR::VBR)
                 .layers(layer)
@@ -571,7 +595,12 @@ impl Encoder {
             begin = begin.next_video_encode_rate_control_info_khr(&mut rc_now).next_video_encode_h264_rate_control_info_khr(&mut h264_rc_now);
         }
         d.cmd_begin_video_coding(slot.cb, &begin);
-        if pic.reset || pic.bitrate.is_some() {
+        if pic.refine {
+            // rate control off for this picture: its slices carry REFINE_QP
+            let mut rc = vk::VideoEncodeRateControlInfoKHR::default().rate_control_mode(vk::VideoEncodeRateControlModeFlagsKHR::DISABLED);
+            let control = vk::VideoCodingControlInfoKHR::default().flags(vk::VideoCodingControlFlagsKHR::ENCODE_RATE_CONTROL).next_video_encode_rate_control_info_khr(&mut rc);
+            d.cmd_control_video_coding(slot.cb, &control);
+        } else if pic.reset || pic.bitrate.is_some() {
             let kbps = pic.bitrate.or(pic.current_kbps).unwrap_or(0);
             let mut layer_h264 = vk::VideoEncodeH264RateControlLayerInfoKHR::default();
             let layer = [self.rate_control_layer(kbps).next_video_encode_h264_rate_control_layer_info_khr(&mut layer_h264)];
@@ -616,7 +645,7 @@ impl Encoder {
             cabac_init_idc: vk::StdVideoH264CabacInitIdc::TYPE_0,
             ..Default::default()
         };
-        let slices = [vk::VideoEncodeH264NaluSliceInfoKHR::default().std_slice_header(&slice_header)];
+        let slices = [vk::VideoEncodeH264NaluSliceInfoKHR::default().std_slice_header(&slice_header).constant_qp(if pic.refine { REFINE_QP } else { 0 })];
         let mut h264_picture = vk::VideoEncodeH264PictureInfoKHR::default().nalu_slice_entries(&slices).std_picture_info(&std_picture);
         let setup_info = vk::StdVideoEncodeH264ReferenceInfo {
             primary_pic_type: std_picture.primary_pic_type,
@@ -788,6 +817,8 @@ pub(crate) struct StreamEncoder {
     pub info: String,
     /// GPU timestamps around the copy (graphics queue): where a picture's time goes.
     stamps: vk::QueryPool,
+    /// The session's rate control is off (the last picture was a refinement).
+    rc_off: bool,
     timing: Timing,
 }
 
@@ -830,8 +861,8 @@ impl Timing {
     }
 }
 
-fn default_kbps_for(w: u32, h: u32, fps: u32) -> u32 {
-    default_kbps(w, h, fps)
+fn default_kbps_for(w: u32, h: u32, fps: u32, full_chroma: bool) -> u32 {
+    default_kbps(w, h, fps, full_chroma)
 }
 
 impl StreamEncoder {
@@ -840,13 +871,14 @@ impl StreamEncoder {
         Device::existing().and_then(|d| d.video_encode.as_ref().map(|v| 1 + v.more.len() as u32)).unwrap_or(0)
     }
 
-    /// An encoder on engine `engine` (its queue; an engine the GPU does not have is engine 0).
-    pub fn open(width: u32, height: u32, fps: u32, kbps: u32, engine: usize) -> Result<StreamEncoder, String> {
+    /// An encoder on engine `engine` (its queue; an engine the GPU does not have is engine 0),
+    /// 4:4:4 when `full_chroma`.
+    pub fn open(width: u32, height: u32, fps: u32, kbps: u32, engine: usize, full_chroma: bool) -> Result<StreamEncoder, String> {
         let dev = Device::existing().ok_or("the HAL has no Vulkan device yet (no window rendered)")?;
         let fps = fps.clamp(1, 240);
-        let mut enc = Encoder::new(dev.clone(), [width, height], fps)?;
+        let mut enc = Encoder::new(dev.clone(), [width, height], fps, full_chroma)?;
         enc.queue_index = engine;
-        let kbps = if kbps == 0 { default_kbps_for(width, height, fps) } else { kbps };
+        let kbps = if kbps == 0 { default_kbps_for(width, height, fps, full_chroma) } else { kbps };
         unsafe {
             let d = &dev.raw;
             let copy_pool = d
@@ -857,7 +889,7 @@ impl StreamEncoder {
             let ready = d.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).map_err(error)?;
             let stamps = d.create_query_pool(&vk::QueryPoolCreateInfo::default().query_type(vk::QueryType::TIMESTAMP).query_count(2), None).map_err(error)?;
             let name = std::ffi::CStr::from_ptr(dev.properties.device_name.as_ptr()).to_string_lossy().into_owned();
-            let info = format!("H.264 High {width}x{height} (coded {}x{}) {fps} fps {kbps} kbit/s on {name}", enc.coded[0], enc.coded[1]);
+            let info = format!("H.264 High{} {width}x{height} (coded {}x{}) {fps} fps {kbps} kbit/s on {name}", if full_chroma { " 4:4:4" } else { "" }, enc.coded[0], enc.coded[1]);
             Ok(StreamEncoder {
                 enc,
                 copy_pool,
@@ -873,6 +905,7 @@ impl StreamEncoder {
                 applied_kbps: None,
                 info,
                 stamps,
+                rc_off: false,
                 timing: Timing::default(),
             })
         }
@@ -885,7 +918,7 @@ impl StreamEncoder {
     }
 
     /// The picture's place in the stream (an IDR when `key` or the first).
-    fn next_picture(&mut self, key: bool) -> Picture {
+    fn next_picture(&mut self, key: bool, refine: bool) -> Picture {
         let idr = key || self.last.is_none();
         if idr {
             self.frame_num = 0;
@@ -905,10 +938,15 @@ impl StreamEncoder {
             setup,
             reference: if idr { None } else { self.last },
             reset: self.applied_kbps.is_none(),
-            bitrate: (self.applied_kbps != Some(self.kbps)).then_some(self.kbps),
+            // after a refinement the stream's rate control is set again
+            bitrate: (self.applied_kbps != Some(self.kbps) || self.rc_off).then_some(self.kbps),
             current_kbps: self.applied_kbps,
+            // a refinement needs a stream (not the first picture, not a key frame)
+            refine: refine && !idr && self.applied_kbps.is_some(),
+            rc_off_now: self.rc_off,
         };
         self.applied_kbps = Some(self.kbps);
+        self.rc_off = pic.refine;
         self.last = Some((setup, self.frame_num, poc));
         // frame_num wraps at MaxFrameNum; POC type 2 follows it (2 x FrameNumOffset + frame_num)
         self.frame_num = (self.frame_num + 1) % (1 << LOG2_MAX_FRAME_NUM);
@@ -921,6 +959,7 @@ impl StreamEncoder {
     fn failed(&mut self) {
         self.last = None;
         self.applied_kbps = None;
+        self.rc_off = false;
     }
 
     unsafe fn begin_copy(&self) -> Result<(), String> {
@@ -967,7 +1006,7 @@ impl StreamEncoder {
                 vk::BufferImageCopy::default()
                     .buffer_offset(w as u64 * h as u64)
                     .image_subresource(plane(vk::ImageAspectFlags::PLANE_1))
-                    .image_extent(vk::Extent3D { width: w / 2, height: h / 2, depth: 1 }),
+                    .image_extent(if self.enc.full_chroma { vk::Extent3D { width: w, height: h, depth: 1 } } else { vk::Extent3D { width: w / 2, height: h / 2, depth: 1 } }),
             ],
         );
         let to_src = vk::ImageMemoryBarrier::default()
@@ -1003,6 +1042,12 @@ impl StreamEncoder {
         }
         let out = self.enc.encode(&pic, self.copied);
         if out.is_err() {
+            // the copy was submitted (it signals `copied`, which nothing waits for now): it is done
+            // before anything it uses is reused or destroyed
+            {
+                let _queue = lock(&dev.queue_lock);
+                let _ = d.queue_wait_idle(dev.queue);
+            }
             self.failed();
         }
         out
@@ -1018,12 +1063,17 @@ impl StreamEncoder {
     /// `source_height` tall packed NV12 picture: its rows from `y0` on (this encoder's height of
     /// them: a tile of it, or all of it), once its producer's `sync` (a sync_file; `None` when its
     /// work is known to be complete) has signalled.
-    pub fn encode_rows(&mut self, image: vk::Image, image_size: [u32; 2], source_height: u32, y0: u32, sync: Option<OwnedFd>, key: bool) -> Result<Vec<u8>, String> {
+    /// `refine`: the same picture as the last one again at a near-lossless QP (a still desktop).
+    pub fn encode_rows(&mut self, image: vk::Image, image_size: [u32; 2], source_height: u32, y0: u32, sync: Option<OwnedFd>, key: bool, refine: bool) -> Result<Vec<u8>, String> {
         let [w, h] = self.enc.size;
-        if image_size[0] * 4 < w || image_size[1] < source_height + source_height / 2 || y0 + h > source_height || y0 % 2 != 0 {
+        let full = self.enc.full_chroma;
+        // the packed picture: luma rows, then chroma rows (4:2:0: half as many, each w bytes; 4:4:4:
+        // one per luma row, each 2w bytes = two texture rows)
+        let chroma_rows = if full { source_height * 2 } else { source_height / 2 };
+        if image_size[0] * 4 < w || image_size[1] < source_height + chroma_rows || y0 + h > source_height || y0 % 2 != 0 {
             return Err(format!("rows {y0}.. ({h}) of a {source_height} tall NV12 picture in a {}x{} texture: out of it", image_size[0], image_size[1]));
         }
-        let pic = self.next_picture(key);
+        let pic = self.next_picture(key, refine);
         let started = crate::clock_ns();
         // the frame that rendered the picture still running on the GPU when this is called
         let frame_pending = sync.as_ref().is_some_and(|fd| {
@@ -1086,8 +1136,8 @@ impl StreamEncoder {
                     vk::BufferImageCopy::default()
                         .buffer_offset(w as u64 * h as u64)
                         .image_subresource(layer)
-                        .image_offset(vk::Offset3D { x: 0, y: (source_height + y0 / 2) as i32, z: 0 })
-                        .image_extent(vk::Extent3D { width: w / 4, height: h / 2, depth: 1 }),
+                        .image_offset(vk::Offset3D { x: 0, y: (source_height + if full { y0 * 2 } else { y0 / 2 }) as i32, z: 0 })
+                        .image_extent(vk::Extent3D { width: w / 4, height: if full { h * 2 } else { h / 2 }, depth: 1 }),
                 ],
             );
             let release = vk::ImageMemoryBarrier::default()
@@ -1117,6 +1167,9 @@ impl StreamEncoder {
     /// A picture from tightly packed NV12 bytes.
     pub fn encode_nv12(&mut self, nv12: &[u8], key: bool) -> Result<Vec<u8>, String> {
         let [w, h] = self.enc.size;
+        if self.enc.full_chroma {
+            return Err("a 4:4:4 stream takes texture pictures only".into());
+        }
         let bytes = w as usize * h as usize * 3 / 2;
         if nv12.len() != bytes {
             return Err(format!("NV12 picture of {} bytes, a {w}x{h} one has {bytes}", nv12.len()));
@@ -1134,7 +1187,7 @@ impl StreamEncoder {
             if !coherent {
                 self.enc.dev.raw.flush_mapped_memory_ranges(&[vk::MappedMemoryRange::default().memory(mem).size(vk::WHOLE_SIZE)]).map_err(error)?;
             }
-            let pic = self.next_picture(key);
+            let pic = self.next_picture(key, false);
             if let Err(e) = self.begin_copy() {
                 self.failed();
                 return Err(e);

@@ -247,6 +247,9 @@ pub struct Stats {
     /// (slot id, absolute module offset, encoded body length), including final
     /// relocation encodings. Folded aliases own no bytes: (slot, 0, 0).
     pub fn_ranges: Vec<(u32, usize, usize)>,
+    /// Folded slots' shared implementation ranges. These bytes are already
+    /// accounted for by the canonical body; aliases do not own another copy.
+    pub fn_alias_ranges: Vec<(u32, usize, usize)>,
 }
 
 pub struct Output {
@@ -807,6 +810,12 @@ impl<'a> Module<'a> {
             if canon[ni + k] != ni + k { return (*id, 0, 0); }
             let (offset, len) = body_ranges[ni + k];
             (*id, code_start + offset, len)
+        }).collect();
+        st.fn_alias_ranges = funcs.iter().enumerate().filter_map(|(k, (id, _))| {
+            let canonical = canon[ni + k];
+            if canonical == ni + k { return None; }
+            let (offset, len) = body_ranges[canonical];
+            Some((*id, code_start + offset, len))
         }).collect();
         sz(&mut st, &out, b0, 10);
         if !segs.is_empty() {

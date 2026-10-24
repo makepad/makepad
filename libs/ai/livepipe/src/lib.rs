@@ -604,7 +604,7 @@ impl WireEncoder {
             fps,
             bitrate_kbps: 2500,
             keyint: 30,
-            low_latency: true,
+            low_latency: true, full_chroma: false,
         })
         .map_err(|e| format!("{e:?}"))?;
         Ok(WireEncoder { enc, width, height, fps, pts: 0 })

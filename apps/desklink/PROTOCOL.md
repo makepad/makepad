@@ -1,4 +1,4 @@
-# Desk Link protocol, version 2
+# Desk Link protocol, version 3
 
 Desk Link is how a viewer (this app) sees and drives a desktop (the window manager's
 `desk_link` server, `apps/wm/src/desk_link/`). It runs between machines on one LAN only: no
@@ -50,11 +50,12 @@ Fixed-size fields are little-endian. `str` and `bytes` are `u32 LE length` + byt
 
 | type | name | payload |
 |---|---|---|
-| 1 | Hello | `version u16, name str, authorization str, screen i32 (-1 = the desktop's default), paused bool` |
+| 1 | Hello | `version u16, name str, authorization str, screen i32 (-1 = the desktop's default), paused bool, caps u32` (1 = the viewer's decoder takes H.264 High 4:4:4 Predictive) |
 | 2 | Pause | — no pictures for this session; pings continue |
 | 3 | Resume | — pictures again, starting with a key frame |
 | 4 | SelectScreen | `index u32` (into `Welcome.screens`) |
 | 5 | RequestKeyframe | — (sent by the viewer after a decode error) |
+| 6 | SetSplit | `split u8` (0 one engine, 1 tiles, 2 interleave: how a desktop with several encode engines shares them, for every viewer) |
 | 10 | Key | `down bool, keycode u32 (makepad KeyCode index), mods u8 (1 shift, 2 control, 4 alt, 8 logo)` |
 | 11 | Pointer | `x u16, y u16`: position over the stream picture, 0..=65535 on each axis |
 | 12 | Button | `down bool, button u8 (0 left, 1 right, 2 middle, 3 back, 4 forward)` |
@@ -87,8 +88,10 @@ example, no `/dev/uinput` access); `input_note` says why.
 
 ## Video
 
-- **Codec.** H.264 High, 4:2:0 8-bit, BT.709 limited range (written in the SPS VUI), Annex-B access
-  units (one picture each).
+- **Codec.** H.264 High, 4:2:0 8-bit, or High 4:4:4 Predictive (4:4:4 8-bit, CAVLC) when the
+  desktop's settings ask for it (`chroma = 444`, the default) and every watching viewer's Hello
+  says it decodes it; BT.709 limited range (written in the SPS VUI), Annex-B access units (one
+  picture each).
   - Every key frame (IDR) starts with its SPS and PPS.
   - There are no B frames. Every P frame references the picture before it, and output order is
   decode order (POC type 2).

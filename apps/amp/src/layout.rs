@@ -203,6 +203,11 @@ pub struct HwStage {
     eq_open: bool,
     #[rust]
     eq_opened_at: Option<f64>,
+    /// The AI music page is open (a tab page of the host only; ai_page.rs).
+    #[rust]
+    ai_open: bool,
+    #[rust]
+    ai_opened_at: Option<f64>,
     /// The panels host (the `tracks` slot): the pages its tab keys offer
     /// and the page it shows (`tracks`, `eq`), and since when,
     /// for the page's slide in.
@@ -284,10 +289,11 @@ impl Widget for HwStage {
                 tab_pages.push(panel);
             }
         }
+        tab_pages.push("ai");
         // The page: the panel opened last, else the track list.
         let mut page = "tracks";
         let mut latest = f64::MIN;
-        for (panel, open, at) in [("eq", self.eq_open, self.eq_opened_at)] {
+        for (panel, open, at) in [("eq", self.eq_open, self.eq_opened_at), ("ai", self.ai_open, self.ai_opened_at)] {
             if open && tab_pages.contains(&panel) && at.unwrap_or(0.0) >= latest {
                 latest = at.unwrap_or(0.0);
                 page = panel;
@@ -417,6 +423,17 @@ impl HwStageRef {
             if inner.eq_open != open {
                 inner.eq_open = open;
                 inner.eq_opened_at = open.then(|| cx.seconds_since_app_start());
+                inner.view.redraw(cx);
+            }
+        }
+    }
+
+    /// Open or close the AI music page (a tab page of the host).
+    pub fn set_ai_open(&self, cx: &mut Cx, open: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            if inner.ai_open != open {
+                inner.ai_open = open;
+                inner.ai_opened_at = open.then(|| cx.seconds_since_app_start());
                 inner.view.redraw(cx);
             }
         }

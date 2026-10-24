@@ -21,6 +21,7 @@ pub const EXT_IMAGE_DRM_FORMAT_MODIFIER_NAME: &CStr = c"VK_EXT_image_drm_format_
 pub const EXT_MEMORY_BUDGET_NAME: &CStr = c"VK_EXT_memory_budget";
 pub const EXT_PCI_BUS_INFO_NAME: &CStr = c"VK_EXT_pci_bus_info";
 pub const EXT_QUEUE_FAMILY_FOREIGN_NAME: &CStr = c"VK_EXT_queue_family_foreign";
+pub const EXT_YCBCR_2PLANE_444_FORMATS_NAME: &CStr = c"VK_EXT_ycbcr_2plane_444_formats";
 pub const FALSE: u32 = 0;
 pub const KHR_ANDROID_SURFACE_NAME: &CStr = c"VK_KHR_android_surface";
 pub const KHR_DISPLAY_NAME: &CStr = c"VK_KHR_display";
@@ -499,6 +500,7 @@ impl StdVideoH264ChromaFormatIdc {
     pub const fn from_raw(value: i32) -> Self { Self(value) }
     pub const fn as_raw(self) -> i32 { self.0 }
     pub const TYPE_420: Self = Self(1 as i32);
+    pub const TYPE_444: Self = Self(3 as i32);
 }
 impl core::fmt::Debug for StdVideoH264ChromaFormatIdc { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
 match self.0 {
@@ -775,6 +777,7 @@ impl StdVideoH264ProfileIdc {
     pub const fn from_raw(value: i32) -> Self { Self(value) }
     pub const fn as_raw(self) -> i32 { self.0 }
     pub const HIGH: Self = Self(100 as i32);
+    pub const HIGH_444_PREDICTIVE: Self = Self(244 as i32);
     pub const MAIN: Self = Self(77 as i32);
 }
 impl core::fmt::Debug for StdVideoH264ProfileIdc { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -3380,6 +3383,8 @@ impl DeviceCreateInfo {
     pub fn next_physical_device_vulkan12_features(mut self, next: &mut PhysicalDeviceVulkan12Features) -> Self { unsafe { append_extension((next as *mut PhysicalDeviceVulkan12Features).cast(), self.p_next.cast()); } self.p_next = next as *mut PhysicalDeviceVulkan12Features as *const core::ffi::c_void; self }
     #[inline]
     pub fn next_physical_device_vulkan13_features(mut self, next: &mut PhysicalDeviceVulkan13Features) -> Self { unsafe { append_extension((next as *mut PhysicalDeviceVulkan13Features).cast(), self.p_next.cast()); } self.p_next = next as *mut PhysicalDeviceVulkan13Features as *const core::ffi::c_void; self }
+    #[inline]
+    pub fn next_physical_device_ycbcr2_plane444_formats_features_ext(mut self, next: &mut PhysicalDeviceYcbcr2Plane444FormatsFeaturesEXT) -> Self { unsafe { append_extension((next as *mut PhysicalDeviceYcbcr2Plane444FormatsFeaturesEXT).cast(), self.p_next.cast()); } self.p_next = next as *mut PhysicalDeviceYcbcr2Plane444FormatsFeaturesEXT as *const core::ffi::c_void; self }
 }
 #[repr(transparent)]
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -4344,6 +4349,7 @@ impl Format {
     pub const D32_SFLOAT: Self = Self(126 as i32);
     pub const D32_SFLOAT_S8_UINT: Self = Self(130 as i32);
     pub const G8_B8R8_2PLANE_420_UNORM: Self = Self(1000156003 as i32);
+    pub const G8_B8R8_2PLANE_444_UNORM: Self = Self(1000330000 as i32);
     pub const G8_B8_R8_3PLANE_420_UNORM: Self = Self(1000156002 as i32);
     pub const R16G16B16A16_SFLOAT: Self = Self(97 as i32);
     pub const R16G16_SFLOAT: Self = Self(83 as i32);
@@ -6704,6 +6710,8 @@ impl PhysicalDeviceFeatures2 {
     pub fn next_physical_device_vulkan12_features(mut self, next: &mut PhysicalDeviceVulkan12Features) -> Self { unsafe { append_extension((next as *mut PhysicalDeviceVulkan12Features).cast(), self.p_next.cast()); } self.p_next = next as *mut PhysicalDeviceVulkan12Features as *mut core::ffi::c_void; self }
     #[inline]
     pub fn next_physical_device_vulkan13_features(mut self, next: &mut PhysicalDeviceVulkan13Features) -> Self { unsafe { append_extension((next as *mut PhysicalDeviceVulkan13Features).cast(), self.p_next.cast()); } self.p_next = next as *mut PhysicalDeviceVulkan13Features as *mut core::ffi::c_void; self }
+    #[inline]
+    pub fn next_physical_device_ycbcr2_plane444_formats_features_ext(mut self, next: &mut PhysicalDeviceYcbcr2Plane444FormatsFeaturesEXT) -> Self { unsafe { append_extension((next as *mut PhysicalDeviceYcbcr2Plane444FormatsFeaturesEXT).cast(), self.p_next.cast()); } self.p_next = next as *mut PhysicalDeviceYcbcr2Plane444FormatsFeaturesEXT as *mut core::ffi::c_void; self }
 }
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -8177,6 +8185,24 @@ impl PhysicalDeviceVulkan13Properties {
     pub fn uniform_texel_buffer_offset_single_texel_alignment(mut self, value: bool) -> Self { self.uniform_texel_buffer_offset_single_texel_alignment = value as u32; self }
     #[inline]
     pub fn max_buffer_size(mut self, value: DeviceSize) -> Self { self.max_buffer_size = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct PhysicalDeviceYcbcr2Plane444FormatsFeaturesEXT {
+    pub s_type: StructureType,
+    pub p_next: *mut core::ffi::c_void,
+    pub ycbcr2plane444_formats: Bool32,
+}
+impl Default for PhysicalDeviceYcbcr2Plane444FormatsFeaturesEXT { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000330000);
+    value
+} }
+unsafe impl Send for PhysicalDeviceYcbcr2Plane444FormatsFeaturesEXT {}
+unsafe impl Sync for PhysicalDeviceYcbcr2Plane444FormatsFeaturesEXT {}
+impl PhysicalDeviceYcbcr2Plane444FormatsFeaturesEXT {
+    #[inline]
+    pub fn ycbcr2plane444_formats(mut self, value: bool) -> Self { self.ycbcr2plane444_formats = value as u32; self }
 }
 #[repr(transparent)]
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -10948,6 +10974,7 @@ impl StructureType {
     pub const PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES: Self = Self(52 as i32);
     pub const PHYSICAL_DEVICE_VULKAN_1_3_FEATURES: Self = Self(53 as i32);
     pub const PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES: Self = Self(54 as i32);
+    pub const PHYSICAL_DEVICE_YCBCR_2_PLANE_444_FORMATS_FEATURES_EXT: Self = Self(1000330000 as i32);
     pub const PIPELINE_CACHE_CREATE_INFO: Self = Self(17 as i32);
     pub const PIPELINE_COLOR_BLEND_STATE_CREATE_INFO: Self = Self(26 as i32);
     pub const PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO: Self = Self(25 as i32);
@@ -11122,6 +11149,7 @@ match self.0 {
     1000299008 => f.write_str("VIDEO_ENCODE_QUALITY_LEVEL_INFO_KHR"),
     1000299009 => f.write_str("VIDEO_ENCODE_SESSION_PARAMETERS_GET_INFO_KHR"),
     1000299010 => f.write_str("VIDEO_ENCODE_SESSION_PARAMETERS_FEEDBACK_INFO_KHR"),
+    1000330000 => f.write_str("PHYSICAL_DEVICE_YCBCR_2_PLANE_444_FORMATS_FEATURES_EXT"),
     1000506000 => f.write_str("PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR"),
     1000506001 => f.write_str("COOPERATIVE_MATRIX_PROPERTIES_KHR"),
     1000506002 => f.write_str("PHYSICAL_DEVICE_COOPERATIVE_MATRIX_PROPERTIES_KHR"),
@@ -11902,6 +11930,7 @@ impl VideoChromaSubsamplingFlagsKHR {
     pub const fn from_raw(value: u32) -> Self { Self(value) }
     pub const fn as_raw(self) -> u32 { self.0 }
     pub const TYPE_420: Self = Self(2 as u32);
+    pub const TYPE_444: Self = Self(8 as u32);
     #[inline]
     pub const fn from_bits_retain(value: u32) -> Self { Self(value) }
     #[inline]

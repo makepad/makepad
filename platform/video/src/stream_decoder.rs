@@ -34,6 +34,8 @@ pub enum PicturePlane {
 #[derive(Clone)]
 pub struct DecodedPicture {
     pub handle: u64,
+    /// 4:4:4: the chroma plane is full size (else half each way).
+    pub full_chroma: bool,
     pub(crate) _keep: std::sync::Arc<dyn Send + Sync>,
 }
 
@@ -111,6 +113,15 @@ impl VideoStreamDecoder {
             let _ = (annex_b, pts_100ns);
             return Err(VideoFileError::new(UNSUPPORTED));
         }
+    }
+
+    /// Whether pictures decode on a hardware decoder (None: not known yet, or not reported on
+    /// this platform).
+    pub fn hardware(&self) -> Option<bool> {
+        #[cfg(target_vendor = "apple")]
+        return self.os.hardware();
+        #[cfg(not(target_vendor = "apple"))]
+        return None;
     }
 
     /// Drains any frames still buffered inside the decoder (call at stream

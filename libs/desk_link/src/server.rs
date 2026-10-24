@@ -85,7 +85,7 @@ pub struct ServerConfig {
 
 /// What the sessions tell the UI thread.
 pub enum ToUi {
-    Opened { session: u32, peer: String, client: String, name: String, screen: i32, paused: bool, out: Sender<Out>, backlog: Arc<AtomicUsize> },
+    Opened { session: u32, peer: String, client: String, name: String, screen: i32, paused: bool, caps: u32, out: Sender<Out>, backlog: Arc<AtomicUsize> },
     Control { session: u32, control: Control },
     Closed { session: u32, reason: String },
 }
@@ -407,7 +407,7 @@ impl SessionCtx {
             stream.shutdown();
             Err(format!("refused: {reason}"))
         };
-        let Ok(ClientMsg::Hello { version, name, authorization, screen, paused }) = ClientMsg::decode(ty, &payload) else {
+        let Ok(ClientMsg::Hello { version, name, authorization, screen, paused, caps }) = ClientMsg::decode(ty, &payload) else {
             return refuse(&mut stream, "the first message must be a hello".into());
         };
         if version != proto::VERSION {
@@ -450,6 +450,7 @@ impl SessionCtx {
             client: identity.client_id.clone(),
             name,
             screen,
+            caps,
             paused,
             out: out_tx,
             backlog: backlog.clone(),

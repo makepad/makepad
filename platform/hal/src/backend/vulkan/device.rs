@@ -245,6 +245,15 @@ impl Device {
                 .filter(|f| *f != family)
         } else { None };
         if video_family.is_some() { wanted.extend(video_names); }
+        // 4:4:4 encode source images (G8_B8R8_2PLANE_444): an extension below Vulkan 1.3, and a
+        // feature
+        let mut plane444 = vk::PhysicalDeviceYcbcr2Plane444FormatsFeaturesEXT::default();
+        if video_family.is_some() && supported(vk::EXT_YCBCR_2PLANE_444_FORMATS_NAME) {
+            let mut query = vk::PhysicalDeviceFeatures2::default().next_physical_device_ycbcr2_plane444_formats_features_ext(&mut plane444);
+            unsafe { instance.get_physical_device_features2(physical, &mut query); }
+            plane444.p_next = std::ptr::null_mut();
+            if plane444.ycbcr2plane444_formats != 0 { wanted.push(vk::EXT_YCBCR_2PLANE_444_FORMATS_NAME); }
+        }
         wanted.sort_by(|a, b| a.to_bytes().cmp(b.to_bytes()));
         wanted.dedup();
         if log_enabled() { eprintln!("[hal-vulkan] vkCreateDevice device={name:?} queue_family={family} extensions={wanted:?}"); }
@@ -271,6 +280,7 @@ impl Device {
         if timeline.timeline_semaphore != 0 { create = create.next_physical_device_timeline_semaphore_features(&mut timeline); }
         if pacing { create = create.next_physical_device_present_id_features_khr(&mut present_id)
             .next_physical_device_present_wait_features_khr(&mut present_wait); }
+        if plane444.ycbcr2plane444_formats != 0 { create = create.next_physical_device_ycbcr2_plane444_formats_features_ext(&mut plane444); }
         // A GPU full of other work (an AI model) has no room for a device yet: the app waits
         // for room -- the desktop's owner asks the hub to yield on the sustained shortage --
         // instead of falling back to another renderer. It never fails for want of memory.

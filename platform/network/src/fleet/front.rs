@@ -368,7 +368,11 @@ fn serve(config: &FrontConfig, tcp: TcpStream, peer: SocketAddr) -> Result<(), R
         Ok(c) => c,
         Err(e) => {
             respond(&mut tls, 401, "credential refused");
-            return Err(Refusal::Auth(e.to_string()));
+            // Who it claims to be (the id and role are not secret; the proof
+            // is never logged), so a refusal names its client.
+            let claimed = authorization.trim().strip_prefix("MKC2 ").map(|v| v.split('.').take(2).collect::<Vec<_>>().join(".")).unwrap_or_default();
+            let claimed: String = claimed.chars().filter(|c| c.is_ascii_graphic()).take(80).collect();
+            return Err(Refusal::Auth(format!("{e} (claims {claimed:?}, {} {})", parsed.method, parsed.path.chars().take(80).collect::<String>())));
         }
     };
     if !(config.policy)(cred.role, &parsed.method, &parsed.path) {

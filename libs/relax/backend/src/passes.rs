@@ -386,24 +386,32 @@ pub fn lower_coverage(f: &Func) -> Option<Func> {
     for bi in 0..out.blocks.len() {
         let mut k = 0;
         while k < out.blocks[bi].insts.len() {
-            let Inst::Coverage { word, mask } = out.blocks[bi].insts[k] else {
+            let Inst::Coverage { word, mask, disabled } = out.blocks[bi].insts[k] else {
                 k += 1;
                 continue;
             };
             let addr = out.vreg(Cls::I);
             let bits = out.vreg(Cls::I);
             let old = out.vreg(Cls::I);
+            let gate_addr = out.vreg(Cls::I);
+            let gate = out.vreg(Cls::I);
+            let enabled = out.vreg(Cls::I);
+            let active_bits = out.vreg(Cls::I);
             let b = &mut out.blocks[bi];
             if b.pos.len() == b.insts.len() {
                 let pos = b.pos[k];
-                b.pos.splice(k..=k, [pos; 3]);
+                b.pos.splice(k..=k, [pos; 7]);
             }
             b.insts.splice(k..=k, [
                 Inst::Iconst(addr, word as i64),
                 Inst::Iconst(bits, mask as i64),
-                Inst::AtomicRmw(RmwOp::Or, Mem::Int(8, false), AtomOrd::Relaxed, old, addr, bits),
+                Inst::TlsAddr(gate_addr, disabled),
+                Inst::Load(Mem::Int(8, false), gate, gate_addr, 0),
+                Inst::INot(U64, enabled, gate),
+                Inst::IBin(IOp::And, U64, active_bits, bits, enabled),
+                Inst::AtomicRmw(RmwOp::Or, Mem::Int(8, false), AtomOrd::Relaxed, old, addr, active_bits),
             ]);
-            k += 3;
+            k += 7;
         }
     }
     Some(out)
@@ -7521,6 +7529,8 @@ pub fn rotate_loops(f: &mut Func) {
     // latches ending in a branch whose false edge goes to the header get a new block with the
     // header's copy there (laid out after the latch below)
     let mut added = false;
+    // the blocks added below (index n + k): the (latch, header) edge each one sits on
+    let mut made: Vec<(u32, u32)> = Vec::new();
     for l in 0..n {
         let (h, branch_latch) = match f.blocks[l].term {
             Term::Jump(h) if idom[l] != u32::MAX && dominates(h, l as u32) => (h as usize, false),
@@ -7537,9 +7547,16 @@ pub fn rotate_loops(f: &mut Func) {
         // loop has two entries and is no natural loop any more -- the loop splitter, the
         // cold-call split and loop depths no longer see it
         let Term::Branch(_, ht, he) = hb.term else { unreachable!() };
-        // (a header whose own branch an earlier latch rotation sent to a new block is left alone)
+        // (a header whose own branch an earlier latch rotation sent to a new block: that block
+        // sits on the edge latch -> outer header, inside a loop when both ends are)
+        let inside = |m: &[bool], x: u32| -> bool {
+            match (x as usize).checked_sub(n) {
+                None => m[x as usize],
+                Some(k) => m[made[k].0 as usize] && m[made[k].1 as usize],
+            }
+        };
         match loops.iter().find(|(x, _)| *x as usize == h) {
-            Some((_, m)) if (ht as usize) < n && (he as usize) < n && m[ht as usize] != m[he as usize] => {}
+            Some((_, m)) if inside(m, ht) != inside(m, he) => {}
             _ if crate::stats::opt_env_off("-rotexit") => {}
             _ => continue,
         }
@@ -7605,6 +7622,7 @@ pub fn rotate_loops(f: &mut Func) {
         if branch_latch {
             let nb = f.blocks.len() as u32;
             f.blocks.push(Block { insts, pos: hb.pos.clone(), term, term_pos: hb.term_pos, count: hb.count });
+            made.push((l as u32, h as u32));
             if let Term::Branch(_, _, ref mut e) = f.blocks[l].term {
                 *e = nb;
             }
@@ -7843,4 +7861,100 @@ pub fn slot_scan_inner(f: &Func, terminal_calls: bool) -> SlotScan {
 pub fn set_sroa_nocapture(q: Option<Box<dyn Fn(&Callee, usize) -> bool>>) {
     // (try_with: the JIT compiles on threads whose thread-locals are being destroyed)
     let _ = SROA_NOCAP.try_with(|c| *c.borrow_mut() = q);
+}
+
+/// A branch on `x & y` or `x | y` of two compares of its block, each read only there, becomes a
+/// branch on `x` and, in a new block, a branch on `y` (LLVM CodeGenPrepare splitBranchCondition):
+/// two compare-and-branch pairs instead of materialising both flags and combining them
+/// (`setbe; movzx; setbe; movzx; and; test; je`, `cset; cset; and; cbz`). The compares have no
+/// effects, so evaluating `y` only when `x` does not decide is the same branch. Version guards
+/// (`lo <= hi & hi <= len`) and selects folded into `&` of conditions take this shape.
+/// MAKEPAD_RUN_OPT=-splitbr off. Returns whether anything changed.
+pub fn split_branch_conditions(options: &relax_session::Options, f: &mut Func) -> bool {
+    if crate::stats::opt_off(options, "-splitbr") {
+        return false;
+    }
+    let nv = f.vregs.len();
+    let (mut nuse, mut ndef) = (vec![0u32; nv], vec![0u32; nv]);
+    let mut tu: Vec<VReg> = Vec::new();
+    for b in &f.blocks {
+        for i in &b.insts {
+            for_uses(i, |u| nuse[u.0 as usize] += 1);
+            for_defs(i, |d| ndef[d.0 as usize] += 1);
+        }
+        tu.clear();
+        term_uses(&b.term, &mut tu);
+        for u in &tu {
+            nuse[u.0 as usize] += 1;
+        }
+    }
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    let once = |v: VReg| nuse[v.0 as usize] == 1 && ndef[v.0 as usize] == 1;
+    let is_cmp = |i: &Inst, v: VReg| matches!(*i, Inst::ICmp(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) if d == v);
+    let mut changed = false;
+    for bi in 0..f.blocks.len() {
+        let Term::Branch(c, t, e) = f.blocks[bi].term else { continue };
+        if t == e || !once(c) {
+            continue;
+        }
+        let b = &f.blocks[bi];
+        let Some(k) = b.insts.iter().rposition(|i| { let mut d = false; for_defs(i, |x| d |= x == c); d }) else { continue };
+        let (or, x, y) = match b.insts[k] {
+            Inst::IBin(IOp::And, _, _, x, y) => (false, x, y),
+            Inst::IBin(IOp::Or, _, _, x, y) => (true, x, y),
+            _ => continue,
+        };
+        if x == y || !once(x) || !once(y) {
+            continue;
+        }
+        let (Some(px), Some(py)) = (b.insts[..k].iter().position(|i| is_cmp(i, x)), b.insts[..k].iter().position(|i| is_cmp(i, y))) else { continue };
+        // y's compare moves to the new block: its operands must keep their values from py to
+        // the end of the block (and x's compare must not read y)
+        let mut ops: Vec<VReg> = Vec::new();
+        for_uses(&b.insts[py], |u| ops.push(u));
+        let clobbered = b.insts[py + 1..].iter().any(|i| { let mut w = false; for_defs(i, |d| w |= ops.contains(&d)); w });
+        if clobbered || px == py {
+            continue;
+        }
+        // the new block is the branch's false target (relayout lays it out next): for `&`, x's
+        // compare is negated (`!x -> e`); of float compares only `==` / `!=` negate each other
+        // (`!=` is true for NaN), so `&` of an ordered float x is left alone
+        let neg = |c: Cond| match c {
+            Cond::Eq => Cond::Ne,
+            Cond::Ne => Cond::Eq,
+            Cond::Lt => Cond::Ge,
+            Cond::Ge => Cond::Lt,
+            Cond::Le => Cond::Gt,
+            Cond::Gt => Cond::Le,
+        };
+        let xneg = match b.insts[px] {
+            Inst::ICmp(cc, sg, d, a1, a2) => Inst::ICmp(neg(cc), sg, d, a1, a2),
+            Inst::ICmpI(cc, sg, d, a1, k1) => Inst::ICmpI(neg(cc), sg, d, a1, k1),
+            Inst::FCmp(cc @ (Cond::Eq | Cond::Ne), w, d, a1, a2) => Inst::FCmp(neg(cc), w, d, a1, a2),
+            _ if !or => continue,
+            _ => b.insts[px].clone(),
+        };
+        let ycmp = b.insts[py].clone();
+        let ypos = b.pos[py];
+        let (term_pos, count) = (b.term_pos, b.count);
+        let nb = f.blocks.len() as u32;
+        let b = &mut f.blocks[bi];
+        if !or {
+            b.insts[px] = xneg;
+        }
+        // remove the `&`/`|` (k > py) first, then y's compare
+        b.insts.remove(k);
+        b.pos.remove(k);
+        b.insts.remove(py);
+        b.pos.remove(py);
+        b.term = if or { Term::Branch(x, t, nb) } else { Term::Branch(x, e, nb) };
+        f.blocks.push(Block { insts: vec![ycmp], pos: vec![ypos], term: Term::Branch(y, t, e), term_pos, count });
+        changed = true;
+    }
+    if changed {
+        relayout(f);
+    }
+    changed
 }

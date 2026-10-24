@@ -951,6 +951,19 @@ pub fn reg_config(options: &relax_session::Options) -> RegConfig {
 /// (test), `t = load [p + o]; c = t cmp K` (cmp [p + o], K), `s = m >> t; c = s & 1` (bt). The
 /// first result is read only by the second. The emitter's own conditions only narrow these
 /// shapes; the loop asks this before each deferral.
+/// `t = load; c = fcmp x, y` (t one of them) as `ucomiss reg, [mem]`: the load must be the operand
+/// the compare reads from r/m -- y for `>`/`>=`/`==`/`!=` (`ucomiss x, y`), x for `<`/`<=`
+/// (`ucomiss y, x`); `==`/`!=` are symmetric. (Swapping the operands instead would need the
+/// below/carry conditions, which are true for unordered operands.)
+fn fload_cmp_ok(cond: Cond, t: VReg, x: VReg, y: VReg) -> bool {
+    x != y
+        && match cond {
+            Cond::Eq | Cond::Ne => x == t || y == t,
+            Cond::Lt | Cond::Le => x == t,
+            Cond::Gt | Cond::Ge => y == t,
+        }
+}
+
 fn x64_defers(b: &Block, k: usize, uses: &[u32]) -> bool {
     let n = b.insts.len();
     if k + 1 >= n {
@@ -963,6 +976,7 @@ fn x64_defers(b: &Block, k: usize, uses: &[u32]) -> bool {
         Inst::ICmp(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) if once(d) => matches!(*next, Inst::Sel(_, c, _, _) if c == d),
         Inst::Load(Mem::F32 | Mem::F64, t, _, _) if once(t) => match *next {
             Inst::FBin(_, _, _, x, y) => (x == t) != (y == t),
+            Inst::FCmp(cond, _, c, x, y) => branch_on(c) && fload_cmp_ok(cond, t, x, y),
             Inst::FMulAdd(_, _, _, _, a, b2, c) => b2 != t && (a == t) != (c == t),
             Inst::VInsert(_, _, _, s2) => s2 == t,
             _ => false,
@@ -1042,6 +1056,8 @@ struct Gen<'a> {
     /// `t = load64 [base + off]; c = t cmp r` (or `r cmp t`) feeding the branch (t used once):
     /// cmp [base + off], r / cmp r, [base + off] -- (base, off, r, the load is the left operand)
     load_cmp: Option<(VReg, i32, VReg, bool)>,
+    /// `t = load f32/f64 [base + off]; branch on fcmp with t`: (base, off, t) -- ucomiss reg, [mem]
+    fload_cmp: Option<(VReg, i32, VReg)>,
     /// per block: its loop depth (a branch whose targets are both laid out above jumps
     /// conditionally to the deeper one: the loop's back edge)
     depth: Vec<u32>,
@@ -1672,6 +1688,16 @@ impl<'a> Gen<'a> {
                     }
                 }
             }
+            // `t = load [p + o]; c = fcmp x, y` (t one of them, used once) feeding the branch:
+            // ucomiss reg, [p + o]
+            self.fload_cmp = None;
+            if fused && n >= 2 && self.test_fuse.is_none() && self.load_fuse.is_none() && self.load_cmp.is_none() && !crate::stats::opt_off(options, "-loadcmp") {
+                if let (Inst::Load(Mem::F32 | Mem::F64, t, base, off), Inst::FCmp(..)) = (&b.insts[n - 2], &b.insts[n - 1]) {
+                    if self.al.uses[t.0 as usize] == 1 && x64_defers(b, n - 2, &self.al.uses) {
+                        self.fload_cmp = Some((*base, *off, *t));
+                    }
+                }
+            }
             // a branch on bit t of m: bt m, t (CF = bit t mod 64, as the 64-bit shift reads t)
             self.bt_fuse = None;
             if !fused && n >= 2 {
@@ -1720,7 +1746,7 @@ impl<'a> Gen<'a> {
                 if fused && ii == n - 1 {
                     break;
                 }
-                if (self.test_fuse.is_some() || self.load_cmp.is_some() || self.load_fuse.is_some() && !load_branch) && ii == n - 2 {
+                if (self.test_fuse.is_some() || self.load_cmp.is_some() || self.fload_cmp.is_some() || self.load_fuse.is_some() && !load_branch) && ii == n - 2 {
                     continue;
                 }
                 if load_branch && ii == n - 1 {
@@ -2975,26 +3001,30 @@ impl<'a> Gen<'a> {
                         }
                     },
                     Some(Inst::FCmp(cond, f64_, _, x, y)) => {
-                        let xa = self.use_f(*x, XS);
-                        let xb = self.use_f(*y, XS2);
                         let pfx = if *f64_ { 0x66 } else { 0 };
+                        if let Some((base, off, t)) = self.fload_cmp.take() {
+                            // ucomiss reg, [p + o]: the loaded operand is the one the compare
+                            // reads from r/m below (fload_cmp_ok)
+                            let ro = self.use_f(if *x == t { *y } else { *x }, XS);
+                            let (rb, disp) = self.base_disp(options, base, R11, off);
+                            self.a.sse_rm(pfx, 0x2e, ro, rb, disp);
+                        } else {
+                            let xa = self.use_f(*x, XS);
+                            let xb = self.use_f(*y, XS2);
+                            match cond {
+                                Cond::Lt | Cond::Le => self.a.sse_rr(pfx, 0x2e, xb, xa, false),
+                                _ => self.a.sse_rr(pfx, 0x2e, xa, xb, false),
+                            }
+                        }
                         match cond {
-                            Cond::Lt | Cond::Le => {
-                                self.a.sse_rr(pfx, 0x2e, xb, xa, false);
-                                Some(if *cond == Cond::Lt { CC_A } else { CC_AE })
-                            }
-                            Cond::Gt | Cond::Ge => {
-                                self.a.sse_rr(pfx, 0x2e, xa, xb, false);
-                                Some(if *cond == Cond::Gt { CC_A } else { CC_AE })
-                            }
+                            Cond::Lt | Cond::Gt => Some(CC_A),
+                            Cond::Le | Cond::Ge => Some(CC_AE),
                             Cond::Eq => {
-                                self.a.sse_rr(pfx, 0x2e, xa, xb, false);
                                 // unordered -> false
                                 self.jcc_to(CC_P, *ff);
                                 Some(CC_E)
                             }
                             Cond::Ne => {
-                                self.a.sse_rr(pfx, 0x2e, xa, xb, false);
                                 self.jcc_to(CC_P, *tt);
                                 Some(CC_NE)
                             }
@@ -6525,6 +6555,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         bt_fuse: None,
         load_fuse: None,
         load_cmp: None,
+        fload_cmp: None,
         depth: Vec::new(),
         jt_fix: Vec::new(),
         last_spill: None,

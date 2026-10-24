@@ -76,6 +76,9 @@ mod native {
 
     /// More pictures than this queued for a viewer: no picture is made until it catches up
     /// (none is ever dropped once encoded: the next one references it).
+    /// How long the desktop holds still before its picture is sent again near lossless (s).
+    const REFINE_AFTER: f64 = 0.12;
+
     const BACKLOG: usize = 2;
 
     struct Viewer {
@@ -83,6 +86,8 @@ mod native {
         name: String,
         /// The viewer's address (IP only) and since when it is here.
         peer: String,
+        /// Its decoder takes 4:4:4.
+        full_chroma: bool,
         since: std::time::Instant,
         out: std::sync::mpsc::Sender<Out>,
         backlog: Arc<AtomicUsize>,
@@ -113,6 +118,8 @@ mod native {
         dump_gone: Option<Arc<AtomicBool>>,
         /// A held-back picture is due: the frame clock that draws it.
         owed_next: NextFrame,
+        /// Fires when the desktop held still after its last picture: the refinement.
+        refine_timer: Timer,
         /// Bumped whenever a viewer comes, goes, pauses or resumes (the bar follows it).
         generation: u32,
     }
@@ -237,7 +244,7 @@ mod native {
             });
             if spawned.is_ok() {
                 self.dump_gone = Some(gone);
-                self.viewers.push(Viewer { session: 0, name: "dump".into(), peer: String::new(), since: std::time::Instant::now(), out: tx, backlog, paused: Arc::new(AtomicBool::new(false)) });
+                self.viewers.push(Viewer { session: 0, name: "dump".into(), peer: String::new(), full_chroma: true, since: std::time::Instant::now(), out: tx, backlog, paused: Arc::new(AtomicBool::new(false)) });
                 self.sync_subscribers();
             }
         }
@@ -275,12 +282,17 @@ mod native {
             self.viewers.iter().any(|v| !v.paused.load(Ordering::Acquire))
         }
 
+        /// 4:4:4 when the settings ask for it and every watching viewer's decoder takes it.
+        fn full_chroma(&self) -> bool {
+            self.settings.as_ref().is_some_and(|s| s.full_chroma) && self.viewers.iter().filter(|v| !v.paused.load(Ordering::Acquire)).all(|v| v.full_chroma)
+        }
+
         /// The capture follows the viewers: wanted while one watches and none is behind.
         fn update_capture(&mut self, cx: &mut Cx) {
             let (screens, _) = self.screens(cx);
             let screen = screens.get(self.screen).or(screens.first()).cloned();
             let want = match (self.watching() && !self.congested, screen.filter(|s| s.width >= 16 && s.height >= 16)) {
-                (true, Some(s)) => Some(Want { screen_px: [s.x, s.y, s.width, s.height], stream: Self::stream_size_of(&s) }),
+                (true, Some(s)) => Some(Want { screen_px: [s.x, s.y, s.width, s.height], stream: Self::stream_size_of(&s), full_chroma: self.full_chroma() }),
                 _ => None,
             };
             if let (Some(server), Some(s)) = (&self.server, screens.get(self.screen)) {
@@ -292,7 +304,8 @@ mod native {
                 return;
             }
             super::note(&format!("desk link capture: {want:?}"));
-            let changed_size = st.want.map(|w| w.stream) != want.map(|w| w.stream);
+            // another size or chroma: another picture texture (the registered one goes)
+            let changed_size = st.want.map(|w| (w.stream, w.full_chroma)) != want.map(|w| (w.stream, w.full_chroma));
             st.want = want;
             if want.is_none() && !self.watching() || changed_size {
                 // nobody watches (or another size): the picture texture and its memory go
@@ -387,7 +400,27 @@ mod native {
             }
             let settings = self.settings.clone().unwrap_or_default();
             if let Some(e) = &self.encoder {
-                e.send(Job::Picture { handle, size: want.stream, fence, built_ns: makepad_hal::clock_ns(), fps: settings.fps, kbps: settings.kbps, split: settings.split });
+                e.send(Job::Picture { handle, size: want.stream, fence, built_ns: makepad_hal::clock_ns(), fps: settings.fps, kbps: settings.kbps, split: settings.split, full_chroma: want.full_chroma, refine: false });
+            }
+            // still for REFINE_AFTER s: the same picture again, near lossless
+            self.refine_timer = cx.start_timeout(REFINE_AFTER);
+        }
+
+        /// The desktop held still since the last picture: the picture again at a near-lossless
+        /// QP (text and edges sharp once the motion stops).
+        fn refine(&mut self, cx: &mut Cx) {
+            let (want, texture) = {
+                let st = cx.global::<CaptureState>();
+                (st.want, st.picture())
+            };
+            let (Some(want), Some(texture), Some((handle, t))) = (want, texture, self.picture.clone()) else { return };
+            if t != texture {
+                return;
+            }
+            let settings = self.settings.clone().unwrap_or_default();
+            if let Some(e) = &self.encoder {
+                // the picture's frame finished long ago: nothing to wait for
+                e.send(Job::Picture { handle, size: want.stream, fence: Fence::None, built_ns: makepad_hal::clock_ns(), fps: settings.fps, kbps: settings.kbps, split: settings.split, full_chroma: want.full_chroma, refine: true });
             }
         }
 
@@ -427,7 +460,7 @@ mod native {
             let note = server.input_note.lock().unwrap().clone();
             for m in messages {
                 match m {
-                    ToUi::Opened { session, peer, client, name, screen, paused, out, backlog } => {
+                    ToUi::Opened { session, peer, client, name, screen, paused, caps, out, backlog } => {
                         let (screens, default) = self.screens(cx);
                         if self.viewers.is_empty() {
                             self.screen = if screen >= 0 && (screen as usize) < screens.len() { screen as usize } else { default };
@@ -448,7 +481,7 @@ mod native {
                         let _ = out.send(Out::Msg(welcome.encode()));
                         // the address without its port
                         let ip = peer.rsplit_once(':').map_or(peer.as_str(), |(ip, _)| ip).trim_matches(|c| c == '[' || c == ']').to_string();
-                        self.viewers.push(Viewer { session, name, peer: ip, since: std::time::Instant::now(), out, backlog, paused: Arc::new(AtomicBool::new(paused)) });
+                        self.viewers.push(Viewer { session, name, peer: ip, full_chroma: caps & proto::caps::FULL_CHROMA != 0, since: std::time::Instant::now(), out, backlog, paused: Arc::new(AtomicBool::new(paused)) });
                         self.generation = self.generation.wrapping_add(1);
                         self.sync_subscribers();
                         self.cursor = None;
@@ -572,6 +605,9 @@ mod native {
             // added, a mode set): the capture follows it
             if !self.viewers.is_empty() && matches!(event, Event::Draw(_)) {
                 self.update_capture(cx);
+            }
+            if self.refine_timer.is_event(event).is_some() {
+                self.refine(cx);
             }
             if self.export_next.is_event(event).is_some() {
                 cx.redraw_all();

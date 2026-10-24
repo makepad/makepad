@@ -96,7 +96,7 @@ fn request_keyframe_forces_the_next_packet() {
         fps: FPS,
         bitrate_kbps: 4_000,
         keyint: 300,
-        low_latency: true,
+        low_latency: true, full_chroma: false,
     })
     .expect("encoder creation");
     for index in 0..4 {
@@ -117,7 +117,7 @@ fn encode_decode_round_trip_psnr_and_keyframes() {
         fps: FPS,
         bitrate_kbps: 4_000,
         keyint: FRAME_COUNT as u32, // one GOP for this test, forced keyframe below exercises a second
-        low_latency: true,
+        low_latency: true, full_chroma: false,
     })
     .expect("encoder creation");
 

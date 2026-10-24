@@ -176,6 +176,7 @@ type VkPhysicalDevicePresentWaitFeaturesKHR
 type VkPhysicalDeviceProperties2
 type VkPhysicalDeviceSamplerYcbcrConversionFeatures
 type VkPhysicalDeviceTimelineSemaphoreFeatures
+type VkPhysicalDeviceYcbcr2Plane444FormatsFeaturesEXT
 type VkPhysicalDeviceType
 type VkPipeline
 type VkPipelineBindPoint
@@ -647,6 +648,7 @@ value VkScopeKHR SUBGROUP
 # The codec Std types come from video.xml: pass it as the generator's fourth argument.
 const VK_KHR_VIDEO_QUEUE_EXTENSION_NAME
 const VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME
+const VK_EXT_YCBCR_2PLANE_444_FORMATS_EXTENSION_NAME
 const VK_KHR_VIDEO_ENCODE_QUEUE_EXTENSION_NAME
 const VK_KHR_VIDEO_ENCODE_H264_EXTENSION_NAME
 const VK_STD_VULKAN_VIDEO_CODEC_H264_ENCODE_EXTENSION_NAME
@@ -752,6 +754,10 @@ value StdVideoH264LevelIdc TYPE_5_1
 value StdVideoH264LevelIdc TYPE_5_2
 value StdVideoH264LevelIdc TYPE_6_2
 value StdVideoH264ChromaFormatIdc TYPE_420
+value StdVideoH264ChromaFormatIdc TYPE_444
+value StdVideoH264ProfileIdc HIGH_444_PREDICTIVE
+value VkVideoChromaSubsamplingFlagsKHR TYPE_444
+value VkFormat G8_B8R8_2PLANE_444_UNORM
 value StdVideoH264PocType TYPE_2
 value StdVideoH264SliceType I
 value StdVideoH264SliceType P

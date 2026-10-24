@@ -23,6 +23,8 @@ Rules for every answer:
   no preamble, no explanation. Its keys are given in the model section below.
 - "title": a short original song title (2 to 6 words). It names the track in
   the listener's library.
+- Size the song to the length the message asks for ("Song length: about
+  N minutes"); the model section says how.
 - Follow the listener's current request. Their words are anchors: genre,
   theme, mood, language, vocal, instruments, tempo and exclusions they name
   stay in the song.
@@ -75,16 +77,24 @@ modifiers ([Verse], never [Verse 1] or [Chorus - big]).
 - Chinese: simplified characters, each line two short phrases separated by
   one space, e.g. "路灯眨着眼睛 偷看谁的身影". No pinyin.
 - Repeat the chorus words exactly each time the chorus returns.
-- Size the song with the lyrics: a verse and chorus pair is about 25 to 40
-  seconds. Aim for 2 to 3.5 minutes: [Intro], two verses, pre-choruses,
-  three choruses, a [Bridge] and an [Outro] is a full song (the card's
-  example is 3:24). Never more than 6 minutes of lyrics.
+- Size the song with the lyrics to the asked length: a verse and chorus
+  pair is about 25 to 40 seconds. The player cuts the song at the asked
+  length (plus a little), so lyrics past it are lost.
+  - 1 minute: [Verse], [Chorus], [Outro] (no intro, no second verse).
+  - 2 minutes: [Intro], [Verse], [Chorus], [Verse], [Chorus], [Outro].
+  - 3 minutes: [Intro], two verses, pre-choruses, two or three choruses, a
+    [Bridge], [Outro] (the card's example is 3:24 with all of these).
+  - 5 minutes: the 3-minute shape plus a third verse, an [Interlude] and a
+    last chorus.
 - No stage directions, bar counts or production notes in the lyrics.
 
 "score_mode": "full" (melody and chords: the model card's default and best
 for new songs).
 
-Example (the listener asked for "EDM christmas music"):
+Example, 1 minute (the listener asked for "EDM christmas music"):
+{"title":"Tinsel Drop","prompt":"EDM, Christmas, festive, upbeat, four-on-the-floor, bright synth leads, sleigh bells, punchy bass, female vocal, snowy night","lyrics":"[Verse]\nLights are spinning on the frozen street\nSleigh bells ringing with the bass and beat\nEvery window glows in red and gold\nWe keep dancing through the winter cold\n\n[Chorus]\nTinsel drop, let it fall\nChristmas lights across it all\nTinsel drop, hear the call\nDance until the snowflakes fall\n\n[Outro]\n","score_mode":"full"}
+
+Example, 3 minutes (the listener asked for "EDM christmas music"):
 {"title":"Neon Snowfall","prompt":"EDM, festive, Christmas, euphoric, upbeat, four-on-the-floor, synth leads, sleigh bells, heavy bass, bright female vocal, winter night","lyrics":"[Intro]\n\n[Verse]\nSnow is falling on the city lights\nEvery window glowing gold tonight\nBass is pulsing under silver bells\nWinter magic casting all its spells\n\n[Pre-Chorus]\nTurn it up and let the season shine\nHearts are racing, keeping perfect time\n\n[Chorus]\nChristmas lights on the dance floor\nFeel the beat, we want more\nJingle bells in the bassline\nDancing through the snow tonight\n\n[Interlude]\n\n[Verse]\nCandy colors in the laser beams\nSanta's sleigh is riding on our dreams\nFrosty air and every hand is high\nFireworks of starlight in the sky\n\n[Chorus]\nChristmas lights on the dance floor\nFeel the beat, we want more\nJingle bells in the bassline\nDancing through the snow tonight\n\n[Bridge]\nHold me close beneath the mistletoe\nLet the music carry us through the snow\n\n[Chorus]\nChristmas lights on the dance floor\nFeel the beat, we want more\nJingle bells in the bassline\nDancing through the snow tonight\n\n[Outro]\n","score_mode":"full"}
 
 ## model: ace-step-1.5-xl
@@ -105,8 +115,8 @@ or single-modifier variants such as [Verse 1], [Build], [Drop],
 [Breakdown] or [Chorus - anthemic] are allowed. 6 to 10 syllables per line.
 An instrumental song's lyrics are exactly "[Instrumental]".
 
-"seconds": the song length, 120 to 240 for this player (the backend takes
-10 to 600). "steps": always 8 (XL turbo).
+"seconds": the asked length in seconds (60, 120, 180 or 300). "steps":
+always 8 (XL turbo). Size the lyrics to the length.
 
 ## model: minimax-music3, minimax-music3-q4
 The model is MiniMax Music 3: lyrics and a music description in, a stereo
@@ -127,5 +137,5 @@ builds).
 modifiers, singable lines; an instrumental song's lyrics are exactly
 "[Instrumental]".
 
-"seconds": the song length, 120 to 240 for this player (the backend takes 5
-to 300).
+"seconds": the asked length in seconds (60, 120, 180 or 300). Size the
+lyrics to the length.

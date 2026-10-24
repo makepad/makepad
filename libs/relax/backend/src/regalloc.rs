@@ -1046,6 +1046,8 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
         }
         let equal: std::collections::HashSet<(u32, u32)> = equal.iter().map(|x| (x.1, x.2)).collect();
         pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+        // the members of each unit (by root), for the equal-copy joins below
+        let mut unit_of: HashMap<u32, Vec<u32>> = HashMap::new();
         for (_, a, b) in pairs {
             let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
             if ra == rb || f.vregs[ra as usize] != f.vregs[rb as usize] || remat[a as usize].is_some() || remat[b as usize].is_some() || remat[ra as usize].is_some() || remat[rb as usize].is_some() || is_low(a) || is_low(b) {
@@ -1053,9 +1055,16 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
             }
             let x = merged.get(&ra).map(|v| v.as_slice()).unwrap_or(ranges.of(ra));
             let y = merged.get(&rb).map(|v| v.as_slice()).unwrap_or(ranges.of(rb));
-            // overlapping ranges join only for a copy of one value (equal_copies) between two
-            // values not yet in a unit: wherever both are live they hold the same bits
-            let same = (ra, rb) == (a, b) && !merged.contains_key(&ra) && !merged.contains_key(&rb) && equal.contains(&(a, b));
+            // overlapping ranges join only for a copy of one value (equal_copies): wherever both
+            // are live they hold the same bits. A value not yet in a unit joins its copy's unit
+            // when it meets no other member there (`old = i` of a counter whose step `i = t`
+            // already joined i and t: the register holds i wherever old is live)
+            let lone = |r: u32, v: u32| r == v && !merged.contains_key(&r);
+            let same = equal.contains(&(a, b))
+                && ((lone(ra, a) && lone(rb, b))
+                    || [(a, ra, b, rb), (b, rb, a, ra)].iter().any(|&(l, rl, o, ro)| {
+                        lone(rl, l) && unit_of.get(&ro).map_or(true, |m| m.iter().all(|&u| u == o || !ranges_meet(ranges.of(l), ranges.of(u))))
+                    }));
             if x.is_empty() || y.is_empty() || (ranges_meet(x, y) && !same) {
                 continue;
             }
@@ -1063,6 +1072,9 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
             merged.remove(&rb);
             merged.insert(ra, u);
             parent[rb as usize] = ra;
+            let mut m = unit_of.remove(&rb).unwrap_or_else(|| vec![rb]);
+            let e = unit_of.entry(ra).or_insert_with(|| vec![ra]);
+            e.append(&mut m);
         }
         for v in 0..nv {
             let r = find(&mut parent, v);

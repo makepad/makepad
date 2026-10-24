@@ -164,7 +164,7 @@ fn run(settings: Settings, desktop: &mut dyn Desktop) {
         let _ = wake_rx.try_recv();
         for m in server.rx.try_iter() {
             match m {
-                ToUi::Opened { session, peer, client, name, screen: wanted, paused, out, backlog } => {
+                ToUi::Opened { session, peer, client, name, screen: wanted, paused, out, backlog, .. } => {
                     let screens = desktop.screens();
                     if viewers.is_empty() && wanted >= 0 && (wanted as usize) < screens.len() {
                         screen = wanted as usize;
@@ -279,7 +279,7 @@ fn run(settings: Settings, desktop: &mut dyn Desktop) {
                 fps: settings.fps,
                 bitrate_kbps: if settings.kbps > 0 { settings.kbps } else { default_kbps(size, settings.fps) },
                 keyint: 0,
-                low_latency: true,
+                low_latency: true, full_chroma: false,
             };
             match VideoStreamEncoder::new(options) {
                 Ok(e) => {
