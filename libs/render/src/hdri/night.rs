@@ -1158,8 +1158,8 @@ mod tests {
     /// mid longitudes 1.5 to 2.5, the anticentre 0.7 to 1.5, 0.1 to 0.45 at 30 degrees out, at most 0.15 at the poles,
     /// never over about 9 (the star clouds are capped with the band: MW_PEAK_MU's range, 19.5 to 19.6, is 9.04 G0 at
     /// most); the Great Rift (b +1, l 10..60) lets 0.25 to 0.45 through; the core is warmer than the anticentre. With
-    /// the constants of Step 3 it prints about: core region 4.03, mid 1.82, anticentre 1.02, 30 deg 0.23, poles 0.03,
-    /// peak 8.88; rift 0.35.
+    /// Task 3b's constants (fix round 1) it prints about: core region 3.59, mid 1.89, anticentre 1.07, 30 deg 0.20,
+    /// poles 0.02, peak 8.50; rift 0.41.
     #[test]
     fn the_milky_way_is_the_real_skys() {
         let clean = milky_night_at(MilkyWayParams { dust: 0.0, ..MilkyWayParams::default() }, 1.0);

@@ -8,14 +8,15 @@
 //! filtered by the lookup's texel in closed form, nothing kept.
 //!
 //! The kinds: an emission cloud (hydrogen-alpha, brightest toward one side); a hot star's blister (an off-centre
-//! cavity, a faint oxygen-III glow in it, its rim thick on the far side); a complex near the core (red on one side,
-//! a bright star's blue glow in the middle, yellow-orange dust lit by it on the other); a reflection glow round a
-//! bright star, just off the band; a dark cloud; and a large red shell off the band.
+//! cavity, a faint pale glow in it (oxygen-III and hydrogen-alpha: pale rose, never a teal centre), its rim thick on
+//! the far side); a complex near the core (red on one side, a bright star's blue glow in the middle, yellow-orange dust
+//! lit by it on the other); a reflection glow round a bright star, just off the band; a dark cloud; and a large red
+//! shell off the band.
 //!
 //! **Realism** blends two looks of one layout (D8): at 0 astrophotography's colours (hydrogen-alpha red-magenta,
-//! oxygen-III teal, reflection blue, dark dust; peaks about 45 G0), at 1 the naked eye's faint grey patches (peaks
-//! about 3.5 G0, read two levels softer). Luminance blends geometrically, chroma by 1 - (1 - r)², the structure through
-//! the softer level.
+//! oxygen-III's teal only mixed into a cavity's pale glow, reflection blue, yellow-orange lit dust, dark dust; peaks
+//! about 45 G0), at 1 the naked eye's faint grey patches (peaks about 3.5 G0, read two levels softer). Luminance
+//! blends geometrically, chroma by 1 - (1 - r)², the structure through the softer level.
 //!
 //! **Held and released.** A sprite has six levels, 8 to 256 texels across, each the same function with its octaves
 //! cut at its own Nyquist on the scale of all of them (`fbm3_frac_full`, as the Milky Way's: a coarse level's noise
@@ -78,8 +79,8 @@ const KNOT_SALT: u32 = 0x4b4e_4f54;
 enum NebulaKind {
     /// Hydrogen-alpha, a little oxygen, brightest toward one side.
     Emission,
-    /// A hot star's blister: an off-centre cavity with a faint oxygen-III glow, its hydrogen-alpha rim thick on the far
-    /// side.
+    /// A hot star's blister: an off-centre cavity with a faint pale glow (oxygen-III and hydrogen-alpha), its
+    /// hydrogen-alpha rim thick on the far side.
     BiColour,
     /// A star-forming complex near the core: hydrogen-alpha on one side, a bright star's blue glow in the middle,
     /// yellow-orange dust lit by a red giant on the other.
@@ -256,8 +257,10 @@ fn sprite_texel(def: &SpriteDef, size: usize, px: f32, py: f32) -> [f32; 5] {
             let (cx, cy) = (-0.3 * def.lean.0, -0.3 * def.lean.1);
             let rc = ((qx - cx) * (qx - cx) + (qy - cy) * (qy - cy)).sqrt();
             let rim = smoothstep(0.12, 0.4, rc) * envelope;
-            let inner = (1.0 - smoothstep(0.0, 0.35, rc)) * envelope;
-            [rim * (0.4 + 0.6 * wisps + 0.8 * knot), inner * (0.45 + 0.4 * wisps), 0.0, 0.8 * lanes, 0.0]
+            // a pale glow in the cavity, fainter than the rim: oxygen-III and as much hydrogen-alpha, pale rose as a long
+            // exposure shows a hot star's cavity (Task 3b: no teal centre)
+            let inner = (1.0 - smoothstep(0.0, 0.35, rc)) * envelope * (0.3 + 0.25 * wisps);
+            [rim * (0.4 + 0.6 * wisps + 0.8 * knot) + inner, inner, 0.0, 0.8 * lanes, 0.0]
         }
         NebulaKind::Complex => {
             let red = smoothstep(-0.3, 0.5, lean);
@@ -652,14 +655,15 @@ mod tests {
     }
 
     /// Realism 1 is nearly grey (saturation at most 0.12 wherever it shows); Realism 0 is the astrophotograph's colours
-    /// (spec §3): saturation at least 0.5 where hydrogen-alpha leads; teal (green and blue over red) where oxygen-III
-    /// leads; blue the largest channel where reflection leads. "Leads" for oxygen-III is over four times the other two
-    /// together: hydrogen-alpha's red is about three times as luminous per unit, so a third of it already greys the teal.
+    /// (spec §3): saturation at least 0.5 where hydrogen-alpha leads; blue the largest channel where reflection leads.
+    /// Oxygen-III shows only mixed into a blister's pale cavity (Task 3b: the owner's photographs show no teal centre):
+    /// where it is at least two thirds of the hydrogen-alpha, the look is pale rose, its red at least its green, never
+    /// teal.
     /// Seeds 1 to 24, so every kind is among the first clouds.
     #[test]
     fn a_nebulas_colour_follows_its_realism() {
         let texel = TAU / 1024.0;
-        let (mut red, mut teal, mut blue) = (0, 0, 0);
+        let (mut red, mut pale, mut blue) = (0, 0, 0);
         for seed in 1..=24u32 {
             if candidate(hash_u32(seed ^ NEBULA_SALT), 0).kind == NebulaKind::Dark {
                 continue;
@@ -681,9 +685,9 @@ mod tests {
                     red += 1;
                     assert!(saturation(c) >= 0.5, "seed {seed}: hydrogen-alpha shows {c:?}");
                 }
-                if v[1] > 0.2 && v[1] > 4.0 * (v[0] + v[2] + v[4]) {
-                    teal += 1;
-                    assert!(c.y > c.x && c.z > c.x, "seed {seed}: oxygen-III shows {c:?}, not teal");
+                if v[1] > 0.1 && 1.5 * v[1] >= v[0] {
+                    pale += 1;
+                    assert!(c.x >= c.y, "seed {seed}: oxygen-III shows {c:?}, teal");
                 }
                 if v[2] > 0.2 && v[2] > 2.0 * (v[0] + v[1] + v[4]) {
                     blue += 1;
@@ -691,7 +695,7 @@ mod tests {
                 }
             }
         }
-        assert!(red > 50 && teal > 20 && blue > 20, "the premise: hydrogen-alpha {red}, oxygen-III {teal}, reflection {blue} looks");
+        assert!(red > 50 && pale > 20 && blue > 20, "the premise: hydrogen-alpha {red}, oxygen-III {pale}, reflection {blue} looks");
     }
 
     /// Plan hdri-7 §3 ("each with bright knots and embedded stars"): a glowing cloud holds 3 to 8 stars at magnitudes 3
