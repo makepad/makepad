@@ -421,6 +421,7 @@ pub(crate) fn resolve_package(
         }
         if let Some((checked, _)) = sources { checked?; }
         scripts?;
+        crate::macro_reg::set_build_outputs(sess, &g.crates, &g.cfgs, &g.env);
     }
     if crate::preload::trace() {
         eprintln!("boot-trace: unit graph (resolve) {:.1} ms, graph {:.1} ms (load {:.1}, watch inputs {:.1}, substitutes {:.1})", (t_load - t).as_secs_f64() * 1e3, t_load.elapsed().as_secs_f64() * 1e3,

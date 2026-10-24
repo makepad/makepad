@@ -461,7 +461,7 @@ impl CrateInfo {
                 return std::borrow::Cow::Owned(crate::lit::unescape_str(file.tok_text(attr.toks.lo + 2)));
             }
         }
-        std::borrow::Cow::Borrowed(prog.syms.str(self.name))
+        std::borrow::Cow::Borrowed(crate::crates::base_crate_name(prog.syms.str(self.name)))
     }
 
     /// The crate's `#![feature(..)]` declarations.
@@ -686,10 +686,10 @@ pub struct Program {
     pub std_from_shared: bool,
     /// the std crates include core::simd / std::simd (relax_portable_simd; `std_simd_wanted`)
     pub std_simd: bool,
-    /// item-level macro calls no macro resolved at their parse (file, item, module): expanded
+    /// item-level macro calls no macro resolved at their parse (file, item, module, dir, mod_rs): expanded
     /// again once the crate is loaded (expand_pending: rustc's resolve/expand fixpoint for
     /// macros an expansion in a later file defines or imports), else errors
-    pending_macs: Vec<(u32, ItemId, u32)>,
+    pending_macs: Vec<(u32, ItemId, u32, String, bool)>,
     /// `global_asm!` items (unless `--no-asm`): (file, item, module), assembled and placed when
     /// the program's code is set up (compiler global_asm.rs)
     pub global_asms: Vec<(u32, ItemId, u32)>,
@@ -1313,7 +1313,7 @@ impl Program {
             }
             // Resolve scopes against the loader's complete dependency imports. Do not retain
             // a scope the prescan computed against its earlier macro table.
-            let mods = std::sync::Arc::new(crate::macros::CrateMods { root: ahead.mods.root.clone(), src: ahead.mods.src.clone(), mods: ahead.mods.mods.clone(), items: ahead.mods.items.clone(), uses: ahead.mods.uses.clone(), externs, renames: ahead.mods.renames.clone(), ..Default::default() });
+            let mods = std::sync::Arc::new(crate::macros::CrateMods { root: ahead.mods.root.clone(), src: ahead.mods.src.clone(), mods: ahead.mods.mods.clone(), items: ahead.mods.items.clone(), uses: ahead.mods.uses.clone(), externs, renames: ahead.mods.renames.clone(), recursion_limit: ahead.mods.recursion_limit, ..Default::default() });
             table.add_crate(ahead.name.clone(), mods);
             if !ahead.macro_use.is_empty() {
                 let v = table.macro_use.entry(ahead.name.clone()).or_default();
@@ -1329,7 +1329,7 @@ impl Program {
             // This raw-source optimization has no token-origin context. Lowered files
             // expand derives inside their normal token-input parse instead.
             let files: Vec<(&str, &[u8], &[crate::lexer::Tok])> = ahead.prelexed.iter().map(|(p, s, t)| (p.as_str(), &s[..], &t[..])).collect();
-            crate::builtins::pre_expand_derives(&files, &self.crates[krate as usize].cfg, edition);
+            crate::builtins::pre_expand_derives(&kname, &files, &self.crates[krate as usize].cfg, edition);
         }
         for (p, s, t) in ahead.prelexed {
             self.prelexed.insert(p, (s, t));
@@ -1891,7 +1891,7 @@ impl Program {
         let kname = self.syms.str(self.crates[krate as usize].name).to_string();
         let mut rounds = 0;
         loop {
-            let pend: Vec<(u32, ItemId, u32)> = {
+            let pend: Vec<(u32, ItemId, u32, String, bool)> = {
                 let (mine, other): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending_macs).into_iter().partition(|p| self.mods[p.2 as usize].krate == krate);
                 self.pending_macs = other;
                 mine
@@ -1902,9 +1902,9 @@ impl Program {
             rounds += 1;
             let mut still = Vec::new();
             let mut progress = false;
-            for (file, iid, module) in pend {
+            for (file, iid, module, dir, mod_rs) in pend {
                 if rounds > 16 {
-                    still.push((file, iid, module));
+                    still.push((file, iid, module, dir, mod_rs));
                     continue;
                 }
                 let (text, path) = {
@@ -1917,14 +1917,14 @@ impl Program {
                 let bctx = std::rc::Rc::new(crate::builtins::FileCtx::new(&kname, &path, &mod_path, &cfg));
                 let parsed = crate::parser::parse_owned_ctx(sess, text, None, edition, Some(crate::macros::MacroScope::new(self.macros.clone())), &kname, Some(bctx), false);
                 let Ok((mut pf, used)) = parsed else {
-                    still.push((file, iid, module));
+                    still.push((file, iid, module, dir, mod_rs));
                     continue;
                 };
                 let used = used.unwrap();
                 let items = pf.ast.root_items.clone();
                 // the same call again: nothing new resolves it yet
                 if items.len() == 1 && matches!(pf.ast.item(items[0]).kind, ItemKind::Mac(_)) {
-                    still.push((file, iid, module));
+                    still.push((file, iid, module, dir, mod_rs));
                     continue;
                 }
                 progress = true;
@@ -1948,12 +1948,12 @@ impl Program {
                 self.file_crate.push(krate);
                 self.file_blocks.push(prep.blocks);
                 let nf = self.files.len() as u32 - 1;
-                if let Err(e) = self.collect_items(nf, &items, module, "", false) {
+                if let Err(e) = self.collect_items(nf, &items, module, &dir, mod_rs) {
                     self.errors.push(e);
                 }
             }
             if !progress {
-                for (file, iid, _) in still {
+                for (file, iid, _, _, _) in still {
                     let f = &self.files[file as usize];
                     let it = f.ast.item(iid);
                     let name = match &it.kind {
@@ -2348,7 +2348,7 @@ impl Program {
         self.trait_item_def_id.retain(|d, t| self.defs[d.0 as usize].krate != krate && self.defs[t.0 as usize].krate != krate);
         self.block_mods.retain(|_, m| self.mods[*m as usize].krate != krate);
         self.block_owner.retain(|_, d| self.defs[d.0 as usize].krate != krate);
-        self.pending_macs.retain(|(f, _, _)| self.file_crate[*f as usize] != krate);
+        self.pending_macs.retain(|(f, _, _, _, _)| self.file_crate[*f as usize] != krate);
         // Tombstones cannot be rediscovered as callable bodies by a later scan.
         for d in old { if d != root_def { self.defs[d.0 as usize].kind = DefKind::Mod; self.defs[d.0 as usize].sub = root; } }
         self.set_def_file(root_def, file);
@@ -2984,7 +2984,7 @@ impl Program {
                             self.errors.push(e);
                         } else if !BUILTIN_MACROS.contains(&last.as_str()) && crate::builtins::macro_def(&last).is_none() && !crate::macro_reg::has_macro(&last) {
                             // no macro at the parse: maybe one a later expansion makes
-                            self.pending_macs.push((file, iid, module));
+                            self.pending_macs.push((file, iid, module, dir.to_string(), mod_rs));
                         }
                     }
                 }

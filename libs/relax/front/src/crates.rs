@@ -25,6 +25,59 @@ pub struct CrateUnit {
     pub registry: bool,
 }
 
+/// Returns the original crate name before any `__relax_v` multi-version suffix.
+pub fn base_crate_name(s: &str) -> &str {
+    match s.find("__relax_v") {
+        Some(i) => &s[..i],
+        None => s,
+    }
+}
+
+/// Gives multi-version library crates a canonical identifier-safe name (`<name>__relax_v<ver>`)
+/// when more than one non-bin, non-build-script unit in the graph shares `name` with distinct
+/// `src_path`s (leaving the highest version unsuffixed).
+pub fn disambiguate_multi_version_crates(units: &mut [CrateUnit]) {
+    let mut by_name: std::collections::HashMap<String, Vec<usize>> = Default::default();
+    for (i, u) in units.iter().enumerate() {
+        if !u.bin {
+            by_name.entry(u.name.clone()).or_default().push(i);
+        }
+    }
+    for (_, mut idxs) in by_name {
+        if idxs.len() <= 1 {
+            continue;
+        }
+        let first_src = &units[idxs[0]].src_path;
+        if idxs.iter().all(|&i| &units[i].src_path == first_src) {
+            continue;
+        }
+        idxs.sort_by(|&a, &b| {
+            let key = |u: &CrateUnit| -> Vec<u64> {
+                u.version.split(|c: char| !c.is_ascii_digit()).filter(|s| !s.is_empty()).filter_map(|s| s.parse().ok()).collect()
+            };
+            key(&units[a]).cmp(&key(&units[b])).then_with(|| units[a].version.cmp(&units[b].version)).then_with(|| units[a].src_path.cmp(&units[b].src_path))
+        });
+        let keep = *idxs.last().unwrap();
+        let mut used = std::collections::HashSet::new();
+        for &i in &idxs {
+            if i == keep {
+                continue;
+            }
+            let ver_tag: String = units[i].version.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+            let mut cand = if ver_tag.is_empty() {
+                format!("{}__relax_v_{}", units[i].name, i)
+            } else {
+                format!("{}__relax_v{}", units[i].name, ver_tag)
+            };
+            if !used.insert(cand.clone()) {
+                cand = format!("{}_{}", cand, i);
+                used.insert(cand.clone());
+            }
+            units[i].name = cand;
+        }
+    }
+}
+
 /// Crates Relax provides itself (std/substitutes.txt: `<name> <version prefix> <root>`):
 /// a unit of that crate at a matching version loads the provided root instead of its sources
 /// (same name; deps become core/alloc/std only; features ignored). The rustc build keeps the
@@ -49,7 +102,7 @@ pub fn apply_substitutes(sess: &std::sync::Arc<crate::Session>, units: &mut [Cra
         }
         let (name, ver, root) = (parts[0], parts[1], parts[2]);
         for u in units.iter_mut() {
-            if u.name != name || u.proc_macro {
+            if base_crate_name(&u.name) != name || u.proc_macro {
                 continue;
             }
             let matches = u.version == ver || u.version.starts_with(&format!("{}.", ver));
@@ -217,6 +270,7 @@ pub fn load_units(path: &str) -> Result<Vec<CrateUnit>, String> {
         }
         c.deps = nd;
     }
+    disambiguate_multi_version_crates(&mut out);
 
     Ok(out)
 }

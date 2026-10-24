@@ -664,7 +664,13 @@ impl<'a> Parser<'a> {
                     if m.lookup(name, &self.krate, &[], module).is_some() {
                         return BodyOutline::Eager(3);
                     }
-                    match crate::builtins::macro_def(name) {
+                    let is_std_qual = i >= 2 && self.toks.kind_at(i - 2) == T::PathSep;
+                    let bdef = if is_std_qual || (STD_PRELUDE_MACROS.contains(&name) && !self.name_imported(name)) {
+                        crate::builtins::builtin_macro_def(name)
+                    } else {
+                        crate::builtins::macro_def_for(&self.krate, name)
+                    };
+                    match bdef {
                         Some(d) if d.builtin < crate::builtins::HOSTED && !crate::builtins::is_item_level(d.builtin) => {}
                         // the parser's own built-ins (format family, assert*, vec!, matches!, ..:
                         // arguments parsed in place, MacArgs; Relax's dialect rule R2)
@@ -1041,25 +1047,40 @@ impl<'a> Parser<'a> {
 
     /// `#[doc = include_str!(..)]`: the value is a literal-producing macro call; it is expanded
     /// (and so checked) like any other macro call (rustc expands macros in attribute values).
-    fn check_doc_value(&self, lo: usize, hi: usize) -> PResult<()> {
-        let kind = |i: usize| if i < hi { self.toks.at(i).kind } else { T::Eof };
-        if kind(lo + 1) != T::Eq || kind(lo + 2) != T::Ident || kind(lo + 3) != T::Not { return Ok(()); }
-        match self.tok_text(self.toks.at(lo + 2)) {
+    fn check_doc_value(&mut self, lo: usize, hi: usize) -> PResult<()> {
+        let kind = |p: &Self, i: usize| if i < hi { p.toks.at(i).kind } else { T::Eof };
+        if kind(self, lo + 1) != T::Eq || kind(self, lo + 2) != T::Ident || kind(self, lo + 3) != T::Not { return Ok(()); }
+        let mname = match self.tok_text(self.toks.at(lo + 2)) {
             // the macro's own message is the error
-            b"compile_error" if kind(lo + 5) == T::Str => {
+            b"compile_error" if kind(self, lo + 5) == T::Str => {
                 let msg = crate::lit::unescape_str(&String::from_utf8_lossy(self.tok_text(self.toks.at(lo + 5))));
                 return Err(PErr { pos: self.toks.at(lo + 2).lo, msg });
             }
-            b"include_str" | b"include_bytes" | b"concat" | b"env" | b"stringify" => {}
+            b"include_str" => "include_str",
+            b"include_bytes" => "include_bytes",
+            b"concat" => "concat",
+            b"env" => "env",
+            b"stringify" => "stringify",
             _ => return Ok(()),
+        };
+        let call_lo = self.toks.at(lo + 2).lo;
+        if hi >= lo + 6 && matches!(self.toks.at(lo + 4).kind, T::OpenParen | T::OpenBracket | T::OpenBrace) {
+            if let Some((text, rtoks)) = self.builtin_with_rules_expanded(mname, TokRange { lo: (lo + 5) as u32, hi: (hi - 1) as u32 })? {
+                let start = self.expand_toks(&text, &rtoks, call_lo);
+                let end = self.toks.len() - 1;
+                if let Err(m) = crate::builtins::eval_lit_range(self, start, end) {
+                    return Err(PErr { pos: call_lo, msg: m });
+                }
+                return Ok(());
+            }
         }
         if let Err(m) = crate::builtins::eval_lit_range(self, lo + 2, hi) {
-            return Err(PErr { pos: self.toks.at(lo + 2).lo, msg: m });
+            return Err(PErr { pos: call_lo, msg: m });
         }
         Ok(())
     }
 
-    fn check_attr_shape(&self, toks: TokRange) -> PResult<()> {
+    fn check_attr_shape(&mut self, toks: TokRange) -> PResult<()> {
         let (lo, hi) = (toks.lo as usize, toks.hi as usize);
         if hi <= lo || hi > self.toks.len() || self.toks.kind_at(lo) != T::Ident {
             return Ok(());
@@ -1361,9 +1382,16 @@ impl<'a> Parser<'a> {
     fn record_use_tree(&self, m: &crate::macros::MacroScope, module: &str, prefix: &mut Vec<String>, tree: &UseTree) {
         match tree {
             UseTree::Path(sg, rest) => {
-                prefix.push(self.seg_text(sg));
-                self.record_use_tree(m, module, prefix, self.ast.use_tree(*rest));
-                prefix.pop();
+                let s = self.seg_text(sg);
+                if prefix.len() == 1 && prefix[0].is_empty() && s.starts_with("__relax_crate_") {
+                    prefix[0] = s;
+                    self.record_use_tree(m, module, prefix, self.ast.use_tree(*rest));
+                    prefix[0] = String::new();
+                } else {
+                    prefix.push(s);
+                    self.record_use_tree(m, module, prefix, self.ast.use_tree(*rest));
+                    prefix.pop();
+                }
             }
             UseTree::Name(sg, rename) => {
                 let name = self.seg_text(sg);
@@ -1401,23 +1429,26 @@ impl<'a> Parser<'a> {
     }
 
     /// The `macro_rules!` macro a call path names, if any.
-    /// Is `name` mentioned in a `use` item of this file (a macro can be imported by path)? Text scan, only
-    /// reached for a call of a macro defined further down.
+    /// Is `name` mentioned in a `use` item of this file (a macro can be imported by path)?
     fn name_imported(&self, name: &str) -> bool {
-        let text = String::from_utf8_lossy(self.src);
-        let mut from = 0;
-        while let Some(i) = text[from..].find(name) {
-            let at = from + i;
-            let word = |c: Option<u8>| c.is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_');
-            if word(at.checked_sub(1).map(|k| text.as_bytes()[k])) || word(text.as_bytes().get(at + name.len()).copied()) {
-                from = at + name.len();
-                continue;
+        let nb = name.as_bytes();
+        let n = self.toks.len();
+        let mut i = 0;
+        while i < n {
+            if self.toks.at(i).kind == T::KwUse {
+                i += 1;
+                while i < n && self.toks.at(i).kind != T::Semi {
+                    let t = self.toks.at(i);
+                    if matches!(t.kind, T::Ident | T::RawIdent) {
+                        let s = self.tok_text(t);
+                        if s.strip_prefix(b"r#").unwrap_or(s) == nb {
+                            return true;
+                        }
+                    }
+                    i += 1;
+                }
             }
-            let line_start = text[..at].rfind('\n').map_or(0, |x| x + 1);
-            if text[line_start..at].contains("use ") || text[..at].rfind("use ").is_some_and(|u| !text[u..at].contains(';')) {
-                return true;
-            }
-            from = at + name.len();
+            i += 1;
         }
         false
     }
@@ -1527,7 +1558,7 @@ impl<'a> Parser<'a> {
         }
         // a skipped body calls only built-ins (body_outline checked each call where it was)
         if self.lazy_part {
-            return crate::builtins::macro_def(&name);
+            return crate::builtins::builtin_macro_def(&name);
         }
         // `dep::m!` / `crate::m!` / `$crate::m!` (expanded as `::dep::m!` or `crate::m!`): the
         // module part, resolved like an item path
@@ -1589,9 +1620,21 @@ impl<'a> Parser<'a> {
             }
         }
         // Relax's built-in macros (builtins.rs) when no macro_rules! of that name is visible
+        let prelude_shadowed = STD_PRELUDE_MACROS.contains(&name.as_str())
+            && (matches!(qual.as_deref(), Some("std" | "core" | "alloc"))
+                || (qual.is_none() && !path.global() && self.no_prelude == 0 && !self.name_imported(&name)));
+        let bdef = if prelude_shadowed {
+            crate::builtins::builtin_macro_def(&name)
+        } else {
+            let scope_krate = qual.as_deref()
+                .filter(|&q| !matches!(q, "crate" | "self" | "super" | "std" | "core" | "alloc"))
+                .and_then(|q| m.table.crates.get(&self.krate).and_then(|c| c.externs.get(q)).map(|s| s.as_str()).or(Some(q)))
+                .unwrap_or(&self.krate);
+            crate::builtins::macro_def_for(scope_krate, &name)
+        };
         match r {
             Some(d) => Some(crate::builtins::override_rules(&self.session.options, d)),
-            None => crate::builtins::macro_def(&name).or_else(|| {
+            None => bdef.or_else(|| {
                 // a macro this crate imported under another name (`use std::{eprintln as log_error}`)
                 let own = matches!(qual.as_deref(), None | Some("crate") | Some("self") | Some("super"));
                 let (q, target) = if own { m.table.alias(&self.krate, &name)?.clone() } else { return None };
@@ -1603,7 +1646,11 @@ impl<'a> Parser<'a> {
                 // the dep's own re-export under that name (`pub use crate::{__trace as trace}`)
                 let dep_alias = || -> Option<crate::macros::MacroRef> {
                     let dep = q2.filter(|q| *q != "crate")?;
-                    let (dq, dt) = m.table.alias(dep, &target)?.clone();
+                    let dep_key = m.table.crates.get(&self.krate)
+                        .and_then(|c| c.externs.get(dep))
+                        .map(|s| s.as_str())
+                        .unwrap_or(dep);
+                    let (dq, dt) = m.table.alias(dep_key, &target)?.clone();
                     let dq2 = match dq.as_str() {
                         "crate" | "self" | "super" | "" => dep.to_string(),
                         other => other.to_string(),
@@ -1615,12 +1662,22 @@ impl<'a> Parser<'a> {
                     Some(d) => Some(crate::builtins::override_rules(&self.session.options, d)),
                     // a name imported as it is (`use dep::{trace}`) that is no macro there
                     None if target == name => None,
-                    None => match crate::builtins::macro_def(&target) {
-                        Some(d) => Some(d),
-                        // a std macro Relax handles by its name (format family, assert, ..):
-                        // the alias forwards its tokens to it, as `alias!(..)` => `target!(..)`
-                        None => m.forwarding_def(&name, &self.krate, &target),
-                    },
+                    None => {
+                        let target_def = if matches!(q.as_str(), "std" | "core" | "alloc") {
+                            crate::builtins::builtin_macro_def(&target)
+                        } else {
+                            let tk = q2.filter(|&k| k != "crate")
+                                .and_then(|dep| m.table.crates.get(&self.krate).and_then(|c| c.externs.get(dep)).map(|s| s.as_str()).or(Some(dep)))
+                                .unwrap_or(&self.krate);
+                            crate::builtins::macro_def_for(tk, &target)
+                        };
+                        match target_def {
+                            Some(d) => Some(d),
+                            // a std macro Relax handles by its name (format family, assert, ..):
+                            // the alias forwards its tokens to it, as `alias!(..)` => `target!(..)`
+                            None => m.forwarding_def(&name, &self.krate, &target),
+                        }
+                    }
                 }
             }),
         }
@@ -1755,7 +1812,7 @@ impl<'a> Parser<'a> {
             if a.toks.hi == a.toks.lo + 3 && self.tok_text(self.toks.at(a.toks.lo as usize)) == b"recursion_limit" && self.tok_text(self.toks.at(a.toks.lo as usize + 1)) == b"=" {
                 std::str::from_utf8(self.tok_text(self.toks.at(a.toks.lo as usize + 2))).ok()?.trim_matches('"').parse().ok()
             } else { None }
-        })
+        }).or_else(|| self.macros.as_ref()?.table.crates.get(&self.krate)?.recursion_limit)
     }
 
     fn expand_call_inner(&mut self, def: &crate::macros::MacroDef, toks: TokRange, call_lo: u32) -> PResult<usize> {
@@ -1920,7 +1977,9 @@ impl<'a> Parser<'a> {
         self.expect(T::Not)?;
         let (delim, toks) = self.delim_tt()?;
         // `m!(..).method()` etc. continue as an expression: not a statement macro
-        if delim != b'{' && !matches!(self.kind(), T::Semi | T::CloseBrace | T::Eof) {
+        if (delim != b'{' && !matches!(self.kind(), T::Semi | T::CloseBrace | T::Eof))
+            || (delim == b'{' && as_expr && matches!(self.kind(), T::Dot | T::Question))
+        {
             self.pos = save;
             return Ok(None);
         }
@@ -2000,6 +2059,7 @@ impl<'a> Parser<'a> {
         // #[cfg] is false is removed with its tokens), otherwise it is a statement macro
         if self.macros.is_some() && self.kind() == T::Pound {
             let save = self.pos;
+            let pend0 = self.pending_shape.len();
             let attrs = self.outer_attrs()?;
             if self.mac_ahead() {
                 let at = self.pos;
@@ -2007,17 +2067,22 @@ impl<'a> Parser<'a> {
                 if self.rules_macro(&path).is_some() {
                     if !self.cfg_active(&attrs) {
                         self.expect(T::Not)?;
-                        self.delim_tt()?;
-                        self.eat(T::Semi);
-                        return Ok(());
-                    }
-                    self.pos = at;
-                    self.record_mac_call_attrs(&attrs);
-                    if self.stmt_macro(stmts)? {
-                        return Ok(());
+                        let (delim, _) = self.delim_tt()?;
+                        if (delim == b'{' && !matches!(self.kind(), T::Dot | T::Question)) || matches!(self.kind(), T::Semi | T::CloseBrace | T::Eof) {
+                            self.eat(T::Semi);
+                            self.pending_shape.truncate(pend0);
+                            return Ok(());
+                        }
+                    } else {
+                        self.pos = at;
+                        self.record_mac_call_attrs(&attrs);
+                        if self.stmt_macro(stmts)? {
+                            return Ok(());
+                        }
                     }
                 }
             }
+            self.pending_shape.truncate(pend0);
             self.pos = save;
         }
         let s = self.stmt()?;
@@ -2258,6 +2323,19 @@ impl<'a> Parser<'a> {
             Some(_) => Ok(()),
             None => self.err("expected item"),
         }
+    }
+
+    fn with_cfg_active<R>(&mut self, active: bool, pend0: usize, f: impl FnOnce(&mut Self) -> PResult<R>) -> PResult<R> {
+        if active {
+            return f(self);
+        }
+        let macros = self.macros.take();
+        self.cfg_out += 1;
+        let r = f(self);
+        self.cfg_out -= 1;
+        self.macros = macros;
+        self.pending_shape.truncate(pend0);
+        r
     }
 
     /// Runs `parse` as a cfg-stripped construct: no macro expansion, and everything it adds
@@ -4210,20 +4288,19 @@ impl<'a> Parser<'a> {
         let item_tok = self.pos;
         let pend0 = self.pending_shape.len();
         let attrs = self.outer_attrs()?;
-        if self.at_item_start() && !attrs.is_empty() && !self.cfg_active(&attrs) {
+        let active = attrs.is_empty() || self.cfg_active(&attrs);
+        if !active && self.at_item_start() {
             self.parse_cfg_out(attrs)?;
             self.pending_shape.truncate(pend0);
             return Ok(Stmt::Empty);
         }
-        // `#[cfg(false)] try { .. }`: try blocks (unstable, `try_blocks`) parse only where cfg
-        // stripping removes them (rustc_parse `parse_try_block`)
-        if self.kind() == T::KwTry && self.nth(1) == T::OpenBrace && !attrs.is_empty() && !self.cfg_active(&attrs) {
-            self.parse_stripped(|p| p.stmt_after_attrs(attrs, item_tok))?;
-            return Ok(Stmt::Empty);
-        }
-        if !self.pending_shape.is_empty() { self.check_pending_attrs()?; }
-        let s = self.stmt_after_attrs(attrs.clone(), item_tok)?;
+        if active && !self.pending_shape.is_empty() { self.check_pending_attrs()?; }
+        let s = self.with_cfg_active(active, pend0, |p| p.stmt_after_attrs(attrs.clone(), item_tok))?;
         if matches!(s, Stmt::Item(_)) {
+            if !active {
+                self.pending_shape.truncate(pend0);
+                return Ok(Stmt::Empty);
+            }
             let items = self.hosted_derives(&attrs, item_tok)?;
             self.extra_items.extend(items);
         }
@@ -4288,12 +4365,28 @@ impl<'a> Parser<'a> {
             self.expect(T::Not)?;
             if self.kind() == T::OpenBrace {
                 let (delim, toks) = self.delim_tt()?;
-                let e = match self.builtin_mac_expr(&path, toks, lo)? {
-                    Some(e) => e,
-                    None => {
-                        let args = self.mac_args(&path, toks);
-                        { let m = self.ast.push_row(MacCall { path, delim, toks, args }); self.mk_expr(ExprKind::Mac(m), lo) }
-                    }
+                let e = if let Some(def) = self.rules_macro(&path) {
+                    self.include_as_expr = true;
+                    self.cfg_select_rest.borrow_mut().clear();
+                    let start = self.expand_call(&def, toks, lo);
+                    self.include_as_expr = false;
+                    let start = start?;
+                    let rest = std::mem::take(&mut *self.cfg_select_rest.borrow_mut());
+                    let include = def.builtin < crate::builtins::HOSTED && crate::builtins::from_u8(def.builtin) == crate::builtins::Builtin::Include;
+                    let e = self.in_expansion(start, |p| {
+                        let e = p.expr()?;
+                        if include { p.incomplete_include_check(); p.skip_to_eof(); }
+                        p.eat(T::Semi);
+                        Ok(e)
+                    })?;
+                    self.parse_cfg_select_rest(rest, 0)?;
+                    e
+                } else if let Some(e) = self.builtin_mac_expr(&path, toks, lo)? {
+                    e
+                } else {
+                    let args = self.mac_args(&path, toks);
+                    let m = self.ast.push_row(MacCall { path, delim, toks, args });
+                    self.mk_expr(ExprKind::Mac(m), lo)
                 };
                 if matches!(self.kind(), T::Dot | T::Question) {
                     let e = self.postfix(e, lo)?;
@@ -4731,10 +4824,16 @@ impl<'a> Parser<'a> {
     /// (the element is removed; Reference expressions.md [expr.attr.restriction] and
     /// conditional-compilation.md [cfg.attr]; rustc_expand config.rs configure_expr).
     fn list_elem(&mut self, r: u8) -> PResult<Option<ExprId>> {
+        let pend0 = self.pending_shape.len();
         let attrs = if self.kind() == T::Pound && self.nth(1) == T::OpenBracket { self.outer_attrs()? } else { Vec::new() };
+        if !attrs.is_empty() && !self.cfg_present(&attrs) {
+            self.parse_stripped(|p| p.expr_bp(0, r))?;
+            self.pending_shape.truncate(pend0);
+            return Ok(None);
+        }
         self.closure_attrs(&attrs)?;
         let e = self.expr_bp(0, r)?;
-        Ok(if attrs.is_empty() || self.cfg_present(&attrs) { Some(e) } else { None })
+        Ok(Some(e))
     }
 
     /// rustc_parse parse_expr_block: a labeled or unsafe block, or a closure body after its return
@@ -4871,31 +4970,36 @@ impl<'a> Parser<'a> {
                 self.inner_attrs(&mut _inner)?;
                 let mut arms = Vec::new();
                 while self.kind() != T::CloseBrace {
+                    let pend0 = self.pending_shape.len();
                     let attrs = self.outer_attrs()?;
-                    if self.cfg_out == 0 { self.non_macro_attrs(&attrs)?; }
-                    let pat = self.pat_top()?;
-                    let guard = if self.eat(T::KwIf) { Some(self.guard_expr()?) } else { None };
-                    self.expect(T::FatArrow)?;
-                    let blo = self.lo();
-                    let body;
-                    if self.block_like_start() {
-                        let e = self.primary(0)?;
-                        if matches!(self.kind(), T::Dot | T::Question) {
-                            let e = self.postfix(e, blo)?;
-                            body = self.expr_continue(e, 0, 0, blo)?;
-                            if !self.eat(T::Comma) && self.kind() != T::CloseBrace {
-                                return self.err("expected `,` after match arm");
+                    let active = self.cfg_active(&attrs);
+                    if active && self.cfg_out == 0 { self.non_macro_attrs(&attrs)?; }
+                    let (pat, guard, body) = self.with_cfg_active(active, pend0, |p| {
+                        let pat = p.pat_top()?;
+                        let guard = if p.eat(T::KwIf) { Some(p.guard_expr()?) } else { None };
+                        p.expect(T::FatArrow)?;
+                        let blo = p.lo();
+                        let body;
+                        if p.block_like_start() {
+                            let e = p.primary(0)?;
+                            if matches!(p.kind(), T::Dot | T::Question) {
+                                let e = p.postfix(e, blo)?;
+                                body = p.expr_continue(e, 0, 0, blo)?;
+                                if !p.eat(T::Comma) && p.kind() != T::CloseBrace {
+                                    return p.err("expected `,` after match arm");
+                                }
+                            } else {
+                                body = e;
+                                p.eat(T::Comma);
                             }
                         } else {
-                            body = e;
-                            self.eat(T::Comma);
+                            body = p.expr()?;
+                            if !p.eat(T::Comma) && p.kind() != T::CloseBrace {
+                                return p.err("expected `,` after match arm");
+                            }
                         }
-                    } else {
-                        body = self.expr()?;
-                        if !self.eat(T::Comma) && self.kind() != T::CloseBrace {
-                            return self.err("expected `,` after match arm");
-                        }
-                    }
+                        Ok((pat, guard, body))
+                    })?;
                     let attrs = self.ast.push_list(attrs);
                     arms.push(Arm { attrs, pat, guard, body });
                 }
@@ -5016,8 +5120,10 @@ impl<'a> Parser<'a> {
         let mut base = None;
         let mut rest = false;
         while self.kind() != T::CloseBrace {
+            let pend0 = self.pending_shape.len();
             let attrs = self.outer_attrs()?;
-            if self.cfg_out == 0 { self.non_macro_attrs(&attrs)?; }
+            let active = self.cfg_active(&attrs);
+            if active && self.cfg_out == 0 { self.non_macro_attrs(&attrs)?; }
             let attrs = self.ast.push_list(attrs);
             if self.eat(T::DotDot) {
                 if self.kind() != T::CloseBrace {
@@ -5034,9 +5140,10 @@ impl<'a> Parser<'a> {
             self.pos += 1;
             let name = Ident { lo: t.lo, hi: t.hi };
             if self.eat(T::Colon) {
-                let e = self.expr()?;
+                let e = self.with_cfg_active(active, pend0, |p| p.expr())?;
                 fields.push(FieldExpr { attrs, name, expr: e, shorthand: false });
             } else {
+                if !active { self.pending_shape.truncate(pend0); }
                 let segs = self.mk_segs(vec![PathSeg::new(SegKind::Ident, name, GenericArgsId::NONE)], false);
                 let p = Path { segs, lo: t.lo };
                 let e = self.mk_expr(ExprKind::Path(p), t.lo);
@@ -5224,7 +5331,7 @@ fn region_of<'t>(exp_map: impl Into<OSegRef<'t, Regions>>, pos: u32) -> Option<u
 fn source_origin<'a>(mut pos: u32, exact: bool, src_len: u32,
     tables: impl Fn(u32) -> (OSegRef<'a, Maps>, OSegRef<'a, Regions>, OSegRef<'a, Origins>),
 ) -> Result<SourceSpan, u32> {
-    for _ in 0..64 {
+    for _ in 0..4096 {
         let (to, em, origins) = tables(pos);
         if exact {
             // AST ends (for example Block.hi) are exclusive. If no next token starts here,
@@ -5552,7 +5659,7 @@ impl ParsedFile {
     /// The position in the file's own text a position comes from: macro expansion positions
     /// followed back to their call sites (a position in the text is its own).
     pub fn call_site(&self, mut pos: u32) -> u32 {
-        for _ in 0..64 {
+        for _ in 0..4096 {
             match region_of(self.tables(pos).1, pos) {
                 Some(p) if p != pos => pos = p,
                 _ => break,
@@ -5671,7 +5778,7 @@ impl ParsedFile {
         if depth > 32 {
             return;
         }
-        for _ in 0..64 {
+        for _ in 0..4096 {
             if pos < self.src_len {
                 return;
             }
@@ -5719,7 +5826,7 @@ impl ParsedFile {
     /// defined in this file, of one defined elsewhere (another crate's: lints are not reported
     /// in it), or the output of a built-in / derive / proc macro (compiler-generated).
     pub fn expansion_kind(&self, mut pos: u32) -> ExpnKind {
-        for _ in 0..64 {
+        for _ in 0..4096 {
             if pos < self.src_len {
                 return ExpnKind::Root;
             }
@@ -5770,7 +5877,7 @@ impl ParsedFile {
     /// fragment is at the call's argument, anything else maps to the call site as in
     /// `diagnostic_pos`.
     pub fn lint_pos(&self, mut pos: u32) -> u32 {
-        for _ in 0..64 {
+        for _ in 0..4096 {
             if pos < self.src_len { return pos; }
             let (to, em) = self.tables(pos);
             if let Some(o) = origin_of(to, pos) {
@@ -5818,7 +5925,7 @@ impl ParsedFile {
 
     /// The source position `pos` stands for (a fragment's origin, else the call site).
     pub fn src_pos(&self, mut pos: u32) -> u32 {
-        for _ in 0..64 {
+        for _ in 0..4096 {
             if pos < self.src_len {
                 return pos;
             }
@@ -5835,7 +5942,7 @@ impl ParsedFile {
     }
     pub fn diagnostic_pos(&self, mut pos: u32) -> u32 {
         if self.token_input { return self.source_span(pos).lo; }
-        for _ in 0..64 {
+        for _ in 0..4096 {
             if pos < self.src_len { break; }
             match region_of(self.tables(pos).1, pos) {
                 Some(p) if p != pos => pos = p,
@@ -5998,7 +6105,7 @@ pub(crate) fn parse_owned_input(sess: &std::sync::Arc<crate::Session>, mut src: 
             if token_input { return Err((p.source_span(e.pos), e.msg)); }
             // an error inside an expansion is reported at its call site
             let mut pos = e.pos;
-            for _ in 0..64 {
+            for _ in 0..4096 {
                 if pos < src_len { break; }
                 let next = region_of(p.exp_map.view(),pos);
                 match next { Some(at) if at != pos => pos = at, _ => break }

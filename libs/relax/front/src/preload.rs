@@ -473,6 +473,9 @@ impl Pool {
             };
             inputs.push((path.clone(), crate::crate_image::file_hash(&path, &s.src[..s.src_len])));
             probes.extend(s.probes);
+            if path == c.root && s.recursion_limit.is_some() {
+                cmods.recursion_limit = s.recursion_limit;
+            }
             for d in s.defs {
                 defs.push(Arc::new(d));
             }
@@ -772,6 +775,8 @@ struct Scanned {
     mods: Vec<String>,
     /// the `mod` item of each module declared in the file
     mod_items: Vec<(String, crate::macros::ModItem)>,
+    /// `#![recursion_limit = ".."]` in the file's leading inner attributes
+    pub(crate) recursion_limit: Option<u32>,
 }
 
 /// The bindings of a `use` tree in tokens `lo..hi` (after `use`, before `;`) under `prefix`.
@@ -960,7 +965,29 @@ fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16, cf
     let mut mod_items: Vec<(String, crate::macros::ModItem)> = Vec::new();
     if !file_cfg_active(&src, &toks, cfg) {
         // `#![cfg(false)]` file: removed with its module; nothing in it counts
-        return Some(Scanned { src_len, src, toks: toks.into(), defs, children, probes, aliases, macro_use, uses, mods: Vec::new(), mod_items: Vec::new() });
+        return Some(Scanned { src_len, src, toks: toks.into(), defs, children, probes, aliases, macro_use, uses, mods: Vec::new(), mod_items: Vec::new(), recursion_limit: None });
+    }
+    let mut recursion_limit = None;
+    {
+        let mut i = 0;
+        while i + 5 < toks.len() && toks[i].kind == T::Pound && toks[i + 1].kind == T::Not && toks[i + 2].kind == T::OpenBracket {
+            let mut d = 0i32;
+            let mut j = i + 2;
+            while j < toks.len() {
+                match toks[j].kind {
+                    T::OpenBracket => d += 1,
+                    T::CloseBracket => { d -= 1; if d == 0 { break; } }
+                    _ => {}
+                }
+                j += 1;
+            }
+            if j == i + 6 && &src[toks[i + 3].lo as usize..toks[i + 3].hi as usize] == b"recursion_limit" && toks[i + 4].kind == T::Eq {
+                if let Ok(s) = std::str::from_utf8(&src[toks[i + 5].lo as usize..toks[i + 5].hi as usize]) {
+                    recursion_limit = s.trim_matches('"').parse::<u32>().ok().or(recursion_limit);
+                }
+            }
+            i = j + 1;
+        }
     }
     {
         let text = |i: usize| -> &[u8] { &src[toks[i].lo as usize..toks[i].hi as usize] };
@@ -1182,7 +1209,7 @@ fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16, cf
             i += 1;
         }
     }
-    Some(Scanned { src_len, src, toks: toks.into(), defs, children, probes, aliases, macro_use, uses, mods, mod_items })
+    Some(Scanned { src_len, src, toks: toks.into(), defs, children, probes, aliases, macro_use, uses, mods, mod_items, recursion_limit })
 }
 
 /// Starts the pipeline for `crates` (load order): scans (all crates at once, earliest crate
@@ -1357,6 +1384,9 @@ pub fn check_macros(prog: &mut crate::program::Program, krate: u32, files: &[(u3
     let mut reached = Vec::new();
     for (k, reachable, mut mods, scans) in contexts {
         for scan in scans {
+            if scan.recursion_limit.is_some() && mods.recursion_limit.is_none() {
+                mods.recursion_limit = scan.recursion_limit;
+            }
             for d in scan.defs { table.define(d); }
             for (alias, qual, target) in scan.aliases { table.add_alias(name.clone(), alias, (qual, target)); }
             table.macro_use.entry(name.clone()).or_default().extend(scan.macro_use);

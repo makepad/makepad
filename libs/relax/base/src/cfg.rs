@@ -237,33 +237,25 @@ impl CfgSet {
         }
     }
 
-    /// The CARGO_CFG_* variables cargo gives a build script for the target's basic cfgs (OS, arch,
-    /// env, vendor, family, endianness, pointer width, and the family flag `unix` / `windows`).
+    /// The CARGO_CFG_* variables cargo gives a build script for the target's cfgs (OS, arch,
+    /// env, vendor, family, endianness, pointer width, target_has_atomic, target_feature, panic,
+    /// and the family flag `unix` / `windows`), plus any `--cfg` from RUSTFLAGS.
     pub fn build_script_env(&self) -> Vec<(String, String)> {
-        let mut v = Vec::new();
-        for key in ["target_endian", "target_pointer_width", "target_family", "target_os", "target_arch", "target_env", "target_vendor"] {
-            let prefix = format!("{}=", key);
-            if let Some(e) = self.set.iter().find(|e| e.starts_with(&prefix)) {
-                v.push((format!("CARGO_CFG_{}", key.to_uppercase()), e[prefix.len()..].to_string()));
+        let mut v: Vec<(String, String)> = Vec::new();
+        for e in self.set.iter().chain(self.session.options.cfgs.iter()) {
+            if e.starts_with("feature=") {
+                continue;
             }
-        }
-        for flag in ["unix", "windows"] {
-            if self.has(flag) {
-                v.push((format!("CARGO_CFG_{}", flag.to_uppercase()), String::new()));
-            }
-        }
-        // cargo gives a build script every `--cfg` of RUSTFLAGS the same way: `CARGO_CFG_CUSTOM`
-        // (empty) for `--cfg custom`, `CARGO_CFG_KEY=value` for `--cfg key="value"` (several
-        // values of one key are joined by commas)
-        for e in &self.session.options.cfgs {
             let (k, val) = e.split_once('=').unwrap_or((e.as_str(), ""));
             let name = format!("CARGO_CFG_{}", k.to_uppercase());
             match v.iter_mut().find(|(n, _)| *n == name) {
                 Some((_, old)) if !val.is_empty() => {
-                    if !old.is_empty() {
-                        old.push(',');
+                    if !old.split(',').any(|x| x == val) {
+                        if !old.is_empty() {
+                            old.push(',');
+                        }
+                        old.push_str(val);
                     }
-                    old.push_str(val);
                 }
                 Some(_) => {}
                 None => v.push((name, val.to_string())),

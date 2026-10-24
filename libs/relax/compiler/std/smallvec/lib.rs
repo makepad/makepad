@@ -124,6 +124,7 @@ pub struct SmallVec<A: Array> {
 }
 
 unsafe impl<A: Array> Send for SmallVec<A> where A::Item: Send {}
+unsafe impl<A: Array> Sync for SmallVec<A> where A::Item: Sync {}
 
 impl<A: Array> SmallVec<A> {
     /// Construct an empty vector

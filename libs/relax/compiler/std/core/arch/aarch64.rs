@@ -2177,6 +2177,26 @@ pub unsafe fn vmaxvq_s8(a: int8x16_t) -> i8 {
     r
 }
 
+pub unsafe fn vmaxvq_u16(a: uint16x8_t) -> u16 {
+    let mut r = a.0[0];
+    let mut i = 1;
+    while i < 8 {
+        r = r.max(a.0[i]);
+        i += 1;
+    }
+    r
+}
+
+pub unsafe fn vmaxvq_u8(a: uint8x16_t) -> u8 {
+    let mut r = a.0[0];
+    let mut i = 1;
+    while i < 16 {
+        r = r.max(a.0[i]);
+        i += 1;
+    }
+    r
+}
+
 pub unsafe fn vminnmq_f32(a: float32x4_t, b: float32x4_t) -> float32x4_t {
     let mut r = [0.0; 4];
     let mut i = 0;

@@ -27,6 +27,8 @@ use crate::program::*;
 thread_local! {
     /// the last `relax_pm_parse` result of this thread (the macro copies it right away)
     static PARSE_OUT: std::cell::RefCell<Vec<u8>> = Default::default();
+    /// the last `relax_pm_getenv` result of this thread (the macro copies it right away)
+    static ENV_OUT: std::cell::RefCell<Vec<u8>> = Default::default();
 }
 
 /// `"..".parse::<TokenStream>()` inside JIT-run macro code (Relax's std proc_macro FromStr):
@@ -39,6 +41,25 @@ pub extern "C" fn relax_pm_parse(src: *const u8, len: usize, out: *mut *const u8
     PARSE_OUT.with(|b| {
         let mut b = b.borrow_mut();
         *b = crate::pm::encode(Span::DUMMY, &ts);
+        unsafe {
+            *out = b.as_ptr();
+            *out_len = b.len();
+        }
+    });
+    0
+}
+
+/// Per-crate compile-time environment variable (`CARGO_MANIFEST_DIR`, `CARGO_PKG_*`, build-script
+/// `rustc-env`) for the crate invoking the currently running JIT proc macro.
+/// 0: found (`out` and `out_len` set); 1: not set in the invoking crate's environment.
+pub extern "C" fn relax_pm_getenv(key: *const u8, len: usize, out: *mut *const u8, out_len: *mut usize) -> i32 {
+    let s = unsafe { std::slice::from_raw_parts(key, len) };
+    let Ok(s) = std::str::from_utf8(s) else { return 1 };
+    let Some(val) = crate::macro_reg::call_krate_env(s) else { return 1 };
+    ENV_OUT.with(|b| {
+        let mut b = b.borrow_mut();
+        b.clear();
+        b.extend_from_slice(val.as_bytes());
         unsafe {
             *out = b.as_ptr();
             *out_len = b.len();
@@ -151,11 +172,29 @@ pub static PH: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::A
 /// loaded (free_world: no expansions until a hot reload or a run-time module loads source), then
 /// rebuilt on the next need -- from the disk cache, so a rebuild compiles nothing.
 static WORLD: relax_session::sync::Mutex<Option<std::sync::Arc<Result<World, String>>>> = relax_session::sync::Mutex::new(None);
+static BOOT_WORLD: relax_session::sync::Mutex<Option<std::sync::Arc<Result<World, String>>>> = relax_session::sync::Mutex::new(None);
 /// held while the world is being built: other threads wait for that build
 static BUILDING: relax_session::sync::Mutex<()> = relax_session::sync::Mutex::new(());
 
 fn world_now() -> Option<std::sync::Arc<Result<World, String>>> {
     WORLD.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+fn world_for(sess: &std::sync::Arc<crate::Session>, unit: usize) -> Option<std::sync::Arc<Result<World, String>>> {
+    if in_world() {
+        return None;
+    }
+    if let Some(w) = world_now() {
+        return Some(w);
+    }
+    if let Some(bw) = BOOT_WORLD.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        if let Ok(w) = bw.as_ref() {
+            if w.crate_of.get(unit).copied().unwrap_or(u32::MAX) != u32::MAX {
+                return Some(bw);
+            }
+        }
+    }
+    world(sess)
 }
 
 
@@ -211,6 +250,14 @@ pub fn world_alive() -> bool {
 }
 
 pub fn free_world() -> bool {
+    let bw = {
+        let mut g = BOOT_WORLD.lock().unwrap_or_else(|e| e.into_inner());
+        match g.as_ref() {
+            Some(w) if std::sync::Arc::strong_count(w) == 1 => g.take(),
+            _ => None,
+        }
+    };
+    drop(bw);
     let w = {
         let mut g = WORLD.lock().unwrap_or_else(|e| e.into_inner());
         // Only the caller retires the world's unit (retire_unit parks every compile job): a macro
@@ -275,10 +322,10 @@ pub fn policy() -> Policy {
     if POLICY.load(std::sync::atomic::Ordering::Relaxed) == 1 { Policy::Open } else { Policy::Sandboxed }
 }
 
-/// Trusted crates may use unsafe/FFI: all of them under `Policy::Open`; else the path packages
-/// (and std): a registry/git package is sandboxed by what it is, not by where it is stored.
-fn trusted(unit: &crate::macro_reg::UnitInfo) -> bool {
-    policy() == Policy::Open || !unit.registry
+/// Trusted crates may use unsafe/FFI: all of them under `Policy::Open` or `--allow-c`; else the
+/// path packages (and std): a registry/git package is sandboxed by what it is, not by where it is stored.
+fn trusted(sess: &std::sync::Arc<crate::Session>, unit: &crate::macro_reg::UnitInfo) -> bool {
+    policy() == Policy::Open || sess.options.allow_c || !unit.registry
 }
 
 /// The sandbox's dialect-level refusal for an untrusted macro crate's files.
@@ -328,7 +375,6 @@ fn sandbox_check(root: &str, edition: u16) -> Result<(), String> {
 }
 
 fn build_world(sess: &std::sync::Arc<crate::Session>) -> Result<World, String> {
-    let t0 = std::time::Instant::now();
     let _mem = crate::memstat::tag(crate::memstat::Tag::PmHost);
     let reg = REG.with(|r| r.borrow().as_ref().map(|r| (r.units.clone(), r.std_dir.clone())));
     let (units, std_dir) = reg.ok_or("no crate graph registered")?;
@@ -348,7 +394,7 @@ fn build_world(sess: &std::sync::Arc<crate::Session>) -> Result<World, String> {
     // world; its macros report the reason at their call sites
     let mut refused: Vec<Option<String>> = vec![None; units.len()];
     for i in 0..units.len() {
-        if need[i] && !trusted(&units[i]) {
+        if need[i] && !trusted(sess, &units[i]) {
             if let Err(e) = sandbox_check(&units[i].src_path, units[i].edition) {
                 refused[i] = Some(e);
             }
@@ -371,6 +417,50 @@ fn build_world(sess: &std::sync::Arc<crate::Session>) -> Result<World, String> {
             need[i] = false;
         }
     }
+    let mut boot_root = vec![false; units.len()];
+    for i in 0..units.len() {
+        if need[i] {
+            for &(d, _) in &units[i].deps {
+                if units[d].proc_macro && !crate::native_macros::required(&units[d].name) && need[d] {
+                    boot_root[d] = true;
+                }
+            }
+        }
+    }
+    let mut uses_boot = vec![false; units.len()];
+    if boot_root.iter().any(|&b| b) {
+        let mut progress = true;
+        while progress {
+            progress = false;
+            for i in 0..units.len() {
+                if need[i] && !uses_boot[i] && units[i].deps.iter().any(|&(d, _)| boot_root[d] || uses_boot[d]) {
+                    uses_boot[i] = true;
+                    progress = true;
+                }
+            }
+        }
+        let mut boot_need = vec![false; units.len()];
+        let mut bstack: Vec<usize> = (0..units.len()).filter(|&i| boot_root[i] && !uses_boot[i]).collect();
+        while let Some(i) = bstack.pop() {
+            if boot_need[i] || uses_boot[i] {
+                continue;
+            }
+            boot_need[i] = true;
+            for &(d, _) in &units[i].deps {
+                bstack.push(d);
+            }
+        }
+        if boot_need.iter().any(|&b| b) {
+            let bw = build_world_inner(sess, &units, &std_dir, &boot_need, &vec![false; units.len()], refused.clone())?;
+            *BOOT_WORLD.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(Ok(bw)));
+        }
+    }
+    build_world_inner(sess, &units, &std_dir, &need, &uses_boot, refused)
+}
+
+fn build_world_inner(sess: &std::sync::Arc<crate::Session>, units: &[crate::macro_reg::UnitInfo], std_dir: &str, need: &[bool], uses_boot: &[bool], refused: Vec<Option<String>>) -> Result<World, String> {
+    let t0 = std::time::Instant::now();
+    let _mem = crate::memstat::tag(crate::memstat::Tag::PmHost);
     let mut prog = crate::program::Program::new(sess);
     // core/alloc/std: the program's own parses (program::SharedParse), not a second copy
     prog.std_from_shared = true;
@@ -412,7 +502,26 @@ fn build_world(sess: &std::sync::Arc<crate::Session>) -> Result<World, String> {
             let mut cs = host(&u.features);
             // Proc macros run in the host Relax session and are never shipped to the web.
             cs.set.push("relax".to_string());
+            for c in &u.cfgs {
+                cs.set.push(c.replace('"', ""));
+            }
+            crate::crates::set_crate_env(&u.name, u.env.clone());
+            struct AllowBoot(bool);
+            impl Drop for AllowBoot {
+                fn drop(&mut self) {
+                    if self.0 {
+                        set_in_world(true);
+                    }
+                }
+            }
+            let _allow = if uses_boot[i] {
+                set_in_world(false);
+                AllowBoot(true)
+            } else {
+                AllowBoot(false)
+            };
             let k = prog.load_crate_deferred(&u.name, &u.src_path, u.edition, cs, deps).map_err(|e| format!("macro crate {}: {}", u.name, e))?;
+            drop(_allow);
             crate_of[i] = k;
             done[i] = true;
             progress = true;
@@ -565,7 +674,7 @@ fn call(sess: &std::sync::Arc<crate::Session>, entry: &Entry, attr: Option<&Toke
     let _mem = crate::memstat::tag(crate::memstat::Tag::PmHost);
     tl_set_once(2, crate::clock::ms_since_start());
     let wait = crate::load_profile::span(sess.runtime.profile, "wait-macro-world", &entry.fname);
-    let wa = world(sess);
+    let wa = world_for(sess, entry.unit);
     drop(wait);
     let w = match wa.as_deref() {
         Some(Ok(w)) => w,
@@ -575,9 +684,11 @@ fn call(sess: &std::sync::Arc<crate::Session>, entry: &Entry, attr: Option<&Toke
     // Reload's lexer/parser now run off the unit, but the JIT macro world still uses
     // the runtime's process-wide UNIT and TLS machinery. Preserve the original reload
     // serialization for this step. Cached script expansions never enter the host.
+    let call_krate = crate::macro_reg::current_call_krate();
     let wait = crate::load_profile::span(sess.runtime.profile, "wait-macro-unit", &entry.fname);
     crate::owner::call(crate::owner::Class::Program, || -> Result<TokenStream, String> {
     drop(wait);
+    let _krate = crate::macro_reg::with_call_krate(&call_krate);
     let _held = crate::load_profile::span(sess.runtime.profile, "macro-unit-held", &entry.fname);
     if let Some(Some(e)) = w.refused.get(entry.unit) {
         return Err(format!("sandbox: {}", e));

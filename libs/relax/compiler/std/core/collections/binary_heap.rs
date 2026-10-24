@@ -301,6 +301,9 @@ impl<T: Ord> Extend<T> for BinaryHeap<T> {
     }
 }
 
+pub type Iter<'a, T> = crate::slice::Iter<'a, T>;
+pub type Drain<'a, T> = crate::vec::Drain<'a, T>;
+
 pub struct IntoIter<T> {
     iter: crate::vec::IntoIter<T>,
 }

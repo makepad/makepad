@@ -117,6 +117,8 @@ impl crate::fmt::Display for Infallible {
     }
 }
 
+impl crate::error::Error for Infallible {}
+
 pub const fn identity<T>(x: T) -> T {
     x
 }
