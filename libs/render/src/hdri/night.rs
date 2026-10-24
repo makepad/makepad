@@ -46,7 +46,7 @@ use super::milky_way::MilkyWay;
 use super::nebulas::Nebulas;
 use super::noise::{hash01, hash_u32};
 use super::studio::{kelvin_to_rgb, light_frame, project, LightFrame};
-use super::{EnvSun, NebulaParams, NightParams, SunMode, SunParams};
+use super::{dome_look, EnvSun, NebulaParams, NightParams, SunMode, SunParams, DOME_COLUMNS, DOME_ROWS};
 use crate::sky::{luminance, sun_transmittance};
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
@@ -681,25 +681,24 @@ impl NightSky {
         (mean / TAU, irradiance)
     }
 
-    /// The aurora's mean radiance over the upper hemisphere and the irradiance it puts on flat ground, by the glow's
-    /// midpoint quadrature at the bare lookups' band limit.
+    /// The aurora's mean radiance over the upper hemisphere and the irradiance it puts on flat ground, at the bare
+    /// lookups' band limit, over the dome's looks (`dome_look`, each an equal share of the hemisphere): the same sums
+    /// the map's dome makes of it, so the ground under a deck gains just what the deck's light gains (D9; Task 4c: the
+    /// glow's 16 x 32 midpoint quadrature sampled other directions, and against the folded ribbons the two sums differed
+    /// by up to 15 %).
     fn integrate_aurora(&self) -> (Vec3f, Vec3f) {
-        const THETA_STEPS: usize = 16;
-        const PHI_STEPS: usize = 32;
-        let d_theta = FRAC_PI_2 / THETA_STEPS as f32;
-        let d_phi = TAU / PHI_STEPS as f32;
+        let count = DOME_ROWS * DOME_COLUMNS;
+        let share = TAU / count as f32;
         let (mut mean, mut irradiance) = (Vec3f::default(), Vec3f::default());
-        for i in 0..THETA_STEPS {
-            let (sin_t, cos_t) = ((i as f32 + 0.5) * d_theta).sin_cos();
-            for j in 0..PHI_STEPS {
-                let (sin_p, cos_p) = ((j as f32 + 0.5) * d_phi).sin_cos();
-                let l = self.aurora(vec3f(sin_t * cos_p, cos_t, sin_t * sin_p), AURORA_BARE_TEXEL);
-                let d_omega = sin_t * d_theta * d_phi;
-                mean += l * d_omega;
-                irradiance += l * (d_omega * cos_t);
+        for j in 0..DOME_ROWS {
+            for i in 0..DOME_COLUMNS {
+                let (d, sine) = dome_look(j, i);
+                let l = self.aurora(d, AURORA_BARE_TEXEL);
+                mean += l;
+                irradiance += l * (sine * share);
             }
         }
-        (mean / TAU, irradiance)
+        (mean / count as f32, irradiance)
     }
 }
 

@@ -1172,8 +1172,8 @@ impl Env {
     /// and the light the open sky put there (its clouds left out), so the two
     /// differ by the cover alone.
     fn dome_light(&self) -> Dome {
-        const ROWS: usize = 8;
-        const COLUMNS: usize = 32;
+        const ROWS: usize = DOME_ROWS;
+        const COLUMNS: usize = DOME_COLUMNS;
         let Some(atmo) = &self.atmo else {
             return Dome::default();
         };
@@ -1181,12 +1181,8 @@ impl Env {
         // Each direction stands for an equal share of the hemisphere's 2 pi.
         let share = std::f32::consts::TAU / (ROWS * COLUMNS) as f32;
         for j in 0..ROWS {
-            let sine = (j as f32 + 0.5) / ROWS as f32;
-            let elevation = sine.asin().to_degrees();
-            let turn = if j % 2 == 0 { 0.5 } else { 0.0 };
             for i in 0..COLUMNS {
-                let azimuth = (i as f32 + turn) * 360.0 / COLUMNS as f32;
-                let d = dir_from_az_el(azimuth, elevation);
+                let (d, sine) = dome_look(j, i);
                 let drawn = self.sky_layers(d, atmo, None, Sampling { bare: true, ..Sampling::default() });
                 // What sky_layers draws with no clouds, and without the points.
                 let open = atmo.sky(d) + self.night.as_ref().map_or(Vec3f::default(), |night| night.glow(d));
@@ -1688,6 +1684,23 @@ enum KeyTerm {
     /// The sun found in an image that is the whole base (1b, B15): a file's
     /// sun, whose covering cone the renderer fills; no keyless bake.
     Image,
+}
+
+/// The dome's looks (`Env::dome_light`): DOME_ROWS rows equally spaced in the
+/// sine of the elevation (equal solid angles) of DOME_COLUMNS directions each,
+/// every other row turned by half a column. The night sums the aurora's light
+/// over the same looks (`NightSky::integrate_aurora`, Task 4c), so the ground
+/// under a deck gains just what the deck's light gains (plan hdri-7 D9).
+pub(super) const DOME_ROWS: usize = 8;
+pub(super) const DOME_COLUMNS: usize = 32;
+
+/// Look `i` of the dome's row `j`, and the row's sine of the elevation.
+pub(super) fn dome_look(j: usize, i: usize) -> (Vec3f, f32) {
+    let sine = (j as f32 + 0.5) / DOME_ROWS as f32;
+    let elevation = sine.asin().to_degrees();
+    let turn = if j % 2 == 0 { 0.5 } else { 0.0 };
+    let azimuth = (i as f32 + turn) * 360.0 / DOME_COLUMNS as f32;
+    (dir_from_az_el(azimuth, elevation), sine)
 }
 
 /// Unit direction for an azimuth (degrees clockwise from north) and an
@@ -3376,7 +3389,12 @@ mod tests {
             q
         };
         let (a, b) = (Env::new(&thin).ground_gain, Env::new(&with(&thin)).ground_gain);
-        assert!((a - b).length() < 1.0e-3, "{a:?} against {b:?} with the aurora");
+        // within 0.5 %: the hair of cloud (nine of the dome's looks) is lit by the night's mean, the aurora in it, and
+        // covers a little of it, two small terms of either sign that the aurora's shape moves (Task 4c, 2026-10-24: 0.08 %
+        // at the default before the ribbons folded but 0.10 to 0.16 % at its other Folds, 0.16 to 0.28 % after); without
+        // the aurora in the open dome the gain would grow by its share of the sky's light, 35 to 52 % here
+        println!("the ground's gain under a hair of cloud: {a:?}, with the aurora {b:?}");
+        assert!((a - b).length() < 5.0e-3, "{a:?} against {b:?} with the aurora");
         let mut deck = thin.clone();
         deck.sky.clouds.coverage = 1.0;
         let (off, on) = (Env::new(&deck), Env::new(&with(&deck)));
@@ -3385,8 +3403,8 @@ mod tests {
         let ground = |e: &Env| e.night.as_ref().unwrap().ground(down, Vec3f::all(1.0)) * e.ground_gain;
         let (ground_off, ground_on) = (ground(&off), ground(&on));
         let (lit_off, lit_on) = (off.dome_light().irradiance, on.dome_light().irradiance);
-        // to within the two quadratures (the night's 16 x 32, the dome's 8 x 32: 0.2 % in green); without the aurora in
-        // the open dome the ground would grow by its own share of the aurora's light more (11 % in green)
+        // the night sums the aurora over the dome's own looks (Task 4c), so to within the glow's two quadratures (0.07 % at
+        // most); without the aurora in the open dome the ground would grow by its own share of the aurora's light more
         let channels = |v: Vec3f| [v.x, v.y, v.z];
         let (ground_off, ground_on, lit_off, lit_on) = (channels(ground_off), channels(ground_on), channels(lit_off), channels(lit_on));
         for c in 0..3 {

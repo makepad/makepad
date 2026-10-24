@@ -268,6 +268,39 @@ pub fn fbm1_d(x: f32, octaves: f32, seed: u32) -> (f32, f32) {
     }
 }
 
+/// `fbm1_d`'s value on the scale of `full` octaves (a whole number), as `fbm3_frac_full` is fbm3_frac's: every octave
+/// keeps the weight it has in the fbm of `full` octaves, and the finer ones a coarse lookup leaves out count as their
+/// mean (one half), so what a texel's band limit leaves of a texture keeps its local means. Between two whole counts it
+/// is their straight line; at `full` or more (texel 0), or a NaN count, it is `fbm1_d`'s value at `full`, bit for bit.
+/// Plan hdri-7 Task 4c (the aurora's rays: with `fbm1_d` a 1024 and a 2048 export weighed their first octave
+/// differently).
+pub fn fbm1_frac_full(x: f32, octaves: f32, full: f32, seed: u32) -> f32 {
+    let full = if full.is_nan() { 1.0 } else { full.clamp(1.0, FBM_MAX_OCTAVES as f32).floor() };
+    if !(octaves < full) {
+        return fbm1_d(x, full, seed).0;
+    }
+    let octaves = octaves.max(1.0);
+    let whole = octaves.floor() as u32;
+    let part = octaves - whole as f32;
+    let count = if part > 0.0 { whole + 1 } else { whole };
+    let (mut px, mut amplitude, mut sum, mut total) = (x, 1.0f32, 0.0f32, 0.0f32);
+    let (mut sum_n, mut total_n) = (0.0f32, 0.0f32);
+    for octave in 0..count {
+        if octave == whole {
+            (sum_n, total_n) = (sum, total);
+        }
+        sum += amplitude * value1_d(px, octave_seed(seed, octave)).0;
+        total += amplitude;
+        amplitude *= 0.5;
+        px = px * 2.0 + 17.13;
+    }
+    let total_full = 2.0 * (1.0 - 0.5f32.powi(full as i32));
+    // each sum less its mean, so the octaves left out count as one half
+    let (a, b) = (sum_n - 0.5 * total_n, sum - 0.5 * total);
+    let centred = if part > 0.0 { a + (b - a) * part } else { b };
+    0.5 + centred / total_full
+}
+
 /// `fbm3` with fractional octaves (as `fbm1_d`): at a whole number of octaves it is `fbm3`, bit for bit (the same
 /// sums in the same order); between, the last octave fades in by its fraction. Plan hdri-7 (the Milky Way's dust and
 /// clouds, the nebulas' sprites).
@@ -689,6 +722,28 @@ mod tests {
             assert_eq!(fbm3_frac_full(x, y, z, 9.0, 6.0, 9).to_bits(), fbm3(x, y, z, 6, 9).to_bits());
             assert_eq!(fbm3_frac_full(x, y, z, f32::NAN, 2.0, 9).to_bits(), fbm3(x, y, z, 2, 9).to_bits());
             assert!((fbm3_frac_full(x, y, z, 5.9999, 6.0, 9) - fbm3(x, y, z, 6, 9)).abs() < 1.0e-4, "continuous at full");
+        }
+    }
+
+    /// fbm1_frac_full is fbm1_d's value as fbm3_frac_full is fbm3's: at a whole number w of octaves it is fbm1_d of w on
+    /// full's scale, between two it is their straight line, and at `full` or more (texel 0), or a NaN count, it is
+    /// fbm1_d's value at `full` bit for bit.
+    #[test]
+    fn fbm1_frac_full_keeps_each_octaves_weight() {
+        let total = |w: u32| 2.0 * (1.0 - 0.5f32.powi(w as i32));
+        let plain = |x: f32, w: u32| fbm1_d(x, w as f32, 9).0;
+        for &(x, _, _) in &points() {
+            let at = |w: u32| 0.5 + (plain(x, w) - 0.5) * total(w) / total(3);
+            for w in 1..3u32 {
+                let v = fbm1_frac_full(x, w as f32, 3.0, 9);
+                assert!((v - at(w)).abs() < 1.0e-6, "{w} octaves: {v} against {}", at(w));
+                let mid = fbm1_frac_full(x, w as f32 + 0.25, 3.0, 9);
+                let line = at(w) + (if w < 2 { at(w + 1) } else { plain(x, 3) } - at(w)) * 0.25;
+                assert!((mid - line).abs() < 1.0e-6, "{w}.25 octaves: {mid} against {line}");
+            }
+            assert_eq!(fbm1_frac_full(x, 3.0, 3.0, 9).to_bits(), plain(x, 3).to_bits());
+            assert_eq!(fbm1_frac_full(x, 5.0, 3.0, 9).to_bits(), plain(x, 3).to_bits());
+            assert_eq!(fbm1_frac_full(x, f32::NAN, 2.0, 9).to_bits(), plain(x, 2).to_bits());
         }
     }
 
