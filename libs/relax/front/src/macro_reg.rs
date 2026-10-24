@@ -87,6 +87,48 @@ pub struct Reg {
     pub macros: Vec<(String, Entry)>,
     /// derive name -> its helper attributes (`attributes(..)` of proc_macro_derive)
     pub helpers: Vec<(String, Vec<String>)>,
+    /// crate name -> the units its unit(s) reach through `deps` (transitively; memoised)
+    pub reach: std::collections::HashMap<String, Vec<bool>>,
+}
+
+/// The units in the dependency closure of the unit(s) named `krate`, themselves included. A
+/// name no unit has (core, alloc, std, proc_macro: never cargo units) reaches nothing.
+fn reach<'a>(reg: &'a mut Reg, krate: &str) -> &'a [bool] {
+    if !reg.reach.contains_key(krate) {
+        let mut seen = vec![false; reg.units.len()];
+        let mut stack: Vec<usize> = (0..reg.units.len()).filter(|&i| reg.units[i].name == krate).collect();
+        while let Some(i) = stack.pop() {
+            if std::mem::replace(&mut seen[i], true) {
+                continue;
+            }
+            stack.extend(reg.units[i].deps.iter().map(|d| d.0));
+        }
+        reg.reach.insert(krate.to_string(), seen);
+    }
+    &reg.reach[krate]
+}
+
+/// Attribute macro `name` as crate `krate` sees it: an entry of a proc-macro crate in `krate`'s
+/// dependency closure (rustc: the macro has to be nameable in the invoking crate). A crate
+/// whose closure holds no proc-macro crate, such as std's own crates, has no attribute macros
+/// at all: core's inert `#[unstable]` stays an attribute when the graph holds the
+/// `instability` crate, which exports an attribute macro of that name.
+fn attr_entry_for(krate: &str, name: &str) -> Option<Entry> {
+    REG.with(|r| {
+        let mut b = r.borrow_mut();
+        let r = b.as_mut()?;
+        let hits: Vec<Entry> = r.macros.iter().filter(|(n, e)| n == name && e.kind == Kind::Attr).map(|x| x.1.clone()).collect();
+        if hits.is_empty() {
+            return None;
+        }
+        let rc = reach(r, krate);
+        hits.into_iter().find(|e| rc[e.unit])
+    })
+}
+
+/// Is `name` an attribute macro crate `krate` can use (attr_entry_for)?
+pub fn has_attr_for(krate: &str, name: &str) -> bool {
+    attr_entry_for(krate, name).is_some()
 }
 
 /// Boot cost of the host (for the measurements in builtins-lane.md).
@@ -279,6 +321,8 @@ pub fn stats() -> HostStats {
 fn register(sess: &std::sync::Arc<crate::Session>, units: &[CrateUnit], std_dir: &str, additive: bool) -> Result<(), String> {
     let mut reg = if additive { REG.with(|r| r.borrow().clone()).unwrap_or_default() } else { Reg::default() };
     reg.std_dir = std_dir.to_string();
+    // the dependency closures are computed again for the new units
+    reg.reach.clear();
     // unit index of the graph -> unit index in the registry
     let mut map = vec![usize::MAX; units.len()];
     let mut fresh = Vec::new();
@@ -423,12 +467,13 @@ pub fn is_derive_helper(name: &str, derives: &[String]) -> bool {
     REG.with(|r| r.borrow().as_ref().map_or(false, |r| r.helpers.iter().any(|(d, hs)| derives.contains(d) && hs.iter().any(|h| h == name))))
 }
 
-/// Runs attribute macro `name` on its arguments and item (any thread but the world's).
-pub fn run_attr(sess: &std::sync::Arc<crate::Session>, name: &str, attr: &TokenStream, item: &TokenStream, call_span: Span) -> Result<TokenStream, String> {
+/// Runs attribute macro `name`, as crate `krate` sees it (attr_entry_for), on its arguments
+/// and item (any thread but the world's).
+pub fn run_attr(sess: &std::sync::Arc<crate::Session>, krate: &str, name: &str, attr: &TokenStream, item: &TokenStream, call_span: Span) -> Result<TokenStream, String> {
     if in_world() {
         return Err("an attribute macro used while the macro world itself is being built".to_string());
     }
-    let e = REG.with(|r| r.borrow().as_ref().and_then(|r| r.macros.iter().find(|(n, e)| n == name && e.kind == Kind::Attr).map(|x| x.1.clone()))).ok_or("unknown attribute macro")?;
+    let e = attr_entry_for(krate, name).ok_or("unknown attribute macro")?;
     match RUNNER.get() {
         Some(r) if declaring() => r.declare(sess, &e, Some(attr), item, call_span),
         Some(r) => r.call_attr(sess, &e, attr, item, call_span),
