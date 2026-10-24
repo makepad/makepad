@@ -371,6 +371,19 @@ fn enqueue(options: &crate::options::Options, src: &Arc<dyn FrontSource>, def: D
         if !q.advance(src.identity(), epoch) { return; }
         let key = (src.identity(), def, epoch);
         if q.seen.contains_key(&key) {
+            // a verdict an earlier run stored for this body settles a check that is only queued
+            // (discovery queues every owner at the start): the queued check goes, and the body is
+            // verified now instead of being lowered as unverified code until the checker reaches it
+            if let Some(v) = cached.clone() {
+                if matches!(VERDICTS.lock().unwrap_or_else(|e| e.into_inner()).get(&def).and_then(|i| i.get(&key)), Some(FnVerdict::Pending) | None) {
+                    if let Some(at) = q.rank_of.remove(&key) {
+                        q.order.remove(&at);
+                        q.items.remove(&at);
+                    }
+                    v.reuse(key);
+                    return;
+                }
+            }
             // Discovery may have queued this owner first. A compiled instance
             // promotes that same check instead of adding an instance check.
             if args.is_some() {

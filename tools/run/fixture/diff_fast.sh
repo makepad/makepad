@@ -36,7 +36,8 @@ sleepms=${DIFF_SLEEP_MS:-250}
 # past the pipeline (instrument, web32, backend rewrites, split_loops); a broken function is an
 # ICE naming the pass, so the program's output differs (JITSAFE 19). DIFF_VERIFY=0: off.
 verify=; [ "${DIFF_VERIFY:-1}" = 0 ] || verify=MAKEPAD_RUN_VERIFY_PASSES=1
-work=$(mktemp -d "${TMPDIR:-/tmp}/diff_fast.XXXXXX") || exit 2
+# (a --job run gets the parent's work dir: no dir of its own, which every job left behind empty)
+[ "${1:-}" = "--job" ] || { work=$(mktemp -d "${TMPDIR:-/tmp}/diff_fast.XXXXXX") || exit 2; }
 mkdir -p "$cache"
 progs=${DIFF_PROGRAMS:-$(cd "$here/diff" && ls *.rs | sed 's/\.rs$//')}
 known=${DIFF_KNOWN:-$(cd "$here/known" && ls *.rs | sed 's/\.rs$//')}

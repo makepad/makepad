@@ -298,7 +298,15 @@ pub mod warm_count {
     /// and entry stay the unverified lowering)
     pub const REC_UNVERIFIED: usize = 38;
     pub const SPECV_LATE: usize = 39;
-    pub static N: [AtomicU64; 40] = [const { AtomicU64::new(0) }; 40];
+    /// verified O1 rebuilds (jit.rs o1v): queued because the verdict came late / because O3
+    /// inlined a slot with no standalone code; built; written as the slot's entry; dropped
+    /// (not verified, O3 meanwhile, entry already O1+, build failed)
+    pub const O1V_LATE: usize = 40;
+    pub const O1V_INLINED: usize = 41;
+    pub const O1V_BUILT: usize = 42;
+    pub const O1V_WRITTEN: usize = 43;
+    pub const O1V_DROPPED: usize = 44;
+    pub static N: [AtomicU64; 45] = [const { AtomicU64::new(0) }; 45];
     #[inline]
     pub fn add(k: usize, n: u64) {
         N[k].fetch_add(n, Relaxed);
@@ -343,6 +351,10 @@ pub fn warm_summary() -> String {
     if g(O3_QUEUED) + g(O3_UNVERIFIED) + g(O3_FRAME) + g(O3_SPEC) > 0 {
         s.push_str(&format!("; O3 installs kept as entries: {} queued (written {}, same as stored {}, not encodable {}, stale {}, dropped {}; {} deferred records waiting, last drain {} with {}), not kept: unverified {}, frame too big {}, speculative/inspect {}; O2 entries written {}",
             k(g(O3_QUEUED)), k(g(O3_WRITTEN)), k(g(O3_SAME)), k(g(O3_UNENCODABLE)), k(g(O3_STALE)), k(g(O3_DROPPED)), k(g(RECORDS_WAITING)), g(DRAIN_WHY), k(g(DRAIN_LEN)), k(g(O3_UNVERIFIED)), k(g(O3_FRAME)), k(g(O3_SPEC)), k(g(O2_WRITTEN))));
+    }
+    if g(O1V_LATE) + g(O1V_INLINED) > 0 {
+        s.push_str(&format!("; verified O1 rebuilds: queued {} (verdict late) + {} (inlined-only), built {}, written {}, dropped {}",
+            k(g(O1V_LATE)), k(g(O1V_INLINED)), k(g(O1V_BUILT)), k(g(O1V_WRITTEN)), k(g(O1V_DROPPED))));
     }
     if g(NO_ENTRY) > 0 && g(KEY_CHANGED) + g(ENTRY_GONE) + g(NOT_RECORDED) == 0 {
         s.push_str(" (why an entry is missing -- key changed, never recorded, not flushed -- needs a MAKEPAD_RUN_WARM_STRICT=1 cold run then warm run)");
@@ -609,6 +621,9 @@ pub struct Cache {
     /// carries a fresh image
     image_slots: usize,
     image_stale: usize,
+    /// the tier of each code entry this run recorded (by key), pending or written: a verified O1
+    /// rebuild replaces only an entry below O1
+    rec_tier: HashMap<u128, u8>,
     /// code reached a slot of the loaded image without an identity (`image_broken`): the
     /// manifest carries no image from now on (written at once, at exit too), so no later run
     /// starts from it
@@ -838,6 +853,7 @@ impl Cache {
             manifest_done: false,
             image_slots: 0,
             image_stale: 0,
+            rec_tier: HashMap::new(),
             image_bad: false,
             manifest_root: None,
             linked_key: HashMap::new(),
@@ -1121,8 +1137,10 @@ impl Cache {
     /// warm_count's RETIER_*_OVER) by the tier of its entry in the opened stores.
     pub(crate) fn note_retier_over(&mut self, u: &Unit, id: u32, base: usize) {
         if !self.has_code_entries() { return; }
-        let rank = self.slot_key(u, id).and_then(|k| self.entry_tier(k)).map_or(0, |t| tier_rank(t) as usize + 1);
+        let key = self.slot_key(u, id);
+        let rank = key.and_then(|k| self.entry_tier(k)).map_or(0, |t| tier_rank(t) as usize + 1);
         warm_count::add(base + rank, 1);
+        if trace_on() { trace_keyed(u, id, &format!("fresh-{}-over:{}", if base == warm_count::RETIER_O3_OVER { "O3" } else { "O2" }, ["none", "base", "O1", "O2", "O3"][rank]), key); }
     }
 
     fn index_at(&self, key: u128) -> Option<(u32, u32)> {
@@ -2390,7 +2408,7 @@ impl Cache {
     /// `code` is the backend's output (relocated fields zeroed), `relocs` its relocations.
     pub fn record(&mut self, u: &Unit, id: u32, code: &[u8], relocs: &[RelocAt], pc_map: &[(u32, u64)]) {
         if u.fns[id as usize].unverified.load(std::sync::atomic::Ordering::Relaxed) { warm_count::add(warm_count::REC_UNVERIFIED, 1); }
-        self.record_entry(u, id, code, relocs, pc_map, None, false, None)
+        self.record_entry(u, id, code, relocs, pc_map, None, RecKind::First, None)
     }
 
     /// What the install of slot `id` leaves for its entry's encoding later (the main thread's
@@ -2447,7 +2465,7 @@ impl Cache {
         }
         let previous = std::mem::replace(&mut self.recording_pending, true);
         let o3 = p.o3.as_ref().map(|(i, n)| (i.as_slice(), n.as_slice()));
-        self.record_entry(u, p.id, &p.code, &p.relocs, &p.pc_map, o3, false, Some(p));
+        self.record_entry(u, p.id, &p.code, &p.relocs, &p.pc_map, o3, RecKind::First, Some(p));
         self.recording_pending = previous;
     }
 
@@ -2459,14 +2477,35 @@ impl Cache {
         // The O2 worker can finish after O3 installed (or linked from the cache). Never
         // downgrade its entry, even when that O3 build itself was too large to cache.
         if u.fns[id as usize].o3.load(std::sync::atomic::Ordering::Relaxed) { return; }
-        self.record_entry(u, id, code, relocs, pc_map, None, true, None)
+        self.record_entry(u, id, code, relocs, pc_map, None, RecKind::O2, None)
+    }
+
+    /// Records verified O1 code of slot `id` (jit.rs o1v: a slot whose SPEC-V verdict came clean
+    /// after its unverified -- baseline -- code was built, or a slot only ever inlined into O3
+    /// code) as its entry, replacing an entry below O1 (baseline), never one at O1 or above:
+    /// the cache keeps the session's final verified code. False: nothing was recorded.
+    pub fn record_o1_verified(&mut self, u: &Unit, id: u32, code: &[u8], relocs: &[RelocAt], pc_map: &[(u32, u64)]) -> bool {
+        if u.fns[id as usize].o3.load(std::sync::atomic::Ordering::Relaxed) { return false; }
+        let before = warm_count::get(warm_count::O1V_WRITTEN);
+        self.record_entry(u, id, code, relocs, pc_map, None, RecKind::O1Up, None);
+        warm_count::get(warm_count::O1V_WRITTEN) != before
+    }
+
+    /// The tier rank (baseline 0, O1 1, O2 2, O3 3) of slot `id`'s newest entry, recorded this run
+    /// or stored: None when the slot has no storable key, Some(None) when it has no entry.
+    pub(crate) fn slot_entry_rank(&mut self, u: &Unit, id: u32) -> Option<Option<u8>> {
+        let key = self.slot_key(u, id)?;
+        if self.cert_rejected.contains(&key) && !self.pending_keys.contains(&key) { return Some(None); }
+        Some(self.rec_tier.get(&key).copied().or_else(|| self.entry_tier(key)).map(tier_rank))
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn record_entry(&mut self, u: &Unit, id: u32, code: &[u8], relocs: &[RelocAt], pc_map: &[(u32, u64)], o3: Option<(&[u32], &[(u32, bool)])>, o2: bool, pending: Option<&PendingRecord>) {
+    fn record_entry(&mut self, u: &Unit, id: u32, code: &[u8], relocs: &[RelocAt], pc_map: &[(u32, u64)], o3: Option<(&[u32], &[(u32, bool)])>, kind: RecKind, pending: Option<&PendingRecord>) {
         let _mem = crate::memstat::tag(crate::memstat::Tag::CacheStore);
-        // O3 and O2 code replace the slot's entry; O1 code is recorded once
-        let replace = o3.is_some() || o2;
+        let o2 = kind == RecKind::O2;
+        // O3 and O2 code replace the slot's entry, verified O1 code a baseline one; O1 code is
+        // recorded once
+        let replace = o3.is_some() || kind != RecKind::First;
         let f = &u.fns[id as usize];
         if self.mode == Mode::ReadOnly || f.patch_gen != 0 || u.prog.is_edit_version(f.file) || (!replace && self.linked.contains(&id)) {
             trace_lookup(u, id, "norecord:mode/patch/linked");
@@ -2500,7 +2539,12 @@ impl Cache {
             trace_lookup(u, id, "norecord:exists");
             return;
         }
-        let Some(payload) = self.encode_entry(u, id, code, relocs, pc_map, o3, o2, pending) else {
+        // a verified O1 rebuild never replaces an entry at O1 or above
+        if kind == RecKind::O1Up && existing && self.rec_tier.get(&key).copied().or_else(|| self.entry_tier(key)).is_some_and(|t| tier_rank(t) >= tier_rank(TIER_O1)) {
+            trace_lookup(u, id, "norecord:o1v-not-below");
+            return;
+        }
+        let Some(payload) = self.encode_entry(u, id, code, relocs, pc_map, o3, kind, pending) else {
             if o3.is_some() { warm_count::add(warm_count::O3_UNENCODABLE, 1); }
             let w = self.last_why;
             trace_lookup(u, id, &format!("norecord:encode:{}", w));
@@ -2531,12 +2575,17 @@ impl Cache {
                 Some(_) => {}
             }
         }
+        if let Some(t) = payload_tier(&payload) {
+            self.rec_tier.insert(key, t);
+            if trace_on() { trace_keyed(u, id, &format!("rec:{}", ["O1", "O3", "O2", "base"].get(t as usize).copied().unwrap_or("?")), Some(key)); }
+        }
         let kc = self.cur_crate;
         self.push_pending(kc, NewEntry { key, kind: KIND_CODE, payload });
         self.stats.recorded += 1;
         warm_count::add(warm_count::RECORDED, 1);
         if o3.is_some() { warm_count::add(warm_count::O3_WRITTEN, 1); }
         if o2 { warm_count::add(warm_count::O2_WRITTEN, 1); }
+        if kind == RecKind::O1Up { warm_count::add(warm_count::O1V_WRITTEN, 1); }
         if o3.is_none() { self.remember_outcome(u, id, Some(key), "recorded"); }
     }
 
@@ -2617,7 +2666,8 @@ impl Cache {
     /// The payload of a code entry (O1, or O3 with its inlined slots);
     /// None: it cannot be stored (`last_why` says why).
     #[allow(clippy::too_many_arguments)]
-    fn encode_entry(&mut self, u: &Unit, id: u32, code: &[u8], relocs: &[RelocAt], pc_map: &[(u32, u64)], o3: Option<(&[u32], &[(u32, bool)])>, o2: bool, pending: Option<&PendingRecord>) -> Option<Vec<u8>> {
+    fn encode_entry(&mut self, u: &Unit, id: u32, code: &[u8], relocs: &[RelocAt], pc_map: &[(u32, u64)], o3: Option<(&[u32], &[(u32, bool)])>, kind: RecKind, pending: Option<&PendingRecord>) -> Option<Vec<u8>> {
+        let o2 = kind == RecKind::O2;
         // unlinked code only: a pool word must still be zero (linked code holds this run's values)
         for rl in relocs {
             let o = rl.at as usize;
@@ -2645,7 +2695,7 @@ impl Cache {
         e.u32(ENTRY_VERSION);
         e.str(&u.fns[id as usize].name);
         // the code's level (TIER_O1 / TIER_O3 / TIER_O2 / TIER_BASE); O3: the inlined slots (by key)
-        let base = o3.is_none() && !o2 && match pending {
+        let base = o3.is_none() && kind == RecKind::First && match pending {
             Some(p) => p.baseline,
             None => u.fns[id as usize].rir.as_ref().is_some_and(|r| r.baseline),
         };
@@ -2846,6 +2896,7 @@ impl Cache {
         self.base_linked = old.base_linked.clone();
         self.cert_rejected = old.cert_rejected.clone();
         self.pending_keys = old.pending_keys.clone();
+        self.rec_tier = old.rec_tier.clone();
         self.pending_verdicts = old.pending_verdicts.clone();
         self.manifest_done = old.manifest_done;
         self.collected_committed = true;
@@ -3200,6 +3251,11 @@ impl Cache {
         }
     }
 }
+
+/// What a code record is: a first record (O1 / baseline / O3: recorded once, O3 replaces), an O2
+/// build (replaces), a verified O1 rebuild (replaces only an entry below O1)
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RecKind { First, O2, O1Up }
 
 /// A stored tier's order (the tier bytes are not in tier order): baseline < O1 < O2 < O3.
 fn tier_rank(t: u8) -> u8 {
@@ -3731,6 +3787,11 @@ pub(crate) fn trace_on() -> bool {
 }
 
 pub(crate) fn trace_lookup(u: &Unit, id: u32, what: &str) {
+    trace_keyed(u, id, what, None)
+}
+
+/// trace_lookup with the code key given (a record runs with the cache taken out of the unit).
+pub(crate) fn trace_keyed(u: &Unit, id: u32, what: &str, code_key: Option<u128>) {
     if !trace_on() {
         return;
     }
@@ -3743,6 +3804,7 @@ pub(crate) fn trace_lookup(u: &Unit, id: u32, what: &str) {
     // the code key and the identity of the fn (its key bytes without interfaces and bodies): the same
     // identity under another key in two runs is a function the cache failed to share
     let (key, ident) = u.cache.as_ref().map_or((0, 0), |c| (c.slot_keys.get(&id).copied().flatten().unwrap_or(0), c.fnkey_bytes.get(&id).and_then(|b| b.as_ref()).map_or(0, |b| identity_hash(b))));
+    let key = code_key.unwrap_or(key);
     let line = format!("{:.1}\t{}\t{}\t{}\t{}\t{}\t{:032x}\t{:032x}\n", crate::jit::wall_ns() as f64 / 1e6, what, if on_main { "main" } else { "worker" }, krate, u.fns[id as usize].name, crate::syms::stable_fn_name(u, id), key, ident);
     crate::zone_alloc::kept_with(|| TRACE.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(String::new).push_str(&line));
 }
@@ -3750,6 +3812,8 @@ pub(crate) fn trace_lookup(u: &Unit, id: u32, what: &str) {
 /// Writes MAKEPAD_RUN_CACHE_TRACE (at exit).
 pub fn write_trace() {
     if let Ok(p) = std::env::var("MAKEPAD_RUN_CACHE_TRACE") {
+        // ({pid}: one file per process -- a program's build scripts run under the same env)
+        let p = p.replace("{pid}", &std::process::id().to_string());
         if let Some(t) = TRACE.lock().unwrap_or_else(|e| e.into_inner()).take() {
             let _ = std::fs::write(p, t);
         }

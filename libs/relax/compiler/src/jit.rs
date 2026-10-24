@@ -6948,6 +6948,14 @@ unsafe fn ready_code_locked(up: *mut Unit, id: u32) -> Option<u64> {
             let at = u.fns[id as usize].code;
             u.code.write().unwrap_or_else(|e| e.into_inner()).note_inlined(at, inl);
         }
+        // an entry an earlier run made from an unverified lowering (it calls SPEC-V twins): its
+        // verified O1 rebuild becomes the entry (o1v_begin checks the verdict)
+        {
+            let u = &*up;
+            if t1.is_none() && callees.iter().any(|&c| (c as usize) < u.fns.len() && matches!(u.fns[c as usize].key, FnKey::Plain(_))) {
+                o1v_enqueue(up, id, false);
+            }
+        }
         spec_enqueue_cached(up, &callees, 0);
         return Some(a);
     }
@@ -8123,10 +8131,10 @@ static O2_LATER: relax_session::sync::Mutex<Vec<(usize, u32)>> = relax_session::
 /// The first present released the O2 worker's full builds.
 fn o2_release_later() {
     let later = std::mem::take(&mut *O2_LATER.lock().unwrap_or_else(|e| e.into_inner()));
-    if !later.is_empty() {
-        O2_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).extend(later);
-        O2_WAKE.notify_one();
-    }
+    // (also with nothing later: verified O1 rebuilds queued before the present wait for it)
+    let mut q = O2_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+    crate::zone_alloc::kept_with(|| q.extend(later));
+    O2_WAKE.notify_one();
 }
 
 fn o2_build() -> bool {
@@ -8317,6 +8325,113 @@ unsafe fn o2_base(up: *mut Unit, id: u32) {
     o2_start(up);
 }
 
+/// Verified O1 rebuilds (o1v): slots whose cache entry is to become verified O1 code, served by
+/// the O2 worker after its O2 work and only after the first present: (unit, slot)
+static O1V_QUEUE: relax_session::sync::Mutex<std::collections::VecDeque<(usize, u32)>> = relax_session::sync::Mutex::new(std::collections::VecDeque::new());
+/// slots ever queued for a verified O1 rebuild (each once)
+static O1V_SEEN: relax_session::sync::Mutex<Option<std::collections::HashSet<(usize, u32)>>> = relax_session::sync::Mutex::new(None);
+
+/// MAKEPAD_RUN_O1V=0: no verified O1 rebuilds (the cache keeps unverified baseline entries and
+/// has no standalone entry for slots only inlined into O3 code; A/B)
+fn o1v_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_O1V").map_or(true, |v| v != "0"))
+}
+
+/// The cache keeps the session's final verified code: slot `id` gets a verified O1 build in the
+/// background whose code replaces its entry when that is below O1 (record_o1_verified) --
+/// `inlined` false: its SPEC-V verdict came clean after its code was built (that code is the
+/// unverified lowering: baseline, calls to twins; cached callers kept calling the twins on every
+/// warm launch); true: O3 inlined it and it has no standalone code (warm launches whose lower-tier
+/// callers call it compiled it). Once per slot; owner thread (a unit call).
+unsafe fn o1v_enqueue(up: *mut Unit, id: u32, inlined: bool) {
+    let u = &*up;
+    if !o1v_on() || (id as usize) >= u.fns.len() || matches!(u.fns[id as usize].key, FnKey::Sandbox(_) | FnKey::Plain(_)) || u.cache.is_none() {
+        return;
+    }
+    {
+        let mut seen = O1V_SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        if !crate::zone_alloc::kept_with(|| seen.get_or_insert_with(Default::default).insert((up as usize, id))) {
+            return;
+        }
+    }
+    crate::cache::warm_count::add(if inlined { crate::cache::warm_count::O1V_INLINED } else { crate::cache::warm_count::O1V_LATE }, 1);
+    {
+        // under O2_QUEUE's lock: the worker checks every queue under it before it waits
+        let _q = O2_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut q = O1V_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+        crate::zone_alloc::kept_with(|| q.push_back((up as usize, id)));
+        O2_WAKE.notify_one();
+    }
+    o2_start(up);
+}
+
+/// A verified O1 rebuild's front (o1v_enqueue; a unit call, like o2_begin): None when it does not
+/// apply (any more) -- the slot is not verified, has O3 code, an error, a build open, or its entry
+/// is at O1 or above already.
+unsafe fn o1v_begin(up: *mut Unit, id: u32) -> Option<O2Work> {
+    use crate::cache::warm_count as wc;
+    let _census_context = (&*up).exec_context(false);
+    let _cost = relax_codegen::fncost::Record::new(id, 0, "O1V");
+    let t0 = cpu_ns();
+    let epoch = PATCH_EPOCH.load(Ordering::SeqCst);
+    let dropped = || { wc::add(wc::O1V_DROPPED, 1); None };
+    if !(&*up).refresh_verified(id) {
+        return dropped();
+    }
+    let f = &(&*up).fns[id as usize];
+    if f.build_err.is_some() || f.building || matches!(f.key, FnKey::Sandbox(_) | FnKey::Plain(_)) || f.o3.load(Ordering::Relaxed) {
+        return dropped();
+    }
+    // a lazy compile's back end for the slot is running: again later
+    if f.inflight {
+        let mut q = O1V_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+        crate::zone_alloc::kept_with(|| q.push_back((up as usize, id)));
+        return None;
+    }
+    let rank = {
+        let u = &mut *up;
+        let Some(mut cache) = u.cache.take() else { return dropped() };
+        let r = cache.slot_entry_rank(u, id);
+        u.cache = Some(cache);
+        r
+    };
+    // no storable key, or the entry is verified code at O1 or above already
+    if rank.is_none_or(|r| r.is_some_and(|t| t >= 1)) {
+        return dropped();
+    }
+    let u = &*up;
+    let f = &u.fns[id as usize];
+    // the lowering is reused unless it is lowered again for its verdict (calls to twins, missing
+    // disjoint-index checks: split_upgrade's rule)
+    let lowered = f.rir.as_ref().filter(|r| !r.plain_calls && !(!f.d3_lowered.load(Ordering::Relaxed) && u.disjoint_checks(id).is_some())).map(|r| (**r).clone());
+    if begin_build(up, id).is_err() {
+        return dropped();
+    }
+    let depth0 = BUILD_STACK.try_with(|s| s.borrow().len()).unwrap_or(0);
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prepare_rir_from(up, id, true, lowered, RirMode::Normal)));
+    if r.is_err() {
+        let open: Vec<u32> = BUILD_STACK.try_with(|s| s.borrow()[depth0.min(s.borrow().len())..].to_vec()).unwrap_or_default();
+        for x in open.into_iter().rev() {
+            end_build(up, x);
+        }
+    }
+    end_build(up, id);
+    let prep = match r {
+        Ok(Ok((p, _))) if !p.func.baseline => p,
+        Ok(Err(e)) if e == YIELDED => return None,
+        Err(p) if p.is::<crate::preempt::OwnerBusy>() || p.is::<crate::preempt::PublishBail>() => std::panic::resume_unwind(p),
+        _ => return dropped(),
+    };
+    let u = &*up;
+    let session = (*std::ptr::addr_of!(u.prog.session)).clone();
+    let e = &u.env;
+    let env = x64::Env { slots: e.slots, tls_key: e.tls_key, tls_slow: e.tls_slow, resume: e.resume, opt_regs: true, syms: e.syms, sym_class: e.sym_class, near: e.near };
+    let (fold, layout) = (u.opt.fold, u.opt.layout);
+    let lc = loop_syms(u, id);
+    Some(O2Work { id, capture_unit: u.wasm_export_id, prep, epoch, snapshot: false, o1: true, session, env, fold, layout, lc, t0 })
+}
+
 /// The O2 worker: builds `#[relax(O2)]` fns at O2 at low priority, ahead of their first call
 /// where it can (the marked callees of every O2 build are queued behind it) and over their O1
 /// code otherwise. The program's threads never wait for it: a call before the O2 code is
@@ -8326,14 +8441,20 @@ fn o2_thread(runtime: &crate::options::RuntimeOptions) {
     ensure_altstack();
     lower_worker_priority(runtime);
     loop {
-        let (unit, id) = {
+        let ((unit, id), o1) = {
             let mut q = O2_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
             loop {
                 if !q.is_empty() {
-                    break q.remove(0);
+                    break (q.remove(0), false);
                 }
                 if let Some(x) = O2_BASE.lock().unwrap_or_else(|e| e.into_inner()).pop_front() {
-                    break x;
+                    break (x, false);
+                }
+                // verified O1 rebuilds last, and never before the first frame
+                if FIRST_PRESENT.load(Ordering::Acquire) {
+                    if let Some(x) = O1V_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).pop_front() {
+                        break (x, true);
+                    }
                 }
                 crate::zone_alloc::compiler_hand_back_idle();
                 q = O2_WAKE.wait(q).unwrap_or_else(|e| e.into_inner());
@@ -8355,7 +8476,7 @@ fn o2_thread(runtime: &crate::options::RuntimeOptions) {
                             job_sleep(TIER1_POLL);
                         }
                     }
-                    take_prefronted(&front, || live().and_then(|up| o2_begin(up, id).map(|w| (up, w)))).flatten()
+                    take_prefronted(&front, || live().and_then(|up| if o1 { o1v_begin(up, id) } else { o2_begin(up, id) }.map(|w| (up, w)))).flatten()
                 }
             };
             if let Some((up, w)) = begin {
@@ -8364,7 +8485,7 @@ fn o2_thread(runtime: &crate::options::RuntimeOptions) {
             }
         }));
         if r.is_err() {
-            O2_STATS[2].fetch_add(1, Ordering::Relaxed);
+            if o1 { crate::cache::warm_count::add(crate::cache::warm_count::O1V_DROPPED, 1) } else { O2_STATS[2].fetch_add(1, Ordering::Relaxed); }
         }
     }
 }
@@ -8441,7 +8562,7 @@ unsafe fn o2_begin(up: *mut Unit, id: u32) -> Option<O2Work> {
     let env = x64::Env { slots: e.slots, tls_key: e.tls_key, tls_slow: e.tls_slow, resume: e.resume, opt_regs: true, syms: e.syms, sym_class: e.sym_class, near: e.near };
     let (fold, layout) = (u.opt.fold, u.opt.layout);
     let lc = loop_syms(u, id);
-    Some(O2Work { id, capture_unit: u.wasm_export_id, prep, epoch, snapshot, session, env, fold, layout, lc, t0 })
+    Some(O2Work { id, capture_unit: u.wasm_export_id, prep, epoch, snapshot, o1: false, session, env, fold, layout, lc, t0 })
 }
 
 /// An O2 build's optimisation and code generation (no unit state).
@@ -8451,6 +8572,8 @@ struct O2Work {
     prep: Prep,
     epoch: u64,
     snapshot: bool,
+    /// a verified O1 rebuild (o1v_begin), not an O2 build
+    o1: bool,
     session: std::sync::Arc<crate::Session>,
     env: x64::Env,
     fold: bool,
@@ -8464,6 +8587,7 @@ struct O2Done {
     id: u32,
     epoch: u64,
     snapshot: bool,
+    o1: bool,
     t0: u64,
     built: std::thread::Result<Result<(relax_backend::rir::Func, Vec<(u32, usize)>, x64::Compiled), String>>,
     done: Vec<Deferred>,
@@ -8471,7 +8595,7 @@ struct O2Done {
 
 impl O2Work {
     fn run(self) -> O2Done {
-        let O2Work { id, capture_unit, prep, epoch, snapshot, session, env, fold, layout, lc, t0 } = self;
+        let O2Work { id, capture_unit, prep, epoch, snapshot, o1, session, env, fold, layout, lc, t0 } = self;
         let options = &session.options;
         let mut done: Vec<Deferred> = Vec::new();
         let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -8483,13 +8607,15 @@ impl O2Work {
             let c = copied_out(relax_codegen::native::compile(options, &cg, &env)?);
             Ok::<_, String>((func, inlined, c))
         }));
-        O2Done { id, epoch, snapshot, t0, built, done }
+        O2Done { id, epoch, snapshot, o1, t0, built, done }
     }
 }
 
 /// An O2 build's install (unit call): the inline candidates' RIR, the cache record, the code.
 unsafe fn o2_finish(up: *mut Unit, d: O2Done) {
-    let O2Done { id, epoch, snapshot, t0, built, done } = d;
+    let O2Done { id, epoch, snapshot, o1, t0, built, done } = d;
+    use crate::cache::warm_count as wc;
+    let dropped = || if o1 { wc::add(wc::O1V_DROPPED, 1) } else { O2_STATS[2].fetch_add(1, Ordering::Relaxed); };
     let stale = PATCH_EPOCH.load(Ordering::SeqCst) != epoch;
     if !stale {
         // the inline candidates' RIR, where no program thread built it meanwhile
@@ -8513,12 +8639,24 @@ unsafe fn o2_finish(up: *mut Unit, d: O2Done) {
             c
         }
         _ => {
-            O2_STATS[2].fetch_add(1, Ordering::Relaxed);
+            dropped();
             return;
         }
     };
     let u = &mut *up;
-    if snapshot {
+    if o1 {
+        wc::add(wc::O1V_BUILT, 1);
+        // (O3 code installed meanwhile: its own entry; record_o1_verified never goes below it)
+        if let Some(mut cache) = u.cache.take() {
+            cache.record_o1_verified(u, id, &c.code, &c.relocs, &c.pc_map);
+            u.cache = Some(cache);
+        }
+        // a slot with no code of its own (only inlined so far) gets only the entry: its first call
+        // links it
+        if !u.fns[id as usize].compiled {
+            return;
+        }
+    } else if snapshot {
         crate::zone_alloc::kept_with(|| O2_LATER.lock().unwrap_or_else(|e| e.into_inner()).push((up as usize, id)));
     } else if let Some(mut cache) = u.cache.take() {
         cache.note_retier_over(u, id, crate::cache::warm_count::RETIER_O2_OVER);
@@ -8532,12 +8670,12 @@ unsafe fn o2_finish(up: *mut Unit, d: O2Done) {
     // (PGO: counted code runs until its O3 build: the counts are of that code)
     let counted = u.frequency_profiles.contains_key(&id);
     if u.fns[id as usize].o3.load(Ordering::Relaxed) || o3_building || counted || crate::inspect::instrument::active(id) {
-        O2_STATS[2].fetch_add(1, Ordering::Relaxed);
+        if !o1 { O2_STATS[2].fetch_add(1, Ordering::Relaxed); }
         return;
     }
     let first = !u.fns[id as usize].compiled;
     let len = c.code.len();
-    let _as = code_as(CodeKind::new(tier::O2, origin::FRESH));
+    let _as = code_as(CodeKind::new(if o1 { tier::O1 } else { tier::O2 }, origin::FRESH));
     match u.install(id, &c.code, &c.relocs, c.pc_map, 0) {
         Ok(a) => {
             if first {
@@ -8549,7 +8687,10 @@ unsafe fn o2_finish(up: *mut Unit, d: O2Done) {
                 u.rearm_counter(id, a);
             }
             if perf_map_on() {
-                perf_map(a, len, &format!("{} [O2]", u.fns[id as usize].name));
+                perf_map(a, len, &format!("{} [{}]", u.fns[id as usize].name, if o1 { "O1" } else { "O2" }));
+            }
+            if o1 {
+                return;
             }
             O2_STATS[0].fetch_add(1, Ordering::Relaxed);
             let dt = cpu_ns() - t0;
@@ -8558,9 +8699,7 @@ unsafe fn o2_finish(up: *mut Unit, d: O2Done) {
                 eprintln!("makepad-run O2: {} installed{} ({}, {} bytes, {:.2} ms cpu)", u.fns[id as usize].name, if first { " ahead of its first call" } else { " over O1" }, if snapshot { "snapshot" } else { "full, cached" }, len, dt as f64 / 1e6);
             }
         }
-        Err(_) => {
-            O2_STATS[2].fetch_add(1, Ordering::Relaxed);
-        }
+        Err(_) => dropped(),
     }
 }
 
@@ -13496,6 +13635,14 @@ pub fn sweep_verdicts() {
             });
         }
         relower_twin_callers(up, &tc);
+        // the rest of the compiled slots verified after their build: a verified O1 rebuild becomes
+        // their entry (their code and entry were the unverified lowering; the twin callers among
+        // them get their O2 build above)
+        for &c in &verified {
+            if u.fns[c as usize].compiled && !tc.below.contains(&c) {
+                o1v_enqueue(up, c, false);
+            }
+        }
         for &id in &relower { tier_push(id, Q_RETIER, 0); }
         for &r in &rejected_in {
             if specv_trace() {
@@ -16220,7 +16367,10 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                 // SPEC-V: unverified O3 code is never the slot's entry (it is built again once verified)
                 // (an unverified root's build, or one that took in unverified callees, is unverified
                 // code even when the root's verdict came while it was built: built again then)
-                let unverified_now = u.fns[id as usize].unverified.load(Ordering::Relaxed);
+                // (a SPEC-V twin's O3 code is kept as its entry: the twin is unverified-mode code by
+                // kind, as its cached baseline is; warm runs whose callers call the twin built its O3
+                // again every launch)
+                let unverified_now = u.fns[id as usize].unverified.load(Ordering::Relaxed) && !matches!(u.fns[id as usize].key, FnKey::Plain(_));
                 let unverified_inl: Vec<u32> = unverified_in.iter().copied().filter(|c| inlined.contains(c)).collect();
                 // (a twin is unverified by kind: its own O3 code is treated as before)
                 let built_unverified = root_unverified && !matches!(u.fns[id as usize].key, FnKey::Plain(_)) || !unverified_inl.is_empty();
@@ -16244,6 +16394,14 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                             u.pending_cache_records.push(Some(p));
                             PENDING_RECORDS.fetch_add(1, Ordering::Relaxed);
                         crate::cache::warm_count::add(crate::cache::warm_count::RECORDS_WAITING, 1);
+                            // the slots this code inlined that have no standalone code: each gets a
+                            // standalone O1 entry the first time (a warm launch's lower-tier callers
+                            // call them before this O3 code is installed)
+                            for &c in &inlined {
+                                if c != id && (c as usize) < u.fns.len() && !u.fns[c as usize].compiled {
+                                    o1v_enqueue(up, c, true);
+                                }
+                            }
                         }
                         O3_INSTALL_REC[0].fetch_add(1, Ordering::Relaxed);
                         O3_INSTALL_REC[1].fetch_add(cpu_ns() - tr, Ordering::Relaxed);
