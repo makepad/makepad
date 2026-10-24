@@ -546,7 +546,10 @@ fn options(knobs: &[&str]) -> relax_session::Options {
     let mut o = relax_session::Options::default();
     o.opt = knobs.iter().map(|s| s.to_string()).collect();
     // the allocation checker, fatal: a finding fails the compile
-    o.opt.push("+checkra".to_string());
+    // (FUZZ_NOCHECKRA=1: without it -- triage: a checker finding whose code still agrees)
+    if std::env::var("FUZZ_NOCHECKRA").is_err() {
+        o.opt.push("+checkra".to_string());
+    }
     o
 }
 
@@ -810,6 +813,19 @@ fn random_programs_agree_across_tiers() {
     }
     eprintln!("fuzz: {} programs, {} native runs, {} disagree", n, runs, fails.len());
     assert!(fails.is_empty(), "programs disagreeing across tiers (rerun with FUZZ_SEED=<hex>): {:x?}", fails);
+}
+
+/// Seeds the clock-seeded batch found (FUZZ-NEW): they block from then on, in every tier.
+/// - 3853108f782e2d2a (O2 thorough, checker only; the code agreed): `t = s as i8` read only in
+///   its low bits, coalesced with s (equal_copies) in a caller-saved register, both saved around a
+///   call in a loop; the checker took the cast for a copy in the register only, so the restore
+///   of s's save slot (stored before t existed) dropped t.
+const FOUND_SEEDS: [u64; 1] = [0x3853_108f_782e_2d2a];
+
+#[test]
+fn found_seeds_agree_across_tiers() {
+    let fails: Vec<String> = FOUND_SEEDS.iter().filter_map(|&s| check(s).err()).collect();
+    assert!(fails.is_empty(), "found seeds disagree again:\n{}", fails.join("\n"));
 }
 
 // ---- minimized cases the fuzzer found (each runs through every tier like a random program)

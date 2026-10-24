@@ -2185,7 +2185,9 @@ pub fn check_or_fail(options: &relax_session::Options, f: &Func, cfg: &RegConfig
 /// - a definition sets its register, or its home slot -- unless Alloc::store_skip drops that
 ///   store -- and the register of a window starting right after it, and makes every other copy
 ///   of the value stale (non-SSA RIR: a location holds v only with v's latest value); a
-///   same-location move or integer cast adds its result to what the location holds;
+///   same-location copy (a move, or an integer cast emitted as one) adds its result to what the
+///   location holds, and every location holding its source holds it too; a cast that extends is a
+///   fresh value;
 /// - clobbers and calls empty registers; a call's saves copy the register into the save slot
 ///   (save_skip: the slot is left as it is) and its restores -- after its results are in place,
 ///   as the emitter orders them -- copy the slot back (restore_skip: the register stays empty);
@@ -2239,6 +2241,24 @@ pub fn check_alloc(options: &relax_session::Options, f: &Func, cfg: &RegConfig, 
         def_win.insert((a, v), ri);
     }
     let in_win = |v: u32, p: u32| -> Option<usize> { win_of.get(&v)?.iter().find(|w| w.0 <= p && p <= w.1).map(|w| w.2) };
+    // the copies: a Mov, or an integer cast both emitters emit as a plain move (its upper bits
+    // nobody reads, or its source zero above fewer bits: x64 / arm64 conv, the condition
+    // equal_copies coalesces by); any other cast extends, a fresh value
+    let any_cast = f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::Conv(Conv::IntToInt(_), ..))));
+    let (low, zero) = if any_cast {
+        let low = crate::passes::low_bits_only(options, f);
+        let zero = crate::passes::zero_above(options, f, &low);
+        (low, zero)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let copy_of = |i: &Inst| -> Option<(VReg, VReg)> {
+        match *i {
+            Inst::Mov(d, s2) => Some((d, s2)),
+            Inst::Conv(Conv::IntToInt(it), d, s2) if low[d.0 as usize] || crate::passes::cast_is_move(zero[s2.0 as usize], it) => Some((d, s2)),
+            _ => None,
+        }
+    };
     let mut caller = [false; NR];
     for &r in &cfg.int_caller {
         caller[r as usize] = true;
@@ -2454,15 +2474,12 @@ pub fn check_alloc(options: &relax_session::Options, f: &Func, cfg: &RegConfig, 
                     }
                 }
             }
-            // (a cast coalesced into its operand's register is a move when it changes no bit,
-            // passes::cast_is_move; not modelled: every same-register cast counts as a copy)
-            let same = match *i {
-                Inst::Mov(d, s2) | Inst::Conv(Conv::IntToInt(_), d, s2) => Some((d, s2)),
-                _ => None,
-            };
-            // a move's source and the values equal to it, before the move's own write
-            let mov_eq: Option<Vec<u32>> = match *i {
-                Inst::Mov(d, s2) if s2 != d && dd[s2.0 as usize / 64] & (1 << (s2.0 % 64)) != 0 => {
+            // (a cast emitted as a move is a copy; one that extends is a fresh value, even in its
+            // operand's register)
+            let same = copy_of(i);
+            // a copy's source and the values equal to it, before the copy's own write
+            let mov_eq: Option<Vec<u32>> = match same {
+                Some((d, s2)) if s2 != d && dd[s2.0 as usize / 64] & (1 << (s2.0 % 64)) != 0 => {
                     let mut eq = vec![s2.0];
                     for h in st.reg.iter().chain(st.slot.values()) {
                         if h.contains(&s2.0) {
@@ -2519,13 +2536,15 @@ pub fn check_alloc(options: &relax_session::Options, f: &Func, cfg: &RegConfig, 
                         }
                     }
                 }
-                // a move: d and its source hold one value until either is redefined, so every
+                // a copy: d and its source hold one value until either is redefined, so every
                 // location holding the source holds d too, and d's location the source and every
                 // value equal to it (held together with it somewhere: `t = v; w = t` with t
                 // recomputed and w sharing v's slot) -- the copy_reuse register or a shared slot
-                // serving a read of the spilled one of them
-                if let (Inst::Mov(dv, s2), Some(eq)) = (i, &mov_eq) {
-                    if dv == d && *s2 != *d {
+                // serving a read of the spilled one of them; also a save slot of the source that a
+                // later restore copies back into a register d shares with it (a cast coalesced
+                // with its source, equal_copies: FUZZ 3853108f782e2d2a)
+                if let (Some((dv, s2)), Some(eq)) = (same, &mov_eq) {
+                    if dv == *d && s2 != *d {
                         let mine = loc_reg(l);
                         for (r, h) in st.reg.iter_mut().enumerate() {
                             if h.contains(&s2.0) && !h.contains(&d.0) {
