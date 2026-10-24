@@ -180,6 +180,12 @@ impl Credential {
         let proof = hmac(&self.secret, &format!("mkfleet2 proof|{}", to_hex(fingerprint)));
         format!("MKC2 {}.{}", self.identity.text(), to_hex(&proof))
     }
+
+    /// The key a fleet-key holder derives for this credential and `context`
+    /// ([`Keyring::shared_key`]).
+    pub fn shared_key(&self, context: &str) -> [u8; 32] {
+        hmac(&self.secret, &format!("mkfleet2 shared|{context}"))
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -201,20 +207,20 @@ impl std::fmt::Display for Rejection {
     }
 }
 
-/// A node's check: its fleet key, its own certificate, the revocations.
-pub struct Verifier {
+/// The fleet key and the revocation list: everything a holder needs to check
+/// a client's proof against any value it binds the proof to.
+pub struct Keyring {
     key: FleetKey,
-    fingerprint: [u8; 32],
     revoked: HashSet<String>,
 }
 
-impl Verifier {
-    pub fn new(key: FleetKey, fingerprint: [u8; 32], revoked: HashSet<String>) -> Self {
-        Self { key, fingerprint, revoked }
+impl Keyring {
+    pub fn new(key: FleetKey, revoked: HashSet<String>) -> Self {
+        Self { key, revoked }
     }
 
     /// Loads `fleet.key` (required) and `revoked` (optional) from `dir`.
-    pub fn load(dir: &Path, fingerprint: [u8; 32]) -> Result<Self, String> {
+    pub fn load(dir: &Path) -> Result<Self, String> {
         let path = dir.join(FLEET_KEY);
         let key = FleetKey::load(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let revoked = fs::read_to_string(dir.join(REVOKED))
@@ -223,18 +229,32 @@ impl Verifier {
             .map(|l| l.trim().to_string())
             .filter(|l| !l.is_empty() && !l.starts_with('#'))
             .collect();
-        Ok(Self::new(key, fingerprint, revoked))
+        Ok(Self::new(key, revoked))
     }
 
-    /// Checks an `Authorization` header value (`MKC2 <id>.<role>.<expiry>.<proof>`).
-    pub fn verify(&self, authorization: &str, now: u64) -> Result<Identity, Rejection> {
+    /// This machine's fleet key: the admin machine's (`~/.makepad/ai-hub/admin`),
+    /// else a node's, in its hub cache (`$MAKEPAD_ASSET_AI_CACHE/fleet`, default
+    /// `~/.makepad/weights/fleet`). The two places `ai-fleet` puts it.
+    pub fn load_local() -> Result<Self, String> {
+        let dirs = [client_dir().join("admin"), node_fleet_dir()];
+        for dir in &dirs {
+            if dir.join(FLEET_KEY).exists() {
+                return Self::load(dir);
+            }
+        }
+        Err(format!("no fleet key in {} or {}", dirs[0].display(), dirs[1].display()))
+    }
+
+    /// Checks an `Authorization` value (`MKC2 <id>.<role>.<expiry>.<proof>`)
+    /// made by [`Credential::authorization`] for `bound`.
+    pub fn verify(&self, authorization: &str, bound: &[u8; 32], now: u64) -> Result<Identity, Rejection> {
         let value = authorization.trim().strip_prefix("MKC2 ").ok_or(Rejection::Malformed)?;
         let parts: Vec<&str> = value.trim().split('.').collect();
         let [id, role, expiry, proof] = parts.as_slice() else { return Err(Rejection::Malformed) };
         let identity = Identity::parse(id, role, expiry).ok_or(Rejection::Malformed)?;
         let proof = from_hex::<32>(proof).ok_or(Rejection::Malformed)?;
         let secret = self.key.secret(&identity);
-        let expected = hmac(&secret, &format!("mkfleet2 proof|{}", to_hex(&self.fingerprint)));
+        let expected = hmac(&secret, &format!("mkfleet2 proof|{}", to_hex(bound)));
         if !tls::constant_time_eq(&expected, &proof) {
             return Err(Rejection::BadProof);
         }
@@ -246,6 +266,40 @@ impl Verifier {
         }
         Ok(identity)
     }
+
+    /// The key [`Credential::shared_key`] derives for the same `context`:
+    /// only this client and fleet-key holders can compute it, so it carries
+    /// a secret back to the client and proves the answer came from the fleet.
+    pub fn shared_key(&self, identity: &Identity, context: &str) -> [u8; 32] {
+        hmac(&self.key.secret(identity), &format!("mkfleet2 shared|{context}"))
+    }
+}
+
+/// A node's check: its fleet key, its own certificate, the revocations.
+pub struct Verifier {
+    keyring: Keyring,
+    fingerprint: [u8; 32],
+}
+
+impl Verifier {
+    pub fn new(key: FleetKey, fingerprint: [u8; 32], revoked: HashSet<String>) -> Self {
+        Self { keyring: Keyring::new(key, revoked), fingerprint }
+    }
+
+    /// Loads `fleet.key` (required) and `revoked` (optional) from `dir`.
+    pub fn load(dir: &Path, fingerprint: [u8; 32]) -> Result<Self, String> {
+        Ok(Self { keyring: Keyring::load(dir)?, fingerprint })
+    }
+
+    /// Checks an `Authorization` header value (`MKC2 <id>.<role>.<expiry>.<proof>`).
+    pub fn verify(&self, authorization: &str, now: u64) -> Result<Identity, Rejection> {
+        self.keyring.verify(authorization, &self.fingerprint, now)
+    }
+}
+
+/// HMAC-SHA256, the fleet's one primitive (proofs, shared keys, bindings).
+pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+    crate::tunnel::hmac_sha256(key, msg)
 }
 
 // --- this process as a fleet client ---------------------------------------------
@@ -262,15 +316,29 @@ pub fn set_node_credential(text: Option<String>) {
     let _ = NODE_CREDENTIAL_TEXT.set(text);
 }
 
-/// This process's credential: a node's own, else `MAKEPAD_AI_HUB_CREDENTIAL`,
-/// else `~/.makepad/ai-hub/client.credential`.
+/// A node's fleet directory: its hub cache's `fleet` (`$MAKEPAD_ASSET_AI_CACHE/fleet`,
+/// default `~/.makepad/weights/fleet`), where `ai-fleet node-files` puts `fleet.key`
+/// and `node.credential`.
+pub fn node_fleet_dir() -> PathBuf {
+    std::env::var_os("MAKEPAD_ASSET_AI_CACHE")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| super::makepad_home().join("weights"))
+        .join("fleet")
+}
+
+/// This process's credential: a node's own (set at start), else
+/// `MAKEPAD_AI_HUB_CREDENTIAL`, else `~/.makepad/ai-hub/client.credential`, else
+/// the node fleet dir's `node.credential` (a machine whose only credential is its
+/// node one; a person's lan credential wins, since roles reach different routes).
 pub fn own_credential() -> Option<Credential> {
     let text = NODE_CREDENTIAL_TEXT
         .get()
         .cloned()
         .flatten()
         .or_else(|| std::env::var("MAKEPAD_AI_HUB_CREDENTIAL").ok())
-        .or_else(|| fs::read_to_string(client_dir().join(CLIENT_CREDENTIAL)).ok())?;
+        .or_else(|| fs::read_to_string(client_dir().join(CLIENT_CREDENTIAL)).ok())
+        .or_else(|| fs::read_to_string(node_fleet_dir().join(NODE_CREDENTIAL)).ok())?;
     Credential::parse(&text)
 }
 
@@ -342,6 +410,13 @@ mod tests {
         assert_eq!(verifier.verify(&other_fleet.authorization(&node_fp), 1_000), Err(Rejection::BadProof));
         assert_eq!(verifier.verify("Bearer x", 1_000), Err(Rejection::Malformed));
         assert!(Credential::parse("mkc1.a.lan.1.00").is_none());
+        // A keyring checks proofs bound to any value and shares a key per context.
+        let keyring = Keyring::new(FleetKey(key.0), HashSet::new());
+        let bound = [9u8; 32];
+        let id = keyring.verify(&cred.authorization(&bound), &bound, 1_000).unwrap();
+        assert_eq!(keyring.verify(&cred.authorization(&bound), &node_fp, 1_000), Err(Rejection::BadProof));
+        assert_eq!(keyring.shared_key(&id, "n1"), cred.shared_key("n1"));
+        assert_ne!(keyring.shared_key(&id, "n1"), cred.shared_key("n2"));
         // Debug output never shows the secret.
         let secret_hex = text.rsplit('.').next().unwrap();
         assert!(!format!("{cred:?}").contains(secret_hex));

@@ -1148,6 +1148,11 @@ impl Cache {
     }
     fn has_index(&self, key: &u128) -> bool { self.index_at(*key).is_some() }
 
+    /// Whether slot `id` has a stored code entry (any tier): it ran in an earlier session.
+    pub(crate) fn has_stored_entry(&mut self, u: &Unit, id: u32) -> bool {
+        self.has_code_entries() && self.slot_key(u, id).is_some_and(|k| self.entry_tier(k).is_some())
+    }
+
     /// The tier of code entry `key` as stored (its payload's tier byte).
     fn entry_tier(&self, key: u128) -> Option<u8> {
         let (kind, p) = self.get(key)?;

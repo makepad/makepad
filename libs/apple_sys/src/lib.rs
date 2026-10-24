@@ -587,6 +587,13 @@ extern "C" {
     pub fn CVBufferCopyAttachment(buffer: CVPixelBufferRef, key: CFStringRef, mode: *mut u32) -> *const c_void;
     /// `mode`: 1 = kCVAttachmentMode_ShouldPropagate.
     pub fn CVBufferSetAttachment(buffer: CVPixelBufferRef, key: CFStringRef, value: *const c_void, mode: u32);
+    /// A pixel buffer over an existing IOSurface (no copy).
+    pub fn CVPixelBufferCreateWithIOSurface(
+        allocator: CFAllocatorRef,
+        surface: *mut c_void,
+        pixel_buffer_attributes: CFDictionaryRef,
+        pixel_buffer_out: *mut CVPixelBufferRef,
+    ) -> CVReturn;
     pub fn CVPixelBufferCreate(
         allocator: *const c_void,
         width: usize,
@@ -790,6 +797,9 @@ extern "C" {
     // VTIsHardwareEncodeSupported above is NOT an exported symbol on macOS,
     // see apple_media.rs's dlsym workaround).
     pub static kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: CFStringRef;
+    /// macOS 11.3+: the encoder's low-latency mode (no frame reordering, a short rate-control
+    /// window), set at session creation.
+    pub static kVTVideoEncoderSpecification_EnableLowLatencyRateControl: CFStringRef;
     pub fn VTCopySupportedPropertyDictionaryForEncoder(
         width: i32,
         height: i32,
@@ -2053,6 +2063,9 @@ extern "C" {
     pub fn IOSurfaceLookupFromMachPort(port: mach_port_t) -> IOSurfaceRef;
     pub fn IOSurfaceGetWidth(surface: IOSurfaceRef) -> usize;
     pub fn IOSurfaceGetHeight(surface: IOSurfaceRef) -> usize;
+    pub fn IOSurfaceGetPlaneCount(surface: IOSurfaceRef) -> usize;
+    pub fn IOSurfaceGetWidthOfPlane(surface: IOSurfaceRef, plane: usize) -> usize;
+    pub fn IOSurfaceGetHeightOfPlane(surface: IOSurfaceRef, plane: usize) -> usize;
     pub fn IOSurfaceIncrementUseCount(surface: IOSurfaceRef);
     pub fn IOSurfaceDecrementUseCount(surface: IOSurfaceRef);
 }

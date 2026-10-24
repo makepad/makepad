@@ -424,7 +424,7 @@ impl WindowsStreamDecoder {
                     self.frames_out, width, height, len, stride, pts_100ns
                 )
             });
-            frames.push(DecodedFrame { width: self.width, height: self.height, nv12, pts_100ns });
+            frames.push(DecodedFrame { width: self.width, height: self.height, nv12, pts_100ns, gpu: None });
         }
         Ok(frames)
     }

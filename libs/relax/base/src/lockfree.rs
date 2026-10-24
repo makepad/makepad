@@ -208,12 +208,18 @@ mod tests {
     fn treiber_take_all_delivers_every_push_once() {
         let t = table();
         let stop = Arc::new(AtomicBool::new(false));
+        // deliveries so far: producers go on until the takers have handed out ids twice over, so
+        // ids are pushed again however the threads get scheduled (a loaded machine ran all 200
+        // rounds before a taker ran: 4096 pushes, nothing re-pushed)
+        let taken = Arc::new(AtomicUsize::new(0));
         let takers: Vec<_> = (0..2)
             .map(|_| {
-                let (t, stop) = (t.clone(), stop.clone());
+                let (t, stop, taken) = (t.clone(), stop.clone(), taken.clone());
                 std::thread::spawn(move || {
                     while !stop.load(Ordering::Acquire) {
-                        if consume(&t) == 0 {
+                        let n = consume(&t);
+                        taken.fetch_add(n, Ordering::Relaxed);
+                        if n == 0 {
                             std::thread::yield_now();
                         }
                     }
@@ -222,11 +228,16 @@ mod tests {
             .collect();
         let producers: Vec<_> = (0..8)
             .map(|p| {
-                let t = t.clone();
+                let (t, taken) = (t.clone(), taken.clone());
                 std::thread::spawn(move || {
-                    for round in 0..200 {
+                    let mut round = 0;
+                    while round < 200 || taken.load(Ordering::Relaxed) < 2 * IDS {
                         for i in 0..IDS / 4 {
                             produce(&t, (i * 7 + p * 131 + round * 17) % IDS);
+                        }
+                        round += 1;
+                        if round >= 200 {
+                            std::thread::yield_now();
                         }
                     }
                 })

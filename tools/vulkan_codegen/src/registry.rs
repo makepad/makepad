@@ -12,6 +12,8 @@ pub struct Field {
     pub len: String,
     pub value: String,
     pub optional: bool,
+    /// Width of a C bitfield member (`uint32_t flag : 1`), 0 for an ordinary member.
+    pub bits: u32,
 }
 #[derive(Clone)]
 pub struct Type {
@@ -108,11 +110,15 @@ fn field(doc: &Document, id: usize) -> Field {
         let dim = dim.strip_prefix("VK_").unwrap_or(dim);
         ty = format!("[{ty}; {dim} as usize]");
     }
-    if before.contains(':') || after.trim_start().starts_with(':') {
-        ty = format!("UNSUPPORTED_BITFIELD_{ty}");
+    let mut bits = 0;
+    if let Some(width) = after.trim_start().strip_prefix(':') {
+        bits = width.trim().parse::<u32>().unwrap_or_else(|_| panic!("bitfield width of {name}: {width:?}"));
+        assert!(pointer == 0 && array.is_empty() && bits > 0 && bits <= 32, "unsupported bitfield {name}");
+    } else {
+        assert!(!before.contains(':'), "unsupported declaration of {name}");
     }
     Field { name: ident(&snake(&name)), base, ty, pointer, constant, array,
-        len: e.attr("len").into(), value: e.attr("values").into(), optional: e.attr("optional").starts_with("true") }
+        len: e.attr("len").into(), value: e.attr("values").into(), optional: e.attr("optional").starts_with("true"), bits }
 }
 impl Registry {
     pub fn parse(source: &str) -> Self {
@@ -159,8 +165,9 @@ impl Registry {
                 }
             }
         }
-        let commands = doc.child(root, "commands").expect("registry commands");
-        for id in doc.children(commands, "command") {
+        // video.xml (the codec Std types) has no commands.
+        let commands = doc.child(root, "commands");
+        for id in commands.map(|c| doc.children(c, "command")).unwrap_or_default() {
             let e = &doc.nodes[id];
             if !supported(e) { continue; }
             let proto = doc.child(id, "proto");
@@ -171,6 +178,16 @@ impl Registry {
             r.commands.insert(name.clone(), Command { name, alias: e.attr("alias").into(), ret, fields });
         }
         r
+    }
+    /// Adds a second registry (video.xml): its definitions replace the
+    /// placeholder `requires="vk_video/..."` entries vk.xml has for them.
+    pub fn merge(&mut self, other: Registry) {
+        for (name, t) in other.types {
+            let placeholder = self.types.get(&name).is_none_or(|old| old.category.is_empty() && old.fields.is_empty());
+            if placeholder { self.types.insert(name, t); }
+        }
+        for (name, v) in other.values { self.values.entry(name).or_insert(v); }
+        for (name, c) in other.commands { self.commands.entry(name).or_insert(c); }
     }
     fn read_value(&mut self, e: &Element, group: &str, extension: i64) {
         if !supported(e) || e.attr("name").is_empty() { return; }

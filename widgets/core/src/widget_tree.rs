@@ -1916,16 +1916,22 @@ impl WidgetTree {
         let mut stored_before = Vec::with_capacity(results.len() + 1);
         for widget in &results {
             stored_before.push(matches.len());
-            let Some(uid) = widget.try_widget_uid() else {
-                continue;
-            };
-            if uid == WidgetUid(0) {
-                continue;
+            // A match whose uid cannot be read right now (its widget is mutably borrowed: a
+            // lookup from inside that widget's own draw, e.g. a PortalList comparing itself
+            // with `self.portal_list(..)` while the step holds it) is still a match. Leaving
+            // it out would store a MISS (or a short list) that outlives the borrow: every
+            // later lookup answers from it until an unrelated invalidation (SBXPLAY's dead
+            // JOIN row). The answer is right, it just cannot be cached: store nothing.
+            match widget.try_widget_uid() {
+                Some(uid) if uid != WidgetUid(0) => matches.push(PathCacheMatch {
+                    uid,
+                    widget: widget.downgrade(),
+                }),
+                _ => {
+                    inner.stats.stores_skipped += 1;
+                    return (results, hits);
+                }
             }
-            matches.push(PathCacheMatch {
-                uid,
-                widget: widget.downgrade(),
-            });
         }
         stored_before.push(matches.len());
         let stored_hits = hits
@@ -4087,6 +4093,35 @@ mod tests {
         assert!(!found.is_empty());
         assert_eq!(found.widget_uid(), uid);
         assert!(tree.find_within(root_uid, &[name("root")]).is_empty());
+    }
+
+    /// A lookup made while its match is mutably borrowed (a list's draw step asking for
+    /// itself by name: `self.portal_list(cx, ids!(rooms))` under `item.borrow_mut::<PortalList>()`)
+    /// finds the widget but cannot read its uid. It must not leave a cached MISS behind:
+    /// SBXPLAY's JOIN row never fired because every later `portal_list(rooms)` answered empty.
+    #[test]
+    fn test_lookup_of_a_borrowed_widget_caches_no_miss() {
+        for scope in [true, false] {
+            let tree = WidgetTree::default();
+            let root_uid = WidgetUid::new();
+            let box_uid = WidgetUid::new();
+            let list_uid = WidgetUid::new();
+            let list = if scope { make_widget_skip(list_uid, vec![]) } else { make_widget(list_uid, vec![]) };
+            let boxed = make_widget(box_uid, vec![(name("rooms"), list.clone())]);
+            let root = make_widget(root_uid, vec![(name("rooms_box"), boxed.clone())]);
+            tree.observe_node(root_uid, name("root"), root.clone(), None);
+            tree.observe_node(box_uid, name("rooms_box"), boxed.clone(), Some(root_uid));
+            tree.observe_node(list_uid, name("rooms"), list.clone(), Some(box_uid));
+            stabilize_graph_cache(&tree);
+            {
+                let _drawing = list.borrow_mut::<TestWidget>().expect("the list is a TestWidget");
+                let found = tree.find_within(root_uid, &[name("rooms")]);
+                assert!(!found.is_empty(), "found while borrowed (scope {scope})");
+            }
+            let found = tree.find_within(root_uid, &[name("rooms")]);
+            assert_eq!(found.widget_uid(), list_uid, "found after the borrow ends (scope {scope})");
+            assert_eq!(tree.find_all_within(root_uid, &[name("rooms")]).len(), 1);
+        }
     }
 
     #[test]

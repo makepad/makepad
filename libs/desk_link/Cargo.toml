@@ -1,0 +1,18 @@
+[package]
+name = "makepad-desk-link"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Desk Link: the remote desktop wire protocol of the window manager and its viewer, and the server they share"
+
+[features]
+# The server (listener, TLS, fleet credentials, sessions): desktops that serve Desk Link.
+server = ["dep:makepad-network"]
+
+[dependencies]
+makepad-network = { path = "../../platform/network", optional = true }
+
+[[bin]]
+name = "desk-link-probe"
+path = "src/bin/desk_link_probe.rs"
+required-features = ["server"]

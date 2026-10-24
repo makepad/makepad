@@ -12,6 +12,20 @@ pub fn is_private_lan(ip: IpAddr) -> bool {
     }
 }
 
+/// Whether a datagram from `ip` is from this network: a private LAN address,
+/// link-local, or this machine (loopback). The rule for whom a fleet
+/// listener ANSWERS (a Sandbox room's probe responder); binding stays
+/// [`check_lan_bind`].
+pub fn is_lan_peer(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_private() || v4.is_link_local() || v4.is_loopback(),
+        IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            v6.is_loopback() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+        }
+    }
+}
+
 /// `Ok` for a private LAN address; else why not, naming `service`.
 pub fn check_lan_bind(service: &str, addr: SocketAddr) -> Result<(), String> {
     if is_private_lan(addr.ip()) {
@@ -28,6 +42,16 @@ pub fn check_lan_bind(service: &str, addr: SocketAddr) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lan_peers_are_private_link_local_or_this_machine() {
+        for ip in ["10.0.0.5", "192.168.1.2", "172.20.0.1", "127.0.0.1", "169.254.1.1", "fd00::1", "fe80::1", "::1"] {
+            assert!(is_lan_peer(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["8.8.8.8", "172.32.0.1", "2001:db8::1"] {
+            assert!(!is_lan_peer(ip.parse().unwrap()), "{ip}");
+        }
+    }
 
     #[test]
     fn binds_must_be_private_lan_addresses() {

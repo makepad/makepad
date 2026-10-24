@@ -47,6 +47,7 @@ makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = 
 makepad-studio-protocol = { path = "../../platform/studio" }
 makepad-network = { path = "../../platform/network" }
 makepad-wm-api = { path = "../../libs/wm_api" }
+makepad-desk-link = { path = "../../libs/desk_link", features = ["server"] }
 makepad-app-registry = { path = "../../libs/app_registry" }
 makepad-app-host = { path = "../../libs/app_host" }
 # The AI services wire only: the WM relays frames between the aichat child and the apps.

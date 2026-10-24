@@ -54,9 +54,9 @@ impl Layout {
 }
 
 /// One DMA-BUF bound to a VkImage on the process's device.
-struct Imported {
-    dev: Arc<Device>,
-    image: vk::Image,
+pub(crate) struct Imported {
+    pub(crate) dev: Arc<Device>,
+    pub(crate) image: vk::Image,
     memory: vk::DeviceMemory,
     format: vk::Format,
     layout: Layout,
@@ -131,7 +131,10 @@ impl Imported {
 struct Registered {
     fd: OwnedFd,
     layout: Layout,
-    image: Option<Imported>,
+    /// Shared with a stream encoder while it encodes from it: a release (or a device
+    /// replacement) while a copy is in flight drops only the registry's reference, and the
+    /// image and its memory go when the encode is done with them.
+    image: Option<Arc<Imported>>,
 }
 
 /// The command buffer, fence and host-visible staging buffer every copy reuses.
@@ -148,8 +151,10 @@ unsafe impl Send for Copier {}
 
 impl Drop for Copier {
     fn drop(&mut self) {
+        // nothing is in flight: every submit is waited for (and its fence reset) before the
+        // copy returns. (Waiting here for the reset fence never ended: a device replacement,
+        // which drops the copier, hung the HAL.)
         unsafe {
-            let _ = self.dev.raw.wait_for_fences(&[self.fence], true, u64::MAX);
             if let Some((buffer, memory, _, _)) = self.staging.take() {
                 self.dev.raw.destroy_buffer(buffer, None);
                 self.dev.raw.free_memory(memory, None);
@@ -397,7 +402,7 @@ impl State {
         let dev = self.copier()?.dev.clone();
         let entry = self.registered.get_mut(&handle).ok_or("unknown DMA-BUF handle")?;
         if entry.image.is_none() {
-            entry.image = Some(Imported::new(&dev, entry.fd.as_fd(), entry.layout)?);
+            entry.image = Some(Arc::new(Imported::new(&dev, entry.fd.as_fd(), entry.layout)?));
         }
         Ok(())
     }
@@ -473,6 +478,20 @@ pub fn upload(dst: u64, pixels: &[u8], width: u32, height: u32, stride: usize) -
         let State { copier, registered, .. } = state;
         let dst = registered.get(&dst).and_then(|r| r.image.as_ref()).ok_or("unknown DMA-BUF handle")?;
         copier.as_mut().unwrap().upload(dst, pixels, width, height, stride)
+    })
+}
+
+/// The registered image `handle` (imported on first use) and its size, for the stream encoder
+/// (`video_encode::StreamEncoder::encode_image`). The caller holds the returned reference until
+/// the GPU is done with the image: the handle may be released meanwhile.
+pub(crate) fn registered_image(handle: u64) -> Result<(Arc<Imported>, [u32; 2]), String> {
+    with_state(|state| {
+        state.registered(handle)?;
+        let image = state.registered.get(&handle).and_then(|r| r.image.as_ref()).ok_or("unknown DMA-BUF handle")?;
+        if image.format != vk::Format::B8G8R8A8_UNORM {
+            return Err("a stream picture texture is BGRA8".into());
+        }
+        Ok((image.clone(), [image.layout.width, image.layout.height]))
     })
 }
 

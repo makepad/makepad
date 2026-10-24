@@ -1620,23 +1620,6 @@ mod imp {
     const CAPTURE_SHUTDOWN_WAIT: Duration = Duration::from_secs(20);
 
     /// `/settled`: why the app would still change if time moved on.
-    /// The calling thread's retired instructions and cycles (macOS: thread_selfcounts THSC_CPI,
-    /// unprivileged); (0, 0) elsewhere (Linux: perf stat -t on the thread).
-    #[cfg(target_os = "macos")]
-    fn thread_counts() -> (u64, u64) {
-        extern "C" {
-            fn thread_selfcounts(kind: i32, buf: *mut u64, nbytes: usize) -> i32;
-        }
-        let mut b = [0u64; 2];
-        if unsafe { thread_selfcounts(1, b.as_mut_ptr(), 16) } != 0 {
-            return (0, 0);
-        }
-        (b[0], b[1])
-    }
-    #[cfg(not(target_os = "macos"))]
-    fn thread_counts() -> (u64, u64) {
-        (0, 0)
-    }
     /// The calling thread's CPU time (CLOCK_THREAD_CPUTIME_ID; 0 where there is none).
     #[cfg(unix)]
     fn thread_cpu_ns() -> u64 {
@@ -2325,7 +2308,7 @@ mod imp {
                 let _ = tx.send(Reply::Text(settled_json(cx)));
             }
             Cmd::UiCounts(tx) => {
-                let (ins, cyc) = thread_counts();
+                let (ins, cyc) = crate::thread_counters::read().unwrap_or((0, 0));
                 let _ = tx.send(Reply::Text(format!("{{\"ins\":{ins},\"cyc\":{cyc},\"cpu_ns\":{}}}", thread_cpu_ns())));
             }
             Cmd::Platform(payload) => match *payload

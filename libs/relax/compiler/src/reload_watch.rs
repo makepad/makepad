@@ -372,12 +372,17 @@ mod tests {
         let unrelated = dir.join("unrelated.rs");
         let temporary = dir.join("save.tmp");
         std::fs::write(&source, "old").unwrap();
-        let mut watch = super::Watch::new(std::iter::once(source.to_str().unwrap())).unwrap();
+        let new_watch = || super::Watch::new(std::iter::once(source.to_str().unwrap())).unwrap();
+        let mut watch = new_watch();
         if !cfg!(target_os = "linux") {
-            // FSEvents may still report the write just before the stream started (fseventsd
-            // had not processed it yet); a stray event costs the caller one stat.
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            assert!(watch.changed().is_some());
+            // FSEvents may still deliver the writes made just before the stream started (fseventsd
+            // had not processed them yet): the file's (a stray stat) or the fresh directory's own
+            // (None: events may be lost, and the caller rebuilds the watch -- as here)
+            for _ in 0..5 {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                if watch.changed().is_some() { break; }
+                watch = new_watch();
+            }
         }
         std::fs::write(&unrelated, "unrelated").unwrap();
         if !cfg!(target_os = "linux") { std::thread::sleep(std::time::Duration::from_millis(300)); }

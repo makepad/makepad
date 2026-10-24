@@ -19,6 +19,8 @@ pub(crate) struct XFrame {
     pub tier: String,
     /// file:line of the pc in this frame (JIT frames)
     pub at: String,
+    /// JIT frames: the slot's build version now (installs so far, `versions <fn>`); 0 otherwise
+    pub gen: u32,
 }
 
 /// Expanded frames of each pc (innermost first, as stacks are): JIT pcs by the code tables on the
@@ -43,15 +45,15 @@ fn expand_pcs(pcs: &[u64], partial: &mut Vec<String>) -> HashMap<u64, Vec<XFrame
                                     let n = i.stack.len();
                                     // a level the code tables cannot name: its source position names it
                                     let unnamed = |name: &str, at: &str| if name == "(inlined fn)" { format!("(inlined code at {})", at.rsplit('/').next().unwrap_or(at).rsplitn(2, ':').last().unwrap_or(at)) } else { name.to_string() };
-                                    i.stack.iter().enumerate().map(|(k, (name, _, at))| XFrame { name: if k + 1 == n { own.clone() } else { unnamed(name, at) }, tier: if k + 1 == n { tier.clone() } else { "inl".into() }, at: at.clone() }).collect()
+                                    i.stack.iter().enumerate().map(|(k, (name, _, at))| XFrame { name: if k + 1 == n { own.clone() } else { unnamed(name, at) }, tier: if k + 1 == n { tier.clone() } else { "inl".into() }, at: at.clone(), gen: u.fns[c.slot as usize].version as u32 }).collect()
                                 }
-                                Some(i) => vec![XFrame { name: i.name.clone(), tier: "inl".into(), at: c.at.clone() }, XFrame { name: own, tier, at: String::new() }],
-                                None => vec![XFrame { name: own, tier, at: c.at.clone() }],
+                                Some(i) => vec![XFrame { name: i.name.clone(), tier: "inl".into(), at: c.at.clone(), gen: u.fns[c.slot as usize].version as u32 }, XFrame { name: own, tier, at: String::new(), gen: u.fns[c.slot as usize].version as u32 }],
+                                None => vec![XFrame { name: own, tier, at: c.at.clone(), gen: u.fns[c.slot as usize].version as u32 }],
                             }
                         }
                         None => match super::codever::glue_name(u, pc) {
-                            Some((name, _)) => vec![XFrame { name, tier: "glue".into(), at: String::new() }],
-                            None => vec![XFrame { name: format!("jit {:#x}", pc), tier: "jit".into(), at: String::new() }],
+                            Some((name, _)) => vec![XFrame { name, tier: "glue".into(), at: String::new(), gen: 0 }],
+                            None => vec![XFrame { name: format!("jit {:#x}", pc), tier: "jit".into(), at: String::new(), gen: 0 }],
                         },
                     };
                     (pc, v)
@@ -65,8 +67,8 @@ fn expand_pcs(pcs: &[u64], partial: &mut Vec<String>) -> HashMap<u64, Vec<XFrame
     }
     for &pc in pcs {
         out.entry(pc).or_insert_with(|| match super::symbols::host_symbol(pc) {
-            Some((name, _module, _)) => vec![XFrame { name, tier: "native".into(), at: String::new() }],
-            None => vec![XFrame { name: format!("{:#x}", pc), tier: "?".into(), at: String::new() }],
+            Some((name, _module, _)) => vec![XFrame { name, tier: "native".into(), at: String::new(), gen: 0 }],
+            None => vec![XFrame { name: format!("{:#x}", pc), tier: "?".into(), at: String::new(), gen: 0 }],
         });
     }
     out

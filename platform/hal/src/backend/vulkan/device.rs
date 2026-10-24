@@ -15,6 +15,12 @@ pub(super) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 pub(super) fn error(e: vk::Result) -> String { format!("Vulkan: {e:?}") }
 
+pub struct VideoQueue {
+    pub family: u32,
+    pub queue: vk::Queue,
+    pub lock: Mutex<()>,
+}
+
 pub struct Device {
     pub instance: makepad_vulkan::Instance,
     pub raw: makepad_vulkan::Device,
@@ -31,6 +37,10 @@ pub struct Device {
     pub timestamp_bits: u32,
     pub extensions: HashSet<String>,
     pub present_wait: bool,
+    /// The queue of the GPU's hardware video encoder (VK_KHR_video_encode_queue + H.264), when
+    /// it has one: `video_encode::Stream` submits there. Its own lock: video submits never wait
+    /// for the graphics queue's.
+    pub video_encode: Option<VideoQueue>,
     /// The instance, destroyed after the last device made on it (display peers and a device
     /// that replaced a lost one share it).
     life: Arc<InstanceLife>,
@@ -222,6 +232,14 @@ impl Device {
         if pacing { wanted.extend([vk::KHR_PRESENT_ID_NAME, vk::KHR_PRESENT_WAIT_NAME]); }
         // the device's real budget (other processes included), for the UI's memory reserve
         if supported(vk::EXT_MEMORY_BUDGET_NAME) { wanted.push(vk::EXT_MEMORY_BUDGET_NAME); }
+        // The hardware video encoder: its queue family and the four extensions it takes, when the
+        // GPU has all of them (nothing else changes on a GPU without them).
+        let video_names = [vk::KHR_SYNCHRONIZATION_2_NAME, vk::KHR_VIDEO_QUEUE_NAME, vk::KHR_VIDEO_ENCODE_QUEUE_NAME, vk::KHR_VIDEO_ENCODE_H264_NAME];
+        let video_family = if video_names.iter().all(|n| supported(n)) {
+            queues.iter().position(|q| q.queue_count > 0 && q.queue_flags.contains(vk::QueueFlags::VIDEO_ENCODE_KHR))
+                .filter(|f| *f != family)
+        } else { None };
+        if video_family.is_some() { wanted.extend(video_names); }
         wanted.sort_by(|a, b| a.to_bytes().cmp(b.to_bytes()));
         wanted.dedup();
         if log_enabled() { eprintln!("[hal-vulkan] vkCreateDevice device={name:?} queue_family={family} extensions={wanted:?}"); }
@@ -235,7 +253,9 @@ impl Device {
             // line fill: frame capture's wireframe view (`Draw::WIREFRAME`)
             .fill_mode_non_solid(supported_features.fill_mode_non_solid == vk::TRUE);
         let priorities = [1.0];
-        let queues = [vk::DeviceQueueCreateInfo::default().queue_family_index(family as u32).queue_priorities(&priorities)];
+        let mut queue_infos = vec![vk::DeviceQueueCreateInfo::default().queue_family_index(family as u32).queue_priorities(&priorities)];
+        if let Some(video) = video_family { queue_infos.push(vk::DeviceQueueCreateInfo::default().queue_family_index(video as u32).queue_priorities(&priorities)); }
+        let queues = queue_infos;
         let mut create = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queues).enabled_extension_names(&wanted).enabled_features(&features);
         #[cfg(target_os = "linux")]
@@ -272,10 +292,13 @@ impl Device {
         let formats = std::array::from_fn(|f| unsafe {
             instance.get_physical_device_format_properties(physical, super::resources::vk_format(f as u32).unwrap())
         });
+        let video_encode = video_family.map(|f| VideoQueue { family: f as u32, queue: unsafe { raw.get_device_queue(f as u32, 0) }, lock: Mutex::new(()) });
+        if let Some(v) = &video_encode { if log_enabled() { eprintln!("[hal-vulkan] hardware video encode queue family={}", v.family); } }
         Ok(Some(Arc::new(Self {
             queue: unsafe { raw.get_device_queue(family as u32, 0) }, queue_lock: Mutex::new(()), raw, instance: instance.clone(),
             physical, family: family as u32, properties, memory, features, formats,
             timestamp_bits: queue.timestamp_valid_bits, extensions, present_wait: pacing, life: life.clone(),
+            video_encode,
             allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), budget: Mutex::new(None),
         })))
     }
@@ -379,7 +402,7 @@ impl Device {
         let formats = std::array::from_fn(|f| unsafe { instance.get_physical_device_format_properties(physical, super::resources::vk_format(f as u32).unwrap()) });
         Ok(Arc::new(Self { instance: instance.clone(), queue: unsafe { raw.get_device_queue(family as u32, 0) },
             raw, physical, queue_lock: Mutex::new(()), family: family as u32, properties, memory, features, formats,
-            timestamp_bits: queue.timestamp_valid_bits, extensions, present_wait: pacing, life: owner.life.clone(),
+            timestamp_bits: queue.timestamp_valid_bits, extensions, present_wait: pacing, life: owner.life.clone(), video_encode: None,
             allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), budget: Mutex::new(None) }))
     }
 }

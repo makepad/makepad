@@ -9,7 +9,10 @@ pub type PfnAllocateMemory = unsafe extern "system" fn(Device, *const MemoryAllo
 pub type PfnBeginCommandBuffer = unsafe extern "system" fn(CommandBuffer, *const CommandBufferBeginInfo) -> Result;
 pub type PfnBindBufferMemory = unsafe extern "system" fn(Device, Buffer, DeviceMemory, DeviceSize) -> Result;
 pub type PfnBindImageMemory = unsafe extern "system" fn(Device, Image, DeviceMemory, DeviceSize) -> Result;
+pub type PfnBindVideoSessionMemoryKHR = unsafe extern "system" fn(Device, VideoSessionKHR, u32, *const BindVideoSessionMemoryInfoKHR) -> Result;
+pub type PfnCmdBeginQuery = unsafe extern "system" fn(CommandBuffer, QueryPool, u32, QueryControlFlags) -> ();
 pub type PfnCmdBeginRenderPass = unsafe extern "system" fn(CommandBuffer, *const RenderPassBeginInfo, SubpassContents) -> ();
+pub type PfnCmdBeginVideoCodingKHR = unsafe extern "system" fn(CommandBuffer, *const VideoBeginCodingInfoKHR) -> ();
 pub type PfnCmdBindDescriptorSets = unsafe extern "system" fn(CommandBuffer, PipelineBindPoint, PipelineLayout, u32, u32, *const DescriptorSet, u32, *const u32) -> ();
 pub type PfnCmdBindIndexBuffer = unsafe extern "system" fn(CommandBuffer, Buffer, DeviceSize, IndexType) -> ();
 pub type PfnCmdBindPipeline = unsafe extern "system" fn(CommandBuffer, PipelineBindPoint, Pipeline) -> ();
@@ -17,6 +20,7 @@ pub type PfnCmdBindVertexBuffers = unsafe extern "system" fn(CommandBuffer, u32,
 pub type PfnCmdBlitImage = unsafe extern "system" fn(CommandBuffer, Image, ImageLayout, Image, ImageLayout, u32, *const ImageBlit, Filter) -> ();
 pub type PfnCmdClearColorImage = unsafe extern "system" fn(CommandBuffer, Image, ImageLayout, *const ClearColorValue, u32, *const ImageSubresourceRange) -> ();
 pub type PfnCmdClearDepthStencilImage = unsafe extern "system" fn(CommandBuffer, Image, ImageLayout, *const ClearDepthStencilValue, u32, *const ImageSubresourceRange) -> ();
+pub type PfnCmdControlVideoCodingKHR = unsafe extern "system" fn(CommandBuffer, *const VideoCodingControlInfoKHR) -> ();
 pub type PfnCmdCopyBuffer = unsafe extern "system" fn(CommandBuffer, Buffer, Buffer, u32, *const BufferCopy) -> ();
 pub type PfnCmdCopyBufferToImage = unsafe extern "system" fn(CommandBuffer, Buffer, Image, ImageLayout, u32, *const BufferImageCopy) -> ();
 pub type PfnCmdCopyImage = unsafe extern "system" fn(CommandBuffer, Image, ImageLayout, Image, ImageLayout, u32, *const ImageCopy) -> ();
@@ -24,7 +28,10 @@ pub type PfnCmdCopyImageToBuffer = unsafe extern "system" fn(CommandBuffer, Imag
 pub type PfnCmdDispatch = unsafe extern "system" fn(CommandBuffer, u32, u32, u32) -> ();
 pub type PfnCmdDraw = unsafe extern "system" fn(CommandBuffer, u32, u32, u32, u32) -> ();
 pub type PfnCmdDrawIndexed = unsafe extern "system" fn(CommandBuffer, u32, u32, u32, i32, u32) -> ();
+pub type PfnCmdEncodeVideoKHR = unsafe extern "system" fn(CommandBuffer, *const VideoEncodeInfoKHR) -> ();
+pub type PfnCmdEndQuery = unsafe extern "system" fn(CommandBuffer, QueryPool, u32) -> ();
 pub type PfnCmdEndRenderPass = unsafe extern "system" fn(CommandBuffer) -> ();
+pub type PfnCmdEndVideoCodingKHR = unsafe extern "system" fn(CommandBuffer, *const VideoEndCodingInfoKHR) -> ();
 pub type PfnCmdFillBuffer = unsafe extern "system" fn(CommandBuffer, Buffer, DeviceSize, DeviceSize, u32) -> ();
 pub type PfnCmdPipelineBarrier = unsafe extern "system" fn(CommandBuffer, PipelineStageFlags, PipelineStageFlags, DependencyFlags, u32, *const MemoryBarrier, u32, *const BufferMemoryBarrier, u32, *const ImageMemoryBarrier) -> ();
 pub type PfnCmdPushConstants = unsafe extern "system" fn(CommandBuffer, PipelineLayout, ShaderStageFlags, u32, u32, *const core::ffi::c_void) -> ();
@@ -56,6 +63,8 @@ pub type PfnCreateSamplerYcbcrConversion = unsafe extern "system" fn(Device, *co
 pub type PfnCreateSemaphore = unsafe extern "system" fn(Device, *const SemaphoreCreateInfo, *const AllocationCallbacks, *mut Semaphore) -> Result;
 pub type PfnCreateShaderModule = unsafe extern "system" fn(Device, *const ShaderModuleCreateInfo, *const AllocationCallbacks, *mut ShaderModule) -> Result;
 pub type PfnCreateSwapchainKHR = unsafe extern "system" fn(Device, *const SwapchainCreateInfoKHR, *const AllocationCallbacks, *mut SwapchainKHR) -> Result;
+pub type PfnCreateVideoSessionKHR = unsafe extern "system" fn(Device, *const VideoSessionCreateInfoKHR, *const AllocationCallbacks, *mut VideoSessionKHR) -> Result;
+pub type PfnCreateVideoSessionParametersKHR = unsafe extern "system" fn(Device, *const VideoSessionParametersCreateInfoKHR, *const AllocationCallbacks, *mut VideoSessionParametersKHR) -> Result;
 pub type PfnCreateWaylandSurfaceKHR = unsafe extern "system" fn(Instance, *const WaylandSurfaceCreateInfoKHR, *const AllocationCallbacks, *mut SurfaceKHR) -> Result;
 pub type PfnCreateXlibSurfaceKHR = unsafe extern "system" fn(Instance, *const XlibSurfaceCreateInfoKHR, *const AllocationCallbacks, *mut SurfaceKHR) -> Result;
 pub type PfnDestroyBuffer = unsafe extern "system" fn(Device, Buffer, *const AllocationCallbacks) -> ();
@@ -80,6 +89,8 @@ pub type PfnDestroySemaphore = unsafe extern "system" fn(Device, Semaphore, *con
 pub type PfnDestroyShaderModule = unsafe extern "system" fn(Device, ShaderModule, *const AllocationCallbacks) -> ();
 pub type PfnDestroySurfaceKHR = unsafe extern "system" fn(Instance, SurfaceKHR, *const AllocationCallbacks) -> ();
 pub type PfnDestroySwapchainKHR = unsafe extern "system" fn(Device, SwapchainKHR, *const AllocationCallbacks) -> ();
+pub type PfnDestroyVideoSessionKHR = unsafe extern "system" fn(Device, VideoSessionKHR, *const AllocationCallbacks) -> ();
+pub type PfnDestroyVideoSessionParametersKHR = unsafe extern "system" fn(Device, VideoSessionParametersKHR, *const AllocationCallbacks) -> ();
 pub type PfnDeviceWaitIdle = unsafe extern "system" fn(Device) -> Result;
 pub type PfnEndCommandBuffer = unsafe extern "system" fn(CommandBuffer) -> Result;
 pub type PfnEnumerateDeviceExtensionProperties = unsafe extern "system" fn(PhysicalDevice, *const core::ffi::c_char, *mut u32, *mut ExtensionProperties) -> Result;
@@ -98,6 +109,7 @@ pub type PfnGetDisplayModePropertiesKHR = unsafe extern "system" fn(PhysicalDevi
 pub type PfnGetDisplayPlaneCapabilitiesKHR = unsafe extern "system" fn(PhysicalDevice, DisplayModeKHR, u32, *mut DisplayPlaneCapabilitiesKHR) -> Result;
 pub type PfnGetDisplayPlaneSupportedDisplaysKHR = unsafe extern "system" fn(PhysicalDevice, u32, *mut u32, *mut DisplayKHR) -> Result;
 pub type PfnGetDrmDisplayEXT = unsafe extern "system" fn(PhysicalDevice, i32, u32, *mut DisplayKHR) -> Result;
+pub type PfnGetEncodedVideoSessionParametersKHR = unsafe extern "system" fn(Device, *const VideoEncodeSessionParametersGetInfoKHR, *mut VideoEncodeSessionParametersFeedbackInfoKHR, *mut usize, *mut core::ffi::c_void) -> Result;
 pub type PfnGetFenceStatus = unsafe extern "system" fn(Device, Fence) -> Result;
 pub type PfnGetImageDrmFormatModifierPropertiesEXT = unsafe extern "system" fn(Device, Image, *mut ImageDrmFormatModifierPropertiesEXT) -> Result;
 pub type PfnGetImageMemoryRequirements = unsafe extern "system" fn(Device, Image, *mut MemoryRequirements) -> ();
@@ -119,15 +131,20 @@ pub type PfnGetPhysicalDeviceMemoryProperties2 = unsafe extern "system" fn(Physi
 pub type PfnGetPhysicalDeviceProperties = unsafe extern "system" fn(PhysicalDevice, *mut PhysicalDeviceProperties) -> ();
 pub type PfnGetPhysicalDeviceProperties2 = unsafe extern "system" fn(PhysicalDevice, *mut PhysicalDeviceProperties2) -> ();
 pub type PfnGetPhysicalDeviceQueueFamilyProperties = unsafe extern "system" fn(PhysicalDevice, *mut u32, *mut QueueFamilyProperties) -> ();
+pub type PfnGetPhysicalDeviceQueueFamilyProperties2 = unsafe extern "system" fn(PhysicalDevice, *mut u32, *mut QueueFamilyProperties2) -> ();
 pub type PfnGetPhysicalDeviceSurfaceCapabilitiesKHR = unsafe extern "system" fn(PhysicalDevice, SurfaceKHR, *mut SurfaceCapabilitiesKHR) -> Result;
 pub type PfnGetPhysicalDeviceSurfaceFormatsKHR = unsafe extern "system" fn(PhysicalDevice, SurfaceKHR, *mut u32, *mut SurfaceFormatKHR) -> Result;
 pub type PfnGetPhysicalDeviceSurfacePresentModesKHR = unsafe extern "system" fn(PhysicalDevice, SurfaceKHR, *mut u32, *mut PresentModeKHR) -> Result;
 pub type PfnGetPhysicalDeviceSurfaceSupportKHR = unsafe extern "system" fn(PhysicalDevice, u32, SurfaceKHR, *mut Bool32) -> Result;
+pub type PfnGetPhysicalDeviceVideoCapabilitiesKHR = unsafe extern "system" fn(PhysicalDevice, *const VideoProfileInfoKHR, *mut VideoCapabilitiesKHR) -> Result;
+pub type PfnGetPhysicalDeviceVideoEncodeQualityLevelPropertiesKHR = unsafe extern "system" fn(PhysicalDevice, *const PhysicalDeviceVideoEncodeQualityLevelInfoKHR, *mut VideoEncodeQualityLevelPropertiesKHR) -> Result;
+pub type PfnGetPhysicalDeviceVideoFormatPropertiesKHR = unsafe extern "system" fn(PhysicalDevice, *const PhysicalDeviceVideoFormatInfoKHR, *mut u32, *mut VideoFormatPropertiesKHR) -> Result;
 pub type PfnGetPhysicalDeviceWaylandPresentationSupportKHR = unsafe extern "system" fn(PhysicalDevice, u32, *mut WlDisplay) -> Bool32;
 pub type PfnGetQueryPoolResults = unsafe extern "system" fn(Device, QueryPool, u32, u32, usize, *mut core::ffi::c_void, DeviceSize, QueryResultFlags) -> Result;
 pub type PfnGetSemaphoreCounterValue = unsafe extern "system" fn(Device, Semaphore, *mut u64) -> Result;
 pub type PfnGetSemaphoreFdKHR = unsafe extern "system" fn(Device, *const SemaphoreGetFdInfoKHR, *mut i32) -> Result;
 pub type PfnGetSwapchainImagesKHR = unsafe extern "system" fn(Device, SwapchainKHR, *mut u32, *mut Image) -> Result;
+pub type PfnGetVideoSessionMemoryRequirementsKHR = unsafe extern "system" fn(Device, VideoSessionKHR, *mut u32, *mut VideoSessionMemoryRequirementsKHR) -> Result;
 pub type PfnImportSemaphoreFdKHR = unsafe extern "system" fn(Device, *const ImportSemaphoreFdInfoKHR) -> Result;
 pub type PfnInvalidateMappedMemoryRanges = unsafe extern "system" fn(Device, u32, *const MappedMemoryRange) -> Result;
 pub type PfnMapMemory = unsafe extern "system" fn(Device, DeviceMemory, DeviceSize, DeviceSize, MemoryMapFlags, *mut *mut core::ffi::c_void) -> Result;
@@ -193,10 +210,14 @@ pub struct InstanceTable {
     pub get_physical_device_properties: Option<PfnGetPhysicalDeviceProperties>,
     pub get_physical_device_properties2: Option<PfnGetPhysicalDeviceProperties2>,
     pub get_physical_device_queue_family_properties: Option<PfnGetPhysicalDeviceQueueFamilyProperties>,
+    pub get_physical_device_queue_family_properties2: Option<PfnGetPhysicalDeviceQueueFamilyProperties2>,
     pub get_physical_device_surface_capabilities_khr: Option<PfnGetPhysicalDeviceSurfaceCapabilitiesKHR>,
     pub get_physical_device_surface_formats_khr: Option<PfnGetPhysicalDeviceSurfaceFormatsKHR>,
     pub get_physical_device_surface_present_modes_khr: Option<PfnGetPhysicalDeviceSurfacePresentModesKHR>,
     pub get_physical_device_surface_support_khr: Option<PfnGetPhysicalDeviceSurfaceSupportKHR>,
+    pub get_physical_device_video_capabilities_khr: Option<PfnGetPhysicalDeviceVideoCapabilitiesKHR>,
+    pub get_physical_device_video_encode_quality_level_properties_khr: Option<PfnGetPhysicalDeviceVideoEncodeQualityLevelPropertiesKHR>,
+    pub get_physical_device_video_format_properties_khr: Option<PfnGetPhysicalDeviceVideoFormatPropertiesKHR>,
     pub get_physical_device_wayland_presentation_support_khr: Option<PfnGetPhysicalDeviceWaylandPresentationSupportKHR>,
     pub release_display_ext: Option<PfnReleaseDisplayEXT>,
 }
@@ -234,10 +255,14 @@ impl InstanceTable { pub unsafe fn load(handle: Instance, get: PfnGetInstancePro
         get_physical_device_properties: core::mem::transmute::<PfnVoidFunction, Option<PfnGetPhysicalDeviceProperties>>(lookup(c"vkGetPhysicalDeviceProperties")),
         get_physical_device_properties2: core::mem::transmute::<PfnVoidFunction, Option<PfnGetPhysicalDeviceProperties2>>(lookup(c"vkGetPhysicalDeviceProperties2").or_else(|| lookup(c"vkGetPhysicalDeviceProperties2KHR"))),
         get_physical_device_queue_family_properties: core::mem::transmute::<PfnVoidFunction, Option<PfnGetPhysicalDeviceQueueFamilyProperties>>(lookup(c"vkGetPhysicalDeviceQueueFamilyProperties")),
+        get_physical_device_queue_family_properties2: core::mem::transmute::<PfnVoidFunction, Option<PfnGetPhysicalDeviceQueueFamilyProperties2>>(lookup(c"vkGetPhysicalDeviceQueueFamilyProperties2").or_else(|| lookup(c"vkGetPhysicalDeviceQueueFamilyProperties2KHR"))),
         get_physical_device_surface_capabilities_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnGetPhysicalDeviceSurfaceCapabilitiesKHR>>(lookup(c"vkGetPhysicalDeviceSurfaceCapabilitiesKHR")),
         get_physical_device_surface_formats_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnGetPhysicalDeviceSurfaceFormatsKHR>>(lookup(c"vkGetPhysicalDeviceSurfaceFormatsKHR")),
         get_physical_device_surface_present_modes_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnGetPhysicalDeviceSurfacePresentModesKHR>>(lookup(c"vkGetPhysicalDeviceSurfacePresentModesKHR")),
         get_physical_device_surface_support_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnGetPhysicalDeviceSurfaceSupportKHR>>(lookup(c"vkGetPhysicalDeviceSurfaceSupportKHR")),
+        get_physical_device_video_capabilities_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnGetPhysicalDeviceVideoCapabilitiesKHR>>(lookup(c"vkGetPhysicalDeviceVideoCapabilitiesKHR")),
+        get_physical_device_video_encode_quality_level_properties_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnGetPhysicalDeviceVideoEncodeQualityLevelPropertiesKHR>>(lookup(c"vkGetPhysicalDeviceVideoEncodeQualityLevelPropertiesKHR")),
+        get_physical_device_video_format_properties_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnGetPhysicalDeviceVideoFormatPropertiesKHR>>(lookup(c"vkGetPhysicalDeviceVideoFormatPropertiesKHR")),
         get_physical_device_wayland_presentation_support_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnGetPhysicalDeviceWaylandPresentationSupportKHR>>(lookup(c"vkGetPhysicalDeviceWaylandPresentationSupportKHR")),
         release_display_ext: core::mem::transmute::<PfnVoidFunction, Option<PfnReleaseDisplayEXT>>(lookup(c"vkReleaseDisplayEXT")),
     }
@@ -251,7 +276,10 @@ pub struct DeviceTable {
     pub begin_command_buffer: Option<PfnBeginCommandBuffer>,
     pub bind_buffer_memory: Option<PfnBindBufferMemory>,
     pub bind_image_memory: Option<PfnBindImageMemory>,
+    pub bind_video_session_memory_khr: Option<PfnBindVideoSessionMemoryKHR>,
+    pub cmd_begin_query: Option<PfnCmdBeginQuery>,
     pub cmd_begin_render_pass: Option<PfnCmdBeginRenderPass>,
+    pub cmd_begin_video_coding_khr: Option<PfnCmdBeginVideoCodingKHR>,
     pub cmd_bind_descriptor_sets: Option<PfnCmdBindDescriptorSets>,
     pub cmd_bind_index_buffer: Option<PfnCmdBindIndexBuffer>,
     pub cmd_bind_pipeline: Option<PfnCmdBindPipeline>,
@@ -259,6 +287,7 @@ pub struct DeviceTable {
     pub cmd_blit_image: Option<PfnCmdBlitImage>,
     pub cmd_clear_color_image: Option<PfnCmdClearColorImage>,
     pub cmd_clear_depth_stencil_image: Option<PfnCmdClearDepthStencilImage>,
+    pub cmd_control_video_coding_khr: Option<PfnCmdControlVideoCodingKHR>,
     pub cmd_copy_buffer: Option<PfnCmdCopyBuffer>,
     pub cmd_copy_buffer_to_image: Option<PfnCmdCopyBufferToImage>,
     pub cmd_copy_image: Option<PfnCmdCopyImage>,
@@ -266,7 +295,10 @@ pub struct DeviceTable {
     pub cmd_dispatch: Option<PfnCmdDispatch>,
     pub cmd_draw: Option<PfnCmdDraw>,
     pub cmd_draw_indexed: Option<PfnCmdDrawIndexed>,
+    pub cmd_encode_video_khr: Option<PfnCmdEncodeVideoKHR>,
+    pub cmd_end_query: Option<PfnCmdEndQuery>,
     pub cmd_end_render_pass: Option<PfnCmdEndRenderPass>,
+    pub cmd_end_video_coding_khr: Option<PfnCmdEndVideoCodingKHR>,
     pub cmd_fill_buffer: Option<PfnCmdFillBuffer>,
     pub cmd_pipeline_barrier: Option<PfnCmdPipelineBarrier>,
     pub cmd_push_constants: Option<PfnCmdPushConstants>,
@@ -293,6 +325,8 @@ pub struct DeviceTable {
     pub create_semaphore: Option<PfnCreateSemaphore>,
     pub create_shader_module: Option<PfnCreateShaderModule>,
     pub create_swapchain_khr: Option<PfnCreateSwapchainKHR>,
+    pub create_video_session_khr: Option<PfnCreateVideoSessionKHR>,
+    pub create_video_session_parameters_khr: Option<PfnCreateVideoSessionParametersKHR>,
     pub destroy_buffer: Option<PfnDestroyBuffer>,
     pub destroy_command_pool: Option<PfnDestroyCommandPool>,
     pub destroy_descriptor_pool: Option<PfnDestroyDescriptorPool>,
@@ -312,6 +346,8 @@ pub struct DeviceTable {
     pub destroy_semaphore: Option<PfnDestroySemaphore>,
     pub destroy_shader_module: Option<PfnDestroyShaderModule>,
     pub destroy_swapchain_khr: Option<PfnDestroySwapchainKHR>,
+    pub destroy_video_session_khr: Option<PfnDestroyVideoSessionKHR>,
+    pub destroy_video_session_parameters_khr: Option<PfnDestroyVideoSessionParametersKHR>,
     pub device_wait_idle: Option<PfnDeviceWaitIdle>,
     pub end_command_buffer: Option<PfnEndCommandBuffer>,
     pub flush_mapped_memory_ranges: Option<PfnFlushMappedMemoryRanges>,
@@ -321,6 +357,7 @@ pub struct DeviceTable {
     pub get_buffer_device_address: Option<PfnGetBufferDeviceAddress>,
     pub get_buffer_memory_requirements: Option<PfnGetBufferMemoryRequirements>,
     pub get_device_queue: Option<PfnGetDeviceQueue>,
+    pub get_encoded_video_session_parameters_khr: Option<PfnGetEncodedVideoSessionParametersKHR>,
     pub get_fence_status: Option<PfnGetFenceStatus>,
     pub get_image_drm_format_modifier_properties_ext: Option<PfnGetImageDrmFormatModifierPropertiesEXT>,
     pub get_image_memory_requirements: Option<PfnGetImageMemoryRequirements>,
@@ -331,6 +368,7 @@ pub struct DeviceTable {
     pub get_semaphore_counter_value: Option<PfnGetSemaphoreCounterValue>,
     pub get_semaphore_fd_khr: Option<PfnGetSemaphoreFdKHR>,
     pub get_swapchain_images_khr: Option<PfnGetSwapchainImagesKHR>,
+    pub get_video_session_memory_requirements_khr: Option<PfnGetVideoSessionMemoryRequirementsKHR>,
     pub import_semaphore_fd_khr: Option<PfnImportSemaphoreFdKHR>,
     pub invalidate_mapped_memory_ranges: Option<PfnInvalidateMappedMemoryRanges>,
     pub map_memory: Option<PfnMapMemory>,
@@ -357,7 +395,10 @@ impl DeviceTable { pub unsafe fn load(handle: Device, get: PfnGetDeviceProcAddr)
         begin_command_buffer: core::mem::transmute::<PfnVoidFunction, Option<PfnBeginCommandBuffer>>(lookup(c"vkBeginCommandBuffer")),
         bind_buffer_memory: core::mem::transmute::<PfnVoidFunction, Option<PfnBindBufferMemory>>(lookup(c"vkBindBufferMemory")),
         bind_image_memory: core::mem::transmute::<PfnVoidFunction, Option<PfnBindImageMemory>>(lookup(c"vkBindImageMemory")),
+        bind_video_session_memory_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnBindVideoSessionMemoryKHR>>(lookup(c"vkBindVideoSessionMemoryKHR")),
+        cmd_begin_query: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdBeginQuery>>(lookup(c"vkCmdBeginQuery")),
         cmd_begin_render_pass: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdBeginRenderPass>>(lookup(c"vkCmdBeginRenderPass")),
+        cmd_begin_video_coding_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdBeginVideoCodingKHR>>(lookup(c"vkCmdBeginVideoCodingKHR")),
         cmd_bind_descriptor_sets: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdBindDescriptorSets>>(lookup(c"vkCmdBindDescriptorSets")),
         cmd_bind_index_buffer: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdBindIndexBuffer>>(lookup(c"vkCmdBindIndexBuffer")),
         cmd_bind_pipeline: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdBindPipeline>>(lookup(c"vkCmdBindPipeline")),
@@ -365,6 +406,7 @@ impl DeviceTable { pub unsafe fn load(handle: Device, get: PfnGetDeviceProcAddr)
         cmd_blit_image: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdBlitImage>>(lookup(c"vkCmdBlitImage")),
         cmd_clear_color_image: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdClearColorImage>>(lookup(c"vkCmdClearColorImage")),
         cmd_clear_depth_stencil_image: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdClearDepthStencilImage>>(lookup(c"vkCmdClearDepthStencilImage")),
+        cmd_control_video_coding_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdControlVideoCodingKHR>>(lookup(c"vkCmdControlVideoCodingKHR")),
         cmd_copy_buffer: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdCopyBuffer>>(lookup(c"vkCmdCopyBuffer")),
         cmd_copy_buffer_to_image: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdCopyBufferToImage>>(lookup(c"vkCmdCopyBufferToImage")),
         cmd_copy_image: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdCopyImage>>(lookup(c"vkCmdCopyImage")),
@@ -372,7 +414,10 @@ impl DeviceTable { pub unsafe fn load(handle: Device, get: PfnGetDeviceProcAddr)
         cmd_dispatch: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdDispatch>>(lookup(c"vkCmdDispatch")),
         cmd_draw: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdDraw>>(lookup(c"vkCmdDraw")),
         cmd_draw_indexed: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdDrawIndexed>>(lookup(c"vkCmdDrawIndexed")),
+        cmd_encode_video_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdEncodeVideoKHR>>(lookup(c"vkCmdEncodeVideoKHR")),
+        cmd_end_query: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdEndQuery>>(lookup(c"vkCmdEndQuery")),
         cmd_end_render_pass: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdEndRenderPass>>(lookup(c"vkCmdEndRenderPass")),
+        cmd_end_video_coding_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdEndVideoCodingKHR>>(lookup(c"vkCmdEndVideoCodingKHR")),
         cmd_fill_buffer: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdFillBuffer>>(lookup(c"vkCmdFillBuffer")),
         cmd_pipeline_barrier: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdPipelineBarrier>>(lookup(c"vkCmdPipelineBarrier")),
         cmd_push_constants: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdPushConstants>>(lookup(c"vkCmdPushConstants")),
@@ -399,6 +444,8 @@ impl DeviceTable { pub unsafe fn load(handle: Device, get: PfnGetDeviceProcAddr)
         create_semaphore: core::mem::transmute::<PfnVoidFunction, Option<PfnCreateSemaphore>>(lookup(c"vkCreateSemaphore")),
         create_shader_module: core::mem::transmute::<PfnVoidFunction, Option<PfnCreateShaderModule>>(lookup(c"vkCreateShaderModule")),
         create_swapchain_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnCreateSwapchainKHR>>(lookup(c"vkCreateSwapchainKHR")),
+        create_video_session_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnCreateVideoSessionKHR>>(lookup(c"vkCreateVideoSessionKHR")),
+        create_video_session_parameters_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnCreateVideoSessionParametersKHR>>(lookup(c"vkCreateVideoSessionParametersKHR")),
         destroy_buffer: core::mem::transmute::<PfnVoidFunction, Option<PfnDestroyBuffer>>(lookup(c"vkDestroyBuffer")),
         destroy_command_pool: core::mem::transmute::<PfnVoidFunction, Option<PfnDestroyCommandPool>>(lookup(c"vkDestroyCommandPool")),
         destroy_descriptor_pool: core::mem::transmute::<PfnVoidFunction, Option<PfnDestroyDescriptorPool>>(lookup(c"vkDestroyDescriptorPool")),
@@ -418,6 +465,8 @@ impl DeviceTable { pub unsafe fn load(handle: Device, get: PfnGetDeviceProcAddr)
         destroy_semaphore: core::mem::transmute::<PfnVoidFunction, Option<PfnDestroySemaphore>>(lookup(c"vkDestroySemaphore")),
         destroy_shader_module: core::mem::transmute::<PfnVoidFunction, Option<PfnDestroyShaderModule>>(lookup(c"vkDestroyShaderModule")),
         destroy_swapchain_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnDestroySwapchainKHR>>(lookup(c"vkDestroySwapchainKHR")),
+        destroy_video_session_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnDestroyVideoSessionKHR>>(lookup(c"vkDestroyVideoSessionKHR")),
+        destroy_video_session_parameters_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnDestroyVideoSessionParametersKHR>>(lookup(c"vkDestroyVideoSessionParametersKHR")),
         device_wait_idle: core::mem::transmute::<PfnVoidFunction, Option<PfnDeviceWaitIdle>>(lookup(c"vkDeviceWaitIdle")),
         end_command_buffer: core::mem::transmute::<PfnVoidFunction, Option<PfnEndCommandBuffer>>(lookup(c"vkEndCommandBuffer")),
         flush_mapped_memory_ranges: core::mem::transmute::<PfnVoidFunction, Option<PfnFlushMappedMemoryRanges>>(lookup(c"vkFlushMappedMemoryRanges")),
@@ -427,6 +476,7 @@ impl DeviceTable { pub unsafe fn load(handle: Device, get: PfnGetDeviceProcAddr)
         get_buffer_device_address: core::mem::transmute::<PfnVoidFunction, Option<PfnGetBufferDeviceAddress>>(lookup(c"vkGetBufferDeviceAddress").or_else(|| lookup(c"vkGetBufferDeviceAddressEXT")).or_else(|| lookup(c"vkGetBufferDeviceAddressKHR"))),
         get_buffer_memory_requirements: core::mem::transmute::<PfnVoidFunction, Option<PfnGetBufferMemoryRequirements>>(lookup(c"vkGetBufferMemoryRequirements")),
         get_device_queue: core::mem::transmute::<PfnVoidFunction, Option<PfnGetDeviceQueue>>(lookup(c"vkGetDeviceQueue")),
+        get_encoded_video_session_parameters_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnGetEncodedVideoSessionParametersKHR>>(lookup(c"vkGetEncodedVideoSessionParametersKHR")),
         get_fence_status: core::mem::transmute::<PfnVoidFunction, Option<PfnGetFenceStatus>>(lookup(c"vkGetFenceStatus")),
         get_image_drm_format_modifier_properties_ext: core::mem::transmute::<PfnVoidFunction, Option<PfnGetImageDrmFormatModifierPropertiesEXT>>(lookup(c"vkGetImageDrmFormatModifierPropertiesEXT")),
         get_image_memory_requirements: core::mem::transmute::<PfnVoidFunction, Option<PfnGetImageMemoryRequirements>>(lookup(c"vkGetImageMemoryRequirements")),
@@ -437,6 +487,7 @@ impl DeviceTable { pub unsafe fn load(handle: Device, get: PfnGetDeviceProcAddr)
         get_semaphore_counter_value: core::mem::transmute::<PfnVoidFunction, Option<PfnGetSemaphoreCounterValue>>(lookup(c"vkGetSemaphoreCounterValue").or_else(|| lookup(c"vkGetSemaphoreCounterValueKHR"))),
         get_semaphore_fd_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnGetSemaphoreFdKHR>>(lookup(c"vkGetSemaphoreFdKHR")),
         get_swapchain_images_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnGetSwapchainImagesKHR>>(lookup(c"vkGetSwapchainImagesKHR")),
+        get_video_session_memory_requirements_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnGetVideoSessionMemoryRequirementsKHR>>(lookup(c"vkGetVideoSessionMemoryRequirementsKHR")),
         import_semaphore_fd_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnImportSemaphoreFdKHR>>(lookup(c"vkImportSemaphoreFdKHR")),
         invalidate_mapped_memory_ranges: core::mem::transmute::<PfnVoidFunction, Option<PfnInvalidateMappedMemoryRanges>>(lookup(c"vkInvalidateMappedMemoryRanges")),
         map_memory: core::mem::transmute::<PfnVoidFunction, Option<PfnMapMemory>>(lookup(c"vkMapMemory")),
@@ -525,9 +576,33 @@ impl crate::Device {
 }
 impl crate::Device {
     #[inline]
+    pub unsafe fn bind_video_session_memory(&self, video_session: VideoSessionKHR, bind_session_memory_infos: &[BindVideoSessionMemoryInfoKHR]) -> std::result::Result<(), Result> {
+        let call = self.table.bind_video_session_memory_khr.expect("vkBindVideoSessionMemoryKHR is unavailable");
+        call(self.handle, video_session, bind_session_memory_infos.len() as _, bind_session_memory_infos.as_ptr()).result()?;
+        Ok(())
+    }
+}
+impl crate::Device {
+    #[inline]
+    pub unsafe fn cmd_begin_query(&self, command_buffer: CommandBuffer, query_pool: QueryPool, query: u32, flags: QueryControlFlags) -> () {
+        let call = self.table.cmd_begin_query.expect("vkCmdBeginQuery is unavailable");
+        call(command_buffer, query_pool, query, flags);
+        ()
+    }
+}
+impl crate::Device {
+    #[inline]
     pub unsafe fn cmd_begin_render_pass(&self, command_buffer: CommandBuffer, render_pass_begin: &RenderPassBeginInfo, contents: SubpassContents) -> () {
         let call = self.table.cmd_begin_render_pass.expect("vkCmdBeginRenderPass is unavailable");
         call(command_buffer, render_pass_begin, contents);
+        ()
+    }
+}
+impl crate::Device {
+    #[inline]
+    pub unsafe fn cmd_begin_video_coding(&self, command_buffer: CommandBuffer, begin_info: &VideoBeginCodingInfoKHR) -> () {
+        let call = self.table.cmd_begin_video_coding_khr.expect("vkCmdBeginVideoCodingKHR is unavailable");
+        call(command_buffer, begin_info);
         ()
     }
 }
@@ -589,6 +664,14 @@ impl crate::Device {
 }
 impl crate::Device {
     #[inline]
+    pub unsafe fn cmd_control_video_coding(&self, command_buffer: CommandBuffer, coding_control_info: &VideoCodingControlInfoKHR) -> () {
+        let call = self.table.cmd_control_video_coding_khr.expect("vkCmdControlVideoCodingKHR is unavailable");
+        call(command_buffer, coding_control_info);
+        ()
+    }
+}
+impl crate::Device {
+    #[inline]
     pub unsafe fn cmd_copy_buffer(&self, command_buffer: CommandBuffer, src_buffer: Buffer, dst_buffer: Buffer, regions: &[BufferCopy]) -> () {
         let call = self.table.cmd_copy_buffer.expect("vkCmdCopyBuffer is unavailable");
         call(command_buffer, src_buffer, dst_buffer, regions.len() as _, regions.as_ptr());
@@ -645,9 +728,33 @@ impl crate::Device {
 }
 impl crate::Device {
     #[inline]
+    pub unsafe fn cmd_encode_video(&self, command_buffer: CommandBuffer, encode_info: &VideoEncodeInfoKHR) -> () {
+        let call = self.table.cmd_encode_video_khr.expect("vkCmdEncodeVideoKHR is unavailable");
+        call(command_buffer, encode_info);
+        ()
+    }
+}
+impl crate::Device {
+    #[inline]
+    pub unsafe fn cmd_end_query(&self, command_buffer: CommandBuffer, query_pool: QueryPool, query: u32) -> () {
+        let call = self.table.cmd_end_query.expect("vkCmdEndQuery is unavailable");
+        call(command_buffer, query_pool, query);
+        ()
+    }
+}
+impl crate::Device {
+    #[inline]
     pub unsafe fn cmd_end_render_pass(&self, command_buffer: CommandBuffer) -> () {
         let call = self.table.cmd_end_render_pass.expect("vkCmdEndRenderPass is unavailable");
         call(command_buffer);
+        ()
+    }
+}
+impl crate::Device {
+    #[inline]
+    pub unsafe fn cmd_end_video_coding(&self, command_buffer: CommandBuffer, end_coding_info: &VideoEndCodingInfoKHR) -> () {
+        let call = self.table.cmd_end_video_coding_khr.expect("vkCmdEndVideoCodingKHR is unavailable");
+        call(command_buffer, end_coding_info);
         ()
     }
 }
@@ -924,6 +1031,24 @@ impl crate::Device {
         Ok(value)
     }
 }
+impl crate::Device {
+    #[inline]
+    pub unsafe fn create_video_session(&self, create_info: &VideoSessionCreateInfoKHR, allocator: Option<&AllocationCallbacks>) -> std::result::Result<VideoSessionKHR, Result> {
+        let call = self.table.create_video_session_khr.expect("vkCreateVideoSessionKHR is unavailable");
+        let mut value: VideoSessionKHR = VideoSessionKHR::default();
+        call(self.handle, create_info, allocator.map_or(core::ptr::null(), |v| v as *const AllocationCallbacks), &mut value).result()?;
+        Ok(value)
+    }
+}
+impl crate::Device {
+    #[inline]
+    pub unsafe fn create_video_session_parameters(&self, create_info: &VideoSessionParametersCreateInfoKHR, allocator: Option<&AllocationCallbacks>) -> std::result::Result<VideoSessionParametersKHR, Result> {
+        let call = self.table.create_video_session_parameters_khr.expect("vkCreateVideoSessionParametersKHR is unavailable");
+        let mut value: VideoSessionParametersKHR = VideoSessionParametersKHR::default();
+        call(self.handle, create_info, allocator.map_or(core::ptr::null(), |v| v as *const AllocationCallbacks), &mut value).result()?;
+        Ok(value)
+    }
+}
 impl crate::Instance {
     #[inline]
     pub unsafe fn create_wayland_surface(&self, create_info: &WaylandSurfaceCreateInfoKHR, allocator: Option<&AllocationCallbacks>) -> std::result::Result<SurfaceKHR, Result> {
@@ -1120,6 +1245,22 @@ impl crate::Device {
 }
 impl crate::Device {
     #[inline]
+    pub unsafe fn destroy_video_session(&self, video_session: VideoSessionKHR, allocator: Option<&AllocationCallbacks>) -> () {
+        let call = self.table.destroy_video_session_khr.expect("vkDestroyVideoSessionKHR is unavailable");
+        call(self.handle, video_session, allocator.map_or(core::ptr::null(), |v| v as *const AllocationCallbacks));
+        ()
+    }
+}
+impl crate::Device {
+    #[inline]
+    pub unsafe fn destroy_video_session_parameters(&self, video_session_parameters: VideoSessionParametersKHR, allocator: Option<&AllocationCallbacks>) -> () {
+        let call = self.table.destroy_video_session_parameters_khr.expect("vkDestroyVideoSessionParametersKHR is unavailable");
+        call(self.handle, video_session_parameters, allocator.map_or(core::ptr::null(), |v| v as *const AllocationCallbacks));
+        ()
+    }
+}
+impl crate::Device {
+    #[inline]
     pub unsafe fn device_wait_idle(&self) -> std::result::Result<(), Result> {
         let call = self.table.device_wait_idle.expect("vkDeviceWaitIdle is unavailable");
         call(self.handle).result()?;
@@ -1139,7 +1280,7 @@ impl crate::Instance {
     pub unsafe fn enumerate_device_extension_properties(&self, physical_device: PhysicalDevice) -> std::result::Result<Vec<ExtensionProperties>, Result> {
         let call = self.table.enumerate_device_extension_properties.expect("vkEnumerateDeviceExtensionProperties is unavailable");
         loop {
-            let mut count = 0u32;
+            let mut count: u32 = 0;
             call(physical_device, core::ptr::null(), &mut count, core::ptr::null_mut()).result()?;
             let mut values: Vec<ExtensionProperties> = Vec::with_capacity(count as usize);
             values.resize(count as usize, ExtensionProperties::default());
@@ -1156,7 +1297,7 @@ impl crate::Entry {
     pub unsafe fn enumerate_instance_extension_properties(&self, layer_name: Option<&CStr>) -> std::result::Result<Vec<ExtensionProperties>, Result> {
         let call = self.table.enumerate_instance_extension_properties.expect("vkEnumerateInstanceExtensionProperties is unavailable");
         loop {
-            let mut count = 0u32;
+            let mut count: u32 = 0;
             call(layer_name.map_or(core::ptr::null(), CStr::as_ptr), &mut count, core::ptr::null_mut()).result()?;
             let mut values: Vec<ExtensionProperties> = Vec::with_capacity(count as usize);
             values.resize(count as usize, ExtensionProperties::default());
@@ -1173,7 +1314,7 @@ impl crate::Entry {
     pub unsafe fn enumerate_instance_layer_properties(&self) -> std::result::Result<Vec<LayerProperties>, Result> {
         let call = self.table.enumerate_instance_layer_properties.expect("vkEnumerateInstanceLayerProperties is unavailable");
         loop {
-            let mut count = 0u32;
+            let mut count: u32 = 0;
             call(&mut count, core::ptr::null_mut()).result()?;
             let mut values: Vec<LayerProperties> = Vec::with_capacity(count as usize);
             values.resize(count as usize, LayerProperties::default());
@@ -1190,7 +1331,7 @@ impl crate::Instance {
     pub unsafe fn enumerate_physical_devices(&self) -> std::result::Result<Vec<PhysicalDevice>, Result> {
         let call = self.table.enumerate_physical_devices.expect("vkEnumeratePhysicalDevices is unavailable");
         loop {
-            let mut count = 0u32;
+            let mut count: u32 = 0;
             call(self.handle, &mut count, core::ptr::null_mut()).result()?;
             let mut values: Vec<PhysicalDevice> = Vec::with_capacity(count as usize);
             values.resize(count as usize, PhysicalDevice::default());
@@ -1264,7 +1405,7 @@ impl crate::Instance {
     pub unsafe fn get_display_mode_properties(&self, physical_device: PhysicalDevice, display: DisplayKHR) -> std::result::Result<Vec<DisplayModePropertiesKHR>, Result> {
         let call = self.table.get_display_mode_properties_khr.expect("vkGetDisplayModePropertiesKHR is unavailable");
         loop {
-            let mut count = 0u32;
+            let mut count: u32 = 0;
             call(physical_device, display, &mut count, core::ptr::null_mut()).result()?;
             let mut values: Vec<DisplayModePropertiesKHR> = Vec::with_capacity(count as usize);
             values.resize(count as usize, DisplayModePropertiesKHR::default());
@@ -1290,7 +1431,7 @@ impl crate::Instance {
     pub unsafe fn get_display_plane_supported_displays(&self, physical_device: PhysicalDevice, plane_index: u32) -> std::result::Result<Vec<DisplayKHR>, Result> {
         let call = self.table.get_display_plane_supported_displays_khr.expect("vkGetDisplayPlaneSupportedDisplaysKHR is unavailable");
         loop {
-            let mut count = 0u32;
+            let mut count: u32 = 0;
             call(physical_device, plane_index, &mut count, core::ptr::null_mut()).result()?;
             let mut values: Vec<DisplayKHR> = Vec::with_capacity(count as usize);
             values.resize(count as usize, DisplayKHR::default());
@@ -1309,6 +1450,23 @@ impl crate::Instance {
         let mut value: DisplayKHR = DisplayKHR::default();
         call(physical_device, drm_fd, connector_id, &mut value).result()?;
         Ok(value)
+    }
+}
+impl crate::Device {
+    #[inline]
+    pub unsafe fn get_encoded_video_session_parameters(&self, video_session_parameters_info: &VideoEncodeSessionParametersGetInfoKHR, feedback_info: &mut VideoEncodeSessionParametersFeedbackInfoKHR) -> std::result::Result<Vec<u8>, Result> {
+        let call = self.table.get_encoded_video_session_parameters_khr.expect("vkGetEncodedVideoSessionParametersKHR is unavailable");
+        loop {
+            let mut count: usize = 0;
+            call(self.handle, video_session_parameters_info, feedback_info, &mut count, core::ptr::null_mut()).result()?;
+            let mut values: Vec<u8> = Vec::with_capacity(count as usize);
+            values.resize(count as usize, u8::default());
+            let code = call(self.handle, video_session_parameters_info, feedback_info, &mut count, values.as_mut_ptr().cast());
+            if code == Result::INCOMPLETE { continue; }
+            code.result()?;
+            values.truncate(count as usize);
+            return Ok(values);
+        }
     }
 }
 impl crate::Device {
@@ -1366,7 +1524,7 @@ impl crate::Instance {
     pub unsafe fn get_physical_device_cooperative_matrix_properties(&self, physical_device: PhysicalDevice) -> std::result::Result<Vec<CooperativeMatrixPropertiesKHR>, Result> {
         let call = self.table.get_physical_device_cooperative_matrix_properties_khr.expect("vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR is unavailable");
         loop {
-            let mut count = 0u32;
+            let mut count: u32 = 0;
             call(physical_device, &mut count, core::ptr::null_mut()).result()?;
             let mut values: Vec<CooperativeMatrixPropertiesKHR> = Vec::with_capacity(count as usize);
             values.resize(count as usize, CooperativeMatrixPropertiesKHR::default());
@@ -1383,7 +1541,7 @@ impl crate::Instance {
     pub unsafe fn get_physical_device_display_plane_properties(&self, physical_device: PhysicalDevice) -> std::result::Result<Vec<DisplayPlanePropertiesKHR>, Result> {
         let call = self.table.get_physical_device_display_plane_properties_khr.expect("vkGetPhysicalDeviceDisplayPlanePropertiesKHR is unavailable");
         loop {
-            let mut count = 0u32;
+            let mut count: u32 = 0;
             call(physical_device, &mut count, core::ptr::null_mut()).result()?;
             let mut values: Vec<DisplayPlanePropertiesKHR> = Vec::with_capacity(count as usize);
             values.resize(count as usize, DisplayPlanePropertiesKHR::default());
@@ -1400,7 +1558,7 @@ impl crate::Instance {
     pub unsafe fn get_physical_device_display_properties(&self, physical_device: PhysicalDevice) -> std::result::Result<Vec<DisplayPropertiesKHR>, Result> {
         let call = self.table.get_physical_device_display_properties_khr.expect("vkGetPhysicalDeviceDisplayPropertiesKHR is unavailable");
         loop {
-            let mut count = 0u32;
+            let mut count: u32 = 0;
             call(physical_device, &mut count, core::ptr::null_mut()).result()?;
             let mut values: Vec<DisplayPropertiesKHR> = Vec::with_capacity(count as usize);
             values.resize(count as usize, DisplayPropertiesKHR::default());
@@ -1501,10 +1659,25 @@ impl crate::Instance {
     pub unsafe fn get_physical_device_queue_family_properties(&self, physical_device: PhysicalDevice) -> Vec<QueueFamilyProperties> {
         let call = self.table.get_physical_device_queue_family_properties.expect("vkGetPhysicalDeviceQueueFamilyProperties is unavailable");
         loop {
-            let mut count = 0u32;
+            let mut count: u32 = 0;
             call(physical_device, &mut count, core::ptr::null_mut());
             let mut values: Vec<QueueFamilyProperties> = Vec::with_capacity(count as usize);
             values.resize(count as usize, QueueFamilyProperties::default());
+            call(physical_device, &mut count, values.as_mut_ptr());
+            values.truncate(count as usize);
+            return values;
+        }
+    }
+}
+impl crate::Instance {
+    #[inline]
+    pub unsafe fn get_physical_device_queue_family_properties2(&self, physical_device: PhysicalDevice) -> Vec<QueueFamilyProperties2> {
+        let call = self.table.get_physical_device_queue_family_properties2.expect("vkGetPhysicalDeviceQueueFamilyProperties2 is unavailable");
+        loop {
+            let mut count: u32 = 0;
+            call(physical_device, &mut count, core::ptr::null_mut());
+            let mut values: Vec<QueueFamilyProperties2> = Vec::with_capacity(count as usize);
+            values.resize(count as usize, QueueFamilyProperties2::default());
             call(physical_device, &mut count, values.as_mut_ptr());
             values.truncate(count as usize);
             return values;
@@ -1525,7 +1698,7 @@ impl crate::Instance {
     pub unsafe fn get_physical_device_surface_formats(&self, physical_device: PhysicalDevice, surface: SurfaceKHR) -> std::result::Result<Vec<SurfaceFormatKHR>, Result> {
         let call = self.table.get_physical_device_surface_formats_khr.expect("vkGetPhysicalDeviceSurfaceFormatsKHR is unavailable");
         loop {
-            let mut count = 0u32;
+            let mut count: u32 = 0;
             call(physical_device, surface, &mut count, core::ptr::null_mut()).result()?;
             let mut values: Vec<SurfaceFormatKHR> = Vec::with_capacity(count as usize);
             values.resize(count as usize, SurfaceFormatKHR::default());
@@ -1542,7 +1715,7 @@ impl crate::Instance {
     pub unsafe fn get_physical_device_surface_present_modes(&self, physical_device: PhysicalDevice, surface: SurfaceKHR) -> std::result::Result<Vec<PresentModeKHR>, Result> {
         let call = self.table.get_physical_device_surface_present_modes_khr.expect("vkGetPhysicalDeviceSurfacePresentModesKHR is unavailable");
         loop {
-            let mut count = 0u32;
+            let mut count: u32 = 0;
             call(physical_device, surface, &mut count, core::ptr::null_mut()).result()?;
             let mut values: Vec<PresentModeKHR> = Vec::with_capacity(count as usize);
             values.resize(count as usize, PresentModeKHR::default());
@@ -1561,6 +1734,39 @@ impl crate::Instance {
         let mut value: Bool32 = Bool32::default();
         call(physical_device, queue_family_index, surface, &mut value).result()?;
         Ok(value != 0)
+    }
+}
+impl crate::Instance {
+    #[inline]
+    pub unsafe fn get_physical_device_video_capabilities(&self, physical_device: PhysicalDevice, video_profile: &VideoProfileInfoKHR, capabilities: &mut VideoCapabilitiesKHR) -> std::result::Result<(), Result> {
+        let call = self.table.get_physical_device_video_capabilities_khr.expect("vkGetPhysicalDeviceVideoCapabilitiesKHR is unavailable");
+        call(physical_device, video_profile, capabilities).result()?;
+        Ok(())
+    }
+}
+impl crate::Instance {
+    #[inline]
+    pub unsafe fn get_physical_device_video_encode_quality_level_properties(&self, physical_device: PhysicalDevice, quality_level_info: &PhysicalDeviceVideoEncodeQualityLevelInfoKHR, quality_level_properties: &mut VideoEncodeQualityLevelPropertiesKHR) -> std::result::Result<(), Result> {
+        let call = self.table.get_physical_device_video_encode_quality_level_properties_khr.expect("vkGetPhysicalDeviceVideoEncodeQualityLevelPropertiesKHR is unavailable");
+        call(physical_device, quality_level_info, quality_level_properties).result()?;
+        Ok(())
+    }
+}
+impl crate::Instance {
+    #[inline]
+    pub unsafe fn get_physical_device_video_format_properties(&self, physical_device: PhysicalDevice, video_format_info: &PhysicalDeviceVideoFormatInfoKHR) -> std::result::Result<Vec<VideoFormatPropertiesKHR>, Result> {
+        let call = self.table.get_physical_device_video_format_properties_khr.expect("vkGetPhysicalDeviceVideoFormatPropertiesKHR is unavailable");
+        loop {
+            let mut count: u32 = 0;
+            call(physical_device, video_format_info, &mut count, core::ptr::null_mut()).result()?;
+            let mut values: Vec<VideoFormatPropertiesKHR> = Vec::with_capacity(count as usize);
+            values.resize(count as usize, VideoFormatPropertiesKHR::default());
+            let code = call(physical_device, video_format_info, &mut count, values.as_mut_ptr());
+            if code == Result::INCOMPLETE { continue; }
+            code.result()?;
+            values.truncate(count as usize);
+            return Ok(values);
+        }
     }
 }
 impl crate::Instance {
@@ -1599,11 +1805,28 @@ impl crate::Device {
     pub unsafe fn get_swapchain_images(&self, swapchain: SwapchainKHR) -> std::result::Result<Vec<Image>, Result> {
         let call = self.table.get_swapchain_images_khr.expect("vkGetSwapchainImagesKHR is unavailable");
         loop {
-            let mut count = 0u32;
+            let mut count: u32 = 0;
             call(self.handle, swapchain, &mut count, core::ptr::null_mut()).result()?;
             let mut values: Vec<Image> = Vec::with_capacity(count as usize);
             values.resize(count as usize, Image::default());
             let code = call(self.handle, swapchain, &mut count, values.as_mut_ptr());
+            if code == Result::INCOMPLETE { continue; }
+            code.result()?;
+            values.truncate(count as usize);
+            return Ok(values);
+        }
+    }
+}
+impl crate::Device {
+    #[inline]
+    pub unsafe fn get_video_session_memory_requirements(&self, video_session: VideoSessionKHR) -> std::result::Result<Vec<VideoSessionMemoryRequirementsKHR>, Result> {
+        let call = self.table.get_video_session_memory_requirements_khr.expect("vkGetVideoSessionMemoryRequirementsKHR is unavailable");
+        loop {
+            let mut count: u32 = 0;
+            call(self.handle, video_session, &mut count, core::ptr::null_mut()).result()?;
+            let mut values: Vec<VideoSessionMemoryRequirementsKHR> = Vec::with_capacity(count as usize);
+            values.resize(count as usize, VideoSessionMemoryRequirementsKHR::default());
+            let code = call(self.handle, video_session, &mut count, values.as_mut_ptr());
             if code == Result::INCOMPLETE { continue; }
             code.result()?;
             values.truncate(count as usize);

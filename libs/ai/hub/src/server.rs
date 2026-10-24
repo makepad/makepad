@@ -1823,7 +1823,8 @@ fn route_generate(shared: &Arc<ServiceShared>, caller: &makepad_network::fleet::
     // not decode must be a 400, never a failed turn that tears down the
     // resident session.
     if !params.chat_images.is_empty() {
-        if spec.backend != "llm" || spec.file_by_role("mmproj").is_none() {
+        let sees = (spec.backend == "llm" && spec.file_by_role("mmproj").is_some()) || spec.backend == crate::claude_cli::BACKEND;
+        if !sees {
             return error_json(400, format!("model {} cannot look at pictures", spec.id));
         }
         for image in &params.chat_images {

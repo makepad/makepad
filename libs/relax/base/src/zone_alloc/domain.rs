@@ -636,7 +636,9 @@ mod tests {
                 }
             }
             let before = free_mb(&heap);
-            assert!(before > 1 << 20, "the burst left free pages in the current chunk: {before}");
+            // whole free pages: each survivor pins its page (4 KB on x86-64 Linux, 16 KB on arm64
+            // macOS: 1.2 MB vs 0.93 MB of the 1.28 MB carved), so the bound is half of it
+            assert!(before > 20_000 * 64 / 2, "the burst left free pages in the current chunk: {before}");
             // the next epoch: a free that leaves a power of two of live blocks trims
             heap.inner.arena.densify(0);
             let extra: Vec<*mut u8> = (0..4).map(|_| program_alloc(64, 8)).collect();

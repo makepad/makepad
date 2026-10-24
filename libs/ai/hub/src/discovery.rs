@@ -151,9 +151,9 @@ pub fn answers(host_port: &str, timeout: Duration) -> bool {
     addrs.into_iter().any(|addr| std::net::TcpStream::connect_timeout(&addr, timeout).is_ok())
 }
 
-/// Where a beacon goes: the limited broadcast, then every up interface's
-/// directed broadcast.
-fn beacon_targets() -> Vec<std::net::Ipv4Addr> {
+/// Where a LAN broadcast goes (a beacon, a Sandbox room probe): the limited
+/// broadcast, then every up interface's directed broadcast.
+pub fn beacon_targets() -> Vec<std::net::Ipv4Addr> {
     let mut out = vec![std::net::Ipv4Addr::BROADCAST];
     for interface in makepad_core_util::netif::interfaces() {
         let target = interface.broadcast();

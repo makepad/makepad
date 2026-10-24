@@ -1644,6 +1644,17 @@ impl Linker {
         if let Some(ids) = self.cache().image_ids.as_ref() {
             im.slot.copy_from_slice(&ids.slot);
         }
+        // every slot the image names ran in the session that made it, and so did the callees its
+        // code inlined: not never-run code for O3's walk before their first (lazy) install here
+        for s in &im.slots {
+            for k in std::iter::once(s.key).chain(im.flat[s.inl.0..s.inl.1].iter().copied()) {
+                if let Some(&id) = im.slot.get(k as usize) {
+                    if id != NO_SLOT && (id as usize) < u.fns.len() {
+                        u.fns[id as usize].ran_before.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
+        }
         let t_keys = crate::jit::wall_ns();
         let tagged = im.t_tag.iter().map(|e| e.0).sum::<u64>();
         self.place_data(u, &mut im, &need_sym);

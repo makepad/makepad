@@ -4,6 +4,10 @@
 //! converted pixels around each sample, optionally mixed with a second
 //! frame of the same size and colour (a frame blend).
 //!
+//! A decoder's own GPU picture comes as two plane textures instead
+//! ([`DrawNv12::set_planes`]: luma R8, interleaved chroma RG8 at half size, imported
+//! over the picture's memory with `Cx::import_picture_plane`), drawn the same way.
+//!
 //! The conversion is the frame's own colour (`VideoColor`: matrix, range,
 //! primaries, transfer; see `mod.draw.VideoColor`). Each byte is read at its
 //! texel centre and recovered exactly, the 2x2 chroma block's nearest sample
@@ -37,8 +41,25 @@ script_mod! {
             return vec4((px + 0.5) / w, (py + 0.5) / rows, (cu + 0.5) / w, (cv + 0.5) / rows)
         }
 
+        // The Y, Cb, Cr bytes (0..255) of pixel `p` of a planar picture: luma in `nv12`,
+        // chroma in `nv12_next` (`nv12_size` is the picture's size then).
+        planar_bytes: fn(p: vec2) -> vec3 {
+            let w = self.nv12_size.x
+            let h = self.nv12_size.y
+            let px = clamp(p.x, 0.0, w - 1.0)
+            let py = clamp(p.y, 0.0, h - 1.0)
+            let cw = floor((w + 1.0) * 0.5)
+            let ch = floor((h + 1.0) * 0.5)
+            let yb = floor(self.nv12.sample(vec2((px + 0.5) / w, (py + 0.5) / h)).x * 255.0 + 0.5)
+            let c = self.nv12_next.sample(vec2((floor(px * 0.5) + 0.5) / cw, (floor(py * 0.5) + 0.5) / ch))
+            return vec3(yb, floor(c.x * 255.0 + 0.5), floor(c.y * 255.0 + 0.5))
+        }
+
         // The Y, Cb, Cr bytes (0..255) of pixel `p`.
         nv12_bytes: fn(p: vec2) -> vec3 {
+            if self.planar > 0.5 {
+                return self.planar_bytes(p)
+            }
             let t = self.nv12_taps(p)
             let du = 1.0 / self.nv12_size.x
             let yb = floor(self.nv12.sample(t.xy).x * 255.0 + 0.5)
@@ -103,6 +124,9 @@ pub struct DrawNv12 {
     /// How much of the second frame: 0 = none.
     #[live]
     pub blend: f32,
+    /// 1: the picture is two plane textures ([`DrawNv12::set_planes`]).
+    #[live]
+    pub planar: f32,
     /// The frame's colour ([`VideoColor::draw_uniforms`]), set by [`DrawNv12::set_nv12`].
     #[live]
     pub yuv_r: Vec4f,
@@ -125,6 +149,29 @@ impl DrawNv12 {
     /// in `color`, and a second frame of that size and colour mixed in by
     /// `next.1`. `src` is set to the whole frame.
     pub fn set_nv12(&mut self, texture: &Texture, width: u32, height: u32, color: VideoColor, next: Option<(&Texture, f32)>) {
+        self.set_color(color);
+        self.draw_vars.set_texture(0, texture);
+        self.draw_vars.set_texture(1, next.map_or(texture, |(next, _)| next));
+        self.blend = next.map_or(0.0, |(_, blend)| blend);
+        self.planar = 0.0;
+        self.nv12_size = vec2(width as f32, Texture::nv12_rows(height) as f32);
+        self.src = vec4(0.0, 0.0, width as f32, height as f32);
+    }
+
+    /// The frame `width` x `height` as two plane textures (`Cx::import_picture_plane`):
+    /// `luma` (R8, full size) and `chroma` (RG8, interleaved Cb Cr, half size), in `color`.
+    /// No frame blend. `src` is set to the whole frame.
+    pub fn set_planes(&mut self, luma: &Texture, chroma: &Texture, width: u32, height: u32, color: VideoColor) {
+        self.set_color(color);
+        self.draw_vars.set_texture(0, luma);
+        self.draw_vars.set_texture(1, chroma);
+        self.blend = 0.0;
+        self.planar = 1.0;
+        self.nv12_size = vec2(width as f32, height as f32);
+        self.src = vec4(0.0, 0.0, width as f32, height as f32);
+    }
+
+    fn set_color(&mut self, color: VideoColor) {
         let u = color.draw_uniforms();
         self.yuv_r = Vec4f { x: u.yuv_r[0], y: u.yuv_r[1], z: u.yuv_r[2], w: u.yuv_r[3] };
         self.yuv_g = Vec4f { x: u.yuv_g[0], y: u.yuv_g[1], z: u.yuv_g[2], w: u.yuv_g[3] };
@@ -133,11 +180,6 @@ impl DrawNv12 {
         self.gamut_r = Vec3f { x: u.gamut_r[0], y: u.gamut_r[1], z: u.gamut_r[2] };
         self.gamut_g = Vec3f { x: u.gamut_g[0], y: u.gamut_g[1], z: u.gamut_g[2] };
         self.gamut_b = Vec3f { x: u.gamut_b[0], y: u.gamut_b[1], z: u.gamut_b[2] };
-        self.draw_vars.set_texture(0, texture);
-        self.draw_vars.set_texture(1, next.map_or(texture, |(next, _)| next));
-        self.blend = next.map_or(0.0, |(_, blend)| blend);
-        self.nv12_size = vec2(width as f32, Texture::nv12_rows(height) as f32);
-        self.src = vec4(0.0, 0.0, width as f32, height as f32);
     }
 }
 

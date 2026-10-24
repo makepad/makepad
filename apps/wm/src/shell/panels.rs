@@ -138,6 +138,9 @@ pub fn today() -> (i64, u32, u32) {
 // The panels
 // ======================================================================
 
+/// A Desk Link viewer row in its panel.
+const DESK_LINK_ROW: f64 = 48.0;
+
 /// Which flyout is up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PanelKind {
@@ -149,6 +152,8 @@ pub enum PanelKind {
     Bluetooth,
     Gamepad,
     Hub,
+    /// Who is viewing this desktop over Desk Link, each with Disconnect.
+    DeskLink,
 }
 
 impl PanelKind {
@@ -162,6 +167,7 @@ impl PanelKind {
             BarModule::Bluetooth => PanelKind::Bluetooth,
             BarModule::Gamepad => PanelKind::Gamepad,
             BarModule::Hub => PanelKind::Hub,
+            BarModule::DeskLink => PanelKind::DeskLink,
             _ => return None,
         })
     }
@@ -176,6 +182,7 @@ impl PanelKind {
             PanelKind::Bluetooth => BarModule::Bluetooth,
             PanelKind::Gamepad => BarModule::Gamepad,
             PanelKind::Hub => BarModule::Hub,
+            PanelKind::DeskLink => BarModule::DeskLink,
         }
     }
 
@@ -208,6 +215,8 @@ pub struct PanelData {
     pub today: (i64, u32, u32),
     /// The AI hub, as last read (only while its panel is open).
     pub hub: crate::hub_control::HubSnapshot,
+    /// Desk Link viewers connected right now.
+    pub desk_link: Vec<crate::desk_link::DeskLinkViewer>,
 }
 
 impl Default for PanelData {
@@ -229,6 +238,7 @@ impl Default for PanelData {
             view: (y, m),
             today: (y, m, d),
             hub: Default::default(),
+            desk_link: Vec::new(),
         }
     }
 }
@@ -258,6 +268,7 @@ impl PanelData {
             view: (y, m),
             today: (y, m, d),
             hub: Default::default(),
+            desk_link: Vec::new(),
         }
     }
 
@@ -303,6 +314,8 @@ pub enum ShellPanelAction {
     Close,
     /// A command for the AI hub.
     Hub(crate::hub_control::HubCommand),
+    /// End this Desk Link viewer's session.
+    DeskLinkDisconnect(u32),
     /// The Wi-Fi dropdown's intent (Linux). The WM turns it into a worker
     /// command; a `ConnectWithPassphrase` is completed from the panel's own
     /// field so the passphrase never rides in an action.
@@ -332,6 +345,8 @@ enum Hit {
     HubContext(bool),
     /// The WM's hub child: stop and start it again.
     HubRestart,
+    /// A Desk Link viewer's Disconnect button (its session).
+    DeskLinkDisconnect(u32),
     #[cfg(target_os = "linux")]
     PairXbox(usize),
     /// The BlackShark headset's row and settings view.
@@ -688,6 +703,19 @@ impl ShellPanel {
         }
     }
 
+    /// The Desk Link viewers now: shown when its panel is open, which closes once nobody is left.
+    pub fn desk_link_update(&mut self, cx: &mut Cx, viewers: Vec<crate::desk_link::DeskLinkViewer>) {
+        let changed = self.data.desk_link != viewers;
+        self.data.desk_link = viewers;
+        if self.open == Some(PanelKind::DeskLink) {
+            if self.data.desk_link.is_empty() {
+                self.close(cx);
+            } else if changed {
+                self.redraw(cx);
+            }
+        }
+    }
+
     pub fn close(&mut self, cx: &mut Cx) {
         // A scale drag the flyout leaves mid-way is saved where it got to.
         #[cfg(target_os = "linux")]
@@ -904,6 +932,7 @@ impl ShellPanel {
                 + self.data.game_controllers.batteries.len() + self.data.game_controllers.receivers.len()
                 + self.headset_list_rows()) as f64,
             PanelKind::Hub => self.hub_height(),
+            PanelKind::DeskLink => 52.0 + DESK_LINK_ROW * self.data.desk_link.len().max(1) as f64,
         } + pad * 2.0;
         // The body is inset by the padding AND the popup border. The
         // Display panel's plan is sized to the body, so its card asks for
@@ -955,6 +984,7 @@ impl ShellPanel {
                 );
             }
             PanelKind::Hub => self.draw_hub(cx, body),
+            PanelKind::DeskLink => self.draw_desk_link(cx, body),
             PanelKind::Gamepad => self.draw_game_controllers(cx, body),
             PanelKind::Bluetooth => {
                 let (hero, rest) = cut_top(body, 40.0);
@@ -1382,6 +1412,41 @@ impl ShellPanel {
 
     /// The AI hub panel: GPU memory, the models with Load / Unload, what is
     /// working now and what finished, the context size and the KV switch.
+    /// Who is viewing this desktop: a row per viewer (name, address, how long, watching or
+    /// paused) with its Disconnect button.
+    fn draw_desk_link(&mut self, cx: &mut Cx2d, body: Rect) {
+        use super::ui::HAlign;
+        let tok = self.tokens;
+        let fg = tok.popups.text;
+        let viewers = self.data.desk_link.clone();
+        let (hero, rest) = cut_top(body, 40.0);
+        let status = match viewers.len() {
+            0 => "Nobody is viewing".to_string(),
+            1 => "1 viewer".to_string(),
+            n => format!("{n} viewers"),
+        };
+        self.d.panel_hero(cx, hero, &tok, tok.bar.active, Ico::Record, "Desk Link", &status, 0.0);
+        let (sep, mut rest) = cut_top(rest, 12.0);
+        self.d.separator(cx, rect(sep.pos.x, sep.pos.y + 6.0, sep.size.x, 1.0), fg, 0.12);
+        for v in &viewers {
+            let (row, r2) = cut_top(rest, DESK_LINK_ROW);
+            rest = r2;
+            let w = self.d.button_width(cx, &tok, false, "Disconnect", tok.font.body_small);
+            let button = rect(row.pos.x + row.size.x - w, row.pos.y + 8.0, w, row.size.y - 16.0);
+            let hit = Hit::DeskLinkDisconnect(v.session);
+            let state = if self.hot == Some(hit) { CtrlState::Hover } else { CtrlState::Normal };
+            self.d.button(cx, button, &tok, state, None, "Disconnect", tok.font.body_small, fg, true);
+            self.hits.push((hit, button));
+            let text = rect(row.pos.x, row.pos.y + 6.0, row.size.x - w - 8.0, 18.0);
+            self.d.label_elided(cx, text, false, tok.font.body, fg, HAlign::Left, &format!("{} · {}", v.peer, v.name));
+            let mins = v.secs / 60;
+            let since = if mins == 0 { "just now".to_string() } else if mins < 60 { format!("{mins} min") } else { format!("{} h {} min", mins / 60, mins % 60) };
+            let detail = format!("{} · {since}", if v.paused { "connected, not watching" } else { "watching" });
+            let sub = rect(row.pos.x, row.pos.y + 25.0, row.size.x - w - 8.0, 16.0);
+            self.d.label_elided(cx, sub, false, tok.font.caption, darker(fg, 1.2), HAlign::Left, &detail);
+        }
+    }
+
     fn draw_hub(&mut self, cx: &mut Cx2d, body: Rect) {
         use crate::hub_control::{KvPrecision, ModelState};
         use super::ui::HAlign;
@@ -2784,6 +2849,9 @@ impl Widget for ShellPanel {
                             cx.widget_action(self.uid, ShellPanelAction::System(crate::linux_controls::ControlAction::Command(
                                 super::system_linux::SystemCommand::PairXbox(receiver.id.clone()))));
                         }
+                    }
+                    Some(Hit::DeskLinkDisconnect(session)) => {
+                        cx.widget_action(self.uid, ShellPanelAction::DeskLinkDisconnect(session));
                     }
                     Some(Hit::HubRestart) => {
                         cx.widget_action(self.uid, ShellPanelAction::Hub(crate::hub_control::HubCommand::Restart));

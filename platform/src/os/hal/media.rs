@@ -261,6 +261,21 @@ impl Cx {
         self.hal.frames.external_texture(id.0, id.generation())
     }
 
+    /// One plane of a native biplanar 4:2:0 picture the app holds, as a texture over the
+    /// picture's own memory: nothing is copied (macOS: `handle` is the picture's global
+    /// IOSurface id; luma samples as R8, chroma as RG8 at half size). The app keeps the picture
+    /// alive while frames that draw the texture may still run on the GPU.
+    pub fn import_picture_plane(&mut self, handle: u64, plane: crate::video_file::PicturePlane) -> Texture {
+        let texture = Texture::new_with_format(self, TextureFormat::VideoYuvPlane);
+        let id = self.hal_external_texture(texture.texture_id());
+        let kind = match plane {
+            crate::video_file::PicturePlane::Luma => makepad_hal::texture_handle::LUMA,
+            crate::video_file::PicturePlane::Chroma => makepad_hal::texture_handle::CHROMA,
+        };
+        self.hal.frames.w.texture_import(id, handle, kind);
+        texture
+    }
+
     /// Prepares video (or an audio file when `texture` is `None`) playback. The Y / U / V
     /// textures are made here and announced with `VideoYuvTexturesReady`, as every backend does.
     pub(crate) fn hal_prepare_video(&mut self, video_id: LiveId, source: VideoSource, texture: Option<TextureId>, autoplay: bool, looping: bool, camera_preview: CameraPreviewMode) {

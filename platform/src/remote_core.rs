@@ -735,7 +735,7 @@ pub const COMMANDS: &[Command] = &[
     Command { words: "dump", args: "[paths=1]", answers: "the widget tree as indented text (id, type, x y w h); paths=1 one line per widget", service: "ui", risk: CmdRisk::Read, params: "\"paths\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
     Command { words: "step", args: "[frames=1] [fps=60] [wait_loads=1] [w=ID]", answers: "--virtual-clock only: run frames of 1/fps; answers {\"frame\",\"time\"} after the last", service: "ui", risk: CmdRisk::Act, params: "\"frames\":{\"type\":\"integer\"},\"fps\":{\"type\":\"number\"},\"wait_loads\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"}", required: &[], positional: &[] },
     Command { words: "settled", args: "", answers: "{\"settled\":bool,\"reasons\":[next_frame|redraw|repaint|timer|step|shaders|loads],\"loads\":{kind:n}}", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
-    Command { words: "uicounts", args: "", answers: "{\"ins\":n,\"cyc\":n,\"cpu_ns\":n} of the UI thread so far (ins/cyc: macOS thread_selfcounts, else 0)", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
+    Command { words: "uicounts", args: "", answers: "{\"ins\":n,\"cyc\":n,\"cpu_ns\":n} of the UI thread so far (ins/cyc: thread_counters, user mode: macOS thread_selfcounts, Linux perf_event; else 0)", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
     Command { words: "cap start", args: "path=ABS.mp4 [fps=60] [audio=1] [overwrite=1] [w=ID]", answers: "record the window in process (native pixels, H.264)", service: "ui", risk: CmdRisk::Act, params: "\"path\":{\"type\":\"string\"},\"fps\":{\"type\":\"number\"},\"audio\":{\"type\":\"boolean\"},\"overwrite\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"}", required: &["path"], positional: &[] },
     Command { words: "cap stop", args: "[hashes=1]", answers: "finalize the recording: {\"frames\",\"sz\",\"missing\",\"hash\"}", service: "ui", risk: CmdRisk::Act, params: "\"hashes\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
     Command { words: "input record", args: "path=<file>", answers: "record the person's native pointer, wheel, key and text input as the commands that inject it (one line each: ms, presented frame, command)", service: "ui", risk: CmdRisk::Act, params: "\"path\":{\"type\":\"string\"}", required: &["path"], positional: &[] },
@@ -1048,32 +1048,69 @@ pub fn route_key(p: &Params) -> Answer {
         return err(&format!("bad key code {name}"));
     };
     let kind = p.get(&["k", "kind"]).unwrap_or("press");
+    // A real keyboard delivers a printable key's character as text input after its key down
+    // (that is what a TextInput inserts); an injected one must too, or `key c=Space` types
+    // nothing. Not with ctrl/alt/logo held: those are shortcuts.
+    let text = (!mods.control && !mods.alt && !mods.logo)
+        .then(|| key_text(code, mods.shift))
+        .flatten()
+        .map(|c| Input::Text(c.to_string()));
     let inputs = match kind {
-        "down" => vec![Input::Key {
+        "down" => [Input::Key {
             down: true,
             code,
             mods,
-        }],
+        }]
+        .into_iter()
+        .chain(text)
+        .collect(),
         "up" => vec![Input::Key {
             down: false,
             code,
             mods,
         }],
-        "press" | "tap" => vec![
-            Input::Key {
-                down: true,
-                code,
-                mods,
-            },
-            Input::Key {
-                down: false,
-                code,
-                mods,
-            },
-        ],
+        "press" | "tap" => [Input::Key {
+            down: true,
+            code,
+            mods,
+        }]
+        .into_iter()
+        .chain(text)
+        .chain([Input::Key {
+            down: false,
+            code,
+            mods,
+        }])
+        .collect(),
         other => return err(&format!("bad kind {other}")),
     };
     send_input(window, inputs, p.flag(&["wait"]))
+}
+
+/// The character a key types on a US layout (letters, digits, space), as the OS sends it
+/// with the key down. Shifted digits and punctuation depend on the layout: none.
+fn key_text(code: KeyCode, shift: bool) -> Option<char> {
+    const LETTERS: [(KeyCode, char); 26] = [
+        (KeyCode::KeyA, 'a'), (KeyCode::KeyB, 'b'), (KeyCode::KeyC, 'c'), (KeyCode::KeyD, 'd'),
+        (KeyCode::KeyE, 'e'), (KeyCode::KeyF, 'f'), (KeyCode::KeyG, 'g'), (KeyCode::KeyH, 'h'),
+        (KeyCode::KeyI, 'i'), (KeyCode::KeyJ, 'j'), (KeyCode::KeyK, 'k'), (KeyCode::KeyL, 'l'),
+        (KeyCode::KeyM, 'm'), (KeyCode::KeyN, 'n'), (KeyCode::KeyO, 'o'), (KeyCode::KeyP, 'p'),
+        (KeyCode::KeyQ, 'q'), (KeyCode::KeyR, 'r'), (KeyCode::KeyS, 's'), (KeyCode::KeyT, 't'),
+        (KeyCode::KeyU, 'u'), (KeyCode::KeyV, 'v'), (KeyCode::KeyW, 'w'), (KeyCode::KeyX, 'x'),
+        (KeyCode::KeyY, 'y'), (KeyCode::KeyZ, 'z'),
+    ];
+    const DIGITS: [KeyCode; 10] = [
+        KeyCode::Key0, KeyCode::Key1, KeyCode::Key2, KeyCode::Key3, KeyCode::Key4,
+        KeyCode::Key5, KeyCode::Key6, KeyCode::Key7, KeyCode::Key8, KeyCode::Key9,
+    ];
+    if code == KeyCode::Space {
+        return Some(' ');
+    }
+    if let Some(&(_, c)) = LETTERS.iter().find(|(k, _)| *k == code) {
+        return Some(if shift { c.to_ascii_uppercase() } else { c });
+    }
+    let digit = DIGITS.iter().position(|k| *k == code)?;
+    (!shift).then(|| char::from(b'0' + digit as u8))
 }
 
 pub fn route_text(p: &Params) -> Answer {

@@ -552,14 +552,12 @@ impl Gpu for Metal {
     }
 
     fn texture_import(&mut self, s: &mut Session, id: Id, handle: u64, kind: u32) -> Option<TextureObj> {
-        if kind != texture_handle::NATIVE {
-            return None;
-        }
-        let (tex, w, h, fmt) = import_surface(self.dev.device, IOSurfaceID::try_from(handle).ok()?, id.gen)?;
+        let (tex, w, h, fmt) = import_surface(self.dev.device, IOSurfaceID::try_from(handle).ok()?, id.gen, kind)?;
         if let Some(old) = self.tex.insert((s.id, id.index), tex) {
             self.dev.retire(Box::new(old));
         }
-        Some(TextureObj { format: fmt, w, h, depth: 1, mips: 1, usage: usage::SAMPLED | usage::RENDER_TARGET, bytes: 0, imported: true, uploaded: 0, lent: None })
+        let usage = if kind == texture_handle::NATIVE { usage::SAMPLED | usage::RENDER_TARGET } else { usage::SAMPLED };
+        Some(TextureObj { format: fmt, w, h, depth: 1, mips: 1, usage, bytes: 0, imported: true, uploaded: 0, lent: None })
     }
 
     fn buffer_create(&mut self, s: &mut Session, id: Id, b: &mut BufferObj) -> Result<(), String> {

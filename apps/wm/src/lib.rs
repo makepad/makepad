@@ -45,6 +45,7 @@ mod screenshot_app;
 mod backdrop;
 mod skins;
 mod dock_warp;
+mod desk_link;
 mod dock_layout;
 mod dock_autohide;
 mod hub_control;
@@ -55,6 +56,7 @@ mod gpu_yield;
 mod scroll_gesture;
 use scroll_gesture::Gesture as ScrollGesture;
 use hub_control::HubLink;
+use desk_link::DeskLink;
 use gpu_yield::YieldPolicy;
 mod motion;
 mod spaces;
@@ -159,6 +161,9 @@ script_mod! {
                 // its buttons) so the window still drags.
                 show_caption_bar: false
                 body +: {
+                    // Desk Link: the whole body, captured for a viewer while one watches
+                    // (desk_link/capture.rs); drawn straight otherwise.
+                    desk_capture := DeskCapture{
                     // The bar is drawn over the column, after the scene:
                     // a strip above the desk (`bar_space` holds its place)
                     // on one screen, floating over the top of every screen
@@ -250,6 +255,7 @@ script_mod! {
                         }
                         phone_controls := PhoneSurface{visible: false}
                     }
+                }
                 }
             }
         }
@@ -580,6 +586,12 @@ pub struct App {
     /// The AI hub the top-bar panel controls.
     #[rust]
     hub_link: HubLink,
+    /// The remote desktop server (desk_link): off unless its settings enable it.
+    #[rust]
+    desk_link: DeskLink,
+    /// The Desk Link viewer list the bar and its panel show (its generation).
+    #[rust]
+    desk_link_shown: Option<u32>,
     /// The steps the WM takes when the GPU is short of memory for the UI (`gpu_yield`).
     #[rust]
     yield_policy: YieldPolicy,
@@ -4286,6 +4298,27 @@ impl App {
     /// WM; the status modules come from `bar_sample`, refreshed on the tick
     /// (`shell/bar.rs` does the sampling — cheap things every second, the
     /// expensive ones every fifth).
+    /// Desk Link's viewers into the bar (its item shows while anyone is viewing: never silent)
+    /// and the panel. `changed`: who is connected changed, so the bar is laid out again.
+    fn sync_desk_link(&mut self, cx: &mut Cx, changed: bool) {
+        let viewers = self.desk_link.viewers();
+        if changed {
+            self.bar_sample.desk_link = viewers.iter().map(|v| (v.name.clone(), v.peer.clone())).collect();
+        }
+        let panel = self.ui.widget(cx, ids!(shell_panel));
+        let mut closed = false;
+        if let Some(mut p) = panel.borrow_mut::<shell::panels::ShellPanel>() {
+            p.desk_link_update(cx, viewers);
+            closed = self.shell_panel_open == Some(BarModule::DeskLink) && p.open.is_none();
+        }
+        if closed {
+            self.shell_panel_open = None;
+        }
+        if changed || closed {
+            self.update_bar(cx);
+        }
+    }
+
     fn update_bar(&mut self, cx: &mut Cx) {
         self.sync_bar_placement(cx);
         if let Some(clock)=self.bar_sample.clock.split_whitespace().find(|s|s.contains(':')).map(str::to_string) {
@@ -4629,6 +4662,8 @@ impl App {
             if clock.is_empty() { host::fallback_clock(self.clock_alt) } else { clock }
         };
         self.status_tick = self.status_tick.wrapping_add(1);
+        // the viewers' "connected for" in an open Desk Link panel
+        self.sync_desk_link(cx, false);
         self.bar_sample.network = s.network;
         self.bar_sample.bluetooth = s.bluetooth;
         // Keep the flyout's own copy in step with the bar's.
@@ -6280,6 +6315,7 @@ impl MatchEvent for App {
             if wa.widget_uid == self.ui.widget(cx, ids!(shell_panel)).widget_uid() {
             match wa.cast::<ShellPanelAction>() {
                 ShellPanelAction::SetVolume(v) => self.set_volume(cx, v),
+                ShellPanelAction::DeskLinkDisconnect(session) => self.desk_link.disconnect(session),
                 ShellPanelAction::Hub(command) => {
                     let pool = cx.task_pool();
                     self.hub_link.command(command, host::now(), &pool);
@@ -6483,6 +6519,7 @@ impl AppMain for App {
         mobile_surface::script_mod(vm);
         desk::phone::script_mod(vm);
         dock_warp::script_mod(vm);
+        desk_link::script_mod(vm);
         backdrop::script_mod(vm);
         spacewarp::panel::script_mod(vm);
         skins::script_mod(vm);
@@ -6519,6 +6556,11 @@ impl AppMain for App {
 
 impl App {
     fn handle_wm_event(&mut self, cx: &mut Cx, event: &Event) {
+        self.desk_link.handle_event(cx, event);
+        if self.state.is_some() && self.desk_link_shown != Some(self.desk_link.generation()) {
+            self.desk_link_shown = Some(self.desk_link.generation());
+            self.sync_desk_link(cx, true);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if self.state.is_some() {
             self.domain_event(cx, event);

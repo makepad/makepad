@@ -16,6 +16,8 @@ mod resources;
 pub(crate) mod share;
 mod submit;
 pub mod surface;
+#[cfg(target_os = "linux")]
+pub(crate) mod video_encode;
 
 pub use device::Device;
 pub use resources::Image;

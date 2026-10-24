@@ -853,6 +853,17 @@ fn parked(domain: u32) -> Option<Option<ParkedPanic>> {
     Some(None)
 }
 
+impl Work {
+    /// What the work is, for the log.
+    fn kind(&self) -> String {
+        match self {
+            Work::Save(path, _) => format!("a save of {}", path.display()),
+            Work::OpenFile { .. } => "an open-file request".into(),
+            Work::Resume { .. } => "a resume".into(),
+        }
+    }
+}
+
 fn enqueue(queue: &mut VecDeque<Work>, work: Work) {
     // Geometry/timings are snapshots; a pending write of the same path can take
     // the newer value. User actions retain their order and are never dropped.
@@ -917,6 +928,9 @@ fn pump(
     let mut diagnostics_dirty = true;
     let mut document_errors = Vec::new();
     let mut saved_geometry = None;
+    // the geometry last seen and since when: saved once it has held still (not every frame of
+    // a drag, a resize or a window animation, which kept the action worker full)
+    let mut settling_geometry: Option<([f32; 4], Instant)> = None;
     let mut next_frame = Instant::now();
     let mut next_status = Instant::now();
     let mut dirty = true;
@@ -1164,8 +1178,13 @@ fn pump(
             lent_to_app = lent == domain && domain != 0 && !stopping && !pending;
             app_frame = borrower_frame && lent == domain && domain != 0 && !stopping && !pending;
             may_present = !borrower_frame || lent == 0;
+            if settling_geometry.is_none_or(|(g, _)| g != geom) {
+                settling_geometry = Some((geom, Instant::now()));
+            }
+            let settled = settling_geometry.is_some_and(|(_, since)| since.elapsed() >= Duration::from_millis(500));
             if let Some(path) = geometry_path.as_ref().filter(|_| {
-                saved_geometry != Some(geom)
+                settled
+                    && saved_geometry != Some(geom)
                     && geom.iter().all(|v| v.is_finite())
                     && geom[2] > 0.0
                     && geom[3] > 0.0
@@ -1608,7 +1627,8 @@ fn pump(
                 Err(std::sync::mpsc::TrySendError::Full(work)) => {
                     if !work_full {
                         eprintln!(
-                            "makepad: run action worker busy; retaining work for a later frame"
+                            "makepad: run action worker busy; retaining {} for a later frame",
+                            work.kind()
                         );
                         work_full = true;
                     }

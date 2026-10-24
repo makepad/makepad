@@ -103,6 +103,7 @@ mod macos_menu;
 mod performance_stats;
 pub mod memory_watchdog;
 pub mod perf_monitor;
+pub mod thread_counters;
 pub mod gpu_frame_timer;
 pub mod gpu_admission;
 pub mod sploded;

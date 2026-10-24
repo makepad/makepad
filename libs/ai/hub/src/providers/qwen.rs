@@ -993,6 +993,12 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
         self.wire.clear();
     }
 
+    /// Pinned to the hub's Claude (`claude-cli`), the model reasons on
+    /// its own channel; the fleet's Qwen reasons in text.
+    fn reasons_natively(&self) -> bool {
+        self.preferred_model.as_deref() == Some(crate::claude_cli::MODEL_ID)
+    }
+
     fn kind(&self) -> ProviderKind {
         ProviderKind::FleetQwen
     }
@@ -1703,6 +1709,9 @@ mod wire_transcript_tests {
         assert_eq!(body.get("model").and_then(Value::as_str), Some("claude-cli"));
         assert_eq!(body.get("domain").and_then(Value::as_str), Some("chat"));
         assert_eq!(body.get("chat_system").and_then(Value::as_str), Some("SYS"));
+        // Claude reasons natively (no <think> instructions); the fleet Qwen does not.
+        assert!(provider.reasons_natively());
+        assert!(!FleetQwenChatProvider::new(Scripted::default(), vec![]).reasons_natively());
     }
 
     #[test]

@@ -647,6 +647,11 @@ pub mod window_kind {
 pub mod texture_handle {
     /// The backend's native shared image handle (Metal: a global IOSurface ID).
     pub const NATIVE: u32 = 0;
+    /// The luma plane of a native biplanar 4:2:0 picture (Metal: plane 0 of a `420v`/`420f`
+    /// IOSurface, by global id), as an R8 texture.
+    pub const LUMA: u32 = 1;
+    /// Its interleaved chroma plane (Metal: plane 1), as an RG8 texture of half the size.
+    pub const CHROMA: u32 = 2;
 }
 
 /// The bits above the kind byte of `WindowCreate::kind`: how a macOS window is made (Cx's

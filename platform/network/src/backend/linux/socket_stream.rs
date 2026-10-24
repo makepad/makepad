@@ -402,7 +402,7 @@ impl SocketStream {
     /// TLS 1.2+ without CA validation (self-signed servers); returns the
     /// server certificate's SHA-256 for the caller's known-hosts record.
     pub fn connect_capture(host: &str, port: &str) -> io::Result<(Self, [u8; 32])> {
-        let tcp_stream = TcpStream::connect(format!("{host}:{port}"))?;
+        let tcp_stream = connect_lan(host, port)?;
         let _ = tcp_stream.set_nodelay(true);
         let _ = tcp_stream.set_read_timeout(Some(Duration::from_secs(5)));
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
@@ -481,4 +481,19 @@ impl Write for SocketStream {
             SocketStream::Tls(stream) => stream.flush(),
         }
     }
+}
+
+/// The TCP connection of a fleet TLS stream: each address of `host` tried for at most 5 s, so an
+/// offline LAN machine fails fast instead of after the OS's minute-long connect timeout.
+fn connect_lan(host: &str, port: &str) -> io::Result<TcpStream> {
+    use std::net::ToSocketAddrs;
+    let port: u16 = port.parse().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "bad port"))?;
+    let mut last = None;
+    for addr in (host, port).to_socket_addrs()? {
+        match TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
+            Ok(tcp) => return Ok(tcp),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no address")))
 }

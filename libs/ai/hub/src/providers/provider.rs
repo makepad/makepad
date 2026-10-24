@@ -158,6 +158,14 @@ pub trait ChatProvider {
     fn tools_over_mcp(&self) -> bool {
         false
     }
+
+    /// The model reasons on its own channel (a native reasoner): the session
+    /// never tells it to write its reasoning out in `<think>` tags (Claude's
+    /// API refuses that as reasoning extraction). Only the fleet's own Qwen
+    /// reasons in text.
+    fn reasons_natively(&self) -> bool {
+        self.kind() != ProviderKind::FleetQwen
+    }
 }
 
 // ------------------------------------------------------------------ threaded
@@ -178,6 +186,7 @@ pub trait ChatProvider {
 /// affects the status display between refreshes.
 pub struct ThreadedProvider {
     kind: ProviderKind,
+    reasons_natively: bool,
     cmd_tx: std::sync::mpsc::Sender<ThreadedCmd>,
     msg_rx: std::sync::mpsc::Receiver<ThreadedMsg>,
     last_availability: ProviderAvailability,
@@ -212,6 +221,7 @@ impl ThreadedProvider {
         seed_availability: ProviderAvailability,
     ) -> ThreadedProvider {
         let kind = inner.kind();
+        let reasons_natively = inner.reasons_natively();
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<ThreadedCmd>();
         let (msg_tx, msg_rx) = std::sync::mpsc::channel::<ThreadedMsg>();
         std::thread::Builder::new()
@@ -249,6 +259,7 @@ impl ThreadedProvider {
             .expect("spawn chat provider worker");
         ThreadedProvider {
             kind,
+            reasons_natively,
             cmd_tx,
             msg_rx,
             last_availability: seed_availability,
@@ -288,6 +299,10 @@ impl Drop for ThreadedProvider {
 impl ChatProvider for ThreadedProvider {
     fn kind(&self) -> ProviderKind {
         self.kind
+    }
+
+    fn reasons_natively(&self) -> bool {
+        self.reasons_natively
     }
 
     fn availability(&mut self) -> ProviderAvailability {

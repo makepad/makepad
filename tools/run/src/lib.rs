@@ -57,6 +57,8 @@ pub static HOST: relax_runner::Host = relax_runner::Host {
     provide: provided,
     // interactive visual iteration: a bounded compile-ahead of what the UI is about to need
     ahead: relax_compiler::options::AheadLevel::Balanced,
+    // apps for users: third-party compile-time code stays sandboxed
+    proc_macros: relax_compiler::pmhost::Policy::Sandboxed,
     default_launch: Some(checkout_runner),
 };
 

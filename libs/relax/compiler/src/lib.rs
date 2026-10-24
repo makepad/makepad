@@ -383,6 +383,16 @@ pub fn session_from_env(args: &[String]) -> std::sync::Arc<crate::Session> {
     options.spec_hot = Some(options.spec_hot.unwrap_or_else(crate::jit::on_battery));
     options.spec_jobs = Some(options.spec_jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(2, |n| n.get()).saturating_sub(1).clamp(1, 6)));
     options.tier1_profile_data = options.tier1_profile.as_ref().and_then(|p| p.to_str()).and_then(|p| std::fs::read_to_string(p).ok());
+    // deterministic O3 (record and replay): every body is borrow-checked before its first code
+    // (--check-first), so no code is lowered unverified (SPEC-V baseline code and twins depend on
+    // when verdicts arrive) and both runs lower the same verified bodies
+    // ... and no baseline startup tier (MAKEPAD_RUN_O1=0): whether a body's first code is baseline or
+    // O1 depends on when it is first compiled (before or after the first present), and baseline
+    // code's O2 upgrade on this run's cost checks; first code is O1, O2/O3 as recorded
+    if options.tier1_profile.is_some() {
+        crate::jit::CHECK_FIRST.store(true, std::sync::atomic::Ordering::Relaxed);
+        options.t0_baseline = crate::options::Tier0Baseline::Off;
+    }
     let mut session = crate::Session { options, runtime: crate::options::RuntimeOptions::from_env() };
     session.options.target = match session.options.check_target {
         crate::options::CheckTarget::WindowsX64 => "x86_64-pc-windows-gnu",

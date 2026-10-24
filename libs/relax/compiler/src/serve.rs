@@ -507,7 +507,16 @@ impl Session {
     fn rebuild_sources(&mut self, edits: Vec<(String, std::io::Result<Vec<u8>>)>, check_bodies: bool, force_eager: bool) {
         let start = Instant::now();
         for (path, text) in edits {
-            let path = self.file(&path).map(|f| self.unit.prog.file_paths[f as usize].clone()).unwrap_or_else(|| crate::vfs::normalize_path(&path));
+            // the program's own spelling of the file: the overlay is looked up by it. A skipped
+            // file has no id: an alias (macOS /var -> /private/var) maps to the path the program
+            // knows it by, else the edit would sit under a name the rebuild never reads.
+            let path = match self.file(&path) {
+                Some(f) => self.unit.prog.file_paths[f as usize].clone(),
+                None => {
+                    let spelling = Self::source_spelling(&path);
+                    self.paths().into_iter().find(|p| Self::source_spelling(p) == spelling).unwrap_or_else(|| crate::vfs::normalize_path(&path))
+                }
+            };
             let canonical = Self::source_spelling(&path);
             // Skipped files have no file ID yet. Remove old aliases too, so an
             // earlier overlay cannot overwrite the newest edit.

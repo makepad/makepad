@@ -8,12 +8,16 @@
 //! with the macro fn's address, and decodes the output. Functions compile lazily on first call,
 //! like any Relax code; the world lives for the process (later calls reuse it).
 //!
-//! Sandbox: compile-time code gets no capabilities. A macro crate (and its dependencies) that
-//! is not trusted may not use `unsafe`, `extern` blocks, `asm!`, `static mut` or `transmute`,
-//! nor name std's fs/net/process/env/thread/time modules (refused before anything compiles);
-//! every call runs under the hang watchdog. Trusted: local path crates (the workspace's own,
-//! makepad's) and std; registry/git crates are not. Read-only paths a manifest declares:
-//! not needed by any macro yet.
+//! Trust: one policy per process, chosen by the entry point (`set_policy`; runner Host):
+//! - `Policy::Open` (bare `relax`, the dev/test runner for general crates): every proc-macro
+//!   crate runs as cargo would run it, `unsafe` and std capabilities included.
+//! - `Policy::Sandboxed` (`makepad run`, and the default): compile-time code of a third-party
+//!   package -- a registry or git package by its cargo package id, wherever its sources are
+//!   stored -- gets no capabilities: it (and every macro crate depending on it) may not use
+//!   `unsafe`, `extern` blocks, `asm!`, `static mut` or `transmute`, nor name std's
+//!   fs/net/process/env/thread/time modules (refused before anything compiles). Path packages
+//!   (the workspace's own, makepad's) and std are trusted.
+//! Every call runs under the hang watchdog.
 
 use crate::macro_reg::{in_world, set_in_world, trace, Entry, REG, STATS};
 use std::cell::Cell;
@@ -249,14 +253,32 @@ fn prewarm(sess: &std::sync::Arc<crate::Session>) -> Result<(), String> {
 
 
 
-/// Trusted crates may use unsafe/FFI: std and local path crates (the workspace's own,
-/// makepad's); crates from a registry or git checkout (third-party) are sandboxed.
-fn trusted(path: &str, std_dir: &str) -> bool {
-    if !std_dir.is_empty() && crate::vfs::relative_path(path, std_dir).is_some() {
-        return true;
-    }
-    let path = crate::vfs::normalize_path(path);
-    !(path.contains("/.cargo/registry/") || path.contains("/.cargo/git/"))
+/// Which proc-macro crates may use `unsafe` and std capabilities (module doc): the entry
+/// point's choice, one per process.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Policy {
+    /// every macro crate is trusted (bare `relax`)
+    Open,
+    /// registry/git packages are sandboxed (`makepad run`)
+    Sandboxed,
+}
+
+/// 0 = Sandboxed (the default when no entry point chose), 1 = Open
+static POLICY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// The entry point's proc-macro policy, before any crate graph loads.
+pub fn set_policy(p: Policy) {
+    POLICY.store((p == Policy::Open) as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn policy() -> Policy {
+    if POLICY.load(std::sync::atomic::Ordering::Relaxed) == 1 { Policy::Open } else { Policy::Sandboxed }
+}
+
+/// Trusted crates may use unsafe/FFI: all of them under `Policy::Open`; else the path packages
+/// (and std): a registry/git package is sandboxed by what it is, not by where it is stored.
+fn trusted(unit: &crate::macro_reg::UnitInfo) -> bool {
+    policy() == Policy::Open || !unit.registry
 }
 
 /// The sandbox's dialect-level refusal for an untrusted macro crate's files.
@@ -298,7 +320,7 @@ fn sandbox_check(root: &str, edition: u16) -> Result<(), String> {
             };
             if let Some(what) = bad {
                 let (l, c) = crate::lexer::line_col(&src, toks[i].lo);
-                return Err(format!("{}:{}:{}: proc macro uses {} -- not allowed in compile-time code of an untrusted crate", path, l, c, what));
+                return Err(format!("{}:{}:{}: proc macro uses {} -- not allowed in compile-time code of a third-party crate under `makepad run` (bare `relax` runs it)", path, l, c, what));
             }
         }
     }
@@ -326,7 +348,7 @@ fn build_world(sess: &std::sync::Arc<crate::Session>) -> Result<World, String> {
     // world; its macros report the reason at their call sites
     let mut refused: Vec<Option<String>> = vec![None; units.len()];
     for i in 0..units.len() {
-        if need[i] && !trusted(&units[i].src_path, &std_dir) {
+        if need[i] && !trusted(&units[i]) {
             if let Err(e) = sandbox_check(&units[i].src_path, units[i].edition) {
                 refused[i] = Some(e);
             }

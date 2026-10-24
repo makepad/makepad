@@ -51,6 +51,9 @@ pub mod gpu_limits;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod gpu_prof;
 pub mod gpu_pressure;
+pub mod h264_bits;
+#[cfg(target_os = "linux")]
+pub mod stream_encode;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod framecap;
 #[cfg(not(target_arch = "wasm32"))]

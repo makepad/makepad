@@ -14,6 +14,9 @@
 //! rustc-built (tools/run/build.rs PROVIDED: the HAL, the script VM, the shader compiler), whose
 //! code is the same machine code both ways; `system (called by the program)`.
 //!
+//! `raw=<file>` also writes the samples as recorded (`save_raw`), for the JIT side's `vsnative file=`
+//! (JIT-vs-native per source fn on macOS, where no process may sample another one).
+//!
 //! `wall=1` also samples the picked threads while they wait (a wall-clock profile): those samples
 //! count in the bucket `off CPU (waiting)`, and their stacks say what they wait for.
 
@@ -471,9 +474,46 @@ pub fn cmd_prof(req: &Req, out: &mut Out) {
     if gone() {
         return release(&run.ths);
     }
+    if let Some(path) = req.get("raw") {
+        match save_raw(&run, path) {
+            Ok(k) => out.line(&format!("{{\"raw\":{},\"samples\":{}}}", json_str(path), k)),
+            Err(e) => out.err(&format!("raw={}: {}", path, e)),
+        }
+    }
     let syms = names(&run);
     report(&run, &syms, n, req.get("save") == Some("1"), out);
     release(&run.ths);
+}
+
+/// `prof raw=<file>`: the samples as recorded, for `makepad inspect <jit pid> vsnative file=<file>`
+/// (the JIT side names them by this executable's DWARF inline tree). Lines, tab separated:
+/// `exe <path>`, `secs <s>`, `hz <n>`, then `s <weight> <frame>...` innermost first, a frame being
+/// `@<hex>` (a file virtual address in this executable) or `!<name>` (another image's symbol).
+fn save_raw(run: &Run, path: &str) -> Result<usize, String> {
+    use std::fmt::Write as _;
+    let img = main_image();
+    let slide = unsafe { sys::_dyld_get_image_vmaddr_slide(0) } as i64 as u64;
+    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut t = format!("exe\t{}\nsecs\t{:.3}\nhz\t{}\n", exe, run.secs, run.hz);
+    let mut k = 0;
+    for smp in run.samples.iter().filter(|s| s.on_cpu) {
+        t.push_str("s\t1");
+        for (i, &pc) in smp.pcs.iter().enumerate() {
+            match &img {
+                Some(m) if pc >= m.lo && pc < m.hi => {
+                    let _ = write!(t, "\t@{:x}", pc.wrapping_sub(slide));
+                }
+                _ => {
+                    let f = symbolise(&img, if i == 0 { pc } else { pc.wrapping_sub(1) });
+                    let _ = write!(t, "\t!{}", f.name.replace('\t', " "));
+                }
+            }
+        }
+        t.push('\n');
+        k += 1;
+    }
+    std::fs::write(path, t).map_err(|e| e.to_string())?;
+    Ok(k)
 }
 
 fn cpu_ms(run: &Run, k: usize) -> f64 {

@@ -61,7 +61,10 @@ fn wrapper(out: &mut String, r: &Registry, c: &Command, group: &str) {
     let array_out = last.pointer == 1 && !last.constant && !last.len.is_empty() && !enumeration;
     let output = (return_result || c.ret == "core::ffi::c_void") && last.pointer > 0 && !last.constant && !has_next(r,last)
         && !matches!(c.name.as_str(), "vkUpdateDescriptorSets") || enumeration || array_out;
-    let output_type = if output { pointee(last) } else { "()".into() };
+    // An enumerated `void*` blob (encoded video parameters) comes back as bytes.
+    let blob = enumeration && last.base == "void";
+    let output_type = if blob { "u8".into() } else if output { pointee(last) } else { "()".into() };
+    let count_type = fields.iter().find(|p| enumeration && p.name == snake(&last.len)).map(pointee).unwrap_or_else(|| "u32".into());
     let mut signature: Vec<String> = Vec::new();
     let mut args: Vec<String> = Vec::new();
     let mut setup = String::new();
@@ -77,7 +80,7 @@ fn wrapper(out: &mut String, r: &Registry, c: &Command, group: &str) {
             args.push("self.handle".into()); continue;
         }
         if enumeration && f.name == snake(&last.len) { args.push("&mut count".into()); continue; }
-        if output && i == fields.len()-1 { args.push(if array_out || enumeration { "values.as_mut_ptr()" } else { "&mut value" }.into()); continue; }
+        if output && i == fields.len()-1 { args.push(if blob { "values.as_mut_ptr().cast()" } else if array_out || enumeration { "values.as_mut_ptr()" } else { "&mut value" }.into()); continue; }
         if let Some(array) = lengths.get(&f.name) {
             if f.pointer == 0 { args.push(format!("{array}.len() as _")); continue; }
         }
@@ -119,7 +122,7 @@ fn wrapper(out: &mut String, r: &Registry, c: &Command, group: &str) {
     let comma = if signature.is_empty() { "" } else { ", " };
     out.push_str(&format!("impl crate::{owner} {{\n    #[inline]\n    pub unsafe fn {method}(&self{comma}{}) -> {ret} {{\n        let call = self.table.{field_name}.expect(\"{name} is unavailable\");\n",signature.join(", "),name=c.name));
     if enumeration {
-        enumerate(out,c,&args,&output_type,return_result);
+        enumerate(out,c,&args,&output_type,&count_type,return_result);
         out.push_str("    }\n}\n"); return;
     }
     if array_out {
@@ -150,10 +153,10 @@ fn wrapper(out: &mut String, r: &Registry, c: &Command, group: &str) {
     }
     out.push_str("    }\n}\n");
 }
-fn enumerate(out: &mut String, c: &Command, args: &[String], element: &str, result: bool) {
+fn enumerate(out: &mut String, c: &Command, args: &[String], element: &str, count_type: &str, result: bool) {
     let mut first = args.to_vec();
     *first.last_mut().unwrap() = "core::ptr::null_mut()".into();
-    out.push_str("        loop {\n            let mut count = 0u32;\n");
+    out.push_str(&format!("        loop {{\n            let mut count: {count_type} = 0;\n"));
     let initial = format!("call({})",first.join(", "));
     if result { out.push_str(&format!("            {initial}.result()?;\n")); }
     else { out.push_str(&format!("            {initial};\n")); }

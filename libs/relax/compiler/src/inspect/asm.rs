@@ -401,7 +401,7 @@ fn our_sides(q: &str, max: usize) -> Result<(Vec<(u32, Side)>, Vec<String>), Str
                             }
                             None => (u32::MAX, None),
                         };
-                        let inl = res.inline_stack(u, id, b.map, p).map_or((String::new(), 0), |i| (i.name, (i.stack.len().saturating_sub(1)).min(255) as u8));
+                        let inl = res.inline_stack(u, id, b.start, b.map, p).map_or((String::new(), 0), |i| (i.name, (i.stack.len().saturating_sub(1)).min(255) as u8));
                         pos_cache.insert(p, (li, inl, cnt));
                     }
                     let (li, inl, cnt) = pos_cache[&p].clone();

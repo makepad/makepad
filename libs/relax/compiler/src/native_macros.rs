@@ -288,7 +288,7 @@ mod tests {
             }
             let unit = reg.units.len();
             reg.units.push(UnitInfo { name: name.into(), src_path: root.join(name).join("src/lib.rs").to_string_lossy().into_owned(), edition: 2021,
-                features: Vec::new(), deps: if unit == 0 { Vec::new() } else { vec![(unit - 1, reg.units[unit - 1].name.clone())] }, proc_macro: unit == 2 });
+                features: Vec::new(), deps: if unit == 0 { Vec::new() } else { vec![(unit - 1, reg.units[unit - 1].name.clone())] }, proc_macro: unit == 2, registry: false });
         }
         reg.units[2].deps.push((0, "makepad_micro_proc_macro".into()));
         assert!(checked(&reg).is_ok());

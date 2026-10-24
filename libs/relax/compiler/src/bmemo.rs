@@ -189,13 +189,6 @@ pub(crate) struct Memo {
     epoch: u64,
 }
 
-impl Memo {
-    #[cfg(test)]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-}
-
 /// hits, misses, results not stored, cpu ns the hits saved, cpu ns spent on keys and lookups,
 /// back ends of a slot whose RIR existed (code generation only: not memoized), times the memo
 /// was dropped full

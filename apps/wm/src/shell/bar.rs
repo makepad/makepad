@@ -48,6 +48,8 @@ pub enum BarModule {
     Network,
     /// The AI hub panel's button.
     Hub,
+    /// Someone is viewing this desktop over Desk Link: shown only then, never silent.
+    DeskLink,
     Audio,
     Monitor,
     Power,
@@ -187,6 +189,9 @@ pub struct BarData {
     pub maximized: bool,
     /// Some model of the AI hub is working: its icon pulses.
     pub hub_active: bool,
+    /// Desk Link viewers right now (`name`, address); the bar shows its item while any is
+    /// connected.
+    pub desk_link: Vec<(String, String)>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -244,6 +249,7 @@ impl BarData {
             open_panel: None,
             maximized: false,
             hub_active: false,
+            desk_link: vec![],
         }
     }
 }
@@ -769,6 +775,9 @@ impl ShellBar {
     /// icon each one shows right now.
     fn right_modules(data: &BarData) -> Vec<(BarModule, Ico, bool)> {
         let mut v: Vec<(BarModule, Ico, bool)> = Vec::new();
+        if !data.desk_link.is_empty() {
+            v.push((BarModule::DeskLink, Ico::Record, true));
+        }
         for (i, ico) in data.tray.iter().enumerate() {
             v.push((BarModule::Tray(i), *ico, true));
         }
@@ -1063,9 +1072,23 @@ impl ShellBar {
                     self.hits.push((seg, *module, label_rect));
                 }
             }
+            if *module == BarModule::DeskLink {
+                // who is looking: the first viewer's address (+N more), then the live dot. Static:
+                // an animation here would repaint the very desktop the viewer is streaming
+                let first = &data.desk_link[0].1;
+                let label = if data.desk_link.len() > 1 { format!("{first} +{}", data.desk_link.len() - 1) } else { first.clone() };
+                let width = self.d.measure(cx, false, tok.font.caption, &label) + 6.0;
+                rx -= width;
+                let label_rect = rect(rx, r.pos.y, width, r.size.y);
+                self.d.label(cx, label_rect, false, tok.font.caption, fg, super::ui::HAlign::Left, &label);
+                self.hits.push((seg, *module, label_rect));
+            }
             rx -= slot;
             let cell = rect(rx, r.pos.y, slot, r.size.y);
             let mut color = if *available { fg } else { fade(fg, 0.45) };
+            if *module == BarModule::DeskLink {
+                color = accent;
+            }
             // The battery goes urgent below 20% on battery power.
             if *module == BarModule::Power {
                 if let Some(b) = data.battery {
@@ -1132,6 +1155,10 @@ impl ShellBar {
             },
             BarModule::Gamepad => "Controllers & device batteries".into(),
             BarModule::Hub => if data.hub_active { "AI hub: working".into() } else { "AI hub".into() },
+            BarModule::DeskLink => {
+                let who: Vec<String> = data.desk_link.iter().map(|(name, ip)| format!("{name} ({ip})")).collect();
+                format!("Desk Link: viewed by {}", who.join(", "))
+            }
             BarModule::Monitor => "Display".into(),
             BarModule::Power => match data.battery {
                 Some(b) if b.charging => format!("Battery {}%, charging", b.percent),

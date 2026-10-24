@@ -641,11 +641,6 @@ fn register_probe(id: u32, hook: &str, emits: Vec<(u32, Vec<String>)>) -> (Arc<P
     (p, ps.len() as u64 - 1)
 }
 
-#[cfg(test)]
-pub(super) fn register_probe_for_test(id: u32, hook: &str) -> (Arc<Probe>, u64) {
-    register_probe(id, hook, Vec::new())
-}
-
 /// The live probes: (id, hook).
 pub fn live() -> Vec<(u32, String)> {
     PROBES.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|p| p.on.load(Relaxed) && !p.slots.lock().unwrap_or_else(|e| e.into_inner()).is_empty()).map(|p| (p.id, p.hook.clone())).collect()

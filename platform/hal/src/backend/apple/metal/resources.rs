@@ -157,13 +157,30 @@ pub fn create_texture(device: ObjcId, t: &TextureObj, gen: u32, label: &str) -> 
     Ok(Tex { gen, obj: RcObjcId::from_owned(NonNull::new(texture).expect("checked")), surface, surface_id, last_bound: 0, _keep: None })
 }
 
-/// A texture over an IOSurface another process (or the host) owns, found by its global id.
-pub fn import_surface(device: ObjcId, id: IOSurfaceID, gen: u32) -> Option<(Tex, u32, u32, u32)> {
+/// A texture over an IOSurface another process (or the host) owns, found by its global id:
+/// the whole BGRA surface (`texture_handle::NATIVE`), or one plane of a biplanar 4:2:0 one
+/// (`LUMA`: plane 0 as R8, `CHROMA`: plane 1 as RG8).
+pub fn import_surface(device: ObjcId, id: IOSurfaceID, gen: u32, kind: u32) -> Option<(Tex, u32, u32, u32)> {
+    let (plane, pixel_format, fmt) = match kind {
+        texture_handle::NATIVE => (0usize, MTLPixelFormat::BGRA8Unorm, format::BGRA8),
+        texture_handle::LUMA => (0, MTLPixelFormat::R8Unorm, format::R8),
+        texture_handle::CHROMA => (1, MTLPixelFormat::RG8Unorm, format::RG8),
+        _ => return None,
+    };
     let surface = unsafe { IOSurfaceLookup(id) };
     if surface.is_null() {
         return None;
     }
-    let (w, h) = unsafe { (IOSurfaceGetWidth(surface) as u64, IOSurfaceGetHeight(surface) as u64) };
+    let (w, h) = unsafe {
+        if kind == texture_handle::NATIVE {
+            (IOSurfaceGetWidth(surface) as u64, IOSurfaceGetHeight(surface) as u64)
+        } else if IOSurfaceGetPlaneCount(surface) == 2 {
+            (IOSurfaceGetWidthOfPlane(surface, plane) as u64, IOSurfaceGetHeightOfPlane(surface, plane) as u64)
+        } else {
+            CFRelease(surface);
+            return None;
+        }
+    };
     let Some(descriptor) = NonNull::new(unsafe { msg_send![class!(MTLTextureDescriptor), new] }) else {
         unsafe { CFRelease(surface) };
         return None;
@@ -176,15 +193,16 @@ pub fn import_surface(device: ObjcId, id: IOSurfaceID, gen: u32) -> Option<(Tex,
         let _: () = msg_send![d, setHeight: h];
         let _: () = msg_send![d, setDepth: 1u64];
         let _: () = msg_send![d, setStorageMode: MTLStorageMode::Private];
-        let _: () = msg_send![d, setUsage: (MTLTextureUsage::RenderTarget as u64 | MTLTextureUsage::ShaderRead as u64)];
-        let _: () = msg_send![d, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
+        let usage = if kind == texture_handle::NATIVE { MTLTextureUsage::RenderTarget as u64 | MTLTextureUsage::ShaderRead as u64 } else { MTLTextureUsage::ShaderRead as u64 };
+        let _: () = msg_send![d, setUsage: usage];
+        let _: () = msg_send![d, setPixelFormat: pixel_format];
     }
-    let texture: ObjcId = unsafe { msg_send![device, newTextureWithDescriptor: d iosurface: surface plane: 0u64] };
+    let texture: ObjcId = unsafe { msg_send![device, newTextureWithDescriptor: d iosurface: surface plane: plane as u64] };
     let Some(texture) = NonNull::new(texture) else {
         unsafe { CFRelease(surface) };
         return None;
     };
-    Some((Tex { gen, obj: RcObjcId::from_owned(texture), surface: Some(surface), surface_id: id, last_bound: 0, _keep: None }, w as u32, h as u32, format::BGRA8))
+    Some((Tex { gen, obj: RcObjcId::from_owned(texture), surface: Some(surface), surface_id: id, last_bound: 0, _keep: None }, w as u32, h as u32, fmt))
 }
 
 /// What the device holds for a texture.

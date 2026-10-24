@@ -56,8 +56,8 @@ pub mod stream_decoder;
 pub mod stream_encoder;
 
 pub use color::{VideoColor, VideoColorUniforms, VideoMatrix, VideoPrimaries, VideoRange, VideoTransfer};
-pub use stream_decoder::{DecodedFrame, VideoStreamDecoder};
-pub use stream_encoder::{EncodedPacket, StreamVideoCodec, VideoStreamEncoder, VideoStreamEncoderOptions};
+pub use stream_decoder::{DecodedFrame, DecodedPicture, PicturePlane, VideoStreamDecoder};
+pub use stream_encoder::{EncodedPacket, GpuReady, StreamVideoCodec, VideoStreamEncoder, VideoStreamEncoderOptions};
 
 use std::fmt;
 
@@ -226,6 +226,8 @@ use apple_encoder::MacosVideoFileEncoder as OsVideoFileEncoder;
 // the fleet's Linux verification pass.
 #[cfg(target_os = "linux")]
 mod linux_gst_sys;
+#[cfg(target_os = "linux")]
+mod linux_stream_encoder;
 #[cfg(target_os = "linux")]
 mod linux_encoder;
 #[cfg(target_os = "linux")]

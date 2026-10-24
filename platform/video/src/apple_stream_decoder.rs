@@ -9,7 +9,7 @@
 //! encoder: `push_packet` waits for the decode callback before returning.
 
 use crate::annex_b;
-use crate::stream_decoder::DecodedFrame;
+use crate::stream_decoder::{DecodedFrame, DecodedPicture};
 use crate::stream_encoder::StreamVideoCodec;
 use crate::VideoFileError;
 use makepad_apple_sys::*;
@@ -36,7 +36,27 @@ fn cmtime_to_hns(t: CMTime) -> i64 {
 }
 
 struct DecoderShared {
-    frames: Vec<(u32, u32, Vec<u8>, i64)>,
+    /// Frames stay the decoder's IOSurface-backed pixel buffers (no CPU copy).
+    gpu: bool,
+    frames: Vec<DecodedFrame>,
+}
+
+#[link(name = "CoreVideo", kind = "framework")]
+extern "C" {
+    fn CVPixelBufferGetIOSurface(buffer: CVPixelBufferRef) -> *mut c_void;
+}
+
+/// A decoded pixel buffer held for a `DecodedPicture`: back to the decoder's pool when released.
+struct HeldPixelBuffer(CVPixelBufferRef);
+
+// SAFETY: a CVPixelBuffer is a thread-safe refcounted CoreVideo object; this only releases it.
+unsafe impl Send for HeldPixelBuffer {}
+unsafe impl Sync for HeldPixelBuffer {}
+
+impl Drop for HeldPixelBuffer {
+    fn drop(&mut self) {
+        unsafe { CVPixelBufferRelease(self.0) };
+    }
 }
 
 unsafe extern "C" fn decode_output_callback(
@@ -56,6 +76,20 @@ unsafe extern "C" fn decode_output_callback(
     if width == 0 || height == 0 {
         return;
     }
+    let pts_100ns = cmtime_to_hns(presentation_time_stamp);
+    let shared = &*(decompression_output_ref_con as *const Mutex<DecoderShared>);
+    let Ok(mut guard) = shared.lock() else { return };
+    if guard.gpu {
+        let surface = CVPixelBufferGetIOSurface(image_buffer);
+        if !surface.is_null() {
+            let handle = IOSurfaceGetID(surface) as u64;
+            let held = HeldPixelBuffer(CVPixelBufferRetain(image_buffer));
+            let gpu = Some(DecodedPicture { handle, _keep: std::sync::Arc::new(held) });
+            guard.frames.push(DecodedFrame { width, height, nv12: Vec::new(), pts_100ns, gpu });
+            return;
+        }
+    }
+    drop(guard);
     CVPixelBufferLockBaseAddress(image_buffer, 1); // kCVPixelBufferLock_ReadOnly
     let mut nv12 = vec![0u8; crate::nv12::nv12_frame_size(width, height)];
     let y_size = width as usize * height as usize;
@@ -77,10 +111,8 @@ unsafe extern "C" fn decode_output_callback(
         }
     }
     CVPixelBufferUnlockBaseAddress(image_buffer, 1);
-    let pts_100ns = cmtime_to_hns(presentation_time_stamp);
-    let shared = &*(decompression_output_ref_con as *const Mutex<DecoderShared>);
     if let Ok(mut guard) = shared.lock() {
-        guard.frames.push((width, height, nv12, pts_100ns));
+        guard.frames.push(DecodedFrame { width, height, nv12, pts_100ns, gpu: None });
     }
 }
 
@@ -88,6 +120,7 @@ pub struct AppleStreamDecoder {
     session: VTDecompressionSessionRef,
     format_desc: CMFormatDescriptionRef,
     shared: Box<Mutex<DecoderShared>>,
+    gpu: bool,
     codec: StreamVideoCodec,
     sps: Option<Vec<u8>>,
     pps: Option<Vec<u8>>,
@@ -96,11 +129,13 @@ pub struct AppleStreamDecoder {
 }
 
 impl AppleStreamDecoder {
-    pub fn new(codec: StreamVideoCodec) -> Result<Self, VideoFileError> {
+    /// `gpu`: frames stay IOSurface-backed pixel buffers (`DecodedFrame::gpu`), no CPU copy.
+    pub fn new(codec: StreamVideoCodec, gpu: bool) -> Result<Self, VideoFileError> {
         Ok(Self {
             session: std::ptr::null_mut(),
             format_desc: std::ptr::null_mut(),
-            shared: Box::new(Mutex::new(DecoderShared { frames: Vec::new() })),
+            gpu,
+            shared: Box::new(Mutex::new(DecoderShared { gpu, frames: Vec::new() })),
             codec,
             sps: None,
             pps: None,
@@ -166,11 +201,24 @@ impl AppleStreamDecoder {
             decompressionOutputRefCon: self.shared.as_ref() as *const Mutex<DecoderShared> as *mut c_void,
         };
         let mut session: VTDecompressionSessionRef = std::ptr::null_mut();
+        // GPU output: 420v pixel buffers on global IOSurfaces (the HAL imports them by id) that
+        // Metal can sample, plane by plane
+        let destination: ObjcId = if self.gpu {
+            let number = |v: u32| -> ObjcId { msg_send![class!(NSNumber), numberWithUnsignedInt: v] };
+            let yes: ObjcId = msg_send![class!(NSNumber), numberWithBool: YES];
+            let global_key: ObjcId = msg_send![class!(NSString), stringWithUTF8String: c"IOSurfaceIsGlobal".as_ptr()];
+            let surface_props: ObjcId = msg_send![class!(NSDictionary), dictionaryWithObject: yes forKey: global_key];
+            let keys = [kCVPixelBufferPixelFormatTypeKey as ObjcId, kCVPixelBufferIOSurfacePropertiesKey as ObjcId, kCVPixelBufferMetalCompatibilityKey as ObjcId];
+            let values = [number(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange), surface_props, yes];
+            msg_send![class!(NSDictionary), dictionaryWithObjects: values.as_ptr() forKeys: keys.as_ptr() count: keys.len()]
+        } else {
+            std::ptr::null_mut()
+        };
         let create_status = VTDecompressionSessionCreate(
             std::ptr::null(),
             format_desc,
             std::ptr::null(),
-            std::ptr::null(),
+            destination as *const c_void,
             &callback_record,
             &mut session,
         );
@@ -298,7 +346,6 @@ impl AppleStreamDecoder {
         Ok(guard
             .frames
             .drain(..)
-            .map(|(width, height, nv12, pts_100ns)| DecodedFrame { width, height, nv12, pts_100ns })
             .collect())
     }
 

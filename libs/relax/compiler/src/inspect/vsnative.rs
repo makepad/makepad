@@ -8,11 +8,16 @@
 //!
 //! Per second of wall is the right unit for work at a fixed pace (playback, a frame-locked app,
 //! a replayed input recording); two flat-out loops are compared by their shares (the `%` columns).
-//! Linux only: macOS lets a process sample another one only with privileges.
+//! Linux only: macOS lets a process sample another one only with privileges. There (and anywhere)
+//! `vsnative file=<raw>` compares against the native app's own samples (its `prof raw=<file>`).
 
 use super::{Out, Req};
 
 pub fn cmd_vsnative(req: &Req, out: &mut Out) {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(f) = req.get("file") {
+        return stacks::run_file(req, out, f);
+    }
     imp::run(req, out);
 }
 
@@ -357,7 +362,7 @@ mod imp {
 /// and keyed alike (`Type::fn` without generics), so self and inclusive time per fn compare 1:1 --
 /// the attribution table of a JIT-vs-native gap. `roots=` keeps the samples under those fns (the
 /// part of a frame a meter times) and cuts their stacks at the root.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod stacks {
     use super::{Out, Req};
     use crate::inspect::short;
@@ -380,133 +385,32 @@ mod stacks {
         segs[k..].join("::")
     }
 
-    /// (user ms, system ms, voluntary switches, involuntary switches) of thread `tid` of `pid` so far.
-    fn tstat(pid: u32, tid: u64) -> (f64, f64, u64, u64) {
-        let tick_ms = 10.0; // USER_HZ = 100 on Linux
-        let st = std::fs::read_to_string(format!("/proc/{}/task/{}/stat", pid, tid)).unwrap_or_default();
-        let f: Vec<&str> = st.rsplit_once(')').map(|x| x.1.split_whitespace().collect()).unwrap_or_default();
-        let num = |k: usize| f.get(k).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-        let status = std::fs::read_to_string(format!("/proc/{}/task/{}/status", pid, tid)).unwrap_or_default();
-        let sw = |key: &str| status.lines().find_map(|l| l.strip_prefix(key)).and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
-        (num(11) * tick_ms, num(12) * tick_ms, sw("voluntary_ctxt_switches:"), sw("nonvoluntary_ctxt_switches:"))
+    /// This process's samples as expanded stacks, outermost first: (name, code) where code is the
+    /// tier and build version of JIT code (`O3 v2`), `inl` for an inlined level, else the frame kind.
+    fn jit_frames(run: &crate::inspect::prof::Run, partial: &mut Vec<String>) -> Vec<(Vec<(String, String)>, u64)> {
+        crate::inspect::calltree::expanded_raw(run, partial).into_iter().map(|(_, _, f, w)| (f.into_iter().map(|x| {
+            let jit = !matches!(x.tier.as_str(), "inl" | "native" | "glue" | "jit" | "?");
+            let code = if jit { format!("{} v{}", x.tier, x.gen) } else { x.tier };
+            (x.name, code)
+        }).collect(), w)).collect()
     }
 
-    fn busiest(pid: u32, n: usize) -> Vec<(u64, String)> {
-        let cpu = |t: &str| -> u64 {
-            std::fs::read_to_string(format!("/proc/{}/task/{}/stat", pid, t)).ok().and_then(|s| {
-                let f: Vec<&str> = s.rsplit_once(')')?.1.split_whitespace().collect();
-                Some(f.get(11)?.parse::<u64>().ok()? + f.get(12)?.parse::<u64>().ok()?)
-            }).unwrap_or(0)
-        };
-        let tids: Vec<String> = std::fs::read_dir(format!("/proc/{}/task", pid)).map(|d| d.flatten().filter_map(|e| e.file_name().to_str().map(|s| s.to_string())).collect()).unwrap_or_default();
-        let a: Vec<u64> = tids.iter().map(|t| cpu(t)).collect();
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        let mut v: Vec<(u64, u64, String)> = tids.iter().zip(&a).map(|(t, &c0)| {
-            let name = std::fs::read_to_string(format!("/proc/{}/task/{}/comm", pid, t)).unwrap_or_default().trim().to_string();
-            (cpu(t).saturating_sub(c0), t.parse().unwrap_or(0), name)
-        }).collect();
-        v.sort_by(|x, y| y.0.cmp(&x.0));
-        v.into_iter().take(n).map(|x| (x.1, x.2)).collect()
-    }
-
-    pub fn run(req: &Req, out: &mut Out, pid: &str) {
-        let Ok(pid) = pid.parse::<u32>() else { return out.err("pid=<the native build's process id>") };
-        let secs = req.get("s").and_then(|v| v.parse::<f64>().ok()).unwrap_or(10.0).clamp(0.5, 60.0);
-        let hz = req.num("hz", 1000).clamp(50, 4000);
+    /// The JIT-vs-native tables of `ours` (this process's run, expanded) and `theirs` (the native
+    /// build's stacks over `tn` s, named by its DWARF inline tree), keyed alike, cut at `roots=`.
+    /// Returns (unit, native all, native under roots, JIT all, JIT under roots, JIT secs).
+    fn compare(req: &Req, out: &mut Out, run: &crate::inspect::prof::Run, ours: &[(Vec<(String, String)>, u64)], theirs: &[(Vec<(String, String)>, u64)], tn: f64) -> (String, f64, f64, f64, f64, f64) {
         let n = req.num("n", 30) as usize;
         let depth = req.num("tree", 0) as usize;
         let min = req.get("min").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.1);
-        let ev = match crate::inspect::prof::Ev::parse(req.get("ev").unwrap_or("cpu")) {
-            Ok(e) => e,
-            Err(e) => return out.err(&e),
-        };
-        let exe = match std::fs::read_link(format!("/proc/{}/exe", pid)) {
-            Ok(p) => p.to_string_lossy().into_owned(),
-            Err(e) => return out.err(&format!("no process {}: {}", pid, e)),
-        };
-        let cfi = match crate::inspect::cfi::Foreign::open(pid) {
-            Ok(c) => c,
-            Err(e) => return out.err(&e),
-        };
-        // the native threads: by name, else the busiest
-        let tids: Vec<(u64, String)> = match req.get("nthreads") {
-            Some(sel) if sel != "busy" => busiest(pid, 1 << 16).into_iter().filter(|(_, nm)| sel.split(',').any(|s| nm.starts_with(s))).collect(),
-            _ => busiest(pid, 2),
-        };
-        if tids.is_empty() {
-            return out.err(&format!("process {}: no thread matches nthreads=", pid));
-        }
-        let gone = out.gone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let ids: Vec<u64> = tids.iter().map(|t| t.0).collect();
-        let spawned = {
-            let _k = crate::zone_alloc::kept();
-            std::thread::Builder::new().name("run-inspect-vsnative".into()).spawn(move || {
-                crate::inspect::heap::exclude_this_thread();
-                let r = crate::inspect::prof::collect_foreign(&ids, secs, hz, ev, &cfi, &|| false);
-                let _ = tx.send((r, cfi));
-            })
-        };
-        if spawned.is_err() {
-            return out.err("cannot start the sampling thread");
-        }
-        // user/system time and context switches of both sides' threads over the window: the
-        // samples see user time only (perf_event_paranoid 2), a meter of wall time sees all of it
-        let me = std::process::id();
-        let mine: Vec<u64> = {
-            let sel = crate::inspect::prof::pick(req.get("threads").unwrap_or("main"));
-            let mut ts = crate::inspect::threads::list();
-            crate::inspect::name_handles(&mut ts);
-            ts.into_iter().filter(|t| sel(t)).map(|t| t.os_id).collect()
-        };
-        let st0: Vec<(f64, f64, u64, u64)> = mine.iter().map(|&t| tstat(me, t)).chain(tids.iter().map(|t| tstat(pid, t.0))).collect();
-        let run = crate::inspect::prof::collect_ev(secs, hz, ev, &*crate::inspect::prof::pick(req.get("threads").unwrap_or("main")), &*gone);
-        let st1: Vec<(f64, f64, u64, u64)> = mine.iter().map(|&t| tstat(me, t)).chain(tids.iter().map(|t| tstat(pid, t.0))).collect();
-        let Ok(((nat, lost, mut notes), cfi)) = rx.recv_timeout(std::time::Duration::from_secs_f64(secs + 30.0)) else {
-            return out.err("the native sampling thread did not finish");
-        };
-        if gone() {
-            return;
-        }
-        // ours: expanded (inline levels as frames), outermost first
-        let mut partial = Vec::new();
-        let ours: Vec<(Vec<(String, String)>, u64)> = crate::inspect::calltree::expanded_raw(&run, &mut partial).into_iter().map(|(_, _, f, w)| (f.into_iter().map(|x| (x.name, x.tier)).collect(), w)).collect();
-        // native: each pc by the binary's symbols and inline tree
-        let map = super::imp::Map::of(pid, &exe);
-        let mut names: HashMap<u64, Vec<String>> = HashMap::new();
-        let mut theirs: Vec<(Vec<(String, String)>, u64)> = Vec::new();
-        let named = crate::inspect::asm::with_native_bin(&exe, |nb| {
-            let mut inl: HashMap<u64, Vec<crate::inspect::natbin::InlinedCall>> = HashMap::new();
-            for smp in &nat {
-                let mut fr: Vec<(String, String)> = Vec::new();
-                for (i, &pc) in smp.frames.iter().enumerate().rev() {
-                    let look = if i == 0 { pc } else { pc.wrapping_sub(1) };
-                    let v = names.entry(look).or_insert_with(|| {
-                        let Some(va) = map.vaddr(look) else {
-                            return vec![cfi.files.iter().find(|f| look >= f.0 && look < f.1).map_or_else(|| format!("{:#x}", look), |f| format!("{}+{:#x}", f.2.rsplit('/').next().unwrap_or(&f.2), look - f.0))];
-                        };
-                        let Some(f) = nb.fn_at(va) else { return vec![format!("{}+{:#x}", exe.rsplit('/').next().unwrap_or(&exe), va)] };
-                        let calls = inl.entry(f.addr).or_insert_with(|| nb.inlined(f.addr, f.addr + f.size));
-                        let mut here: Vec<&crate::inspect::natbin::InlinedCall> = calls.iter().filter(|c| c.ranges.iter().any(|r| va >= r.0 && va < r.1)).collect();
-                        here.sort_by_key(|c| std::cmp::Reverse(c.depth));
-                        // innermost first, the concrete fn last
-                        let mut v: Vec<String> = here.iter().map(|c| c.name.clone()).collect();
-                        v.push(f.name.clone());
-                        v
-                    });
-                    // outermost first
-                    fr.extend(v.iter().rev().enumerate().map(|(k, n)| (n.clone(), if k == 0 { "native".to_string() } else { "inl".to_string() })));
-                }
-                theirs.push((fr, smp.weight.max(1)));
-            }
-        });
-        if let Err(e) = named {
-            return out.err(&e);
-        }
+        let ev = run.ev;
+        let hz = run.hz;
+        let secs = tn;
         let roots: Vec<String> = req.get("roots").map(|r| r.split(',').map(key).collect()).unwrap_or_default();
         // keyed stacks under the roots (cut at the outermost root), weights in ms of CPU (cpu) or events
         let unit_ms = if ev == crate::inspect::prof::Ev::Cpu { 1000.0 / hz as f64 } else { 1.0 };
-        let keyed = |v: &[(Vec<(String, String)>, u64)], tiers: &mut HashMap<String, HashMap<String, u64>>| -> (Vec<(Vec<String>, f64)>, f64) {
+        // per leaf key: the physical code it ran in (itself, or the fn it is inlined into) with that code's tier
+        let mut owners: HashMap<String, HashMap<String, f64>> = HashMap::new();
+        let mut keyed = |v: &[(Vec<(String, String)>, u64)], tiers: &mut HashMap<String, HashMap<String, u64>>, own: bool| -> (Vec<(Vec<String>, f64)>, f64) {
             let mut outv = Vec::new();
             let mut all = 0.0;
             for (fr, w) in v {
@@ -520,14 +424,20 @@ mod stacks {
                         *tiers.entry(k.clone()).or_default().entry(f.1.clone()).or_default() += w as u64;
                     }
                 }
+                if own {
+                    let leaf = ks.len() - 1;
+                    let phys = (at..=leaf).rev().find(|&p| fr[p].1 != "inl").unwrap_or(at);
+                    let desc = if phys == leaf { format!("own code {}", fr[phys].1) } else { format!("inl in {} [{}]", ks[phys], fr[phys].1) };
+                    *owners.entry(ks[leaf].clone()).or_default().entry(desc).or_default() += w;
+                }
                 outv.push((ks[at..].to_vec(), w));
             }
             (outv, all)
         };
         let mut jt: HashMap<String, HashMap<String, u64>> = HashMap::new();
         let mut nt = HashMap::new();
-        let (j, jall) = keyed(&ours, &mut jt);
-        let (nv, nall) = keyed(&theirs, &mut nt);
+        let (j, jall) = keyed(ours, &mut jt, true);
+        let (nv, nall) = keyed(theirs, &mut nt, false);
         let (tj, tn) = (run.secs.max(0.01), secs);
         let tables = |v: &[(Vec<String>, f64)]| {
             let mut selfm: HashMap<String, f64> = HashMap::new();
@@ -569,12 +479,18 @@ mod stacks {
         ));
         out.line("");
         out.line(&format!("self time per fn ({}), sorted by JIT - native; cum = running share of the gap", unit));
-        out.line("| fn | JIT tier | JIT | native | delta | cum % |");
-        out.line("|---|---|---:|---:|---:|---:|");
+        out.line("| fn | JIT tier | JIT code it ran in | JIT | native | delta | cum % |");
+        out.line("|---|---|---|---:|---:|---:|---:|");
+        let owner_of = |k: &str| owners.get(k).map(|m| {
+            let mut v: Vec<(&String, &f64)> = m.iter().collect();
+            v.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(b.0)));
+            let t: f64 = v.iter().map(|x| *x.1).sum();
+            v.iter().take(2).map(|(d, w)| if **w == t { d.to_string() } else { format!("{} {:.0}%", d, **w * 100.0 / t.max(1e-9)) }).collect::<Vec<_>>().join("; ")
+        }).unwrap_or_else(|| "-".into());
         let mut cum = 0.0;
         for (d, k) in srows.iter().take(n) {
             cum += d;
-            out.line(&format!("| {} | {} | {:.2} | {:.2} | {:+.2} | {:.0} |", short(&k.replace('|', "/"), 70), tier_of(k), js.get(k).copied().unwrap_or(0.0) / tj, ns.get(k).copied().unwrap_or(0.0) / tn, d, cum * 100.0 / gap.abs().max(1e-9)));
+            out.line(&format!("| {} | {} | {} | {:.2} | {:.2} | {:+.2} | {:.0} |", short(&k.replace('|', "/"), 70), tier_of(k), short(&owner_of(k).replace('|', "/"), 90), js.get(k).copied().unwrap_or(0.0) / tj, ns.get(k).copied().unwrap_or(0.0) / tn, d, cum * 100.0 / gap.abs().max(1e-9)));
         }
         let neg: Vec<String> = srows.iter().rev().take(6).filter(|r| r.0 < 0.0).map(|r| format!("{} {:+.2}", r.1, r.0)).collect();
         if !neg.is_empty() {
@@ -635,6 +551,220 @@ mod stacks {
                 }
             }
         }
+        (unit, nall, ntot, jall, jtot, tj)
+    }
+
+    /// `vsnative file=<raw samples> [native=<bin>] [s=<the file's>] [hz=<the file's>] [threads=main] [roots=a,b]
+    /// [n=30] [tree=0] [save=1]`: the native build's stacks recorded by its own sampler (`prof raw=<file>`
+    /// of a rustc-built app: macOS has no cross-process sampling without privileges), named here by its
+    /// DWARF inline tree (`native=`, else the file's executable; macOS: its dSYM), against this
+    /// process's samples taken now for the same length. For deterministic work (Sandbox's SANDBOX_DET
+    /// frames) the two windows need not be simultaneous.
+    pub fn run_file(req: &Req, out: &mut Out, path: &str) {
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) => return out.err(&format!("cannot read {}: {}", path, e)),
+        };
+        let (mut exe, mut fsecs, mut fhz) = (String::new(), 0.0f64, 1000u64);
+        let mut raw: Vec<(u64, Vec<String>)> = Vec::new();
+        for l in text.lines() {
+            let mut f = l.split('\t');
+            match f.next() {
+                Some("exe") => exe = f.next().unwrap_or("").to_string(),
+                Some("secs") => fsecs = f.next().and_then(|v| v.parse().ok()).unwrap_or(0.0),
+                Some("hz") => fhz = f.next().and_then(|v| v.parse().ok()).unwrap_or(1000),
+                Some("s") => {
+                    let w = f.next().and_then(|v| v.parse().ok()).unwrap_or(1);
+                    raw.push((w, f.map(|x| x.to_string()).collect()));
+                }
+                _ => {}
+            }
+        }
+        if raw.is_empty() || fsecs <= 0.0 {
+            return out.err(&format!("{}: no samples (write it with `prof threads=main raw=<file>` of the native app)", path));
+        }
+        let native = req.get("native").map(|s| s.to_string()).unwrap_or(exe.clone());
+        let secs = req.get("s").and_then(|v| v.parse::<f64>().ok()).unwrap_or(fsecs).clamp(0.5, 60.0);
+        let hz = req.num("hz", fhz).clamp(50, 4000);
+        if hz != fhz {
+            return out.err(&format!("hz={} differs from the native samples' {} Hz (CPU-time weights must match)", hz, fhz));
+        }
+        let ev = match crate::inspect::prof::Ev::parse(req.get("ev").unwrap_or("cpu")) {
+            Ok(e) => e,
+            Err(e) => return out.err(&e),
+        };
+        let gone = out.gone();
+        let run = crate::inspect::prof::collect_ev(secs, hz, ev, &*crate::inspect::prof::pick(req.get("threads").unwrap_or("main")), &*gone);
+        if gone() {
+            return;
+        }
+        let mut partial = Vec::new();
+        let ours: Vec<(Vec<(String, String)>, u64)> = jit_frames(&run, &mut partial);
+        // native frames, innermost first in the file: `@<file vaddr>` in the executable, `!<name>` elsewhere
+        let mut theirs: Vec<(Vec<(String, String)>, u64)> = Vec::new();
+        let named = crate::inspect::asm::with_native_bin(&native, |nb| {
+            let mut names: HashMap<u64, Vec<String>> = HashMap::new();
+            let mut inl: HashMap<u64, Vec<crate::inspect::natbin::InlinedCall>> = HashMap::new();
+            for (w, frames) in &raw {
+                let mut fr: Vec<(String, String)> = Vec::new();
+                for (i, x) in frames.iter().enumerate().rev() {
+                    let Some(hex) = x.strip_prefix('@') else {
+                        fr.push((x.strip_prefix('!').unwrap_or(x).to_string(), "native".to_string()));
+                        continue;
+                    };
+                    let Ok(va) = u64::from_str_radix(hex, 16) else { continue };
+                    // a return address is looked up one byte back, inside its call
+                    let look = if i == 0 { va } else { va.wrapping_sub(1) };
+                    let v = names.entry(look).or_insert_with(|| {
+                        let Some(f) = nb.fn_at(look) else { return vec![format!("{}+{:#x}", native.rsplit('/').next().unwrap_or(&native), look)] };
+                        let calls = inl.entry(f.addr).or_insert_with(|| nb.inlined(f.addr, f.addr + f.size));
+                        let mut here: Vec<&crate::inspect::natbin::InlinedCall> = calls.iter().filter(|c| c.ranges.iter().any(|r| look >= r.0 && look < r.1)).collect();
+                        here.sort_by_key(|c| std::cmp::Reverse(c.depth));
+                        let mut v: Vec<String> = here.iter().map(|c| c.name.clone()).collect();
+                        v.push(f.name.clone());
+                        v
+                    });
+                    fr.extend(v.iter().rev().enumerate().map(|(k, n)| (n.clone(), if k == 0 { "native".to_string() } else { "inl".to_string() })));
+                }
+                theirs.push((fr, (*w).max(1)));
+            }
+        });
+        if let Err(e) = named {
+            return out.err(&e);
+        }
+        let (unit, nall, ntot, jall, jtot, tj) = compare(req, out, &run, &ours, &theirs, fsecs);
+        out.always(&format!("note: native = {} (samples {}: {} over {:.1} s at {} Hz), {:.1} {} of its sampled CPU, {:.0}% under the roots; JIT {:.1} {} on threads={}, {:.0}% under the roots (sampled now, {:.1} s)", native, path, raw.len(), fsecs, fhz, nall / fsecs, unit, ntot * 100.0 / nall.max(1e-9), jall / tj, unit, req.get("threads").unwrap_or("main"), jtot * 100.0 / jall.max(1e-9), tj));
+        out.always("note: keys are `Type::fn` without generics on both sides (JIT: inline levels expanded; native: the DWARF inline tree, needs debuginfo=2 / a dSYM); the two windows are not simultaneous: compare deterministic work only");
+        for p in partial.iter().chain(run.notes.iter()) {
+            out.always(&format!("note: {}", p));
+        }
+        out.always(&format!("note: {}", crate::inspect::reliability::line(true)));
+    }
+
+    /// (user ms, system ms, voluntary switches, involuntary switches) of thread `tid` of `pid` so far.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn tstat(pid: u32, tid: u64) -> (f64, f64, u64, u64) {
+        let tick_ms = 10.0; // USER_HZ = 100 on Linux
+        let st = std::fs::read_to_string(format!("/proc/{}/task/{}/stat", pid, tid)).unwrap_or_default();
+        let f: Vec<&str> = st.rsplit_once(')').map(|x| x.1.split_whitespace().collect()).unwrap_or_default();
+        let num = |k: usize| f.get(k).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+        let status = std::fs::read_to_string(format!("/proc/{}/task/{}/status", pid, tid)).unwrap_or_default();
+        let sw = |key: &str| status.lines().find_map(|l| l.strip_prefix(key)).and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
+        (num(11) * tick_ms, num(12) * tick_ms, sw("voluntary_ctxt_switches:"), sw("nonvoluntary_ctxt_switches:"))
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn busiest(pid: u32, n: usize) -> Vec<(u64, String)> {
+        let cpu = |t: &str| -> u64 {
+            std::fs::read_to_string(format!("/proc/{}/task/{}/stat", pid, t)).ok().and_then(|s| {
+                let f: Vec<&str> = s.rsplit_once(')')?.1.split_whitespace().collect();
+                Some(f.get(11)?.parse::<u64>().ok()? + f.get(12)?.parse::<u64>().ok()?)
+            }).unwrap_or(0)
+        };
+        let tids: Vec<String> = std::fs::read_dir(format!("/proc/{}/task", pid)).map(|d| d.flatten().filter_map(|e| e.file_name().to_str().map(|s| s.to_string())).collect()).unwrap_or_default();
+        let a: Vec<u64> = tids.iter().map(|t| cpu(t)).collect();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let mut v: Vec<(u64, u64, String)> = tids.iter().zip(&a).map(|(t, &c0)| {
+            let name = std::fs::read_to_string(format!("/proc/{}/task/{}/comm", pid, t)).unwrap_or_default().trim().to_string();
+            (cpu(t).saturating_sub(c0), t.parse().unwrap_or(0), name)
+        }).collect();
+        v.sort_by(|x, y| y.0.cmp(&x.0));
+        v.into_iter().take(n).map(|x| (x.1, x.2)).collect()
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    pub fn run(req: &Req, out: &mut Out, pid: &str) {
+        let Ok(pid) = pid.parse::<u32>() else { return out.err("pid=<the native build's process id>") };
+        let secs = req.get("s").and_then(|v| v.parse::<f64>().ok()).unwrap_or(10.0).clamp(0.5, 60.0);
+        let hz = req.num("hz", 1000).clamp(50, 4000);
+        let ev = match crate::inspect::prof::Ev::parse(req.get("ev").unwrap_or("cpu")) {
+            Ok(e) => e,
+            Err(e) => return out.err(&e),
+        };
+        let exe = match std::fs::read_link(format!("/proc/{}/exe", pid)) {
+            Ok(p) => p.to_string_lossy().into_owned(),
+            Err(e) => return out.err(&format!("no process {}: {}", pid, e)),
+        };
+        let cfi = match crate::inspect::cfi::Foreign::open(pid) {
+            Ok(c) => c,
+            Err(e) => return out.err(&e),
+        };
+        // the native threads: by name, else the busiest
+        let tids: Vec<(u64, String)> = match req.get("nthreads") {
+            Some(sel) if sel != "busy" => busiest(pid, 1 << 16).into_iter().filter(|(_, nm)| sel.split(',').any(|s| nm.starts_with(s))).collect(),
+            _ => busiest(pid, 2),
+        };
+        if tids.is_empty() {
+            return out.err(&format!("process {}: no thread matches nthreads=", pid));
+        }
+        let gone = out.gone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ids: Vec<u64> = tids.iter().map(|t| t.0).collect();
+        let spawned = {
+            let _k = crate::zone_alloc::kept();
+            std::thread::Builder::new().name("run-inspect-vsnative".into()).spawn(move || {
+                crate::inspect::heap::exclude_this_thread();
+                let r = crate::inspect::prof::collect_foreign(&ids, secs, hz, ev, &cfi, &|| false);
+                let _ = tx.send((r, cfi));
+            })
+        };
+        if spawned.is_err() {
+            return out.err("cannot start the sampling thread");
+        }
+        // user/system time and context switches of both sides' threads over the window: the
+        // samples see user time only (perf_event_paranoid 2), a meter of wall time sees all of it
+        let me = std::process::id();
+        let mine: Vec<u64> = {
+            let sel = crate::inspect::prof::pick(req.get("threads").unwrap_or("main"));
+            let mut ts = crate::inspect::threads::list();
+            crate::inspect::name_handles(&mut ts);
+            ts.into_iter().filter(|t| sel(t)).map(|t| t.os_id).collect()
+        };
+        let st0: Vec<(f64, f64, u64, u64)> = mine.iter().map(|&t| tstat(me, t)).chain(tids.iter().map(|t| tstat(pid, t.0))).collect();
+        let run = crate::inspect::prof::collect_ev(secs, hz, ev, &*crate::inspect::prof::pick(req.get("threads").unwrap_or("main")), &*gone);
+        let st1: Vec<(f64, f64, u64, u64)> = mine.iter().map(|&t| tstat(me, t)).chain(tids.iter().map(|t| tstat(pid, t.0))).collect();
+        let Ok(((nat, lost, mut notes), cfi)) = rx.recv_timeout(std::time::Duration::from_secs_f64(secs + 30.0)) else {
+            return out.err("the native sampling thread did not finish");
+        };
+        if gone() {
+            return;
+        }
+        // ours: expanded (inline levels as frames), outermost first
+        let mut partial = Vec::new();
+        let ours: Vec<(Vec<(String, String)>, u64)> = jit_frames(&run, &mut partial);
+        // native: each pc by the binary's symbols and inline tree
+        let map = super::imp::Map::of(pid, &exe);
+        let mut names: HashMap<u64, Vec<String>> = HashMap::new();
+        let mut theirs: Vec<(Vec<(String, String)>, u64)> = Vec::new();
+        let named = crate::inspect::asm::with_native_bin(&exe, |nb| {
+            let mut inl: HashMap<u64, Vec<crate::inspect::natbin::InlinedCall>> = HashMap::new();
+            for smp in &nat {
+                let mut fr: Vec<(String, String)> = Vec::new();
+                for (i, &pc) in smp.frames.iter().enumerate().rev() {
+                    let look = if i == 0 { pc } else { pc.wrapping_sub(1) };
+                    let v = names.entry(look).or_insert_with(|| {
+                        let Some(va) = map.vaddr(look) else {
+                            return vec![cfi.files.iter().find(|f| look >= f.0 && look < f.1).map_or_else(|| format!("{:#x}", look), |f| format!("{}+{:#x}", f.2.rsplit('/').next().unwrap_or(&f.2), look - f.0))];
+                        };
+                        let Some(f) = nb.fn_at(va) else { return vec![format!("{}+{:#x}", exe.rsplit('/').next().unwrap_or(&exe), va)] };
+                        let calls = inl.entry(f.addr).or_insert_with(|| nb.inlined(f.addr, f.addr + f.size));
+                        let mut here: Vec<&crate::inspect::natbin::InlinedCall> = calls.iter().filter(|c| c.ranges.iter().any(|r| va >= r.0 && va < r.1)).collect();
+                        here.sort_by_key(|c| std::cmp::Reverse(c.depth));
+                        // innermost first, the concrete fn last
+                        let mut v: Vec<String> = here.iter().map(|c| c.name.clone()).collect();
+                        v.push(f.name.clone());
+                        v
+                    });
+                    // outermost first
+                    fr.extend(v.iter().rev().enumerate().map(|(k, n)| (n.clone(), if k == 0 { "native".to_string() } else { "inl".to_string() })));
+                }
+                theirs.push((fr, smp.weight.max(1)));
+            }
+        });
+        if let Err(e) = named {
+            return out.err(&e);
+        }
+        let (unit, nall, ntot, jall, jtot, tj) = compare(req, out, &run, &ours, &theirs, secs);
         // per-thread OS time over the window, per second
         let rows: Vec<String> = mine.iter().map(|&t| ("JIT".to_string(), format!("T{}", t))).chain(tids.iter().map(|t| ("native".to_string(), format!("{} T{}", t.1, t.0)))).zip(st0.iter().zip(&st1)).map(|((side, name), (a, b))| {
             format!("| {} | {} | {:.1} | {:.1} | {:.0} | {:.0} |", side, name, (b.0 - a.0) / run.secs.max(0.01), (b.1 - a.1) / run.secs.max(0.01), (b.2 - a.2) as f64 / run.secs.max(0.01), (b.3 - a.3) as f64 / run.secs.max(0.01))
@@ -647,7 +777,7 @@ mod stacks {
             out.line(&r);
         }
         let tn_names: Vec<String> = tids.iter().map(|t| format!("{} (T{})", t.1, t.0)).collect();
-        out.always(&format!("note: native = {} pid {} threads {}; {:.1} {} of its CPU in the window, {:.0}% under the roots; JIT {:.1} {} on threads={}, {:.0}% under the roots", exe, pid, tn_names.join(", "), nall / tn, unit, ntot * 100.0 / nall.max(1e-9), jall / tj, unit, req.get("threads").unwrap_or("main"), jtot * 100.0 / jall.max(1e-9)));
+        out.always(&format!("note: native = {} pid {} threads {}; {:.1} {} of its CPU in the window, {:.0}% under the roots; JIT {:.1} {} on threads={}, {:.0}% under the roots", exe, pid, tn_names.join(", "), nall / secs, unit, ntot * 100.0 / nall.max(1e-9), jall / tj, unit, req.get("threads").unwrap_or("main"), jtot * 100.0 / jall.max(1e-9)));
         out.always("note: keys are `Type::fn` without generics on both sides (JIT: inline levels expanded; native: the DWARF inline tree, needs debuginfo=2); a fn rustc inlined and we did not shows as self time of its caller natively");
         if lost > 0 {
             notes.push(format!("{} native sample batches lost (ring overflow)", lost));
@@ -664,6 +794,6 @@ mod stacks {
 mod imp {
     use super::{Out, Req};
     pub fn run(_req: &Req, out: &mut Out) {
-        out.err("vsnative samples a second process: Linux only (macOS allows that only with privileges); run it on a Linux node, or compare statically with `asm top vs=rustc`");
+        out.err("vsnative samples a second process: Linux only (macOS allows that only with privileges); on macOS give it the native app's own samples (`vsnative file=<the native app's prof raw= file>`), or compare statically with `asm top vs=rustc`");
     }
 }
