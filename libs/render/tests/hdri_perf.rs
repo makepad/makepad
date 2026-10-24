@@ -159,6 +159,13 @@ fn full_bakes_4096_under_10_s() {
         let cases = [
             ("sky with clouds", cloudy_sky()),
             ("Starry night", preset("Starry night").expect("a built-in preset loads")),
+            ("Starry night, the night's three layers", {
+                let mut p = preset("Starry night").expect("a built-in preset loads");
+                p.sky.night.milky_way = Some(MilkyWayParams::default());
+                p.sky.night.nebulas = Some(NebulaParams::default());
+                p.sky.night.aurora = Some(AuroraParams::default());
+                p
+            }),
         ];
         // Warm the pool first, as above.
         let _ = timed_bake(pool, &cases[0].1, 512);
