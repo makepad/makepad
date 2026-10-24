@@ -3039,10 +3039,11 @@ mod tests {
     }
 
     /// Writes `name`.png of `p` at 1024, exposed as the app's Auto would (0.5 log2(0.18 / mean)), into
-    /// HDRI_NIGHT_VISUAL_DIR (plan hdri-7's engine-side looks; nothing without it).
-    fn write_look(name: &str, p: &HdriParams) {
+    /// HDRI_NIGHT_VISUAL_DIR (plan hdri-7's engine-side looks; nothing without it). The exposure, when written.
+    fn write_look(name: &str, p: &HdriParams) -> Option<f32> {
         let Some(dir) = std::env::var_os("HDRI_NIGHT_VISUAL_DIR").map(std::path::PathBuf::from) else {
-            return eprintln!("HDRI_NIGHT_VISUAL_DIR not set, {name} skipped");
+            eprintln!("HDRI_NIGHT_VISUAL_DIR not set, {name} skipped");
+            return None;
         };
         std::fs::create_dir_all(&dir).unwrap();
         let map = Env::new(p).bake_par(1024, four_threads);
@@ -3050,6 +3051,53 @@ mod tests {
         let ev = (0.5 * (0.18 / mean).log2()).clamp(-16.0, 16.0);
         std::fs::write(dir.join(format!("{name}.png")), export::encode_png(&map, ev).unwrap()).unwrap();
         println!("look {name}: mean {mean:.3e}, EV {ev:.2}");
+        Some(ev)
+    }
+
+    /// Task 3b's views of `p`'s night, from its 4096 map at exposure `ev`, into HDRI_NIGHT_VISUAL_DIR: `name`-look (90
+    /// degrees toward the galactic centre, raised 15, as Look around shows it), `name`-sky (the whole sky from below,
+    /// north up and east left, the zenith in the middle) and `name`-core (the 4096 map's own texels round the centre,
+    /// 1024 square).
+    fn write_views(name: &str, p: &HdriParams, ev: f32) {
+        let Some(dir) = std::env::var_os("HDRI_NIGHT_VISUAL_DIR").map(std::path::PathBuf::from) else { return };
+        let env = Env::new(p);
+        let map = env.bake_par(4096, four_threads);
+        let centre = env.night_features().and_then(|f| f.galactic_centre).expect("the band draws");
+        let size = 1024usize;
+        let write = |what: &str, rgb: Vec<f32>| {
+            let png = export::encode_face_png(&export::FaceImage { size, rgb }, ev).unwrap();
+            std::fs::write(dir.join(format!("{name}-{what}.png")), png).unwrap();
+        };
+        let view = |look: &dyn Fn(f32, f32) -> Option<Vec3f>| {
+            let mut rgb = Vec::with_capacity(size * size * 3);
+            for i in 0..size * size {
+                let (u, v) = (((i % size) as f32 + 0.5) / size as f32 * 2.0 - 1.0, 1.0 - ((i / size) as f32 + 0.5) / size as f32 * 2.0);
+                let c = look(u, v).map_or([0.0; 4], |d| map.sample([d.x, d.y, d.z]));
+                rgb.extend_from_slice(&c[..3]);
+            }
+            rgb
+        };
+        let (az, el) = az_el_from_dir(centre);
+        let ahead = dir_from_az_el(az, el + 15.0);
+        let right = Vec3f::cross(ahead, vec3f(0.0, 1.0, 0.0)).normalize();
+        let up = Vec3f::cross(right, ahead);
+        write("look", view(&|u, v| Some((ahead + right * u + up * v).normalize())));
+        write("sky", view(&|u, v| {
+            let r = (u * u + v * v).sqrt();
+            (r <= 1.0).then(|| dir_from_az_el((-u).atan2(v).to_degrees(), 90.0 - 90.0 * r))
+        }));
+        let uv = ibl::dir_to_equirect_uv([centre.x, centre.y, centre.z]);
+        let (cx, cy) = ((uv[0] * map.width as f32) as i64, (uv[1] * map.height as f32) as i64);
+        let top = (cy - 700).clamp(0, (map.height - size) as i64);
+        let mut rgb = Vec::with_capacity(size * size * 3);
+        for y in 0..size as i64 {
+            for x in 0..size as i64 {
+                let tx = (cx - size as i64 / 2 + x).rem_euclid(map.width as i64) as usize;
+                rgb.extend_from_slice(&map.data[(top + y) as usize * map.width + tx][..3]);
+            }
+        }
+        write("core", rgb);
+        println!("views {name}: the centre at azimuth {az:.1}, elevation {el:.1}");
     }
 
     /// The galactic centre of "Starry night" with the Milky Way at its defaults, in the map's frame (about 16 degrees
@@ -3133,6 +3181,16 @@ mod tests {
             p.sky.night.milky_way = Some(MilkyWayParams { turn_deg: turn, ..MilkyWayParams::default() });
             write_look(&format!("milky-way-turn{turn:.0}"), &p);
         }
+        // Task 3b: the band and the nebulas at their defaults, at Realism 0 and 1
+        for realism in [0.0f32, 1.0] {
+            let mut p = base.clone();
+            p.sky.night.milky_way = Some(MilkyWayParams::default());
+            p.sky.night.nebulas = Some(NebulaParams { realism, ..NebulaParams::default() });
+            let name = format!("deep-sky-r{realism:.0}");
+            if let Some(ev) = write_look(&name, &p) {
+                write_views(&name, &p, ev);
+            }
+        }
     }
 
     #[test]
@@ -3141,11 +3199,15 @@ mod tests {
     }
 
     /// The gas's filaments and the Realism clamp are thresholded, so a coarse level's mean moves a little: the nebulas'
-    /// held-vs-released rule is 20 % a block and 10 % in total (the Milky Way's and the aurora's: 10 % and 3 %).
+    /// held-vs-released rule is 20 % a block and 10 % in total (the Milky Way's and the aurora's: 10 % and 3 %). Over the
+    /// band (Task 3b), at their defaults, they hold its knots too, by the same rule.
     #[test]
     fn the_nebulas_held_and_released_agree() {
         let base = super::presets::preset("Starry night").unwrap();
         held_and_released_agree(&base, &|p| p.sky.night.nebulas = Some(NebulaParams { amount: 1.0, size: 2.0, ..NebulaParams::default() }), 0.20, 0.10, "the nebulas");
+        let mut band = base.clone();
+        band.sky.night.milky_way = Some(MilkyWayParams { turn_deg: 0.0, ..MilkyWayParams::default() });
+        held_and_released_agree(&band, &|p| p.sky.night.nebulas = Some(NebulaParams::default()), 0.20, 0.10, "the nebulas and their knots over the band");
     }
 
     /// Plan hdri-7 §5 ("in exports at every width"): 1024 against 2048, by the nebulas' held rule (ignored, release).
@@ -3154,6 +3216,9 @@ mod tests {
     fn the_nebulas_agree_at_export_widths() {
         let base = super::presets::preset("Starry night").unwrap();
         widths_agree(&base, &|p| p.sky.night.nebulas = Some(NebulaParams { amount: 1.0, size: 2.0, ..NebulaParams::default() }), 1024, 0.20, 0.10, "the nebulas");
+        let mut band = base.clone();
+        band.sky.night.milky_way = Some(MilkyWayParams { turn_deg: 0.0, ..MilkyWayParams::default() });
+        widths_agree(&band, &|p| p.sky.night.nebulas = Some(NebulaParams::default()), 1024, 0.20, 0.10, "the nebulas and their knots over the band");
     }
 
     #[test]

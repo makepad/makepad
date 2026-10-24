@@ -46,7 +46,7 @@ use super::milky_way::MilkyWay;
 use super::nebulas::Nebulas;
 use super::noise::{hash01, hash_u32};
 use super::studio::{kelvin_to_rgb, light_frame, project, LightFrame};
-use super::{EnvSun, NightParams, SunMode, SunParams};
+use super::{EnvSun, NebulaParams, NightParams, SunMode, SunParams};
 use crate::sky::{luminance, sun_transmittance};
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
@@ -356,7 +356,10 @@ impl NightSky {
 
         // Plan hdri-7 §2: the band shows from astronomical twilight on, lifted as the stars are.
         let astro = smoothstep(ASTRO_FADE_DEG.0, ASTRO_FADE_DEG.1, -sun_elevation_deg);
-        let milky_way = mw.map(|m| MilkyWay::new(m, seed, gal_axes, m.strength * lift * astro));
+        // Task 3b: the nebulas' Realism sets the whole deep sky's look, the band's too; read from their block whether it
+        // draws or not (an off block keeps the look it was set to), its default without one.
+        let realism = p.nebulas.as_ref().map_or(NebulaParams::default().realism, |n| n.realism);
+        let milky_way = mw.map(|m| MilkyWay::new(m, seed, gal_axes, m.strength * lift * astro, realism));
         // Plan hdri-7 §3: the nebulas likewise, along the band when it draws; their stars lifted as the field's are.
         let nebulas = p.nebulas_drawn().map(|n| Nebulas::new(n, mw.map(|_| gal_axes), lift * astro, star_gain * astro, &star_colors));
         // Plan hdri-7 §4: the aurora fades with the night as the stars do; built only when it draws and the sun is down.
@@ -1149,7 +1152,8 @@ mod tests {
         luminance(sky.milky_way.as_ref().unwrap().at(galactic(sky, l, b), 0.0).0) / zenith
     }
 
-    /// Plan hdri-7 §2, §5 (refs §5.2): at Strength 1 and Core 1 the band is the real sky's, in units of the dark sky's
+    /// Plan hdri-7 §2, §5 (refs §5.2): at Strength 1 and Core 1, as the eye sees it (Realism 1; at 0 a long exposure
+    /// shows it MW_PHOTO_GAIN times brighter, Task 3b), the band is the real sky's, in units of the dark sky's
     /// zenith (G0, 21.9 mag/arcsec²): the core region (|l| <= 30, |b| <= 10) 4.4 +- 1 with its dust; without dust the
     /// mid longitudes 1.5 to 2.5, the anticentre 0.7 to 1.5, 0.1 to 0.45 at 30 degrees out, at most 0.15 at the poles,
     /// never over about 9 (the star clouds are capped with the band: MW_PEAK_MU's range, 19.5 to 19.6, is 9.04 G0 at
@@ -1158,7 +1162,7 @@ mod tests {
     /// peak 8.88; rift 0.35.
     #[test]
     fn the_milky_way_is_the_real_skys() {
-        let clean = milky_night(MilkyWayParams { dust: 0.0, ..MilkyWayParams::default() });
+        let clean = milky_night_at(MilkyWayParams { dust: 0.0, ..MilkyWayParams::default() }, 1.0);
         let mean = |sky: &NightSky, ls: std::ops::RangeInclusive<i32>, bs: &[f32]| {
             let (mut sum, mut n) = (0.0f32, 0.0f32);
             for l in ls {
@@ -1174,7 +1178,7 @@ mod tests {
         let thirty = mean(&clean, -20..=20, &[30.0, -30.0]);
         let poles = band_in_g0(&clean, 0.0, 90.0).max(band_in_g0(&clean, 0.0, -90.0));
         let peak = (-30..=30).flat_map(|l| (-10..=10).map(move |b| (l, b))).map(|(l, b)| band_in_g0(&clean, l as f32, b as f32)).fold(0.0, f32::max);
-        let dusty = milky_night(MilkyWayParams::default());
+        let dusty = milky_night_at(MilkyWayParams::default(), 1.0);
         let bs: Vec<f32> = (-10..=10).map(|b| b as f32).collect();
         let core = mean(&dusty, -30..=30, &bs);
         let rift = (10..=60).map(|l| dusty.milky_way.as_ref().unwrap().at(galactic(&dusty, l as f32, 1.0), 0.0).1).sum::<f32>() / 51.0;
@@ -1299,6 +1303,174 @@ mod tests {
             }
         }
         assert!(seen > 5 && dimmed == seen, "{dimmed} of {seen} stars behind the dust dimmed");
+    }
+
+    /// A moonless night with the Milky Way as `mw` sets it, the deep sky at `realism` (the nebulas' block, off: it sets
+    /// the look and draws nothing).
+    fn milky_night_at(mw: MilkyWayParams, realism: f32) -> NightSky {
+        night_at(&NightParams { moon: false, milky_way: Some(mw), nebulas: Some(NebulaParams { on: false, realism, ..NebulaParams::default() }), ..Default::default() }, -30.0)
+    }
+
+    /// Two unit vectors across `w`.
+    fn across(w: Vec3f) -> (Vec3f, Vec3f) {
+        let up = if w.y.abs() < 0.9 { vec3f(0.0, 1.0, 0.0) } else { vec3f(1.0, 0.0, 0.0) };
+        let t1 = Vec3f::cross(up, w).normalize();
+        (t1, Vec3f::cross(w, t1))
+    }
+
+    /// `n` directions `radius` (radians) round `w`.
+    fn ring(w: Vec3f, radius: f32, n: usize) -> Vec<Vec3f> {
+        let (t1, t2) = across(w);
+        (0..n).map(|i| {
+            let a = i as f32 * std::f32::consts::TAU / n as f32;
+            (w * radius.cos() + (t1 * a.cos() + t2 * a.sin()) * radius.sin()).normalize()
+        }).collect()
+    }
+
+    /// Task 3b: the core is the band's brightest part. At Turn 116 (the galactic centre about 16 degrees up in the south)
+    /// the band as the map shows it (its extinction in, the stars off), each point read as its mean over a 3-degree disc,
+    /// is brightest near the centre: the brightest point within 6 degrees of it beats every point of the band (|b| up to
+    /// 10 degrees, above the horizon) 60 degrees or more from it by 15 % at least.
+    #[test]
+    fn the_core_is_the_bands_brightest_part() {
+        let sky = night_at(&NightParams { moon: false, star_brightness: 0.0, milky_way: Some(MilkyWayParams::default()), ..Default::default() }, -30.0);
+        let centre = sky.features().galactic_centre.expect("the band draws");
+        assert!(centre.y > 0.15, "the premise: the centre is up ({centre:?})");
+        let texel = std::f32::consts::TAU / 1024.0;
+        let disc = |w: Vec3f| {
+            let mut looks = vec![w];
+            looks.extend(ring(w, 1.5f32.to_radians(), 8));
+            looks.extend(ring(w, 3.0f32.to_radians(), 16));
+            looks.iter().map(|d| luminance(sky.deep_sky(*d, texel))).sum::<f32>() / looks.len() as f32
+        };
+        let (mut near, mut far, mut far_at) = (0.0f32, 0.0f32, (0, 0));
+        for l in -4..=4 {
+            for b in -4..=4 {
+                near = near.max(disc(sky.to_world(galactic(&sky, 1.5 * l as f32, 1.5 * b as f32))));
+            }
+        }
+        for l in (0..360).step_by(2) {
+            for b in (-10..=10).step_by(2) {
+                let s = galactic(&sky, l as f32, b as f32);
+                let w = sky.to_world(s);
+                if s.dot(sky.gal_axes[0]) <= 0.5 && w.y > 0.05 {
+                    let v = disc(w);
+                    if v > far {
+                        (far, far_at) = (v, (l, b));
+                    }
+                }
+            }
+        }
+        println!("the band near the galactic centre {near:.3e}, 60 degrees or more from it at most {far:.3e} (l {}, b {}): x{:.2}", far_at.0, far_at.1, near / far);
+        assert!(far > 0.0, "the premise: the band shows far from the centre");
+        assert!(near > 1.15 * far, "the core {near} against {far} at l {}, b {}", far_at.0, far_at.1);
+    }
+
+    /// Task 3b: at Realism 0 (as photographed) the band runs from warm to cool: its core region (|l| and |b| up to 10
+    /// and 5 degrees) is redder (R/B) than the band 90 degrees along it, either way, by a third at least; at Realism 1
+    /// (as the eye sees it) the band is near grey wherever it shows (saturation at most 0.1).
+    #[test]
+    fn the_bands_colour_runs_from_warm_to_cool() {
+        let saturation = |c: Vec3f| {
+            let (hi, lo) = (c.x.max(c.y).max(c.z), c.x.min(c.y).min(c.z));
+            if hi > 0.0 { (hi - lo) / hi } else { 0.0 }
+        };
+        let mean = |sky: &NightSky, ls: std::ops::RangeInclusive<i32>| {
+            let mut sum = Vec3f::default();
+            for l in ls {
+                for b in -5..=5 {
+                    sum += sky.milky_way.as_ref().unwrap().at(galactic(sky, l as f32, b as f32), 0.0).0;
+                }
+            }
+            sum
+        };
+        let art = milky_night_at(MilkyWayParams::default(), 0.0);
+        let red_over_blue = |c: Vec3f| c.x / c.z;
+        let core = red_over_blue(mean(&art, -10..=10));
+        for arm in [80..=100, 260..=280] {
+            let along = red_over_blue(mean(&art, arm.clone()));
+            println!("Realism 0: R/B in the core region {core:.3}, at l {arm:?} {along:.3}");
+            assert!(core > 1.33 * along, "the core's R/B {core} against {along} at l {arm:?}");
+        }
+        let eye = milky_night_at(MilkyWayParams::default(), 1.0);
+        let mut most = 0.0f32;
+        for l in (0..360).step_by(5) {
+            for b in (-10..=10).step_by(5) {
+                let c = eye.milky_way.as_ref().unwrap().at(galactic(&eye, l as f32, b as f32), 0.0).0;
+                most = most.max(saturation(c));
+                assert!(saturation(c) <= 0.1, "Realism 1 shows {c:?} at l {l}, b {b}");
+            }
+        }
+        println!("Realism 1: the band's saturation at most {most:.3}");
+    }
+
+    /// Task 3b: the dust has structure at many scales. Over the plane near the core (lines along l from -30 to 30 degrees
+    /// at b -4 to 4, and across b from -12 to 12 at l -20 to 20), its darkness (1 - transmittance, at texel 0, Dust 1)
+    /// has power at 0.5, 2 and 8 degrees: the RMS of a box of each width less a box of twice it, each over a floor.
+    #[test]
+    fn the_dust_has_structure_at_many_scales() {
+        let sky = milky_night(MilkyWayParams::default());
+        let m = sky.milky_way.as_ref().unwrap();
+        let step = 0.05f32;
+        let mut lines: Vec<Vec<f32>> = Vec::new();
+        for b in [-4.0f32, -2.0, 0.0, 2.0, 4.0] {
+            lines.push((0..=1200).map(|i| 1.0 - m.transmittance(galactic(&sky, -30.0 + step * i as f32, b), 0.0)).collect());
+        }
+        for l in [-20.0f32, -10.0, 0.0, 10.0, 20.0] {
+            lines.push((0..=480).map(|i| 1.0 - m.transmittance(galactic(&sky, l, -12.0 + step * i as f32), 0.0)).collect());
+        }
+        let boxed = |v: &[f32], i: usize, half: usize| v[i - half..=i + half].iter().sum::<f32>() / (2 * half + 1) as f32;
+        for (width, floor) in [(0.5f32, 0.01f32), (2.0, 0.02), (8.0, 0.03)] {
+            let (half, wide) = ((0.5 * width / step).round() as usize, (width / step).round() as usize);
+            let (mut sum, mut n) = (0.0f32, 0usize);
+            for line in &lines {
+                for i in wide..line.len() - wide {
+                    let d = boxed(line, i, half) - boxed(line, i, wide);
+                    sum += d * d;
+                    n += 1;
+                }
+            }
+            let rms = (sum / n as f32).sqrt();
+            println!("the dust's darkness at {width} degrees: RMS {rms:.4} (floor {floor})");
+            assert!(rms > floor, "no dark features {width} degrees wide: RMS {rms}");
+        }
+    }
+
+    /// Task 3b: the two Magellanic Clouds sit south of the plane, at l 280.5, b -32.9 and l 302.8, b -44.3: the band's
+    /// light at each is over three times its mean on a ring round it (12 and 8 degrees out). They turn with the stars:
+    /// Turn and Tilt move a cloud and a star as one, and with the Large one turned up, the map shows it over the sky
+    /// round it.
+    #[test]
+    fn the_magellanic_clouds_sit_south_of_the_plane() {
+        let sky = milky_night(MilkyWayParams::default());
+        let m = sky.milky_way.as_ref().unwrap();
+        let band = |s: Vec3f| luminance(m.at(s, 0.0).0);
+        for (l, b, out) in [(280.5f32, -32.9f32, 12.0f32), (302.8, -44.3, 8.0)] {
+            let s = galactic(&sky, l, b);
+            let round = ring(s, out.to_radians(), 24).iter().map(|d| band(*d)).sum::<f32>() / 24.0;
+            println!("the band at l {l}, b {b}: {:.3e} against {round:.3e} {out} degrees round it", band(s));
+            assert!(band(s) > 3.0 * round, "l {l}, b {b}: {} against {round}", band(s));
+        }
+        let at = |turn: f32, tilt: f32| milky_night(MilkyWayParams { turn_deg: turn, tilt_deg: tilt, ..MilkyWayParams::default() });
+        let base = at(0.0, 0.0);
+        let star = all_cells().filter_map(|c| base.star_in_cell(c)).next().expect("a star").dir;
+        let lmc = galactic(&base, 280.5, -32.9);
+        let mut shown = false;
+        for turn in (0..360).step_by(20) {
+            let sky = at(turn as f32, -60.0);
+            let w = sky.to_world(lmc);
+            assert!((sky.to_world(star).dot(w) - base.to_world(star).dot(base.to_world(lmc))).abs() < 1.0e-5, "turn {turn}: the cloud and the star part");
+            if w.y > 0.5 && !shown {
+                shown = true;
+                let texel = std::f32::consts::TAU / 1024.0;
+                let dark = night_at(&NightParams { moon: false, star_brightness: 0.0, milky_way: Some(MilkyWayParams { turn_deg: turn as f32, tilt_deg: -60.0, ..MilkyWayParams::default() }), ..Default::default() }, -30.0);
+                let round = ring(w, 12.0f32.to_radians(), 24).iter().map(|d| luminance(dark.deep_sky(*d, texel))).sum::<f32>() / 24.0;
+                let here = luminance(dark.deep_sky(w, texel));
+                println!("turn {turn}, tilt -60: the Large Magellanic Cloud {:.0} degrees up, {here:.3e} against {round:.3e} round it", w.y.asin().to_degrees());
+                assert!(here > 2.0 * round, "turned up, the cloud shows {here} against {round}");
+            }
+        }
+        assert!(shown, "the premise: a turn shows the Large Magellanic Cloud well up");
     }
 
     /// Plan hdri-7 §3: the nebulas fade with daylight as the Milky Way does: none with the sun 12 degrees down, some at

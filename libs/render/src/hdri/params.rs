@@ -542,7 +542,8 @@ pub struct NightParams {
 pub struct MilkyWayParams {
     /// Drawn when true. A block an edit made while off keeps its settings (the inspector's grey rows).
     pub on: bool,
-    /// The band's brightness, 0..=4: 1 is the real sky's (the core region about 20.3 mag/arcsec², 4.4x the default glow).
+    /// The band's brightness, 0..=4: 1 is the real sky's (the core region about 20.3 mag/arcsec², 4.4x the default glow)
+    /// as the eye sees it (the nebulas' Realism 1); a long exposure (Realism 0) shows it 14x brighter.
     pub strength: f32,
     /// Turns the whole night sphere (stars, band, nebulas) about the celestial pole, degrees, wrapped to 0..360: a
     /// season. 116 puts the galactic centre on the meridian at 22 h (a late-July evening).
@@ -567,6 +568,7 @@ pub struct NebulaParams {
     /// x the brightness the chosen Realism gives, 0..=10.
     pub brightness: f32,
     /// 0 space-art (astrophotography's colours, filaments, bright cores) .. 1 naked-eye real (faint, nearly grey, soft).
+    /// It sets the Milky Way's look too (its brightness, colours and grain), whether the nebulas draw or not.
     pub realism: f32,
     /// Their layout (placement, shapes, knots), kept across Realism, Amount, Size and Brightness. Not clamped.
     pub seed: u32,
