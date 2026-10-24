@@ -1055,6 +1055,20 @@ mod tests {
         assert!(dot(r[0], later[0]) < 0.99, "the band wheels with the clock");
     }
 
+    /// Plan hdri-7 §2: row 0 of the panorama frame is the galactic centre (l 0, b 0), in Sagittarius at declination
+    /// -28.94 degrees, and row 1 the galactic pole at +27.13, at any hour and latitude.
+    #[test]
+    fn star_rows_row_0_is_the_galactic_centre() {
+        let dot = |a: Vec4f, b: Vec4f| a.x * b.x + a.y * b.y + a.z * b.z;
+        for (hours, lat) in [(22.0, 45.0), (5.0, -30.0)] {
+            let (g, c) = (star_rows(hours, lat), celestial_rows(hours, lat));
+            let dec = dot(g[0], c[1]).asin().to_degrees();
+            assert!((dec + 28.94).abs() < 0.05, "the centre at declination {dec}");
+            let pole = dot(g[1], c[1]).asin().to_degrees();
+            assert!((pole - 27.13).abs() < 0.05, "the galactic pole at declination {pole}");
+        }
+    }
+
     #[test]
     fn noon_sun_is_higher_than_evening_sun() {
         let noon = SunLight::from_time_of_day(12.0, 52.0);

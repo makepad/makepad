@@ -244,19 +244,27 @@ const HOTSPOT_FALLOFF: f32 = 4.0;
 /// by 0.09 %.
 const KEY_GRID: usize = 256;
 
-/// D2: the widest a stroke may spread round its middle and still be the key,
-/// in degrees: the widest key cone a rect or a disc gets (half their 170
-/// degree limit). A stroke round the whole horizon has no middle to light
+/// D2: the widest a stroke or a ring may spread round its middle and still be
+/// the key, in degrees: the widest key cone a rect or a disc gets (half their
+/// 170 degree limit). A stroke round the whole horizon has no middle to light
 /// from, and a ring round the sky lies far out all round its middle: the
 /// engine's light would come from straight up, lighting little and no
-/// vertical surface, while all of the stroke's light left the map's lighting.
+/// vertical surface, while all of the light left the map's lighting.
 pub const KEY_MAX_SPREAD_DEG: f32 = 85.0;
 
-/// D2: whether `light` is a stroke that spreads wider round its middle than a
-/// key of [`KEY_MAX_SPREAD_DEG`] can, so that marked as the key it is not
-/// handed to the engine: it stays a light of the map, lighting the scene
-/// through the map like any other, and under a sky the sun leads. The panel
-/// says so where the key is chosen. False for every other light.
+/// Steps across a Ring light's band, soft edge included, and round a
+/// quarter of it, of [`PreparedLight::ring_facing`]'s polar sum (a ring is
+/// mirrored across both its axes). A circle needs one step round (its light
+/// depends on the radius alone).
+const RING_FACING_STEPS: usize = 256;
+const RING_FACING_TURNS: usize = 32;
+
+/// D2: whether `light` is a stroke or a Ring light that spreads wider round
+/// its middle than a key of [`KEY_MAX_SPREAD_DEG`] can, so that marked as the
+/// key it is not handed to the engine: it stays a light of the map, lighting
+/// the scene through the map like any other, and under a sky the sun leads.
+/// The panel says so where the key is chosen. False for every other light
+/// (a rect, a disc, a polygon, a scrim).
 ///
 /// A stroke spreads that wide in either of two ways, both measured on its
 /// centre line round its mean direction (its middle, the key's axis):
@@ -269,18 +277,49 @@ pub const KEY_MAX_SPREAD_DEG: f32 = 85.0;
 ///   L:41's ring at elevation 10 reaches only 82 degrees, but every point of
 ///   it is 80 degrees out (0.17); a ring is refused below about elevation 33,
 ///   and a 160 degree arch, which runs through its middle, gives 0.71.
+///
+/// A Ring light is measured the same two ways round its axis (the light's
+/// direction, the key's): its key cone, half the larger of its width and
+/// height, against the limit (clamp() holds both to 170 degrees, so a ring
+/// reaches at most the limit itself), and the share of its own light, its
+/// band, soft edge and hotspot, that a surface facing its axis receives
+/// (`PreparedLight::ring_facing`). A thin ring (inner 0.9) is refused from
+/// about 117 degrees across, and a ring nearly a disc (inner 0.1) from about
+/// 158: a whole disc 170 across gives the limit's share itself, and a ring
+/// lacks its middle.
 pub fn spreads_too_wide_to_be_key(light: &LightParams) -> bool {
-    ShapedLight::new(&LightParams { enabled: true, ..light.clone() }).is_some_and(|shaped| too_wide_to_lead(&shaped))
+    let light = &LightParams { enabled: true, ..light.clone() };
+    match light.shape() {
+        LightShape::Ring => too_wide_to_lead(&PreparedLight::new(light, &ImageSet::default())),
+        _ => ShapedLight::new(light).is_some_and(|shaped| stroke_too_wide_to_lead(&shaped)),
+    }
+}
+
+/// [`spreads_too_wide_to_be_key`] for a prepared light: a stroke by its
+/// centre line, a ring by its band, every other light never.
+fn too_wide_to_lead(light: &PreparedLight) -> bool {
+    match (&light.shaped, light.shape) {
+        (Some(shaped), _) => stroke_too_wide_to_lead(shaped),
+        (None, LightShape::Ring) => {
+            let limit = KEY_MAX_SPREAD_DEG.to_radians().cos();
+            !(light.key_cos >= limit) || !(light.ring_facing() >= even_disc_facing(limit))
+        }
+        (None, _) => false,
+    }
 }
 
 /// [`spreads_too_wide_to_be_key`] for a light the shape core draws.
-fn too_wide_to_lead(shaped: &ShapedLight) -> bool {
+fn stroke_too_wide_to_lead(shaped: &ShapedLight) -> bool {
     let limit = KEY_MAX_SPREAD_DEG.to_radians().cos();
     let reaches_too_far = shaped.stroke_cones().is_some_and(|(_, cos_radius, _)| !(cos_radius >= limit));
-    // An even disc of half-angle r: a surface facing it receives
-    // π sin²r / 2π(1 - cos r) = (1 + cos r) / 2 of its light.
-    let lies_too_far_out = shaped.stroke_line_facing().is_some_and(|facing| !(facing >= 0.5 * (1.0 + limit)));
+    let lies_too_far_out = shaped.stroke_line_facing().is_some_and(|facing| !(facing >= even_disc_facing(limit)));
     reaches_too_far || lies_too_far_out
+}
+
+/// An even disc of half-angle r, `cos_r` its cosine: a surface facing it
+/// receives π sin²r / 2π(1 - cos r) = (1 + cos r) / 2 of its light.
+fn even_disc_facing(cos_r: f32) -> f32 {
+    0.5 * (1.0 + cos_r)
 }
 
 /// Coarse cells per axis of [`over_cone`]'s grid over a key's covering cone.
@@ -336,8 +375,8 @@ pub struct Studio {
 
 impl Studio {
     /// `lights` are taken in list order; disabled ones are dropped here. The key is the
-    /// first enabled Add light marked `key`, unless it is a stroke that spreads too wide
-    /// to lead (D2, [`spreads_too_wide_to_be_key`]). A flag (Multiply) never leads the
+    /// first enabled Add light marked `key`, unless it is a stroke or a ring that spreads
+    /// too wide to lead (D2, [`spreads_too_wide_to_be_key`]). A flag (Multiply) never leads the
     /// lighting.
     ///
     /// The key carries exactly the light the map draws of it (D1), measured from the
@@ -389,7 +428,7 @@ impl Studio {
         let key_index = enabled
             .iter()
             .zip(&prepared)
-            .position(|(l, p)| !l.is_caster() && l.key && l.blend() == Blend::Add && !p.shaped.as_ref().is_some_and(too_wide_to_lead));
+            .position(|(l, p)| !l.is_caster() && l.key && l.blend() == Blend::Add && !too_wide_to_lead(p));
         // What hangs in front of each light, built for the same lights in the
         // same order as the prepared lights above. Before the key: a flag's
         // gobo cuts what the flag takes out of the key (B8). A caster's is
@@ -1151,6 +1190,52 @@ impl PreparedLight {
             Some(_) => 0.0,
             None => self.over_with(dir, Vec3f::default(), Vec3f::all(1.0), 0.0).x,
         }
+    }
+
+    /// D2: the share of a Ring light's own light that a surface facing its
+    /// axis receives, ∫ m cosθ dΩ / ∫ m dΩ with θ from the axis and m its
+    /// bare shape as the map draws it (`mask`: the band, its soft edge and
+    /// hotspot; not a picture, the extras or the lights after it, which only
+    /// cut it). 1 for any other light.
+    ///
+    /// Summed in the ellipse's own polar coordinates, where the band lies
+    /// between radii inner and 1 and the soft edge reaches at most half the
+    /// band over the short half axis past either side: p = (hx k cos φ,
+    /// hy k sin φ), dx dy = hx hy k dk dφ, and in the tangent plane
+    /// dΩ = dx dy / (1 + |p|²)^(3/2) and cosθ = 1 / sqrt(1 + |p|²), over a
+    /// quarter turn (the mask reads p's squares only). A circle's light
+    /// depends on k alone, so one step round suffices; a hard circular ring
+    /// between angles a and b from its axis gives exactly (cos a + cos b) / 2.
+    fn ring_facing(&self) -> f32 {
+        if self.shape != LightShape::Ring {
+            return 1.0;
+        }
+        let short = self.half.x.min(self.half.y);
+        let past = 0.5 * self.band / short;
+        let (k_lo, k_hi) = ((1.0 - 2.0 * self.ring_half - past).max(0.0), 1.0 + past);
+        let turns = if is_circle(self.half) { 1 } else { RING_FACING_TURNS };
+        let (dk, dphi) = ((k_hi - k_lo) / RING_FACING_STEPS as f32, std::f32::consts::FRAC_PI_2 / turns as f32);
+        let (mut sum, mut weighted) = (0.0f64, 0.0f64);
+        for i in 0..RING_FACING_STEPS {
+            let k = k_lo + (i as f32 + 0.5) * dk;
+            for j in 0..turns {
+                let (sin, cos) = ((j as f32 + 0.5) * dphi).sin_cos();
+                let p = vec2f(self.half.x * k * cos, self.half.y * k * sin);
+                // `project`'s limit, as in `key_emission`.
+                let r2 = 1.0 + p.x * p.x + p.y * p.y;
+                if !(r2 <= 400.0) {
+                    continue;
+                }
+                let m = self.mask(p, 0.0);
+                if !(m > 0.0) {
+                    continue;
+                }
+                let solid = (m * k / (r2 * r2.sqrt())) as f64;
+                sum += solid;
+                weighted += solid / (r2.sqrt() as f64);
+            }
+        }
+        if sum > 0.0 { (weighted / sum) as f32 } else { 1.0 }
     }
 
     /// The cone that holds this light's reach box, corners and soft edge
@@ -2567,6 +2652,48 @@ mod tests {
         // Only a stroke spreads: a rect as wide as a light may be still leads.
         let wide = LightParams { key: true, width_deg: 170.0, height_deg: 170.0, ..Default::default() };
         assert!(!spreads_too_wide_to_be_key(&wide) && Studio::new(&black_studio(), &[wide]).key().is_some());
+    }
+
+    /// D2 for a Ring light, as for a stroke: a thin ring 160 degrees across
+    /// overhead lies all round the zenith it would light from, 79 to 80
+    /// degrees out, so a surface facing up receives under the even 85 degree
+    /// disc's share of its light. Marked as the key it is not handed to the
+    /// engine; it is still drawn, and under a sky the sun leads. A small ring
+    /// light and a ring that is nearly a disc still lead.
+    #[test]
+    fn a_ring_that_circles_the_sky_is_not_the_key() {
+        let ring = |width_deg: f32, inner: f32| LightParams {
+            key: true,
+            shape: "ring".to_string(),
+            elevation_deg: 90.0,
+            width_deg,
+            height_deg: width_deg,
+            inner,
+            ..Default::default()
+        };
+        let wide = ring(160.0, 0.9);
+        assert!(spreads_too_wide_to_be_key(&wide), "a thin ring 160 degrees across");
+        assert!(Studio::new(&black_studio(), std::slice::from_ref(&wide)).key().is_none(), "not the key");
+        let sky = HdriParams { lights: vec![wide.clone()], ..Default::default() };
+        assert!(matches!(Env::new(&sky).key(), Some((crate::hdri::KeyTerm::Sun, _))), "the sun leads under a sky");
+        // Drawn as before, on the middle of its band (0.95 of its radius).
+        let on_band = 90.0 - (0.95 * 80f32.to_radians().tan()).atan().to_degrees();
+        assert!(Env::new(&studio_params(vec![wide.clone()])).radiance(dir_from_az_el(90.0, on_band)) != Vec3f::default());
+        for (name, light) in [("a small ring light", ring(30.0, 0.9)), ("nearly a disc", ring(60.0, 0.1))] {
+            assert!(!spreads_too_wide_to_be_key(&light), "{name}");
+            let key = Studio::new(&black_studio(), &[light]).key().expect(name);
+            assert!(key.validate().is_ok() && key.dir.y > 0.99, "{name}: {key:?}");
+        }
+        // The share is the cosine-weighted share of the ring's own light: a
+        // hard circle between angles a and b from its axis gives exactly
+        // (cos a + cos b) / 2, here 0.18.
+        let hard = PreparedLight::new(&LightParams { softness: 0.0, ..wide.clone() }, &ImageSet::default());
+        let (a, b) = ((0.9 * 80f32.to_radians().tan()).atan(), 80f32.to_radians());
+        assert!((hard.ring_facing() - 0.5 * (a.cos() + b.cos())).abs() < 1.0e-4, "{}", hard.ring_facing());
+        // The even 85 degree disc's share, 0.544, is a thin ring's 117 degrees across.
+        assert!(!spreads_too_wide_to_be_key(&ring(116.0, 0.9)) && spreads_too_wide_to_be_key(&ring(118.0, 0.9)), "the limit lies near 117 degrees");
+        // A long ring 160 by 90 lies nearer its axis along its short side, and leads.
+        assert!(!spreads_too_wide_to_be_key(&LightParams { height_deg: 90.0, ..wide.clone() }), "a long ring");
     }
 
     /// `EnvSun`'s one meaning for a stroke key: radiance x the key cone is the

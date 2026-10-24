@@ -224,6 +224,132 @@ pub fn fbm3(x: f32, y: f32, z: f32, octaves: u32, seed: u32) -> f32 {
     (sum / total).clamp(0.0, 1.0)
 }
 
+/// 1D value noise in [0, 1] on the integer lattice with the quintic fade, and its derivative: at an integer it is
+/// the lattice's hash and its slope is 0. Plan hdri-7 (the aurora's folds, rays and border).
+pub fn value1_d(x: f32, seed: u32) -> (f32, f32) {
+    let (ix, fx) = cell(x);
+    let s = seed_key(seed);
+    let (a, b) = (unit(mix_in(s, ix)), unit(mix_in(s, ix.wrapping_add(1))));
+    // d fade / d t = 30 t^2 (t - 1)^2
+    let dt = 30.0 * fx * fx * (fx - 1.0) * (fx - 1.0);
+    (mix_f32(a, b, fade(fx)), (b - a) * dt)
+}
+
+/// fbm of `value1_d` (lacunarity 2, gain 0.5, normalised to [0, 1]) and its derivative, with `octaves` held to
+/// 1..=12 and fractional: a fraction f of a last octave moves the sum of the whole octaves f of the way to the sum
+/// with it, so the finest octave fades in from its mean and the noise is continuous in `octaves` (a texel's band
+/// limit, `octaves_for`). At a whole number it is the plain sum.
+pub fn fbm1_d(x: f32, octaves: f32, seed: u32) -> (f32, f32) {
+    let octaves = if octaves.is_nan() { 1.0 } else { octaves.clamp(1.0, FBM_MAX_OCTAVES as f32) };
+    let whole = octaves.floor() as u32;
+    let part = octaves - whole as f32;
+    let count = if part > 0.0 { whole + 1 } else { whole };
+    let (mut px, mut freq) = (x, 1.0f32);
+    let (mut amplitude, mut sum, mut slope, mut total) = (1.0f32, 0.0f32, 0.0f32, 0.0f32);
+    let (mut sum_n, mut slope_n, mut total_n) = (0.0f32, 0.0f32, 1.0f32);
+    for octave in 0..count {
+        if octave == whole {
+            (sum_n, slope_n, total_n) = (sum, slope, total);
+        }
+        let (v, d) = value1_d(px, octave_seed(seed, octave));
+        sum += amplitude * v;
+        slope += amplitude * d * freq;
+        total += amplitude;
+        amplitude *= 0.5;
+        px = px * 2.0 + 17.13;
+        freq *= 2.0;
+    }
+    if part > 0.0 {
+        let (a, da) = (sum_n / total_n, slope_n / total_n);
+        let (b, db) = (sum / total, slope / total);
+        (a + (b - a) * part, da + (db - da) * part)
+    } else {
+        (sum / total, slope / total)
+    }
+}
+
+/// `fbm3` with fractional octaves (as `fbm1_d`): at a whole number of octaves it is `fbm3`, bit for bit (the same
+/// sums in the same order); between, the last octave fades in by its fraction. Plan hdri-7 (the Milky Way's dust and
+/// clouds, the nebulas' sprites).
+pub fn fbm3_frac(x: f32, y: f32, z: f32, octaves: f32, seed: u32) -> f32 {
+    let (sum_n, total_n, sum, total, part) = fbm3_sums(x, y, z, octaves, seed);
+    if part > 0.0 {
+        let (a, b) = (sum_n / total_n, sum / total);
+        (a + (b - a) * part).clamp(0.0, 1.0)
+    } else {
+        (sum / total).clamp(0.0, 1.0)
+    }
+}
+
+/// `fbm3_frac` of `octaves` on the scale of `full` octaves (a whole number; plan hdri-7 D10): every octave keeps the
+/// weight it has in the fbm of `full` octaves, and the finer ones a coarse lookup leaves out count as their mean (one
+/// half). `fbm3_frac` normalises by the octaves it sums, so a coarse lookup weighs its first octave more (the Milky
+/// Way's dust: 0.72 at a 512 bake, 1.8 octaves, against 0.59 at 1024, 2.8) and a texture's contrast would change with
+/// the width. Between two whole counts it is their straight line, as `fbm3_frac` is; at `full` or more (texel 0), or a
+/// NaN count, it is `fbm3_frac` at `full`, bit for bit.
+pub fn fbm3_frac_full(x: f32, y: f32, z: f32, octaves: f32, full: f32, seed: u32) -> f32 {
+    let full = if full.is_nan() { 1.0 } else { full.clamp(1.0, FBM_MAX_OCTAVES as f32).floor() };
+    if !(octaves < full) {
+        return fbm3_frac(x, y, z, full, seed);
+    }
+    let (sum_n, total_n, sum, total, part) = fbm3_sums(x, y, z, octaves, seed);
+    let total_full = 2.0 * (1.0 - 0.5f32.powi(full as i32));
+    // each sum less its mean, so the octaves left out count as one half
+    let (a, b) = (sum_n - 0.5 * total_n, sum - 0.5 * total);
+    let centred = if part > 0.0 { a + (b - a) * part } else { b };
+    (0.5 + centred / total_full).clamp(0.0, 1.0)
+}
+
+/// The sums behind `fbm3_frac`: the whole octaves' sum and amplitude total, the same with the next octave (the whole
+/// octaves' alone when there is no fraction), and that octave's fraction.
+fn fbm3_sums(x: f32, y: f32, z: f32, octaves: f32, seed: u32) -> (f32, f32, f32, f32, f32) {
+    let octaves = if octaves.is_nan() { 1.0 } else { octaves.clamp(1.0, FBM_MAX_OCTAVES as f32) };
+    let whole = octaves.floor() as u32;
+    let part = octaves - whole as f32;
+    let count = if part > 0.0 { whole + 1 } else { whole };
+    let mut p = [x, y, z];
+    let (mut amplitude, mut sum, mut total) = (1.0f32, 0.0f32, 0.0f32);
+    let (mut sum_n, mut total_n) = (0.0f32, 1.0f32);
+    for octave in 0..count {
+        if octave == whole {
+            (sum_n, total_n) = (sum, total);
+        }
+        sum += amplitude * value3(p[0], p[1], p[2], octave_seed(seed, octave));
+        total += amplitude;
+        amplitude *= 0.5;
+        let m = &OCTAVE_TURN;
+        let q = [
+            m[0][0] * p[0] + m[0][1] * p[1] + m[0][2] * p[2],
+            m[1][0] * p[0] + m[1][1] * p[1] + m[1][2] * p[2],
+            m[2][0] * p[0] + m[2][1] * p[1] + m[2][2] * p[2],
+        ];
+        p = [q[0] * 2.0 + 17.13, q[1] * 2.0 + 5.71, q[2] * 2.0 + 11.37];
+    }
+    (sum_n, total_n, sum, total, part)
+}
+
+/// How many octaves of an fbm whose first wavelength is `base_wavelength` keep its finest wavelength at least two
+/// texels of `texel` (both in one unit): log2(base / (2 texel)), held to 1..=max (the plan's D10); `max` at texel 0,
+/// an exact lookup. log2 is read off the float's exponent and its mantissa as a straight line between powers of two
+/// (exact at them, within 0.09 between), so no transcendental function enters the noise's bits.
+pub fn octaves_for(base_wavelength: f32, texel: f32, max: f32) -> f32 {
+    let max = if max.is_nan() { 1.0 } else { max.clamp(1.0, FBM_MAX_OCTAVES as f32) };
+    if !(texel > 0.0) || !(base_wavelength > 0.0) {
+        return max;
+    }
+    let ratio = base_wavelength / (2.0 * texel);
+    if ratio.is_infinite() {
+        return max;
+    }
+    if !(ratio >= f32::MIN_POSITIVE) {
+        return 1.0;
+    }
+    let bits = ratio.to_bits();
+    let exponent = ((bits >> 23) & 0xff) as i32 - 127;
+    let mantissa = f32::from_bits((bits & 0x007f_ffff) | 0x3f80_0000);
+    (exponent as f32 + (mantissa - 1.0)).clamp(1.0, max)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,5 +610,104 @@ mod tests {
         assert!(differs(&|x, y, _, s| fbm2(x, y, 4, s)) > 390);
         assert!(differs(&|x, y, z, s| fbm3(x, y, z, 4, s)) > 390);
         assert_ne!(hash01(1, 2, 3, 1), hash01(1, 2, 3, 2));
+    }
+
+    /// Plan hdri-7: the 1D value noise is pinned like the others (the aurora's folds and rays read it); on the lattice it
+    /// is the lattice's hash and flat. The bits were computed in float32 from the module's own hash.
+    #[test]
+    fn value1_matches_its_golden_values() {
+        let golden: [(f32, u32, u32, Option<u32>); 4] = [
+            (3.0, 7, 1_051_720_604, None),
+            (3.5, 7, 1_051_619_681, Some(3_157_838_760)),
+            (-2.5, 42, 1_052_681_427, Some(3_172_548_106)),
+            (0.25, 0, 1_059_913_176, Some(3_177_932_037)),
+        ];
+        for (x, seed, v, d) in golden {
+            let (got_v, got_d) = value1_d(x, seed);
+            assert_eq!(got_v.to_bits(), v, "value1_d({x}, {seed})");
+            match d {
+                Some(d) => assert_eq!(got_d.to_bits(), d, "value1_d({x}, {seed})'s slope"),
+                None => assert_eq!(got_d, 0.0, "flat on the lattice"),
+            }
+        }
+        assert_eq!(value1_d(3.0, 7).0, unit(mix_in(seed_key(7), 3)));
+    }
+
+    /// The slope is the derivative (central differences); one octave of fbm1_d is value1_d; a fraction of an octave
+    /// fades the last one in, continuously.
+    #[test]
+    fn fbm1_slopes_are_derivatives_and_octaves_fade_in() {
+        for i in 0..200 {
+            let x = -7.3 + i as f32 * 0.0731;
+            for octaves in [1.0f32, 2.5, 4.0] {
+                let (_, d) = fbm1_d(x, octaves, 11);
+                let h = 1.0e-3;
+                let fd = (fbm1_d(x + h, octaves, 11).0 - fbm1_d(x - h, octaves, 11).0) / (2.0 * h);
+                assert!((d - fd).abs() < 0.02 * (1.0 + d.abs()) * 2f32.powf(octaves), "x {x}, {octaves} octaves: {d} vs {fd}");
+            }
+            let one = fbm1_d(x, 1.0, 11);
+            assert_eq!((one.0.to_bits(), one.1.to_bits()), (value1_d(x, 11).0.to_bits(), value1_d(x, 11).1.to_bits()));
+            let (a, b, mid) = (fbm1_d(x, 3.0, 11).0, fbm1_d(x, 4.0, 11).0, fbm1_d(x, 3.5, 11).0);
+            assert!((mid - (a + (b - a) * 0.5)).abs() < 1.0e-6, "half an octave is half way: {a} {mid} {b}");
+            assert!((fbm1_d(x, 3.0001, 11).0 - a).abs() < 1.0e-4, "continuous at a whole octave");
+            assert!((0.0..=1.0).contains(&b));
+        }
+    }
+
+    /// fbm3_frac at a whole number of octaves is fbm3 bit for bit; between, the last octave fades in by its fraction.
+    #[test]
+    fn fbm3_frac_is_fbm3_at_whole_octaves() {
+        for &(x, y, z, seed, octaves) in &GOLDEN_POINTS {
+            assert_eq!(fbm3_frac(x, y, z, octaves as f32, seed).to_bits(), fbm3(x, y, z, octaves, seed).to_bits(), "{x} {y} {z} {seed} {octaves}");
+        }
+        for &(x, y, z) in &points() {
+            assert_eq!(fbm3_frac(x, y, z, 5.0, 9).to_bits(), fbm3(x, y, z, 5, 9).to_bits());
+            let (a, b, mid) = (fbm3(x, y, z, 3, 9), fbm3(x, y, z, 4, 9), fbm3_frac(x, y, z, 3.25, 9));
+            assert!((mid - (a + (b - a) * 0.25)).abs() < 1.0e-6);
+            assert!((0.0..=1.0).contains(&mid));
+        }
+        assert_eq!(fbm3_frac(0.3, 0.4, 0.5, 20.0, 1).to_bits(), fbm3(0.3, 0.4, 0.5, 12, 1).to_bits(), "held to 12 octaves");
+        assert_eq!(fbm3_frac(0.3, 0.4, 0.5, f32::NAN, 1).to_bits(), fbm3(0.3, 0.4, 0.5, 1, 1).to_bits(), "NaN is one octave");
+    }
+
+    /// fbm3_frac_full keeps every octave at its weight in the fbm of `full` octaves: at a whole number w of them it is
+    /// fbm3 of w on full's scale (0.5 + (fbm3 - 0.5) x total(w) / total(full)), between two it is their straight line, and
+    /// at `full` or more (texel 0), or a NaN count, it is fbm3_frac at `full` bit for bit.
+    #[test]
+    fn fbm3_frac_full_keeps_each_octaves_weight() {
+        let total = |w: u32| 2.0 * (1.0 - 0.5f32.powi(w as i32));
+        for &(x, y, z) in &points() {
+            let at = |w: u32| 0.5 + (fbm3(x, y, z, w, 9) - 0.5) * total(w) / total(6);
+            for w in 1..6u32 {
+                let v = fbm3_frac_full(x, y, z, w as f32, 6.0, 9);
+                assert!((v - at(w)).abs() < 1.0e-6, "{w} octaves: {v} against {}", at(w));
+                let mid = fbm3_frac_full(x, y, z, w as f32 + 0.25, 6.0, 9);
+                let line = at(w) + (if w < 5 { at(w + 1) } else { fbm3(x, y, z, 6, 9) } - at(w)) * 0.25;
+                assert!((mid - line).abs() < 1.0e-6, "{w}.25 octaves: {mid} against {line}");
+            }
+            assert_eq!(fbm3_frac_full(x, y, z, 6.0, 6.0, 9).to_bits(), fbm3(x, y, z, 6, 9).to_bits());
+            assert_eq!(fbm3_frac_full(x, y, z, 9.0, 6.0, 9).to_bits(), fbm3(x, y, z, 6, 9).to_bits());
+            assert_eq!(fbm3_frac_full(x, y, z, f32::NAN, 2.0, 9).to_bits(), fbm3(x, y, z, 2, 9).to_bits());
+            assert!((fbm3_frac_full(x, y, z, 5.9999, 6.0, 9) - fbm3(x, y, z, 6, 9)).abs() < 1.0e-4, "continuous at full");
+        }
+    }
+
+    /// The octaves a texel allows (D10): log2(base / (2 texel)), held to 1..=max, the most at texel 0; exact at powers of
+    /// two, within 0.09 of log2 between, and never rising as the texel grows.
+    #[test]
+    fn octaves_follow_the_texel() {
+        assert_eq!(octaves_for(1.0, 0.0, 6.0), 6.0);
+        assert_eq!(octaves_for(1.0, 1.0 / 16.0, 6.0), 3.0);
+        assert_eq!(octaves_for(1.0, 1.0 / 64.0, 6.0), 5.0);
+        assert_eq!(octaves_for(1.0, 1.0, 6.0), 1.0, "never fewer than one");
+        assert_eq!(octaves_for(1.0, 1.0e-9, 6.0), 6.0, "never more than asked");
+        let mut last = f32::MAX;
+        for i in 1..400 {
+            let texel = i as f32 * 1.0e-3;
+            let o = octaves_for(1.0, texel, 12.0);
+            assert!(o <= last, "{i}: {o} after {last}");
+            assert!((o - (1.0 / (2.0 * texel)).log2().clamp(1.0, 12.0)).abs() < 0.09, "{i}: {o}");
+            last = o;
+        }
     }
 }

@@ -217,6 +217,44 @@ pub fn spectrum_rgb(s: &Spectrum) -> Vec3f {
     }
 }
 
+/// The CIE 1931 2-degree functions at `nm`, linearly interpolated in CMF_1931 (0 outside 380..=780). Plan hdri-7: a
+/// line's colour at its exact wavelength, which a narrow band on the 5 nm grid would alias.
+pub fn cmf_at(nm: f32) -> [f32; 3] {
+    let x = (nm - LAMBDA_MIN_NM) / LAMBDA_STEP_NM;
+    if !(x >= 0.0 && x <= (SAMPLES - 1) as f32) {
+        return [0.0; 3];
+    }
+    let i = (x as usize).min(SAMPLES - 2);
+    let t = x - i as f32;
+    let (a, b) = (CMF_1931[i], CMF_1931[i + 1]);
+    std::array::from_fn(|c| a[c] + (b[c] - a[c]) * t)
+}
+
+/// One rayleigh's photons per second per square metre per steradian (10^10 / 4 pi) times Planck's constant times the
+/// speed of light (J m): a rayleigh's radiance at a wavelength of L metres is this over L, in W m^-2 sr^-1.
+const RAYLEIGH_HC: f32 = 7.957_747e8 * 1.986_445_9e-25;
+
+/// XYZ of one rayleigh of an emission line at `nm` as unadapted engine radiance: its radiance through the
+/// colour-matching functions at 683 lm/W, in cd/m², over the engine's cd/m² per unit (`night::cd_m2_per_engine_unit`,
+/// the stars' own anchor). Y is the line's luminance (refs §4.3: 557.7 nm about 3.06e-11 per R).
+pub fn line_xyz_per_rayleigh(nm: f32) -> [f32; 3] {
+    let watts = RAYLEIGH_HC / (nm * 1.0e-9);
+    let k = 683.0 * watts / super::night::cd_m2_per_engine_unit();
+    cmf_at(nm).map(|c| c * k)
+}
+
+/// Linear Rec.709 of `xyz` with its luminance kept: the matrix (`xyz_to_rgb`, which clips each negative channel to 0),
+/// then rescaled to Y. A line outside Rec.709 keeps its brightness and loses only hue.
+pub fn xyz_to_rgb_keep_luminance(xyz: [f32; 3]) -> Vec3f {
+    let rgb = xyz_to_rgb(xyz);
+    let y = luminance(rgb);
+    if y > 0.0 && xyz[1] > 0.0 {
+        rgb * (xyz[1] / y)
+    } else {
+        Vec3f::default()
+    }
+}
+
 /// Weights for three emitters so that their mix has the chromaticity of
 /// `target` (and Y = 1): a 3x3 solve in XYZ. A weight that comes out
 /// negative (the target lies outside the emitters' triangle) is held at 0.
@@ -651,5 +689,39 @@ mod tests {
         assert!(b.x / b.z > a.x / a.z, "a CTO warms the source");
         assert!(b.x <= a.x && b.y <= a.y && b.z <= a.z, "and only takes light away: {b:?} vs {a:?}");
         assert!(luminance(b) < 0.5 * luminance(a), "the ND alone halves it");
+    }
+
+    /// Plan hdri-7: the colour-matching functions between the table's nodes, and an emission line's light per rayleigh
+    /// (refs §4.3: cd/m² per R from 683 lm/W, over the engine's about 6300 cd/m² per unit).
+    #[test]
+    fn a_line_per_rayleigh_is_its_photometric_light() {
+        for i in 0..SAMPLES {
+            assert_eq!(cmf_at(wavelength_nm(i)), CMF_1931[i]);
+        }
+        let mid = cmf_at(557.5);
+        for c in 0..3 {
+            assert!((mid[c] - 0.5 * (CMF_1931[35][c] + CMF_1931[36][c])).abs() < 1.0e-6);
+        }
+        assert_eq!((cmf_at(379.0), cmf_at(781.0)), ([0.0; 3], [0.0; 3]));
+        for (nm, want) in [(557.7f32, 3.063e-11f32), (630.0, 7.205e-12), (427.8, 3.887e-13), (656.3, 1.990e-12)] {
+            let y = line_xyz_per_rayleigh(nm)[1];
+            assert!((y / want - 1.0).abs() < 0.02, "{nm} nm: {y:e} per rayleigh, want {want:e}");
+        }
+    }
+
+    /// A line's colour keeps its luminance however Rec.709 clips it (a plain clip loses 14x at 427.8 nm, engine §12.2).
+    #[test]
+    fn a_clipped_colour_keeps_its_luminance() {
+        for nm in [427.8f32, 486.1, 500.7, 557.7, 630.0, 656.3] {
+            let xyz = line_xyz_per_rayleigh(nm).map(|c| c * 1.0e12);
+            let rgb = xyz_to_rgb_keep_luminance(xyz);
+            assert!(rgb.x >= 0.0 && rgb.y >= 0.0 && rgb.z >= 0.0, "{nm}: {rgb:?}");
+            assert!((luminance(rgb) / xyz[1] - 1.0).abs() < 1.0e-4, "{nm}: {} vs {}", luminance(rgb), xyz[1]);
+        }
+        let violet = xyz_to_rgb_keep_luminance(line_xyz_per_rayleigh(427.8));
+        assert!(violet.z > violet.x && violet.y == 0.0, "{violet:?}");
+        let green = xyz_to_rgb_keep_luminance(line_xyz_per_rayleigh(557.7));
+        assert!(green.y > 4.0 * green.x && green.z == 0.0, "557.7 nm is lime in Rec.709: {green:?}");
+        assert_eq!(xyz_to_rgb_keep_luminance([0.0; 3]), Vec3f::default());
     }
 }
