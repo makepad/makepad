@@ -315,7 +315,7 @@ impl Env {
                 } else {
                     clouds::CloudLayer::new(&sky.clouds, params.seed, atmo.sun_dir())
                 };
-                let night = night::NightSky::new(&sky.night, params.seed, atmo.sun_dir(), night::star_hours(&sky.sun), sky.sun.latitude);
+                let night = night::NightSky::new_par(&sky.night, params.seed, atmo.sun_dir(), night::star_hours(&sky.sun), sky.sun.latitude, run)?;
                 let cloud_sun = atmo.sun_irradiance();
                 let cloud_ambient = atmo.ambient() + night.ambient();
                 // The weather itself works its floors out from the user's block.
@@ -3391,8 +3391,9 @@ mod tests {
         let (a, b) = (Env::new(&thin).ground_gain, Env::new(&with(&thin)).ground_gain);
         // within 0.5 %: the hair of cloud (nine of the dome's looks) is lit by the night's mean, the aurora in it, and
         // covers a little of it, two small terms of either sign that the aurora's shape moves (Task 4c, 2026-10-24: 0.08 %
-        // at the default before the ribbons folded but 0.10 to 0.16 % at its other Folds, 0.16 to 0.28 % after); without
-        // the aurora in the open dome the gain would grow by its share of the sky's light, 35 to 52 % here
+        // at the default before the ribbons folded but 0.10 to 0.16 % at its other Folds, 0.16 to 0.28 % after, 0.14 to
+        // 0.22 % after its fix round); without the aurora in the open dome the gain would grow by its share of the sky's
+        // light, 35 to 52 % here
         println!("the ground's gain under a hair of cloud: {a:?}, with the aurora {b:?}");
         assert!((a - b).length() < 5.0e-3, "{a:?} against {b:?} with the aurora");
         let mut deck = thin.clone();

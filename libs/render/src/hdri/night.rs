@@ -268,6 +268,12 @@ impl NightSky {
     /// The night is read as clamp() holds it (`NightParams::clamped`, D17), so
     /// its ranges, defaults and NaN rule are `NightParams::clamp_fields`' alone.
     pub fn new(p: &NightParams, seed: u32, sun_dir: Vec3f, star_hours: f32, latitude: f32) -> NightSky {
+        NightSky::new_par(p, seed, sun_dir, star_hours, latitude, &super::caster::serial_rows).expect("a serial runner runs every job")
+    }
+
+    /// `new`, the aurora's footprints built over `run` (Task 4c's fix round: a held drag of its Height, Width or Folds
+    /// builds them on every step); None when the runner skipped a job (an overtaken job's).
+    pub fn new_par(p: &NightParams, seed: u32, sun_dir: Vec3f, star_hours: f32, latitude: f32, run: &dyn Fn(usize, &(dyn Fn(usize) + Sync))) -> Option<NightSky> {
         let p = &p.clamped();
         let sun_dir = if sun_dir.is_finite() && sun_dir.length() > 1.0e-6 {
             sun_dir.normalize()
@@ -363,7 +369,10 @@ impl NightSky {
         // Plan hdri-7 §3: the nebulas likewise, along the band when it draws; their stars lifted as the field's are.
         let nebulas = p.nebulas_drawn().map(|n| Nebulas::new(n, mw.map(|_| gal_axes), lift * astro, star_gain * astro, &star_colors));
         // Plan hdri-7 §4: the aurora fades with the night as the stars do; built only when it draws and the sun is down.
-        let aurora_layer = p.aurora_drawn().filter(|_| night_factor > 0.0).map(|a| Aurora::new(a, a.strength * lift * night_factor));
+        let aurora_layer = match p.aurora_drawn().filter(|_| night_factor > 0.0) {
+            Some(a) => Some(Aurora::new_par(a, a.strength * lift * night_factor, run)?),
+            None => None,
+        };
 
         let mut sky = NightSky {
             night_factor,
@@ -399,7 +408,7 @@ impl NightSky {
             sky.ambient += mean;
             sky.ground_irradiance += irradiance;
         }
-        sky
+        Some(sky)
     }
 
     /// 0 by day, rising from sunset to 1 at the end of nautical twilight (sun at -12 degrees).

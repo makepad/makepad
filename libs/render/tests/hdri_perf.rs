@@ -858,6 +858,22 @@ fn night_layers() -> Vec<(&'static str, fn(&mut HdriParams))> {
     ]
 }
 
+/// The aurora at the corners of its ranges (Task 4c's fix round), each gated as a layer: its ribbons nearest (Height
+/// 75), furthest (Height 1), longest (Width 180) and most folded (Folds 1), where its footprints carry the most points
+/// and a held drag of Height, Width or Folds builds them on every step.
+fn aurora_extremes() -> Vec<(&'static str, AuroraParams)> {
+    let at = |height_deg: f32, width_deg: f32, folds: f32| AuroraParams { height_deg, width_deg, folds, ..AuroraParams::default() };
+    let d = AuroraParams::default();
+    vec![
+        ("Height 75, Width 180, Folds 1", at(75.0, 180.0, 1.0)),
+        ("Height 40, Width 180, Folds 1", at(40.0, 180.0, 1.0)),
+        ("Height 15, Width 180, Folds 1", at(15.0, 180.0, 1.0)),
+        ("Height 1, Width 180, Folds 1", at(1.0, 180.0, 1.0)),
+        ("Height 75", at(75.0, d.width_deg, d.folds)),
+        ("Height 1", at(1.0, d.width_deg, d.folds)),
+    ]
+}
+
 /// Plan hdri-7 §5: a held Size drag over the nebulas: 24 held 512 bakes of `preset_name` with the nebulas at `seed` (a
 /// seed no other row uses, so no sprite row is filled yet), their Size stepping from 0.25 to 4 (each step may read a
 /// sprite level the last did not, whose rows fill then), against the same bakes without nebulas. (base median ms, the
@@ -899,7 +915,7 @@ fn the_held_night_bakes_are_measured() {
 
 /// Plan hdri-7 §5: each night layer adds at most a fifth to a held 512 bake of "Moonlit night" and of "Starry night",
 /// all of them together at most two fifths; the released 1024 cost is printed beside it. A held nebula Size drag
-/// (`nebula_size_drag`) is gated like a layer.
+/// (`nebula_size_drag`) and the aurora at the corners of its ranges (`aurora_extremes`) are gated like a layer.
 #[test]
 #[ignore = "release timing; see the module comment"]
 fn held_night_layers_cost_at_most_a_fifth_more() {
@@ -912,6 +928,13 @@ fn held_night_layers_cost_at_most_a_fifth_more() {
                 assert!(extra / base <= HELD_NIGHT_LAYER_SHARE, "{name}: {layer} adds {:.0} % to a held bake", 100.0 * extra / base);
                 let (base, extra) = night_layer_extra(pool, name, 1024, patch);
                 println!("hdri_perf: released 1024, {name}, {layer}: {base:6.2} ms {extra:+5.2} ms");
+            }
+            if layers.iter().any(|(layer, _)| *layer == "aurora") {
+                for (label, aurora) in aurora_extremes() {
+                    let (base, extra) = night_layer_extra(pool, name, 512, &|p| p.sky.night.aurora = Some(aurora.clone()));
+                    println!("hdri_perf: held 512, {name}, the aurora at {label}: {base:6.2} ms {extra:+5.2} ms ({:+.0} %)", 100.0 * extra / base);
+                    assert!(extra / base <= HELD_NIGHT_LAYER_SHARE, "{name}: the aurora at {label} adds {:.0} % to a held bake", 100.0 * extra / base);
+                }
             }
             if layers.iter().any(|(layer, _)| *layer == "nebulas") {
                 // a fresh seed per preset ("Moonlit night" and "Starry night" differ in length), filled by this drag alone

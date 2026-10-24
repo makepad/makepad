@@ -12,12 +12,15 @@
 //!   in a second and a third ribbon behind the first, fainter.
 //! - **Crossings.** The polyline's segments are indexed by azimuth; a view meets every segment its azimuth crosses, so
 //!   along a fold it passes through the sheet three times. The sheet leans poleward with height (FIELD_TILT, a field
-//!   dip of about 77 degrees): a crossing's distance grows by the lean / cos beta (beta the view's azimuth from the
-//!   middle), exact where the ribbon runs along the arc.
+//!   dip of about 77 degrees): over a crossing it stands the lean / cos beta further out per km up (beta the view's
+//!   azimuth from the middle, exact where the ribbon runs along the arc), and the view meets it where its distance at a
+//!   height is the sheet's (by false position).
 //! - **Brightness.** A thin sheet's light is its column along the view: face-on 0.3 of the brightest (EDGE_MAX, the top
 //!   of refs §5.1's 0.1 to 0.3), seen edge-on (a fold's turn, a curl, the arc's ends) up to all of it: 50 kR of green
-//!   at Strength 1. Knots brighten and dim each ribbon along its length. The rays are field lines counted along the
-//!   ribbon, soft, irregularly spaced and of varying length.
+//!   at Strength 1. Where the ribbon turns back as seen from the observer, the two passes that begin there rise softly
+//!   (TIP_KM, a sheet of soft thickness). Knots brighten and dim each ribbon along its length, and a view's columns
+//!   together are held softly under the brightest line of sight's (`Aurora::hold`), so no lookup carries more than
+//!   Strength says. The rays are field lines counted along the ribbon, soft, irregularly spaced and of varying length.
 //! - **Colour.** The lines' heights above the border: nitrogen (427.8 nm and the first positive bands, pink together)
 //!   in its bottom 12 km or so, the green 557.7 nm line from a few km up fading over 25 km, held off the bottom 7 km
 //!   more where the nitrogen is strong (a storm's harder electrons), with the N2+ first negative bands (427.8 and
@@ -32,6 +35,7 @@ use makepad_draw::*;
 use super::noise::{fbm1_d, fbm1_frac_full, hash_u32, octaves_for};
 use super::spectrum::{line_xyz_per_rayleigh, xyz_to_rgb_keep_luminance};
 use super::{dir_from_az_el, AuroraParams};
+use crate::sky::luminance;
 use std::f32::consts::{PI, TAU};
 
 /// The band limit of a bare lookup (the strip's rings, the dome, the night's quadrature): the rings' spacing.
@@ -47,9 +51,12 @@ const ARC_STEP_KM: f32 = 60.0;
 const FIELD_TILT: f32 = 0.23;
 /// Edge-on over face-on, at most: the face-on body is 0.3 of the brightest lines of sight (refs §5.1: 0.1 to 0.3).
 const EDGE_MAX: f32 = 10.0 / 3.0;
-/// Where a view grazes the sheet (a fold's turn seen edge-on, the cosine of its angle to the sheet's normal under
-/// this) its column fades out, so a fold's outer edge is soft rather than a cut.
-const TIP_SOFT: f32 = 0.35;
+/// The sheet's soft thickness across the ribbon (km, at an arc SHAPE_KM away; nearer arcs take it smaller with their
+/// shapes). Where the ribbon turns back as seen from the observer (a fold's U-turn, a meander running away), a view
+/// passing the turn meets two more passes through the sheet; their columns rise from 0 over this much of the view's
+/// lateral distance into the turn, and a thick sheet's column there is finite, so the turn's side is a soft edge, not
+/// a cut, and a wide turn seen edge-on a soft bright rim.
+const TIP_KM: f32 = 10.0;
 /// The footprint's shapes are sized for an arc SHAPE_KM away (its border 15 degrees up in the middle); a nearer arc,
 /// higher in the sky, takes them smaller in proportion (down to SHAPE_MIN), so they keep their size in the sky and the
 /// ribbon stays in front of the observer.
@@ -70,11 +77,17 @@ const FOLD_CELL_KM: f32 = 340.0;
 /// The curls: in each CURL_CELL_KM of a ribbon a loop of radius 12 to 30 km with a chance of 0.6 Folds, tighter on
 /// one side (a spiral's start).
 const CURL_CELL_KM: f32 = 520.0;
-/// The polyline's step at the arc's distance, coarser further out in proportion to the distance; how far it reaches on
-/// the ground (the top of the emission sets beyond about 2300 km); and its segments' azimuth bins.
-const STEP_KM: f32 = 1.5;
+/// The polyline's step at the first arc's distance, coarser further out in proportion to the distance: from a quarter
+/// of it to STEP_MAX of it, as the footprint turns (at most TURN_STEP radians a step; a step that turns more is halved,
+/// one that turns under a third of it grows by half); how far it reaches on the ground (the top of the emission sets
+/// beyond about 2300 km); and its segments' azimuth bins.
+const STEP_KM: f32 = 6.0;
+const STEP_MAX: f32 = 4.0;
+const TURN_STEP: f32 = 0.3;
 const REACH_KM: f32 = 2400.0;
 const BINS: usize = 1024;
+/// `Aurora::ground_light`'s quadrature: every LIGHT_BINS-th bin's middle.
+const LIGHT_BINS: usize = 4;
 /// The knots' wavelength along a ribbon.
 const KNOT_KM: f32 = 150.0;
 /// The rays' wavelength along the ribbon, the warp of their spacing (RAY_WARP of a wavelength over RAY_WARP_KM), and
@@ -128,9 +141,17 @@ const SALT: u32 = 0x4155_524f;
 struct Footprint {
     /// From one end to the other: x, y (km) and the length along it to here (km).
     points: Vec<[f32; 3]>,
-    /// The segments (the index of their first point) whose azimuths reach into bin b: `segments[start[b]..start[b + 1]]`.
+    /// Each point's unit tangent (its two segments' directions averaged): a crossing's direction is read between its
+    /// segment's two, so a view's angle to the sheet has no step at the polyline's corners.
+    tangents: Vec<[f32; 2]>,
+    /// Each segment's run (the stretch over which the azimuth keeps turning one way): the azimuths (radians from the
+    /// middle) where it turns back at its start and at its end, infinite where it runs on to the footprint's end.
+    turns: Vec<[f32; 2]>,
+    /// The segments (the index of their first point) whose azimuths reach into bin b: `segments[start[b]..start[b + 1]]`,
+    /// and the nearest and furthest ground distance (km) any of them reaches.
     start: Vec<u32>,
     segments: Vec<u32>,
+    distances: Vec<[f32; 2]>,
 }
 
 /// One ribbon (an arc of the aurora).
@@ -215,6 +236,115 @@ impl Shape {
             }
         }
     }
+
+    fn at(&self) -> f32 {
+        match *self {
+            Shape::Fold { at, .. } | Shape::Curl { at, .. } => at,
+        }
+    }
+
+    /// How far it reaches along the arc from `at`: a fold's length (past it, its displacement is `passed`'s), a curl's
+    /// half-width (either way).
+    fn reach(&self) -> f32 {
+        match *self {
+            Shape::Fold { rho, leg, .. } => PI * (rho[0] + rho[1]) + leg,
+            Shape::Curl { w, .. } => w,
+        }
+    }
+}
+
+/// A footprint's folds and curls, ordered for its walk: at t they add the folds passed (each a constant displacement
+/// past its end, summed in `passed`) and the few whose span holds t, found from where the walk's last point left its
+/// cursor (`ShapeCursor`), so a point costs a few comparisons, not a pass over every shape (a nearby arc's footprint
+/// carries hundreds).
+struct Shapes {
+    /// The folds by where they start, where each ends (at + its length, as `ends` has it), and the longest.
+    folds: Vec<Shape>,
+    fold_at: Vec<f32>,
+    fold_end: Vec<f32>,
+    longest: f32,
+    /// Where each fold ends, in order, and the displacement of those ending before each: `passed[i]` of the first i.
+    ends: Vec<f32>,
+    passed: Vec<[f32; 2]>,
+    /// The curls by where they start, and the widest's half-width.
+    curls: Vec<Shape>,
+    curl_at: Vec<f32>,
+    widest: f32,
+}
+
+/// Where a walk along a footprint stands among its shapes: how many folds ended, how many folds started and how many
+/// curls started (or start within the widest's half-width) by its last point.
+#[derive(Clone, Copy, Default)]
+struct ShapeCursor {
+    done: usize,
+    started: usize,
+    curls: usize,
+}
+
+impl Shapes {
+    fn new(shapes: Vec<Shape>) -> Shapes {
+        let (mut folds, mut curls): (Vec<Shape>, Vec<Shape>) = shapes.into_iter().partition(|s| matches!(s, Shape::Fold { .. }));
+        folds.sort_by(|a, b| a.at().total_cmp(&b.at()));
+        curls.sort_by(|a, b| a.at().total_cmp(&b.at()));
+        let mut ends: Vec<(f32, [f32; 2])> = folds
+            .iter()
+            .map(|f| match *f {
+                Shape::Fold { at, rho, leg, side, .. } => (at + f.reach(), [-(f.reach() + leg), side * 2.0 * (rho[0] + rho[1])]),
+                Shape::Curl { .. } => unreachable!(),
+            })
+            .collect();
+        ends.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut passed = vec![[0.0f32; 2]];
+        for (_, d) in &ends {
+            let last = passed[passed.len() - 1];
+            passed.push([last[0] + d[0], last[1] + d[1]]);
+        }
+        Shapes {
+            longest: folds.iter().map(Shape::reach).fold(0.0, f32::max),
+            widest: curls.iter().map(Shape::reach).fold(0.0, f32::max),
+            fold_at: folds.iter().map(Shape::at).collect(),
+            fold_end: folds.iter().map(|f| f.at() + f.reach()).collect(),
+            curl_at: curls.iter().map(Shape::at).collect(),
+            folds,
+            ends: ends.into_iter().map(|e| e.0).collect(),
+            passed,
+            curls,
+        }
+    }
+
+    /// What they add to the footprint's (x, y) at `t` km along the arc, `at` the walk's cursor (moved to t).
+    fn add(&self, t: f32, at: &mut ShapeCursor, x: &mut f32, y: &mut f32) {
+        // how many of the sorted `list` are under `t` (or at it, `inclusive`), from the cursor's last count
+        fn count(list: &[f32], t: f32, n: &mut usize, inclusive: bool) {
+            let under = |v: f32| if inclusive { v <= t } else { v < t };
+            while *n < list.len() && under(list[*n]) {
+                *n += 1;
+            }
+            while *n > 0 && !under(list[*n - 1]) {
+                *n -= 1;
+            }
+        }
+        count(&self.ends, t, &mut at.done, true);
+        *x += self.passed[at.done][0];
+        *y += self.passed[at.done][1];
+        // the folds under way: started before t and not ended (by the same end as `passed`'s)
+        count(&self.fold_at, t, &mut at.started, false);
+        for i in (0..at.started).rev() {
+            if self.fold_at[i] < t - self.longest {
+                break;
+            }
+            if self.fold_end[i] > t {
+                self.folds[i].add(t, x, y);
+            }
+        }
+        count(&self.curl_at, t + self.widest, &mut at.curls, false);
+        for i in (0..at.curls).rev() {
+            if self.curl_at[i] <= t - self.widest {
+                break;
+            }
+            self.curls[i].add(t, x, y);
+        }
+    }
 }
 
 /// A hash's top 24 bits in [0, 1).
@@ -282,49 +412,74 @@ fn shapes(folds: f32, sc: f32, span: f32, shared: u32, own: u32, k: u32) -> Vec<
 
 /// Ribbon `k`'s footprint (its middle `d0 + k ARC_STEP_KM` away), from its one end to the other: along the arc past
 /// the window `half` (or REACH_KM) either side, however much of the way its folds and curls take, its warps pinned at
-/// the middle. Without `detail`, its meander alone (no folds, curls or bends).
+/// the middle, in steps that shorten where it turns (TURN_STEP). Without `detail`, its meander alone (no folds, curls
+/// or bends).
 fn footprint(d0: f32, k: u32, folds: f32, half: f32, shared: u32, own: u32, detail: bool) -> Vec<[f32; 3]> {
     let d = d0 + k as f32 * ARC_STEP_KM;
     let sc = (d0 / SHAPE_KM).clamp(SHAPE_MIN, 1.0);
     let reach = REACH_KM.min((d + 200.0 * sc) * (half + 3f32.to_radians()).min(MAX_HALF).tan()) + 100.0 * sc;
     // a fold takes its length of the arc's parameter and goes back by its leg: at Folds 1 about four times the reach
     let span = 4.0 * reach + 1000.0 * sc;
-    let shapes = if detail { shapes(folds, sc, span, shared, own, k) } else { Vec::new() };
+    let shapes = Shapes::new(if detail { shapes(folds, sc, span, shared, own, k) } else { Vec::new() });
     let (meander, bend) = (MEANDER_DEPTH_KM * sc * folds.sqrt(), if detail { BEND_DEPTH_KM * sc * folds } else { 0.0 });
-    let warp = |t: f32| {
+    let warp = |at: &mut ShapeCursor, t: f32| {
         if !(folds > 0.0) {
             return (0.0, 0.0);
         }
         let m = t / (MEANDER_KM * sc);
         let twist = 1.5 * (fbm1_d(1.9 * m + 5.3, 2.0, shared ^ 0x5457_4953).0 - 0.5);
-        let mut y = meander * (2.0 * fbm1_d(m + twist, 3.0, shared).0 - 1.0);
-        let b = t / (BEND_KM * sc);
-        let mut x = bend * (2.0 * fbm1_d(b, 2.0, own ^ 0x4245_4e58).0 - 1.0);
-        y += bend * (2.0 * fbm1_d(b + 11.7, 2.0, own ^ 0x4245_4e59).0 - 1.0);
-        for shape in &shapes {
-            shape.add(t, &mut x, &mut y);
+        let (mut x, mut y) = (0.0, meander * (2.0 * fbm1_d(m + twist, 3.0, shared).0 - 1.0));
+        if bend > 0.0 {
+            let b = t / (BEND_KM * sc);
+            x += bend * (2.0 * fbm1_d(b, 2.0, own ^ 0x4245_4e58).0 - 1.0);
+            y += bend * (2.0 * fbm1_d(b + 11.7, 2.0, own ^ 0x4245_4e59).0 - 1.0);
         }
+        shapes.add(t, at, &mut x, &mut y);
         (x, y)
     };
-    let pin = warp(0.0);
-    let point = |t: f32| {
-        let (x, y) = warp(t);
+    let pin = warp(&mut ShapeCursor::default(), 0.0);
+    let point = |at: &mut ShapeCursor, t: f32| {
+        let (x, y) = warp(at, t);
         [t + x - pin.0, d + y - pin.1]
     };
-    let step = |p: [f32; 2]| STEP_KM * sc * ((p[0] * p[0] + p[1] * p[1]).sqrt() / d).max(1.0);
+    let base = |p: [f32; 2]| STEP_KM * sc * ((p[0] * p[0] + p[1] * p[1]).sqrt() / d0).max(1.0);
     let walk = |sign: f32| {
-        let (mut t, mut p, mut out) = (0.0f32, point(0.0), Vec::new());
+        let mut at = ShapeCursor::default();
+        let (mut t, mut p, mut out) = (0.0f32, point(&mut at, 0.0), Vec::new());
+        let (mut heading, mut grow) = (None::<[f32; 2]>, 1.0f32);
         while sign * p[0] < reach && t < span {
-            t += step(p);
-            p = point(sign * t);
-            out.push(p);
+            let b = base(p);
+            loop {
+                let s = b * grow;
+                let q = point(&mut at, sign * (t + s));
+                let (dx, dy) = (q[0] - p[0], q[1] - p[1]);
+                let length = (dx * dx + dy * dy).sqrt();
+                let turn = match heading {
+                    Some(h) if length > 0.0 => (h[0] * dy - h[1] * dx).atan2(h[0] * dx + h[1] * dy).abs(),
+                    _ => 0.0,
+                };
+                if turn > TURN_STEP && grow > 0.25 {
+                    grow = (grow * 0.5).max(0.25);
+                    continue;
+                }
+                t += s;
+                if length > 0.0 {
+                    heading = Some([dx / length, dy / length]);
+                }
+                p = q;
+                out.push(q);
+                if turn < TURN_STEP / 3.0 {
+                    grow = (grow * 1.5).min(STEP_MAX);
+                }
+                break;
+            }
         }
         out
     };
     let (left, right) = (walk(-1.0), walk(1.0));
     let mut points: Vec<[f32; 3]> = Vec::with_capacity(left.len() + right.len() + 1);
     let mut length = 0.0f32;
-    let mid = point(0.0);
+    let mid = point(&mut ShapeCursor::default(), 0.0);
     for p in left.iter().rev().chain(std::iter::once(&mid)).chain(right.iter()) {
         if let Some(last) = points.last() {
             length += ((p[0] - last[0]).powi(2) + (p[1] - last[1]).powi(2)).sqrt();
@@ -339,41 +494,25 @@ fn footprint(d0: f32, k: u32, folds: f32, half: f32, shared: u32, own: u32, deta
     points
 }
 
-/// The light a footprint's sheet puts on flat ground, but for its height profile: an optically thin sheet's element
-/// sends its emission over the square of its distance, from about h / r up, so about its length over the cube of its
-/// ground distance, times its knots (`knot` of its length along the ribbon), summed inside the window `half` (with
-/// the window's soft edge). Relative: for a bare lookup's stand-in's gain.
-fn light(points: &[[f32; 3]], half: f32, knot: &dyn Fn(f32) -> f32) -> f32 {
-    points
-        .windows(2)
-        .filter(|w| w[0][1] > 0.0 && w[1][1] > 0.0)
-        .map(|w| {
-            let (x, y) = (0.5 * (w[0][0] + w[1][0]), 0.5 * (w[0][1] + w[1][1]));
-            let window = 1.0 - smoothstep((half - WINDOW_EDGE).max(0.0), half, x.atan2(y).abs());
-            let r2 = x * x + y * y;
-            (w[1][2] - w[0][2]) * window * knot(0.5 * (w[0][2] + w[1][2])) / (r2 * r2.sqrt())
-        })
-        .sum()
-}
-
 /// The knots' brightness at `kv` (their fbm, 0..1) and depth `depth`: (2 kv)^2 / 1.25 at depth 1, about 1 on average
 /// (a 3-octave fbm's mean square is about 0.31), 0 to 3.2 at its ends.
 fn knot(depth: f32, kv: f32) -> f32 {
     1.0 + depth * (3.2 * kv * kv - 1.0)
 }
 
-/// `points`' segments by azimuth bin within the window `half` (`scale` bins a radian, from -half), and the nearest
-/// ground distance of a point inside the window.
+/// `points`' segments by azimuth bin within the window `half` (`scale` bins a radian, from -half), their tangents and
+/// turns, and the nearest ground distance of a point inside the window.
 fn index(points: Vec<[f32; 3]>, half: f32, scale: f32) -> (Footprint, f32) {
     let bin = |beta: f32| (((beta + half) * scale).max(0.0) as usize).min(BINS - 1);
+    let betas: Vec<f32> = points.iter().map(|p| p[0].atan2(p[1])).collect();
     let ranges: Vec<Option<(usize, usize)>> = points
         .windows(2)
-        .map(|w| {
+        .zip(betas.windows(2))
+        .map(|(w, b)| {
             if !(w[0][1] > 0.0 && w[1][1] > 0.0) {
                 return None;
             }
-            let (a, b) = (w[0][0].atan2(w[0][1]), w[1][0].atan2(w[1][1]));
-            let (lo, hi) = (a.min(b), a.max(b));
+            let (lo, hi) = (b[0].min(b[1]), b[0].max(b[1]));
             (hi > -half && lo < half).then(|| (bin(lo), bin(hi)))
         })
         .collect();
@@ -388,20 +527,51 @@ fn index(points: Vec<[f32; 3]>, half: f32, scale: f32) -> (Footprint, f32) {
     }
     let mut fill = start.clone();
     let mut segments = vec![0u32; start[BINS] as usize];
+    let mut distances = vec![[f32::MAX, 0.0f32]; BINS];
+    let distance = |p: &[f32; 3]| (p[0] * p[0] + p[1] * p[1]).sqrt();
     for (i, range) in ranges.iter().enumerate() {
         if let Some((lo, hi)) = range {
-            for b in *lo..=*hi {
-                segments[fill[b] as usize] = i as u32;
-                fill[b] += 1;
+            let (from, to) = (distance(&points[i]), distance(&points[i + 1]));
+            // a point between them is no nearer than the nearer less half the segment
+            let near = from.min(to) - 0.5 * ((points[i + 1][0] - points[i][0]).powi(2) + (points[i + 1][1] - points[i][1]).powi(2)).sqrt();
+            for slot in *lo..=*hi {
+                segments[fill[slot] as usize] = i as u32;
+                fill[slot] += 1;
+                distances[slot] = [distances[slot][0].min(near), distances[slot][1].max(from.max(to))];
             }
         }
     }
+    // each segment's direction, and each point's tangent between its two
+    let direction = |i: usize| {
+        let (dx, dy) = (points[i + 1][0] - points[i][0], points[i + 1][1] - points[i][1]);
+        let length = (dx * dx + dy * dy).sqrt();
+        if length > 0.0 { [dx / length, dy / length] } else { [1.0, 0.0] }
+    };
+    let last = points.len().saturating_sub(2);
+    let tangents: Vec<[f32; 2]> = (0..points.len())
+        .map(|i| {
+            let (a, b) = (direction(i.saturating_sub(1).min(last)), direction(i.min(last)));
+            let (x, y) = (a[0] + b[0], a[1] + b[1]);
+            let length = (x * x + y * y).sqrt();
+            if length > 1.0e-3 { [x / length, y / length] } else { b }
+        })
+        .collect();
+    // which way each segment's azimuth turns, and where its run turns back at either end
+    let way: Vec<bool> = betas.windows(2).map(|b| (b[1] - b[0] + PI).rem_euclid(TAU) - PI >= 0.0).collect();
+    let mut turns = vec![[f32::INFINITY; 2]; way.len()];
+    for i in 1..way.len() {
+        turns[i][0] = if way[i] != way[i - 1] { betas[i] } else { turns[i - 1][0] };
+    }
+    for i in (0..way.len().saturating_sub(1)).rev() {
+        turns[i][1] = if way[i] != way[i + 1] { betas[i + 1] } else { turns[i + 1][1] };
+    }
     let nearest = points
         .iter()
-        .filter(|p| p[1] > 0.0 && p[0].atan2(p[1]).abs() < half)
-        .map(|p| (p[0] * p[0] + p[1] * p[1]).sqrt())
+        .zip(&betas)
+        .filter(|(p, beta)| p[1] > 0.0 && beta.abs() < half)
+        .map(|(p, _)| (p[0] * p[0] + p[1] * p[1]).sqrt())
         .fold(f32::MAX, f32::min);
-    (Footprint { points, start, segments }, nearest)
+    (Footprint { points, tangents, turns, start, segments, distances }, nearest)
 }
 
 /// The aurora of one map, built once per map from the block as clamp() holds it.
@@ -415,6 +585,10 @@ pub(super) struct Aurora {
     /// How deep the knots go: 0.5 at Folds 0 to 1 at Folds 1.
     knots: f32,
     gain: f32,
+    /// The sheet's soft thickness (TIP_KM at the shapes' scale).
+    tip: f32,
+    /// The brightest line of sight's luminance, gain out: the table's brightest x EDGE_MAX.
+    brightest_face: f32,
     arcs: Vec<Sheet>,
     /// The sheet's face-on radiance by height above the border (BORDER_KM + dh), TABLE_LOW_KM to TOP_KM.
     table: [Vec3f; TABLE],
@@ -422,69 +596,132 @@ pub(super) struct Aurora {
 }
 
 impl Aurora {
-    /// `gain`: strength x the night's lift x the night factor (none is built at 0).
+    /// `gain`: strength x the night's lift x the night factor (none is built at 0). Built on this thread.
+    #[cfg(test)]
     pub(super) fn new(p: &AuroraParams, gain: f32) -> Aurora {
+        Aurora::new_par(p, gain, &super::caster::serial_rows).expect("a serial runner runs every footprint")
+    }
+
+    /// `new`, its footprints built over `run` (each ribbon's two at once, with their azimuth index and their light on
+    /// the ground); None when the runner skipped one (an overtaken job's).
+    pub(super) fn new_par(p: &AuroraParams, gain: f32, run: &dyn Fn(usize, &(dyn Fn(usize) + Sync))) -> Option<Aurora> {
         // the border's ground distance, exact on a sphere: R cos e0 / cos(e0 + D0 / R) = R + h0
         let e0 = p.height_deg.to_radians();
         let d0 = R_KM * ((R_KM * e0.cos() / (R_KM + BORDER_KM)).acos() - e0);
         let half = (0.5 * p.width_deg).to_radians().min(MAX_HALF);
-        let bin_scale = BINS as f32 / (2.0 * half);
+        let table = line_table(p.line_mix());
+        let mut aurora = Aurora {
+            phi0: p.direction_deg.to_radians(),
+            half,
+            bin_scale: BINS as f32 / (2.0 * half),
+            rays: p.rays,
+            knots: 0.5 + 0.5 * p.folds,
+            gain,
+            tip: TIP_KM * (d0 / SHAPE_KM).clamp(SHAPE_MIN, 1.0),
+            brightest_face: (table.iter().map(|c| luminance(*c)).fold(0.0, f32::max) * EDGE_MAX).max(f32::MIN_POSITIVE),
+            arcs: Vec::new(),
+            table,
+            middle: dir_from_az_el(p.direction_deg, p.height_deg),
+        };
         let seed = hash_u32(p.seed ^ SALT);
         let shared = hash_u32(seed ^ 0x5348_4152);
-        let knots = 0.5 + 0.5 * p.folds;
-        let arcs = (0..3u32)
+        // the ribbons that show (the second and the third fade in with Folds), each with its seed and brightness
+        let ribbons: Vec<(u32, u32, f32)> = (0..3u32)
             .filter_map(|k| {
                 let fade = match k {
                     0 => 1.0,
                     1 => smoothstep(0.1, 0.4, p.folds),
                     _ => smoothstep(0.25, 0.7, p.folds),
                 };
-                if !(fade > 0.0) {
-                    return None;
-                }
-                let s = hash_u32(seed.wrapping_add(k.wrapping_mul(0x9e37_79b9)));
-                let knot_seed = hash_u32(s ^ 0x4b4e_4f54);
-                let points = footprint(d0, k, p.folds, half, shared, s, true);
-                // the folded ribbon's light with its knots, which a bare lookup leaves out
-                let full_light = light(&points, half, &|l| knot(knots, fbm1_d(l / KNOT_KM, 3.0, knot_seed).0));
-                let (full, mut nearest) = index(points, half, bin_scale);
-                let (bare, bare_light) = if p.folds > 0.0 {
-                    let points = footprint(d0, k, p.folds, half, shared, s, false);
-                    let bare_light = light(&points, half, &|_| 1.0);
-                    let (bare, near) = index(points, half, bin_scale);
-                    nearest = nearest.min(near);
-                    (Some(bare), bare_light)
-                } else {
-                    (None, light(&full.points, half, &|_| 1.0))
-                };
-                let bare_gain = full_light / bare_light;
-                let bare_gain = if bare_gain.is_finite() && bare_gain > 0.0 { bare_gain } else { 1.0 };
-                // the highest any of its points stands: its top at its nearest
-                let a = nearest.max(20.0) / R_KM;
-                let top = ((R_KM + TOP_KM) * a.cos() - R_KM).atan2((R_KM + TOP_KM) * a.sin());
-                Some(Sheet {
-                    full,
-                    bare,
-                    bare_gain,
-                    brightness: 0.6f32.powi(k as i32) * fade,
-                    top_sin: top.sin(),
-                    ray_seed: hash_u32(s ^ 0x5241_5953),
-                    wave_seed: hash_u32(s ^ 0x5741_5645),
-                    knot_seed,
-                })
+                (fade > 0.0).then(|| (k, hash_u32(seed.wrapping_add(k.wrapping_mul(0x9e37_79b9))), 0.6f32.powi(k as i32) * fade))
             })
             .collect();
-        Aurora {
-            phi0: p.direction_deg.to_radians(),
-            half,
-            bin_scale,
-            rays: p.rays,
-            knots,
-            gain,
-            arcs,
-            table: line_table(p.line_mix()),
-            middle: dir_from_az_el(p.direction_deg, p.height_deg),
+        // job 2k: ribbon k's footprint and its light with its knots; 2k + 1: its stand-in (its meander alone, none at
+        // Folds 0) and that one's light, which the stand-in's gain makes the first's
+        let built: Vec<std::sync::OnceLock<(Option<Footprint>, f32, f32)>> = (0..2 * ribbons.len()).map(|_| std::sync::OnceLock::new()).collect();
+        {
+            let aurora = &aurora;
+            run(built.len(), &|j| {
+                let (k, s, _) = ribbons[j / 2];
+                let knot_seed = hash_u32(s ^ 0x4b4e_4f54);
+                let detail = j % 2 == 0;
+                let foot = (detail || p.folds > 0.0).then(|| index(footprint(d0, k, p.folds, half, shared, s, detail), half, aurora.bin_scale));
+                let light = match &foot {
+                    Some((foot, _)) => aurora.ground_light(foot, detail.then_some(knot_seed)),
+                    None => 0.0,
+                };
+                let (foot, nearest) = foot.map_or((None, f32::MAX), |(foot, nearest)| (Some(foot), nearest));
+                let _ = built[j].set((foot, nearest, light));
+            });
         }
+        let mut built: Vec<(Option<Footprint>, f32, f32)> = built.into_iter().map(|b| b.into_inner()).collect::<Option<_>>()?;
+        for (i, &(_, s, brightness)) in ribbons.iter().enumerate() {
+            let (bare, near, bare_light) = std::mem::replace(&mut built[2 * i + 1], (None, 0.0, 0.0));
+            let (full, nearest, fine) = std::mem::replace(&mut built[2 * i], (None, 0.0, 0.0));
+            let full = full?;
+            // at Folds 0 a bare lookup meets the ribbon itself, without its knots
+            let bare_light = if bare.is_some() { bare_light } else { aurora.ground_light(&full, None) };
+            let bare_gain = fine / bare_light;
+            // the highest any of its points stands: its top at its nearest
+            let a = nearest.min(near).max(20.0) / R_KM;
+            let top = ((R_KM + TOP_KM) * a.cos() - R_KM).atan2((R_KM + TOP_KM) * a.sin());
+            aurora.arcs.push(Sheet {
+                full,
+                bare,
+                bare_gain: if bare_gain.is_finite() && bare_gain > 0.0 { bare_gain } else { 1.0 },
+                brightness,
+                top_sin: top.sin(),
+                ray_seed: hash_u32(s ^ 0x5241_5953),
+                wave_seed: hash_u32(s ^ 0x5741_5645),
+                knot_seed: hash_u32(s ^ 0x4b4e_4f54),
+            });
+        }
+        Some(aurora)
+    }
+
+    /// A view's columns summed (the ribbons' edge-on factors, knots and brightness, each by the luminance it carries:
+    /// `column`) held softly under the brightest line of sight's, so a fold's three passes at a bright knot carry no
+    /// more than it and Strength 1 stays 50 kR of green there (Task 4b's calibration): the factor, x / (1 + x^4)^(1/4)
+    /// over x; a face-on column loses 0.2 %.
+    fn hold(&self, column: f32) -> f32 {
+        let x = column / self.brightest_face;
+        let x2 = x * x;
+        1.0 / (1.0 + x2 * x2).sqrt().sqrt()
+    }
+
+    /// The edge-on factor of a crossing: the path through a thin vertical sheet, capped, 1 / (cos alpha cos e), alpha
+    /// the view's angle to its normal; `lateral` km inside a turn (the two passes that begin there) through a sheet
+    /// `tip` thick, a parabola's chord: cos alpha^2 grows by tip / lateral, so the column stays finite at the turn,
+    /// and it rises from 0 over `tip`.
+    fn edge(&self, cos_a: f32, cos_e: f32, lateral: f32) -> f32 {
+        let k = cos_a * cos_e;
+        smoothstep(0.0, self.tip, lateral) / (k * k * (1.0 + self.tip / lateral) + 1.0 / (EDGE_MAX * EDGE_MAX)).sqrt()
+    }
+
+    /// The light a footprint's sheet puts on flat ground, relative (for a bare lookup's stand-in's gain), as the
+    /// lookups draw it but for its height profile: azimuth by azimuth (every LIGHT_BINS-th bin's middle, in the window,
+    /// with its soft edge), each crossing's edge-on factor (seen 40 km over the border) and its knots (`knot_seed`'s;
+    /// none for a stand-in) over the square of its ground distance (a thin sheet's element sends its emission over the
+    /// square of its distance, from about h / r up). The fine lookups' hold (`hold`) is left out: it holds the brightest
+    /// views only, about a percent of the light or less.
+    fn ground_light(&self, foot: &Footprint, knot_seed: Option<u32>) -> f32 {
+        let mut sum = 0.0f64;
+        for b in (LIGHT_BINS / 2..BINS).step_by(LIGHT_BINS) {
+            let beta = (b as f32 + 0.5) / self.bin_scale - self.half;
+            let window = 1.0 - smoothstep((self.half - WINDOW_EDGE).max(0.0), self.half, beta.abs());
+            let (sin_b, cos_b) = beta.sin_cos();
+            self.crossings(foot, beta, sin_b, cos_b, |_| true, |r0, l, cos_a, _, lateral| {
+                if !(lateral > 0.0) {
+                    return;
+                }
+                let a = r0 / R_KM;
+                let h = BORDER_KM + 40.0;
+                let e = ((R_KM + h) * a.cos() - R_KM).atan2((R_KM + h) * a.sin());
+                let knot = knot_seed.map_or(1.0, |seed| knot(self.knots, fbm1_d(l / KNOT_KM, 3.0, seed).0));
+                sum += (window * self.edge(cos_a, e.cos(), lateral) * knot / (r0 * r0)) as f64;
+            });
+        }
+        sum as f32
     }
 
     /// The arcs' radiance along `d` (map frame), before extinction and the horizon fade; 0 below the horizon and off
@@ -502,16 +739,26 @@ impl Aurora {
         }
         let window = 1.0 - smoothstep((self.half - WINDOW_EDGE).max(0.0), self.half, beta.abs());
         let (sin_b, cos_b) = beta.sin_cos();
-        let mut sum = Vec3f::default();
+        let (mut sum, mut column) = (Vec3f::default(), 0.0f32);
         for arc in &self.arcs {
             if sin_e > arc.top_sin {
                 continue;
             }
             self.hits(arc, sin_e, cos_e, beta, sin_b, cos_b, texel, |hit| {
-                sum += self.profile(BORDER_KM + hit.above) * (hit.ray * hit.edge * hit.knot * arc.brightness);
+                let (light, c) = (self.profile(BORDER_KM + hit.above), hit.edge * hit.knot * arc.brightness);
+                column += c * luminance(light);
+                sum += light * (hit.ray * c);
             });
         }
-        sum * (window * self.gain)
+        // the view's columns together, by the luminance each carries, held softly under the brightest line of sight's
+        // (the rays streak it on top); a bare lookup's are not, its gain carries the hold
+        let hold = if texel < AURORA_BARE_TEXEL { self.hold(column) } else { 1.0 };
+        sum * (window * self.gain * hold)
+    }
+
+    /// The azimuth bin of beta (radians from the middle).
+    fn bin(&self, beta: f32) -> usize {
+        (((beta + self.half) * self.bin_scale).max(0.0) as usize).min(BINS - 1)
     }
 
     /// The arc's middle at its lower border, map frame.
@@ -520,20 +767,31 @@ impl Aurora {
     }
 
     /// Where the azimuth beta from the middle crosses `foot`: for each crossing, its ground distance (km), its length
-    /// along the ribbon (km), the cosine of the view's angle to the sheet's normal, and the ribbon's x per km along it.
-    fn crossings(&self, foot: &Footprint, beta: f32, sin_b: f32, cos_b: f32, mut each: impl FnMut(f32, f32, f32, f32)) {
-        let bin = (((beta + self.half) * self.bin_scale).max(0.0) as usize).min(BINS - 1);
+    /// along the ribbon (km), the cosine of the view's angle to the sheet's normal and the ribbon's x per km along it
+    /// (both from the tangent between the segment's ends), and how far (km, across the view) the view is from where the
+    /// crossing's run turns back (infinite where it does not). `near` picks the crossings by their ground distance
+    /// before the rest is worked out.
+    fn crossings(&self, foot: &Footprint, beta: f32, sin_b: f32, cos_b: f32, near: impl Fn(f32) -> bool, mut each: impl FnMut(f32, f32, f32, f32, f32)) {
+        let bin = self.bin(beta);
         for &i in &foot.segments[foot.start[bin] as usize..foot.start[bin + 1] as usize] {
-            let (p, q) = (foot.points[i as usize], foot.points[i as usize + 1]);
+            let i = i as usize;
+            let (p, q) = (foot.points[i], foot.points[i + 1]);
             let (dx, dy, length) = (q[0] - p[0], q[1] - p[1], q[2] - p[2]);
-            let cross = sin_b * dy - cos_b * dx;
-            let s = (cos_b * p[0] - sin_b * p[1]) / cross;
-            if !(s >= 0.0 && s < 1.0 && length > 0.0) {
+            // which side of the view each end stands, the same test for a point both its segments share, so a view
+            // through a corner meets one of them, never both or neither
+            let (side_p, side_q) = (cos_b * p[0] - sin_b * p[1], cos_b * q[0] - sin_b * q[1]);
+            if (side_p >= 0.0) == (side_q >= 0.0) || !(length > 0.0) {
                 continue;
             }
+            let s = side_p / (side_p - side_q);
             let r0 = sin_b * (p[0] + s * dx) + cos_b * (p[1] + s * dy);
-            if r0 > 0.0 {
-                each(r0, p[2] + s * length, cross.abs() / length, dx / length);
+            if r0 > 0.0 && near(r0) {
+                let (a, b) = (foot.tangents[i], foot.tangents[i + 1]);
+                let (tx, ty) = (a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s);
+                let norm = (tx * tx + ty * ty).sqrt().max(1.0e-6);
+                let turn = foot.turns[i];
+                let lateral = (beta - turn[0]).abs().min((beta - turn[1]).abs()) * r0;
+                each(r0, p[2] + s * length, (sin_b * ty - cos_b * tx).abs() / norm, tx / norm, lateral);
             }
         }
     }
@@ -543,39 +801,70 @@ impl Aurora {
     #[allow(clippy::too_many_arguments)]
     fn hits(&self, arc: &Sheet, sin_e: f32, cos_e: f32, beta: f32, sin_b: f32, cos_b: f32, texel: f32, mut each: impl FnMut(Hit)) {
         let e = sin_e.atan2(cos_e);
-        // the height a view at e reaches over ground distance r, exact on a sphere
-        let height = |r: f32| {
-            let c = (e + r / R_KM).cos();
-            if c > 0.02 { R_KM * cos_e / c - R_KM } else { f32::INFINITY }
-        };
+        // the ground distance at which the view reaches h km, exact on a sphere
+        let reach = |h: f32| R_KM * ((R_KM * cos_e / (R_KM + h)).acos() - e);
         let lean = FIELD_TILT / cos_b;
         let (foot, gain) = match &arc.bare {
             _ if texel < AURORA_BARE_TEXEL => (&arc.full, 1.0),
             Some(bare) => (bare, arc.bare_gain),
             None => (&arc.full, arc.bare_gain),
         };
-        self.crossings(foot, beta, sin_b, cos_b, |r0, l, cos_a, run| {
+        // The sheet over a crossing r0 km away stands at r0 + (h - border) lean at h km up. The view meets it where
+        // D(h) = reach(h) - (r0 + (h - border) lean) changes sign between 2 km under the border and the top: D grows
+        // with the border and shrinks with r0, so a view whose D keeps one sign there for the border's whole wave skips
+        // the noises, and one that does so over the ground distances its bin's segments reach skips the ribbon.
+        let (low, high) = (BORDER_KM - 0.5 * WAVE_DEPTH_KM, BORDER_KM + 0.5 * WAVE_DEPTH_KM);
+        let (reach_low, reach_high, reach_top) = (reach(low - 2.0), reach(high - 2.0), reach(TOP_KM));
+        let misses = |near: f32, far: f32| {
+            let beyond = reach_low > far - 2.0 * lean && reach_top > far + (TOP_KM - low) * lean;
+            let short = reach_high < near - 2.0 * lean && reach_top < near + (TOP_KM - high) * lean;
+            beyond || short
+        };
+        let [near, far] = foot.distances[self.bin(beta)];
+        if misses(near, far) {
+            return;
+        }
+        self.crossings(foot, beta, sin_b, cos_b, |r0| !misses(r0, r0), |r0, l, cos_a, run, lateral| {
+            if !(lateral > 0.0) {
+                return;
+            }
             // km along the ribbon a texel spans: an azimuth step of texel / cos e, over the ribbon's slant to the view
             let along = texel * r0 / (cos_e.max(0.05) * cos_a.max(0.05));
             let border = BORDER_KM + WAVE_DEPTH_KM * (fbm1_d(l / WAVE_KM, octaves_for(WAVE_KM, along, 3.0), arc.wave_seed).0 - 0.5);
-            // r = r0 + (h(r) - border) x lean, three fixed-point steps from the footprint
-            let mut r = r0;
-            for _ in 0..3 {
-                r = r0 + (height(r) - border).min(TOP_KM) * lean;
-            }
-            let h = height(r);
-            let above = h - border;
-            if !(above > -2.0 && h < TOP_KM) {
+            let d = |h: f32, reached: f32| reached - (r0 + (h - border) * lean);
+            // reach(border - 2) between the wave's two ends (it is all but straight over 4 km)
+            let (mut h0, mut h1) = (border - 2.0, TOP_KM);
+            let (mut d0, mut d1) = (d(h0, reach_low + (reach_high - reach_low) * (border - low) / (high - low)), d(h1, reach_top));
+            if !(d0 * d1 <= 0.0) || d0 == d1 {
                 return;
             }
-            // the path through a thin vertical sheet, capped: 1 / (cos alpha cos e), alpha the view's angle to its normal;
-            // where the view grazes a fold's turn it fades out over TIP_SOFT, the curtain's soft edge there
-            let k = cos_a * cos_e;
-            let edge = gain * smoothstep(0.0, TIP_SOFT, cos_a) / (k * k + 1.0 / (EDGE_MAX * EDGE_MAX)).sqrt();
+            // two steps of false position, then its line: where the view meets the sheet
+            for _ in 0..2 {
+                if !(d1 != d0) {
+                    break;
+                }
+                let h = h0 - d0 * (h1 - h0) / (d1 - d0);
+                let dh = d(h, reach(h));
+                if dh == 0.0 {
+                    (h0, d0, h1, d1) = (h, 0.0, h, 0.0);
+                } else if (dh < 0.0) == (d0 < 0.0) {
+                    (h0, d0) = (h, dh);
+                } else {
+                    (h1, d1) = (h, dh);
+                }
+            }
+            let h = if d1 != d0 { h0 - d0 * (h1 - h0) / (d1 - d0) } else { h0 };
+            let r = r0 + (h - border) * lean;
+            let above = h - border;
+            // the path through the sheet, soft at a turn
+            let edge = gain * self.edge(cos_a, cos_e, lateral);
             // the field line through the hit, counted along the ribbon: the hit less the lean, onto the ribbon
             let x = l + (r - r0) * sin_b * run;
-            let ray_along = texel * r / (cos_e.max(0.05) * cos_a.max(0.05));
-            // the rays fade out where a texel spans more than one of them, gone at two: edge-on, or a bare lookup (face-on
+            // km along the ribbon a texel spans there, or the view's path through the sheet's soft thickness (a view
+            // along the sheet passes many rays at once, and every bake alike), whichever is more
+            let path = self.tip * (1.0 - cos_a * cos_a).max(0.0).sqrt() / cos_a.max(0.05);
+            let ray_along = (texel * r / (cos_e.max(0.05) * cos_a.max(0.05))).max(path);
+            // the rays fade out where that spans more than one of them, gone at two: edge-on, or a bare lookup (face-on
             // the held and the released bakes keep them alike)
             let keep = smoothstep(0.5, 1.0, RAY_KM / ray_along);
             let q = x / RAY_KM + RAY_WARP * (fbm1_d(x / RAY_WARP_KM, 2.0, arc.ray_seed ^ 0x5741_5250).0 - 0.5);
@@ -620,7 +909,7 @@ impl Aurora {
     /// The brightest line of sight's luminance (a sheet edge-on at its brightest height), gain in. For the tests.
     #[cfg(test)]
     fn brightest(&self) -> f32 {
-        self.table.iter().map(|c| crate::sky::luminance(*c)).fold(0.0, f32::max) * EDGE_MAX * self.gain
+        self.table.iter().map(|c| luminance(*c)).fold(0.0, f32::max) * EDGE_MAX * self.gain
     }
 
     /// `crossings`' (ground distance, length along the ribbon) at `beta`. For the tests.
@@ -628,7 +917,7 @@ impl Aurora {
     fn crossings_at(&self, arc: &Sheet, beta: f32) -> Vec<(f32, f32)> {
         let (sin_b, cos_b) = beta.sin_cos();
         let mut out = Vec::new();
-        self.crossings(&arc.full, beta, sin_b, cos_b, |r0, l, _, _| out.push((r0, l)));
+        self.crossings(&arc.full, beta, sin_b, cos_b, |_| true, |r0, l, _, _, _| out.push((r0, l)));
         out
     }
 
@@ -687,7 +976,6 @@ fn line_table(mix: [f32; 3]) -> [Vec3f; TABLE] {
 mod tests {
     use super::*;
     use super::super::atmosphere::SUN_IRRADIANCE;
-    use crate::sky::luminance;
 
     fn g0() -> f32 {
         luminance(vec3f(0.02, 0.03, 0.06)) * 5.0e-8 * SUN_IRRADIANCE
@@ -698,12 +986,73 @@ mod tests {
     }
 
     /// Plan hdri-7 §4, §5 (refs §5.1): at Strength 1, classic, the brightest lines of sight (a sheet seen edge-on)
-    /// carry 50 kR of green: about 51 G0, within 10 %.
+    /// carry 50 kR of green: about 51 G0, within 10 %. That is the table's bound, and (Task 4c's fix round) the
+    /// rendered lookups' too: however a view's columns add up (a fold's three passes, a knot, the ribbons behind), no
+    /// lookup carries more, and the folded arcs reach at least 0.7 of it. Over 120 degrees of azimuth and 40 of
+    /// elevation in quarter degrees, at Folds 0, 0.4 and 1 over three seeds, Rays 0 (the rays keep the mean, as in
+    /// Task 4b, and streak it on top).
     #[test]
     fn the_brightest_line_of_sight_is_50_kr_of_green() {
         let a = Aurora::new(&AuroraParams::default(), 1.0);
         let peak = a.brightest() / g0();
         assert!((peak / 51.0 - 1.0).abs() <= 0.1, "{peak} G0");
+        let mut folded_most = 0.0f32;
+        for folds in [0.0f32, 0.4, 1.0] {
+            for seed in 1..=3u32 {
+                let a = Aurora::new(&AuroraParams { folds, rays: 0.0, seed, ..AuroraParams::default() }, 1.0);
+                let mut most = 0.0f32;
+                for i in -240..=240 {
+                    for j in 1..=160 {
+                        most = most.max(luminance(a.at(dir_from_az_el(i as f32 * 0.25, j as f32 * 0.25), 0.0)));
+                    }
+                }
+                println!("Folds {folds}, seed {seed}: the brightest lookup {:.1} G0 (the table's bound {:.1} G0)", most / g0(), a.brightest() / g0());
+                assert!(most <= a.brightest() * 1.0001, "Folds {folds}, seed {seed}: a lookup carries {} G0, over the brightest line of sight's {} G0", most / g0(), a.brightest() / g0());
+                if folds > 0.0 {
+                    folded_most = folded_most.max(most);
+                }
+            }
+        }
+        assert!(folded_most >= 0.7 * a.brightest(), "the folded arcs reach {} G0 at most", folded_most / g0());
+    }
+
+    /// Task 4c's fix round: a fold's sides are soft, not cuts. Where a view's azimuth passes a turn of a ribbon (a
+    /// fold's U-turn, a meander running away: two more passes through the sheet begin there) the light rises over about
+    /// a degree. Over twelve seeds at Folds 0.4 and 1, Rays 0, along 80 degrees of azimuth round the middle in
+    /// 0.005-degree steps at three elevations through the curtain: no step across which the ribbons' crossings change
+    /// in number moves the luminance by more than 1.5 % of the scan's brightest (a fold's two new passes, two face-on
+    /// columns of up to three or four, spread over at least a fifth of a degree). Such steps are many (the premise).
+    #[test]
+    fn a_folds_sides_are_soft() {
+        let (mut turns, mut worst) = (0usize, 0.0f32);
+        for folds in [0.4f32, 1.0] {
+            for seed in 1..=12u32 {
+                let a = Aurora::new(&AuroraParams { folds, rays: 0.0, seed, ..AuroraParams::default() }, 1.0);
+                let azimuths: Vec<f32> = (-8000..=8000).map(|i| i as f32 * 0.005).collect();
+                let count: Vec<usize> = azimuths.iter().map(|az| a.arcs.iter().map(|arc| a.crossings_at(arc, az.to_radians()).len()).sum()).collect();
+                for el in [17.0f32, 20.0, 24.0] {
+                    let l: Vec<f32> = azimuths.iter().map(|az| luminance(a.at(dir_from_az_el(*az, el), 0.0))).collect();
+                    let peak = l.iter().copied().fold(0.0, f32::max);
+                    if !(peak > 0.0) {
+                        continue;
+                    }
+                    for i in 0..l.len() - 1 {
+                        if count[i] == count[i + 1] {
+                            continue;
+                        }
+                        turns += 1;
+                        let step = (l[i + 1] - l[i]).abs() / peak;
+                        if step > worst {
+                            println!("Folds {folds}, seed {seed}, {el} degrees: a step of {:.2} % of the peak at {:.3} degrees", 100.0 * step, azimuths[i]);
+                            worst = step;
+                        }
+                    }
+                }
+            }
+        }
+        println!("{turns} steps across a turn; the largest {:.2} % of the scan's peak", 100.0 * worst);
+        assert!(turns >= 100, "the premise: {turns} steps across a turn");
+        assert!(worst <= 0.015, "a fold's side steps by {:.1} % of the peak in 0.005 degrees", 100.0 * worst);
     }
 
     /// The colour by height comes from the lines, as the owner's photographs show it (2026-10-24): every look's
