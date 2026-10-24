@@ -67,6 +67,11 @@ pub struct SkyLight {
     /// there and gives way to the floor by this share (`leaves_land`, `floor_share`), and draws no water on its land
     /// itself (`own_wet`).
     pub wet: f32,
+    /// The host's aurora at +1 and +15 degrees (`RING` samples like the rings), in the host's own units: the open and
+    /// the standing water mirror it by Fresnel at night, x (1 - day), in a pass of its own (`post::DrawSkyAuroraWater`).
+    /// Host light, never coded: `plan()` carries it in the host's part (`Split`; never `Unit` while it is handed), the
+    /// designed part has none. None in the example. Plan hdri-7 D12.
+    pub aurora_sky: Option<([[f32; 3]; RING], [[f32; 3]; RING])>,
 }
 
 /// The share of a host's own light the buildings take by night (`SkyLight::night_light_share`): on the generator's
@@ -114,7 +119,7 @@ impl SkyLight {
     pub fn example() -> Self {
         Self { sun_u: 0.0, sun_el_deg: -90.0, sun_rgb: [0.0; 3], ambient_rgb: [0.0; 3], ring_low: [HAZE_COL; RING], ring_high: [HAZE_COL; RING],
             lights_by_day: 0.0, design_gain: 1.0, decode: false, night_haze: 1.0, ground: [[0.0; 3]; RING], host_ground: false, night_light_share: 1.0,
-            sea_sky: None, wet: 0.0 }
+            sea_sky: None, wet: 0.0, aurora_sky: None }
     }
 
     /// The wetness the strip draws itself (the shaders' `wet`, the reflection run's): `wet`, but 0 over a host's ground,
@@ -248,15 +253,16 @@ impl SkyLight {
     /// (`host_share`): the strip is linear in its lights, so the parts make the whole. By full night without a sun the
     /// host's part is a white ambient's times the ambient (`StripPlan::Unit`), which does not change with the sky.
     pub fn plan(&self) -> StripPlan {
-        let lit = self.sun_rgb.iter().chain(&self.ambient_rgb).any(|c| *c != 0.0);
+        let lit = self.sun_rgb.iter().chain(&self.ambient_rgb).any(|c| *c != 0.0) || self.aurora_sky.is_some();
         if !self.coded() || !lit { return StripPlan::One(self.clone()); }
         let k = self.host_share();
-        let designed = SkyLight { sun_rgb: [0.0; 3], ambient_rgb: [0.0; 3], ..self.clone() };
+        // the designed part is in codes: the host's light and its aurora go to the host's part
+        let designed = SkyLight { sun_rgb: [0.0; 3], ambient_rgb: [0.0; 3], aurora_sky: None, ..self.clone() };
         let host_only = |sun: [f32; 3], ambient: [f32; 3]| SkyLight {
             sun_rgb: sun, ambient_rgb: ambient, design_gain: 0.0, decode: false, night_haze: 1.0, night_light_share: 1.0, lights_by_day: 0.0,
             ring_low: [[0.0; 3]; RING], ring_high: [[0.0; 3]; RING], ground: [[0.0; 3]; RING], sea_sky: None, ..self.clone()
         };
-        if self.night_share() >= 1.0 && self.sun_rgb == [0.0; 3] {
+        if self.night_share() >= 1.0 && self.sun_rgb == [0.0; 3] && self.aurora_sky.is_none() {
             // the sun's height does not reach the host's part by full night (the shaders' day() is 0): one unit for any
             let unit = SkyLight { sun_u: 0.0, sun_el_deg: -90.0, ..host_only([0.0; 3], [1.0; 3]) };
             return StripPlan::Unit { designed, unit, ambient: self.ambient_rgb.map(|c| c * k) };
@@ -341,8 +347,10 @@ impl SkyLight {
         let sea = self.sea_sky.iter().flat_map(|(low, high)| low.iter().chain(high)).flatten();
         let rings = self.ring_low.iter().chain(&self.ring_high).chain(&self.ground).flatten().chain(sea);
         let floats = [&self.sun_u, &self.sun_el_deg].into_iter().chain(&self.sun_rgb).chain(&self.ambient_rgb).chain(rings).chain([&self.lights_by_day, &self.design_gain, &self.night_haze, &self.night_light_share]);
+        // (the aurora only when it is handed, marked so it never hashes as a sea sky of the same numbers)
+        let aurora = self.aurora_sky.iter().flat_map(|(low, high)| low.iter().chain(high)).flatten().map(|x| (x.to_bits() as u64) | (1u64 << 40));
         hash_bits(0x5c71_19b7_0000_0002, floats.map(|x| x.to_bits() as u64).chain([self.decode as u64, self.host_ground as u64])
-            .chain((self.wet != 0.0).then(|| self.wet.to_bits() as u64)))
+            .chain((self.wet != 0.0).then(|| self.wet.to_bits() as u64)).chain(aurora))
     }
 
     /// The rings as the first three rows of the shaders' ring texture (`RING` wide, RGBA): row 0 `ring_low`, row 1
@@ -377,6 +385,12 @@ impl SkyLight {
             low.iter().chain(high).copied().collect()
         };
         rows.into_iter().flat_map(|c| [c[0], c[1], c[2], 1.0]).collect()
+    }
+
+    /// The aurora as the water's aurora texture (`RING` wide, two rows, RGBA): row 0 at +1 degree, row 1 at +15, alpha 1,
+    /// linear host light; None without one.
+    pub fn aurora_texels(&self) -> Option<Vec<f32>> {
+        self.aurora_sky.as_ref().map(|(low, high)| low.iter().chain(high).flat_map(|c| [c[0], c[1], c[2], 1.0]).collect())
     }
 }
 
@@ -658,5 +672,32 @@ mod tests {
             sea_sky: Some(([[0.5, 0.6, 0.7]; RING], [[0.3, 0.4, 0.6]; RING])), ..SkyLight::example() };
         assert_eq!(SkyLight::example().hash(), 0x90ed_383a_d3e6_f7e2, "the example");
         assert_eq!(day.hash(), 0xb5d8_4398_a902_f253, "a day light");
+    }
+    /// Plan hdri-7 D12: the aurora the host hands is host light, never coded. With `decode` by night the strip is split
+    /// and the host's part carries it (never Unit while it is handed), the designed part none; without `decode` one render.
+    /// A light without it hashes as it did; with it apart, and apart from a sea sky of the same numbers.
+    #[test]
+    fn the_aurora_mirror_is_host_light() {
+        let ring = [[0.01f32, 0.05, 0.02]; RING];
+        let night = SkyLight { design_gain: 0.0264, decode: true, sun_el_deg: -20.0, night_light_share: 0.1, ..SkyLight::example() };
+        let lit = SkyLight { aurora_sky: Some((ring, ring)), ..night.clone() };
+        match lit.plan() {
+            StripPlan::Split { designed, host } => {
+                assert_eq!(designed.aurora_sky, None, "the designed part is coded: no aurora in it");
+                assert_eq!(host.aurora_sky, Some((ring, ring)));
+                assert_eq!((host.decode, host.design_gain), (false, 0.0));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(SkyLight { ambient_rgb: [0.01; 3], ..lit.clone() }.plan(), StripPlan::Split { .. }), "never Unit while an aurora is handed");
+        assert!(matches!(SkyLight { ambient_rgb: [0.01; 3], ..night.clone() }.plan(), StripPlan::Unit { .. }), "the premise: without it, Unit");
+        assert!(matches!(SkyLight { decode: false, ..lit.clone() }.plan(), StripPlan::One(_)));
+        assert_eq!(SkyLight::example().aurora_sky, None);
+        assert_ne!(lit.hash(), night.hash());
+        assert_ne!(lit.hash(), SkyLight { sea_sky: Some((ring, ring)), ..night.clone() }.hash());
+        let texels = lit.aurora_texels().unwrap();
+        assert_eq!(texels.len(), 2 * RING * 4);
+        assert_eq!(&texels[..4], &[0.01, 0.05, 0.02, 1.0]);
+        assert_eq!(night.aurora_texels(), None);
     }
 }

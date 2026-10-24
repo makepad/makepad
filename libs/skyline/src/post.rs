@@ -167,6 +167,45 @@ script_mod! {
         }
     }
 
+    // The host's aurora (`SkyLight::aurora_sky`: row 0 at +1 degree, row 1 at +15), mirrored at night by the open and the
+    // standing water: Fresnel x (1 - day) x water x cover, behind what the water mirrors, added to the water's light
+    // (alpha 0: the blend adds it). Host light in its own units, never coded; recorded only when the host hands one
+    // (plan hdri-7 D12), so the water's own shaders, and every band without an aurora, are what they were. The water's
+    // distance target (a band's second output) gets 0 at alpha 0, so its distance and light plane are the water's.
+    mod.draw.DrawSkyAuroraWater = mod.std.set_type_default() do #(DrawSkyAuroraWater::script_shader(vm)){
+        ..mod.draw.DrawQuad,
+        ..mod.draw.SkyScene,
+        aurora_tex: texture_2d(float)
+        // the mirrored scene (its alpha: what stands mirrored) and the mirror target's horizon, as DrawSkyWater reads them
+        mirror_light: texture_2d(float)
+        mirror_horizon: uniform(0.8)
+        // the aurora's row v (1/4 at +1 degree, 3/4 at +15) at azimuth u, as `sea_ring` reads the sea's sky
+        aurora_ring: fn(u: float, v: float) -> vec3 {
+            let n = self.aurora_tex.size().x; let x = fract(u) * n - 0.5; let i0 = floor(x); let i1 = i0 + 1.0
+            let a = self.aurora_tex.sample_nearest(vec2((i0 - n * floor(i0 / n) + 0.5) / n, v)).xyz
+            let b = self.aurora_tex.sample_nearest(vec2((i1 - n * floor(i1 / n) + 0.5) / n, v)).xyz
+            return a + (b - a) * (x - i0)
+        }
+        aurora_at: fn(u: float, el: float) -> vec3 { let a = self.aurora_ring(u, 0.25); return a + (self.aurora_ring(u, 0.75) - a) * clamp(el / 0.2617994, 0.0, 1.0) }
+        pixel: fn(){
+            let pp = self.frag(); let vr = self.view_raw(); let v = self.pix_view(vr)
+            let g = self.col_row(pp.x, 6.0); let al = 0.0 - v.y
+            if al <= 0.0 { return vec4(0.0, 0.0, 0.0, 0.0) }
+            let ws = self.water_at(g, v.x, al, v.z); var sea = ws.x
+            if self.host_ground > 0.5 { sea = sea * (1.0 - self.coast_at(vr.x) * self.day()) }
+            let water = max(max(sea, ws.y), ws.z)
+            if water < 0.01 { return vec4(0.0, 0.0, 0.0, 0.0) }
+            let fr = 0.02 + 0.98 * pow(clamp(1.0 - al, 0.0, 1.0), 5.0)
+            // what stands mirrored hides the aurora behind it, as DrawSkyWater hides its sky (`sky * (1.0 - m.w)`): its
+            // mirror point without the ripple (du 0, el = al), so the city, the ranges and the trees stand in front of it
+            let x = ((fract(vr.x - self.view_span.x - 0.5 * self.view_span.y + 0.5) - 0.5) / self.view_span.y + 0.5) * self.view_in().x + self.view_pad
+            let y = self.mirror_horizon * self.view_size.y - vr.y / vr.z
+            let m = self.mirror_light.sample(clamp(vec2(x, y), vec2(0.5, 0.5), self.view_size - vec2(0.5, 0.5)) / self.view_size)
+            return vec4(self.aurora_at(vr.x, al) * (fr * (1.0 - self.day()) * water * self.cover(g.y - v.y, v.z) * (1.0 - m.w)), 0.0)
+        }
+        fragment: fn(){ let c = self.pixel(); self.fb0 = c; self.fb1 = vec4(0.0, 0.0, 0.0, 0.0); self.fb2 = vec4(0.0, 0.0, 0.0, 0.0) }
+    }
+
     // A band's distance where the water ran (DrawSkyWater hands the distance of what it mirrors wherever the mirror covers
     // that point): kept where the texel shows mostly the mirror, as most of it is water (the sea, a lake, a puddle over half
     // of it, by `water_at` as the water reads it) or what it mirrors outshines the rest of it (the water's light over the
@@ -212,7 +251,7 @@ script_mod! {
     mod.draw.SkyPostBase = #(Post::script_component(vm))
     mod.draw.SkyPost = mod.std.set_type_default() do mod.draw.SkyPostBase{
         draw_final: mod.draw.DrawSkyFinal{} draw_blur: mod.draw.DrawSkyBlur{} draw_water: mod.draw.DrawSkyWater{}
-        draw_water_day: mod.draw.DrawSkyWaterDay{} draw_water_dist: mod.draw.DrawSkyWaterDist{}
+        draw_water_day: mod.draw.DrawSkyWaterDay{} draw_aurora_water: mod.draw.DrawSkyAuroraWater{} draw_water_dist: mod.draw.DrawSkyWaterDist{}
         draw_dist_across: mod.draw.DrawSkyDistBlur{} draw_dist_down: mod.draw.DrawSkyDistBlur{}
     }
 }
@@ -221,6 +260,7 @@ script_mod! {
 #[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyBlur { #[deref] pub draw_super: DrawQuad }
 #[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyWater { #[deref] pub draw_super: DrawQuad }
 #[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyWaterDay { #[deref] pub draw_super: DrawQuad }
+#[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyAuroraWater { #[deref] pub draw_super: DrawQuad }
 #[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyWaterDist { #[deref] pub draw_super: DrawQuad }
 #[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyDistBlur { #[deref] pub draw_super: DrawQuad }
 
@@ -253,7 +293,7 @@ pub fn blur_sigma(p: &Params, v: &ViewSpec) -> f64 {
 #[derive(Script, ScriptHook)]
 pub struct Post {
     #[live] pub draw_final: DrawSkyFinal, #[live] pub draw_blur: DrawSkyBlur, #[live] pub draw_water: DrawSkyWater,
-    #[live] pub draw_water_day: DrawSkyWaterDay, #[live] pub draw_water_dist: DrawSkyWaterDist,
+    #[live] pub draw_water_day: DrawSkyWaterDay, #[live] pub draw_aurora_water: DrawSkyAuroraWater, #[live] pub draw_water_dist: DrawSkyWaterDist,
     #[live] pub draw_dist_across: DrawSkyDistBlur, #[live] pub draw_dist_down: DrawSkyDistBlur,
     /// The water and blur targets, a band's choice of the water's distance (`DrawSkyWaterDist`) and its light plane's
     /// blur (`DrawSkyDistBlur`, across and down); what the last picture ran: the water, the blur's sigma (px, 0 none);
@@ -297,7 +337,25 @@ impl Post {
                 (live_id!(scene_dist), out.scene.dist_in()), (live_id!(mirror_dist), mirror.dist_in())] {
                 bind_texture(cx, &mut d.draw_vars, name, tex);
             }
-            t.record(cx, v.w, v.h, |cx| d.draw_abs(cx, full));
+            // the host's aurora, mirrored at night in a pass of its own over the water's light, behind what the mirror
+            // holds (plan hdri-7 D12)
+            let aurora = match sc.aurora {
+                Some(tex) => {
+                    let a = &mut self.draw_aurora_water;
+                    sc.set_uniforms(cx, &mut a.draw_vars);
+                    a.draw_vars.set_uniform(cx, live_id!(mirror_horizon), &[v.mirrored().horizon as f32]);
+                    bind_texture(cx, &mut a.draw_vars, live_id!(mirror_light), &mirror.light);
+                    bind_texture(cx, &mut a.draw_vars, live_id!(aurora_tex), tex);
+                    Some(a)
+                }
+                None => None,
+            };
+            t.record(cx, v.w, v.h, |cx| {
+                d.draw_abs(cx, full);
+                if let Some(a) = aurora {
+                    a.draw_abs(cx, full);
+                }
+            });
             for child in [head, mirror.pass.draw_pass_id()] { cx.attach_child_pass(child, t.pass.draw_pass_id(), None); }
             (head, light) = (t.pass.draw_pass_id(), t.light.clone());
             // a band's: where the texel shows mostly its own ground, not the mirror, the scene's own distance

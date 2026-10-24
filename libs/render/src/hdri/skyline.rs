@@ -656,6 +656,9 @@ pub struct SkylineLight {
     /// under a wet ground, the ground between the puddles (its near rise, its floor between the puddles, its lakes'
     /// bottoms). `ground_ring` exactly when the ground is dry.
     pub ground_damp: [[f32; 3]; RING],
+    /// The aurora as the map shows it (through its clouds and weather) at +1 and +15 degrees, RING samples like the rings:
+    /// what the strip's water mirrors of it at night. None when no aurora draws.
+    pub aurora: Option<([[f32; 3]; RING], [[f32; 3]; RING])>,
 }
 
 /// The ground ring's elevation, degrees below the horizon: inside the strip's own ground (its bottom is
@@ -671,7 +674,7 @@ fn smooth(t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hdri::{dir_from_az_el, vec, CasterParams, Env, HdriParams, ImageSet, LightParams, Sampling, SkylineParams, WeatherParams, SkyParams};
+    use crate::hdri::{dir_from_az_el, vec, AuroraParams, CasterParams, Env, HdriParams, ImageSet, LightParams, Sampling, SkylineParams, WeatherParams, SkyParams};
     use crate::hdri::weather::{Weather, LIGHT_FORWARD};
     use makepad_render_material::ibl;
     use std::sync::Arc;
@@ -2474,5 +2477,42 @@ mod tests {
             assert!(close3(mirrored, want, 1e-4), "{name}: the floor mirrors {mirrored:?}, the city veiled once by the field's share {want:?}");
             assert!(!close3(mean, want, 1e-2), "the premise, {name}: the mean share's {mean:?} is the field's {want:?}");
         }
+    }
+
+    /// Plan hdri-7 D12: the strip's water mirrors the aurora as the map shows it. The light hands the aurora's share of the
+    /// sea's two rings (those rings less the same rings without it), only while it draws: none without it, none by day,
+    /// next to none under a closed deck, green toward it and nothing away from it. Height 10: the +1 ring passes under
+    /// the border, and the +15 ring meets the curtain about 40 km over it, in the green (a 5-degree border put the +15
+    /// look at about 245 km, where the classic table has no green: it is cut above 220 km).
+    #[test]
+    fn the_strip_gets_the_aurora_as_the_map_shows_it() {
+        let mut p = HdriParams::default();
+        sun_at(&mut p, -30.0, 200.0);
+        p.sky.night.moon = false;
+        assert_eq!(Env::new(&p).skyline_light().aurora, None, "no aurora: none handed");
+        let mut on = p.clone();
+        on.sky.night.aurora = Some(AuroraParams { height_deg: 10.0, ..AuroraParams::default() });
+        let env = Env::new(&on);
+        let l = env.skyline_light();
+        let (low, high) = l.aurora.expect("the aurora draws");
+        let north = RING / 2;
+        assert!(high[north][1] > 0.0 && high[north][1] > high[north][0], "green toward the north: {:?}", high[north]);
+        assert!(high[0] == [0.0; 3] && low[0] == [0.0; 3], "nothing toward the south");
+        let without = Sampling { bare: true, unveiled: true, even_ground: true, no_aurora: true, ..Sampling::default() };
+        for i in 0..RING {
+            let u = (i as f32 + 0.5) / RING as f32;
+            for (el, ring, sea) in [(RING_LOW_DEG, &low, &l.sea_low), (RING_HIGH_DEG, &high, &l.sea_high)] {
+                let bare = env.base_under_skyline(dir_at_u(u, el), None, without);
+                let want = [(sea[i][0] - bare.x).max(0.0), (sea[i][1] - bare.y).max(0.0), (sea[i][2] - bare.z).max(0.0)];
+                assert_eq!(ring[i], want, "{i} at {el}");
+            }
+        }
+        let mut day = on.clone();
+        sun_at(&mut day, 20.0, 200.0);
+        assert_eq!(Env::new(&day).skyline_light().aurora, None, "none by day");
+        let mut deck = on.clone();
+        deck.sky.weather = Some(WeatherParams { kind: "overcast".to_string(), ..WeatherParams::default() });
+        let covered = Env::new(&deck).skyline_light().aurora.map_or(0.0, |(_, h)| h[north][1]);
+        assert!(covered < 0.05 * high[north][1], "under the deck {covered} of {}", high[north][1]);
     }
 }

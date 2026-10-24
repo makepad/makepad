@@ -2204,3 +2204,114 @@ fn only_the_water_reads_past_the_strips_own_ground() {
         assert!(dry.is_empty(), "Size {k}: {} texels past the ground's bound show no water, the first {:?}", dry.len(), dry.first().map(|&i| (i % bw.w, i / bw.w, bw.dist[i])));
     }
 }
+
+/// Plan hdri-7 D12: at night the water mirrors the aurora it is handed (`SkyLight::aurora_sky`), host light, by Fresnel,
+/// in a pass of its own, behind what the water mirrors (as `DrawSkyWater`'s sky, `sky * (1 - m.w)`, at the mirror
+/// point without the ripple: the band's row at elevation +al). Where the band stands clear there (a row either side):
+/// in the far sea's columns the rows 0.3 to 1.5 degrees down gain the Fresnel term times the aurora at that
+/// elevation, within 15 %, and none behind the far shore; on wet land (all land with the city, Wet 1, no ripple) the rows 0.3 to 3 degrees down gain
+/// on average at least 0.85 of it, and no texel more than 2 % over it. Behind a mirrored silhouette (the band solid
+/// there, in the city's columns) wet land gains under 5 % of that. The band's light plane does not move, nor its
+/// distance but where the mirrored aurora makes the texel show mostly the mirror (`planes_kept`). By day the pass adds
+/// nothing, texel for texel.
+#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn the_night_sea_mirrors_the_aurora_it_is_handed() {
+    // the aurora's pass adds light only (its distance output is 0 at alpha 0): the light plane is the water's, and the
+    // distance too, but where the light it adds makes the texel show mostly the mirror (`DrawSkyWaterDist`'s choice,
+    // as the day's mirrored sky does): there the band hands what the mirror shows
+    let planes_kept = |what: &str, with: &Band, without: &Band| {
+        assert!(with.light == without.light, "{what}: the aurora's pass moved the band's light plane");
+        let moved: Vec<usize> = (0..with.dist.len()).filter(|&i| with.dist[i] != without.dist[i]).collect();
+        let brighter = moved.iter().filter(|&&i| lum(&with.texels[i]) > lum(&without.texels[i])).count();
+        println!("{what}: {} distances moved, {brighter} of them where the mirrored aurora brightens the texel", moved.len());
+        assert!(brighter == moved.len(), "{what}: a distance moved where the aurora added nothing");
+    };
+    let (low, high) = ([0.02f32, 0.08, 0.03], [0.04f32, 0.16, 0.06]);
+    let aurora = Some(([low; RING], [high; RING]));
+    // what the pass adds at depression al where nothing stands mirrored: Fresnel x the aurora there (`aurora_at`: the
+    // +1 ring at the horizon, toward the +15 one by +15 degrees)
+    let want = |al: f64| {
+        let fr = (0.02 + 0.98 * (1.0 - al).clamp(0.0, 1.0).powi(5)) as f32;
+        let t = (al / 0.2617994).min(1.0) as f32;
+        let sky: [f32; 3] = std::array::from_fn(|c| low[c] + (high[c] - low[c]) * t);
+        fr * lum(&[sky[0], sky[1], sky[2], 1.0])
+    };
+    // whether the band stands clear (Some(true)) or solid (Some(false)) in column x at elevation el, 0.35 degrees either
+    // side (a row at 1024, two at 2048): the mirror sees what stands from the mirrored eye, a little higher than the band
+    let above = |p: &Params, b: &Band, x: usize, el: f64| -> Option<bool> {
+        let y = (p[P::Horizon] * b.h as f64 - el * b.w as f64 / std::f64::consts::TAU - 0.5).round() as usize;
+        let k = (0.35f64.to_radians() * b.w as f64 / std::f64::consts::TAU).round().max(1.0) as usize;
+        let a: Vec<f32> = (y - k..=y + k).map(|y| b.texels[y * b.w + x][3]).collect();
+        if a.iter().all(|a| *a < 0.02) { Some(true) } else if a.iter().all(|a| *a > 0.98) { Some(false) } else { None }
+    };
+    // 1. the far sea of the example's scene, at 2048: the far shore's ranges stand over most of its columns (at 1024
+    // about 18 of its 132 stand clear a row either side of +0.3 to +1.5 degrees, 53 texels), and behind them it gains none
+    let p = Params::default();
+    let night = SkyLight { aurora_sky: aurora, ..SkyLight::example() };
+    let (with, without) = (render_band_lit(&p, 2048, &night), render_band_lit(&p, 2048, &SkyLight::example()));
+    let z = Zones::new(&p);
+    let (mut n, mut worst, mut hidden) = (0usize, 0.0f32, (0usize, 0.0f32));
+    for x in 0..with.w {
+        if z.land((x as f64 + 0.5) / with.w as f64) > 0.05 {
+            continue;
+        }
+        for y in 0..with.h {
+            let al = -row_el(&p, &with, y);
+            if !(al > 0.3f64.to_radians() && al < 1.5f64.to_radians()) {
+                continue;
+            }
+            let i = y * with.w + x;
+            let got = lum(&with.texels[i]) - lum(&without.texels[i]);
+            match above(&p, &without, x, al) {
+                Some(true) => {
+                    worst = worst.max((got / want(al) - 1.0).abs());
+                    n += 1;
+                }
+                Some(false) => hidden = (hidden.0 + 1, hidden.1.max(got / want(al))),
+                None => {}
+            }
+        }
+    }
+    println!("the sea: {n} texels clear above, at most {:.1} % off Fresnel x the aurora; {} behind the far shore, at most {:.3} of it", 100.0 * worst, hidden.0, hidden.1);
+    assert!(n > 100 && worst <= 0.15, "the sea: {n} texels, worst {worst}");
+    assert!(hidden.0 > 100 && hidden.1 < 0.05, "the far shore hides the aurora: {} texels, at most {} of it", hidden.0, hidden.1);
+    planes_kept("the sea", &with, &without);
+    // 2. wet land: standing water mirrors the aurora as a puddle does, behind the mirrored city
+    let mut q = city_params();
+    for (k, v) in [(P::Land, 1.0), (P::PrRipple, 0.0)] {
+        q.set(k as usize, v);
+    }
+    let wet = SkyLight { wet: 1.0, ..SkyLight::example() };
+    let (with, without) = (render_band_lit(&q, 1024, &SkyLight { aurora_sky: aurora, ..wet.clone() }), render_band_lit(&q, 1024, &wet));
+    let (c, hw) = (q[P::CtC], q[P::CtW] * 0.5);
+    let (mut clear, mut over) = ((0usize, 0f64, 0f64), f32::MIN);
+    let mut solid = (0usize, 0f64);
+    for y in 0..with.h {
+        let al = -row_el(&q, &with, y);
+        if !(al > 0.3f64.to_radians() && al < 3f64.to_radians()) {
+            continue;
+        }
+        for x in 0..with.w {
+            let i = y * with.w + x;
+            let got = lum(&with.texels[i]) - lum(&without.texels[i]);
+            let city = makepad_skyline::rng::wd((x as f64 + 0.5) / with.w as f64, c).abs() < hw;
+            match above(&q, &without, x, al) {
+                Some(true) => {
+                    clear = (clear.0 + 1, clear.1 + got as f64, clear.2 + want(al) as f64);
+                    over = over.max(got / want(al) - 1.0);
+                }
+                Some(false) if city => solid = (solid.0 + 1, solid.1 + got as f64),
+                _ => {}
+            }
+        }
+    }
+    let (share, behind) = (clear.1 / clear.2, solid.1 / solid.0.max(1) as f64 / (clear.2 / clear.0.max(1) as f64));
+    println!("wet land: {} texels clear above mirror {share:.3} of Fresnel x the aurora (at most {:+.1} % over); {} behind the city {behind:.3}", clear.0, 100.0 * over, solid.0);
+    assert!(clear.0 > 100 && share >= 0.85 && over <= 0.02, "wet land: {} texels, {share} of it, {over} over", clear.0);
+    assert!(solid.0 > 100 && behind < 0.05, "the mirrored city hides the aurora: {} texels add {behind} of it", solid.0);
+    planes_kept("wet land", &with, &without);
+    // 3. by day the pass adds nothing
+    let day = noon([1.2, 1.3, 1.5]);
+    let day_lit = SkyLight { aurora_sky: aurora, ..day.clone() };
+    assert!(render_band_lit(&p, 512, &day_lit).texels == render_band_lit(&p, 512, &day).texels, "by day the aurora's pass adds nothing");
+}

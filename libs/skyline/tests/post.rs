@@ -23,7 +23,7 @@ fn post_shaders_compile_for_every_backend() {
         post::script_mod(vm);
         let broken = vm.eval(script! { use mod.draw.*; DrawQuad{ pixel: fn(){ return self.no_such_field } } });
         let shaders = [("final", vm.eval(script! { mod.draw.DrawSkyFinal })), ("ground", vm.eval(script! { mod.draw.DrawSkyGround })), ("blur", vm.eval(script! { mod.draw.DrawSkyBlur })),
-            ("water", vm.eval(script! { mod.draw.DrawSkyWater })), ("water_day", vm.eval(script! { mod.draw.DrawSkyWaterDay })),
+            ("water", vm.eval(script! { mod.draw.DrawSkyWater })), ("water_day", vm.eval(script! { mod.draw.DrawSkyWaterDay })), ("aurora_water", vm.eval(script! { mod.draw.DrawSkyAuroraWater })),
             ("water_dist", vm.eval(script! { mod.draw.DrawSkyWaterDist })), ("dist_blur", vm.eval(script! { mod.draw.DrawSkyDistBlur })),
             ("city_blit", vm.eval(script! { mod.draw.DrawSkyCityBlit })), ("part", vm.eval(script! { mod.draw.DrawSkyPart })), ("broken", broken)];
         for (name, shader) in shaders {

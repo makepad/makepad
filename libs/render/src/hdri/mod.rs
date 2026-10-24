@@ -200,6 +200,8 @@ pub struct Env {
 /// over `even_ground`.
 /// `water_ground` reads a wet ground all under water (`Weather::ground_water`):
 /// the floor's puddles where they lie over the strip's floor (`Env::under_band`).
+/// `no_aurora` leaves the aurora out (plan hdri-7 D12: the strip's aurora rings are the sea's rings less the same
+/// rings without it).
 #[derive(Clone, Copy, Default)]
 struct Sampling<'a> {
     cache: Option<&'a volumetric::CloudCache>,
@@ -209,13 +211,14 @@ struct Sampling<'a> {
     even_ground: bool,
     damp_ground: bool,
     water_ground: bool,
+    no_aurora: bool,
 }
 
 impl<'a> Sampling<'a> {
     /// The lookups of a bake `width` wide (2:1, so a texel is as tall as it
     /// is wide at the equator).
     fn bake(width: usize, cache: Option<&'a volumetric::CloudCache>) -> Sampling<'a> {
-        Sampling { cache, texel: std::f32::consts::TAU / width.max(2) as f32, bare: false, unveiled: false, even_ground: false, damp_ground: false, water_ground: false }
+        Sampling { cache, texel: std::f32::consts::TAU / width.max(2) as f32, bare: false, unveiled: false, even_ground: false, damp_ground: false, water_ground: false, no_aurora: false }
     }
 }
 
@@ -605,6 +608,8 @@ impl Env {
     ///   host's ground; plan hdri-6 §5, fix wave 1), where this map lays its
     ///   puddles, their water and what they mirror (`under_band`), so nothing
     ///   is mirrored twice.
+    /// - `aurora`: the aurora's share of `sea_low` and `sea_high` (the same rings read without it, subtracted), only
+    ///   while it draws: what the strip's water mirrors of it at night (plan hdri-7 D12).
     /// - `sun_rgb`: the sun's irradiance through the cover the key is dimmed
     ///   by (`cover_toward`), times the key's own fade over the horizon, / pi:
     ///   so under a closed deck the strip is as unlit by the sun as the key.
@@ -642,8 +647,22 @@ impl Env {
         // The strip's wet ground (plan hdri-6 §5): the puddles' share and the ground between them; the map's floor holds the water.
         let wet = match &self.weather { Some(weather) if self.atmo.is_some() => weather.puddle_share(), _ => 0.0 };
         let ground_damp = if wet > 0.0 { ring_seen(-skyline::GROUND_RING_DEG, Sampling { damp_ground: true, ..at }) } else { ground_ring };
+        // The aurora as the map shows it at the sea's two rings, for the strip's water to mirror at night (plan
+        // hdri-7 D12): the sea's rings less the same rings without it, so the cover and the veil in front are the map's.
+        let sea_at = match self.weather {
+            Some(_) => Sampling { bare: true, ..Sampling::default() },
+            None => at,
+        };
+        let aurora = self.night.as_ref().filter(|night| night.has_aurora()).map(|_| {
+            let without = Sampling { no_aurora: true, ..sea_at };
+            let less = |with: &[[f32; 3]; RING], el_deg: f32| -> [[f32; 3]; RING] {
+                let bare = ring_seen(el_deg, without);
+                std::array::from_fn(|i| std::array::from_fn(|c| (with[i][c] - bare[i][c]).max(0.0)))
+            };
+            (less(&sea_low, skyline::RING_LOW_DEG), less(&sea_high, skyline::RING_HIGH_DEG))
+        });
         let Some(atmo) = &self.atmo else {
-            return skyline::SkylineLight { sun_u: 0.0, sun_el_deg: -90.0, sun_rgb: [0.0; 3], ambient_rgb: [0.0; 3], ring_low, ring_high, ground_ring, sea_low, sea_high, wet, ground_damp };
+            return skyline::SkylineLight { sun_u: 0.0, sun_el_deg: -90.0, sun_rgb: [0.0; 3], ambient_rgb: [0.0; 3], ring_low, ring_high, ground_ring, sea_low, sea_high, wet, ground_damp, aurora };
         };
         let pi = std::f32::consts::PI;
         let sun = atmo.sun_dir();
@@ -670,6 +689,7 @@ impl Env {
             sea_high,
             wet,
             ground_damp,
+            aurora,
         }
     }
 
@@ -1091,7 +1111,7 @@ impl Env {
             c += stars + night.glow(d) + night.ground(d, ground_color);
             // The aurora (plan hdri-7 §4): diffuse light behind the clouds, outside the points, so it lights the dome
             // and the strip's rings; band-limited to the lookup's texel, or to the rings' spacing for a bare lookup.
-            if night.has_aurora() {
+            if night.has_aurora() && !at.no_aurora {
                 c += night.aurora(d, if at.bare { aurora::AURORA_BARE_TEXEL } else { at.texel });
             }
             if points {

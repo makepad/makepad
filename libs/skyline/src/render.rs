@@ -121,6 +121,8 @@ pub struct SceneCtx<'a> {
     pub light: &'a SkyLight, pub ring: &'a Texture, pub sea: &'a Texture,
     /// The lakes (`Skyline::lake_tex`).
     pub lakes: &'a Texture,
+    /// The host's aurora for the night water (`Skyline::aurora_tex`), when it hands one (plan hdri-7 D12).
+    pub aurora: Option<&'a Texture>,
     /// The placement zones (the city and the props read them).
     pub z: &'a Zones,
     /// The column data texture, its geometry (width, height, margin, count) and the data on the CPU (see [`terrain::ROWS`]).
@@ -234,6 +236,8 @@ pub struct Skyline {
     #[rust] sea_tex: Option<Texture>,
     /// The lakes (`lakes::texels`), and the zones' key they were written for.
     #[rust] lake_tex: Option<(u64, Texture)>,
+    /// The host's aurora (`SkyLight::aurora_texels`), written with `ring_tex`; None without one.
+    #[rust] aurora_tex: Option<Texture>,
     /// The key of the picture the targets hold.
     #[rust] pub drawn: Option<u64>,
     #[rust] pub stats: Stats,
@@ -281,7 +285,7 @@ impl Skyline {
         for v in [&mut self.draw_glow.draw_vars, &mut self.draw_range.draw_vars, &mut self.draw_ground.draw_vars, &mut self.trees.draw_trees.draw_vars,
             &mut ci.draw_city.draw_vars, &mut ci.draw_blit.draw_vars, &mut pr.draw_part.draw_vars, &mut pr.draw_blit.draw_vars,
             &mut po.draw_final.draw_vars, &mut po.draw_blur.draw_vars, &mut po.draw_water.draw_vars, &mut po.draw_water_day.draw_vars,
-            &mut po.draw_water_dist.draw_vars, &mut po.draw_dist_across.draw_vars, &mut po.draw_dist_down.draw_vars] {
+            &mut po.draw_water_dist.draw_vars, &mut po.draw_dist_across.draw_vars, &mut po.draw_dist_down.draw_vars, &mut po.draw_aurora_water.draw_vars] {
             v.texture_slots = Default::default();
         }
     }
@@ -335,6 +339,18 @@ impl Skyline {
             let format = TextureFormat::VecRGBAf32 { width: crate::light::RING, height: 2, data: Some(light.sea_texels()), updated: TextureUpdated::Full };
             let sea = match self.sea_tex.take() { Some(t) => { *t.get_format(cx) = format; t } None => Texture::new_with_format(cx, format) };
             self.sea_tex = Some(sea);
+            // the host's aurora for the night water (plan hdri-7 D12): two rows like the sea's; none without one
+            let old = self.aurora_tex.take();
+            self.aurora_tex = light.aurora_texels().map(|texels| {
+                let format = TextureFormat::VecRGBAf32 { width: crate::light::RING, height: 2, data: Some(texels), updated: TextureUpdated::Full };
+                match old {
+                    Some(t) => {
+                        *t.get_format(cx) = format;
+                        t
+                    }
+                    None => Texture::new_with_format(cx, format),
+                }
+            });
         }
     }
 
@@ -350,7 +366,7 @@ impl Skyline {
         let mut scene = self.scene.take().unwrap();
         let (scene_id, dist) = (scene.pass.draw_pass_id(), scene.dist.is_some());
         let mv = view.mirrored();
-        let mut sc = SceneCtx { view, p, light, ring, sea, lakes, z, cols: &cols.tex, col_geom: cols.geom, col_data: &cols.data, tree_cov: blank.clone(), city: None, inputs: [None; 2], mirror: false, up_dy: 0.0, dist };
+        let mut sc = SceneCtx { view, p, light, ring, sea, lakes, aurora: self.aurora_tex.as_ref(), z, cols: &cols.tex, col_geom: cols.geom, col_data: &cols.data, tree_cov: blank.clone(), city: None, inputs: [None; 2], mirror: false, up_dy: 0.0, dist };
         // producers: children of the scene pass, which samples them
         self.trees.draw_pass(cx, &sc, scene_id);
         self.city.draw_pass(cx, &sc, scene_id);
