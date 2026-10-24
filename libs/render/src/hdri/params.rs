@@ -4536,7 +4536,7 @@ mod reader_tests {
             glow_strength: f32::INFINITY,
             milky_way: Some(MilkyWayParams { on: true, strength: f32::INFINITY, turn_deg: f32::NAN, tilt_deg: 200.0, core: f32::NAN, dust: -1.0 }),
             nebulas: Some(NebulaParams { on: true, amount: f32::NAN, size: f32::INFINITY, brightness: -1.0, realism: 2.0, seed: 3 }),
-            aurora: None,
+            aurora: Some(AuroraParams { on: true, strength: f32::INFINITY, color: "Storm ".to_string(), mix: [f32::NAN; 3], direction_deg: f32::NAN, height_deg: 500.0, width_deg: f32::NEG_INFINITY, folds: f32::NAN, rays: 7.0, seed: 1 }),
         };
         raw.studio = StudioParams { top: [f32::NAN, 20.0, -1.0], horizon: [0.5, f32::INFINITY, 0.2], floor: [0.1; 3], horizon_softness: f32::NAN };
         let mut clamped = raw.clone();
@@ -4552,7 +4552,7 @@ mod reader_tests {
         for d in directions() {
             same(aa.sky(d), ab.sky(d), format_args!("the sky at {d:?}"));
             same(aa.sun_disc(d), ab.sun_disc(d), format_args!("the sun's disc at {d:?}"));
-            for (what, a, b) in [("stars", na.stars(d), nb.stars(d)), ("moon", na.moon(d), nb.moon(d)), ("glow", na.glow(d), nb.glow(d)), ("deep sky", na.deep_sky(d, 0.0), nb.deep_sky(d, 0.0))] {
+            for (what, a, b) in [("stars", na.stars(d), nb.stars(d)), ("moon", na.moon(d), nb.moon(d)), ("glow", na.glow(d), nb.glow(d)), ("deep sky", na.deep_sky(d, 0.0), nb.deep_sky(d, 0.0)), ("aurora", na.aurora(d, 0.0), nb.aurora(d, 0.0))] {
                 same(a, b, format_args!("the night's {what} at {d:?}"));
             }
             same(ba.backdrop(d), bb.backdrop(d), format_args!("the backdrop at {d:?}"));

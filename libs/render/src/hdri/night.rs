@@ -41,6 +41,7 @@
 
 use makepad_draw::*;
 use super::atmosphere::SUN_IRRADIANCE;
+use super::aurora::{Aurora, AURORA_BARE_TEXEL};
 use super::milky_way::MilkyWay;
 use super::nebulas::Nebulas;
 use super::noise::{hash01, hash_u32};
@@ -223,6 +224,8 @@ pub struct NightSky {
     milky_way: Option<MilkyWay>,
     /// The nebulas; Some when their block draws (plan hdri-7 §3).
     nebulas: Option<Nebulas>,
+    /// The aurora; Some when its block draws and the sun is below the horizon (plan hdri-7 §4).
+    aurora_layer: Option<Aurora>,
 }
 
 /// One star of the field, in star space.
@@ -356,6 +359,8 @@ impl NightSky {
         let milky_way = mw.map(|m| MilkyWay::new(m, seed, gal_axes, m.strength * lift * astro));
         // Plan hdri-7 §3: the nebulas likewise, along the band when it draws; their stars lifted as the field's are.
         let nebulas = p.nebulas_drawn().map(|n| Nebulas::new(n, mw.map(|_| gal_axes), lift * astro, star_gain * astro, &star_colors));
+        // Plan hdri-7 §4: the aurora fades with the night as the stars do; built only when it draws and the sun is down.
+        let aurora_layer = p.aurora_drawn().filter(|_| night_factor > 0.0).map(|a| Aurora::new(a, a.strength * lift * night_factor));
 
         let mut sky = NightSky {
             night_factor,
@@ -377,12 +382,20 @@ impl NightSky {
             gal_axes,
             milky_way,
             nebulas,
+            aurora_layer,
         };
         let (ambient, sky_irradiance) = sky.integrate_glow();
         let moon_direct = sky.moon.as_ref().map_or(Vec3f::default(), |m| m.irradiance * m.dir.y.max(0.0));
         sky.ambient = ambient;
         sky.moon_ground = moon_direct * night_factor;
         sky.ground_irradiance = sky_irradiance + sky.moon_ground;
+        // The aurora lights the scene (plan hdri-7 D9): its mean over the sky (the clouds' ambient) and its light on
+        // flat ground join the glow's, only when it draws, so a night without it is what it was.
+        if sky.aurora_layer.is_some() {
+            let (mean, irradiance) = sky.integrate_aurora();
+            sky.ambient += mean;
+            sky.ground_irradiance += irradiance;
+        }
         sky
     }
 
@@ -458,8 +471,29 @@ impl NightSky {
         NightFeatures {
             galactic_centre: self.milky_way.as_ref().map(|_| self.to_world(self.gal_axes[0])),
             nebulas: self.nebulas.as_ref().map_or(Vec::new(), |n| n.centres().into_iter().map(|(c, r)| (self.to_world(c), r)).collect()),
-            aurora_middle: None,
+            aurora_middle: self.aurora_layer.as_ref().map(|a| a.middle()),
         }
+    }
+
+    /// Whether the aurora draws: its block on and the sun below the horizon. `Env::sky_layers` and `dome_light` add
+    /// nothing otherwise (plan hdri-7).
+    pub fn has_aurora(&self) -> bool {
+        self.aurora_layer.is_some()
+    }
+
+    /// The aurora along `dir` (map frame): the night's lift and fade in, dimmed and reddened toward the horizon as the
+    /// stars are; 0 below it and off its arc. `texel` band-limits its folds and rays (AURORA_BARE_TEXEL for a bare
+    /// lookup). Diffuse light, never a key (plan 1b D1).
+    pub fn aurora(&self, dir: Vec3f, texel: f32) -> Vec3f {
+        let Some(a) = &self.aurora_layer else { return Vec3f::default() };
+        if !(dir.y > 0.0) {
+            return Vec3f::default();
+        }
+        let c = a.at(dir, texel);
+        if !(c.max_elem() > 0.0) {
+            return Vec3f::default();
+        }
+        c * sun_transmittance(dir.y) * smoothstep(0.0, 0.03, dir.y)
     }
 
     /// The moon's disc: lit from the sun's direction, plus earthshine. It is also drawn
@@ -643,6 +677,27 @@ impl NightSky {
         }
         (mean / TAU, irradiance)
     }
+
+    /// The aurora's mean radiance over the upper hemisphere and the irradiance it puts on flat ground, by the glow's
+    /// midpoint quadrature at the bare lookups' band limit.
+    fn integrate_aurora(&self) -> (Vec3f, Vec3f) {
+        const THETA_STEPS: usize = 16;
+        const PHI_STEPS: usize = 32;
+        let d_theta = FRAC_PI_2 / THETA_STEPS as f32;
+        let d_phi = TAU / PHI_STEPS as f32;
+        let (mut mean, mut irradiance) = (Vec3f::default(), Vec3f::default());
+        for i in 0..THETA_STEPS {
+            let (sin_t, cos_t) = ((i as f32 + 0.5) * d_theta).sin_cos();
+            for j in 0..PHI_STEPS {
+                let (sin_p, cos_p) = ((j as f32 + 0.5) * d_phi).sin_cos();
+                let l = self.aurora(vec3f(sin_t * cos_p, cos_t, sin_t * sin_p), AURORA_BARE_TEXEL);
+                let d_omega = sin_t * d_theta * d_phi;
+                mean += l * d_omega;
+                irradiance += l * (d_omega * cos_t);
+            }
+        }
+        (mean / TAU, irradiance)
+    }
 }
 
 /// Where the night's features are, in the map's own frame (before `rotation_deg`): the galactic centre (the Milky
@@ -746,7 +801,7 @@ fn henyey_greenstein(cos_g: f32, g: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hdri::{dir_from_az_el, vec, Env, HdriParams, MilkyWayParams, NebulaParams};
+    use crate::hdri::{dir_from_az_el, vec, AuroraParams, Env, HdriParams, MilkyWayParams, NebulaParams};
     use makepad_render_material::ibl;
 
     #[test]
@@ -1323,5 +1378,58 @@ mod tests {
             return;
         }
         panic!("the premise: a glowing cloud well up, and a second one far off and as high, among 32 seeds");
+    }
+
+    /// Plan hdri-7 §4: the aurora fades with the night as the stars do (night factor x lift): none by day or at
+    /// sunset, at -6 degrees (32 x 0.5) / 1024 of its night strength.
+    #[test]
+    fn the_aurora_follows_the_night_factor() {
+        let p = NightParams { moon: false, aurora: Some(AuroraParams::default()), ..Default::default() };
+        assert!(!night_at(&p, 5.0).has_aurora() && !night_at(&p, 0.0).has_aurora());
+        let d = dir_from_az_el(0.0, 18.0);
+        let (dusk, night) = (luminance(night_at(&p, -6.0).aurora(d, 0.0)), luminance(night_at(&p, -20.0).aurora(d, 0.0)));
+        assert!(night > 0.0, "the premise: the arc shows 18 degrees up in the north");
+        assert!((dusk / night - 16.0 / 1024.0).abs() < 1.0e-4, "{dusk} / {night}");
+        assert_eq!(night_at(&p, -20.0).aurora(dir_from_az_el(0.0, -5.0), 0.0), Vec3f::default(), "none below the horizon");
+    }
+
+    /// Plan hdri-7 D9: the aurora lights the scene: the night's ground and ambient gain its light, green; a great storm
+    /// (IBC IV, Strength 20) over about a steradian (its arc lights 1.15 sr) puts 0.01 to 0.3 of a full moon's light on
+    /// the ground. Refs §5.1 asked for 0.03 to 0.3 (computed 0.11) of a body averaging a third of the peak; the sheet's
+    /// face-on body is an eighth of it (EDGE_MAX), its green held to the 40 km over the border, and it measures 0.015.
+    #[test]
+    fn the_aurora_lights_the_ground_green() {
+        let dark = night_at(&NightParams { moon: false, ..Default::default() }, -30.0);
+        let lit = night_at(&NightParams { moon: false, aurora: Some(AuroraParams::default()), ..Default::default() }, -30.0);
+        let gain = lit.ground_irradiance - dark.ground_irradiance;
+        assert!(gain.y > gain.x && gain.y > gain.z && gain.y > 0.0, "{gain:?}");
+        assert!(luminance(lit.ambient) > luminance(dark.ambient));
+        let storm = AuroraParams { strength: 20.0, width_deg: 180.0, height_deg: 30.0, ..AuroraParams::default() };
+        let great = night_at(&NightParams { moon: false, aurora: Some(storm), ..Default::default() }, -30.0);
+        let moon = NightSky::new(&NightParams { moon_elevation_deg: 45.0, moon_azimuth_deg: 135.0, ..Default::default() }, 7, dir_from_az_el(315.0, -30.0), 22.0, 45.0);
+        let ratio = luminance(great.ground_irradiance - dark.ground_irradiance) / luminance(moon.moon_ground);
+        println!("a Strength 20 storm puts {ratio:.3} of a full moon's light on the ground");
+        assert!((0.01..=0.3).contains(&ratio), "{ratio}");
+    }
+
+    /// Plan hdri-7 §4: the moon does not hide the aurora but lowers its contrast: under a full moon (the moonlit
+    /// preset's 1.5) its brightest point still adds over 3 % to the sky there, and less than on a moonless night.
+    #[test]
+    fn the_moon_lowers_the_auroras_contrast_but_does_not_hide_it() {
+        let p = |moon: bool| NightParams { moon, moon_elevation_deg: 30.0, moon_azimuth_deg: 105.0, moon_brightness: 1.5, glow_strength: 0.8, aurora: Some(AuroraParams::default()), ..Default::default() };
+        let contrast = |sky: &NightSky| {
+            let mut most = 0.0f32;
+            for beta in -45..=45 {
+                for e in 4..80 {
+                    let d = dir_from_az_el(beta as f32, e as f32 * 0.5);
+                    most = most.max(luminance(sky.aurora(d, 0.0)) / luminance(sky.glow(d)));
+                }
+            }
+            most
+        };
+        let sun = dir_from_az_el(285.0, -30.0);
+        let (lit, dark) = (contrast(&NightSky::new(&p(true), 7, sun, 19.0, 45.0)), contrast(&NightSky::new(&p(false), 7, sun, 19.0, 45.0)));
+        println!("the aurora's best contrast: {dark:.2} moonless, {lit:.3} under the moon");
+        assert!(lit > 0.03 && lit < dark, "{lit} under the moon, {dark} without");
     }
 }

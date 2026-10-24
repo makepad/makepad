@@ -66,6 +66,7 @@ pub mod skyline;
 mod milky_way;
 mod lazy_grid;
 mod nebulas;
+mod aurora;
 
 pub use params::*;
 pub use image_light::ImageSet;
@@ -1088,6 +1089,11 @@ impl Env {
         if let Some(night) = &self.night {
             let stars = if points { night.deep_sky(d, at.texel) } else { Vec3f::default() };
             c += stars + night.glow(d) + night.ground(d, ground_color);
+            // The aurora (plan hdri-7 §4): diffuse light behind the clouds, outside the points, so it lights the dome
+            // and the strip's rings; band-limited to the lookup's texel, or to the rings' spacing for a bare lookup.
+            if night.has_aurora() {
+                c += night.aurora(d, if at.bare { aurora::AURORA_BARE_TEXEL } else { at.texel });
+            }
             if points {
                 discs += match without {
                     Some(KeyTerm::Moon(share)) => night.moon(d) * (1.0 - share),
@@ -1164,6 +1170,12 @@ impl Env {
                 let drawn = self.sky_layers(d, atmo, None, Sampling { bare: true, ..Sampling::default() });
                 // What sky_layers draws with no clouds, and without the points.
                 let open = atmo.sky(d) + self.night.as_ref().map_or(Vec3f::default(), |night| night.glow(d));
+                // The aurora is in what the open sky puts on the ground too, so the cover's gain stays a cover ratio
+                // (plan hdri-7 D9; the ground takes the aurora's light through `NightSky::ground_irradiance`).
+                let open = match &self.night {
+                    Some(night) if night.has_aurora() => open + night.aurora(d, aurora::AURORA_BARE_TEXEL),
+                    _ => open,
+                };
                 dome.mean += drawn;
                 dome.irradiance += drawn * (sine * share);
                 dome.open += open * (sine * share);
@@ -3176,6 +3188,12 @@ mod tests {
         let env = Env::new(&p);
         let parallel = env.bake_par(64, four_threads);
         assert!(env.bake(64) == parallel);
+        p.sky.night.milky_way = Some(MilkyWayParams::default());
+        p.sky.night.nebulas = Some(NebulaParams { amount: 1.0, size: 3.0, seed: 0x51ab_0005, ..NebulaParams::default() });
+        p.sky.night.aurora = Some(AuroraParams { folds: 0.8, rays: 0.8, ..AuroraParams::default() });
+        let env = Env::new(&p);
+        let parallel = env.bake_par(64, four_threads);
+        assert!(env.bake(64) == parallel, "the three layers together");
     }
 
     #[test]
@@ -3187,6 +3205,157 @@ mod tests {
             let mut p = base.clone();
             p.sky.night.nebulas = Some(NebulaParams { amount: 0.6, realism, ..NebulaParams::default() });
             write_look(&format!("nebulas-r{realism:.1}"), &p);
+        }
+    }
+
+    #[test]
+    fn the_aurora_off_or_by_day_changes_nothing() {
+        night_block_changes_nothing(&|p, on| p.sky.night.aurora = Some(AuroraParams { on, ..AuroraParams::default() }));
+    }
+
+    /// The three blocks together, absent against off, and on by day: the base's maps (D13).
+    #[test]
+    fn the_three_off_together_change_nothing() {
+        night_block_changes_nothing(&|p, on| {
+            p.sky.night.milky_way = Some(MilkyWayParams { on, ..MilkyWayParams::default() });
+            p.sky.night.nebulas = Some(NebulaParams { on, ..NebulaParams::default() });
+            p.sky.night.aurora = Some(AuroraParams { on, ..AuroraParams::default() });
+        });
+    }
+
+    #[test]
+    fn the_aurora_held_and_released_agree() {
+        let base = super::presets::preset("Starry night").unwrap();
+        held_and_released_agree(&base, &|p| p.sky.night.aurora = Some(AuroraParams { folds: 0.8, rays: 0.8, ..AuroraParams::default() }), 0.10, 0.03, "the aurora");
+    }
+
+    /// Plan hdri-7 §5 ("in exports at every width"): 1024 against 2048, by the held rule (ignored, release).
+    #[test]
+    #[ignore = "release: 1024 against 2048"]
+    fn the_aurora_agrees_at_export_widths() {
+        let base = super::presets::preset("Starry night").unwrap();
+        widths_agree(&base, &|p| p.sky.night.aurora = Some(AuroraParams { folds: 0.8, rays: 0.8, ..AuroraParams::default() }), 1024, 0.10, 0.03, "the aurora");
+    }
+
+    #[test]
+    fn the_aurora_sits_behind_the_weather_and_the_skyline() {
+        let base = super::presets::preset("Starry night").unwrap();
+        let set = |p: &mut HdriParams| p.sky.night.aurora = Some(AuroraParams::default());
+        let mut on = base.clone();
+        set(&mut on);
+        let middle = Env::new(&on).night_features().unwrap().aurora_middle.expect("the arc draws");
+        let (az, el) = az_el_from_dir(middle);
+        a_layer_sits_behind_the_deck_the_fog_and_the_skyline(&base, &set, dir_from_az_el(az, el + 3.0), true);
+    }
+
+    /// Plan 1b D1: a diffuse sky source is never a key. With the aurora on and no moon there is no key; with the moon
+    /// up the key, the hot spots and what the keyless copy takes off are what they were without it.
+    #[test]
+    fn the_aurora_is_never_a_key() {
+        use super::presets::preset;
+        let with = |mut p: HdriParams| {
+            p.sky.night.aurora = Some(AuroraParams::default());
+            p
+        };
+        let starry = preset("Starry night").unwrap();
+        assert!(Env::new(&starry).sun().is_none() && Env::new(&with(starry)).sun().is_none(), "no key from the aurora");
+        let moonlit = preset("Moonlit night").unwrap();
+        let (off, on) = (Env::new(&moonlit), Env::new(&with(moonlit.clone())));
+        assert!(off.sun().is_some());
+        assert_eq!(off.sun(), on.sun(), "the moon's key, bit for bit");
+        assert_eq!(off.hot_spots(), on.hot_spots());
+        let (map_off, map_on) = (off.bake(128), on.bake(128));
+        let (cut_off, cut_on) = (off.bake_keyless_par(&map_off, four_threads).unwrap(), on.bake_keyless_par(&map_on, four_threads).unwrap());
+        for i in 0..map_on.data.len() {
+            for c in 0..3 {
+                let (taken_off, taken_on) = (map_off.data[i][c] - cut_off.data[i][c], map_on.data[i][c] - cut_on.data[i][c]);
+                assert!((taken_on - taken_off).abs() <= 1.0e-5 * map_on.data[i][c].abs().max(1.0e-12), "texel {i}: the keyless copy takes {taken_on}, without the aurora {taken_off}");
+            }
+        }
+    }
+
+    /// Plan hdri-7 D9: the aurora's light is in the open dome too, so the ground's gain stays a cover ratio: under a sky
+    /// all but clear it is what it was without the aurora, and under a closed deck the ground gains only what the deck's
+    /// own light gains (the night ground's light times the gain is the deck's light: their ratios, with the aurora and
+    /// without, agree). The deck's gain is not held to 1: at night a closed deck, lit by the sky's mean (`cloud_ambient`),
+    /// already puts more on the ground than the open sky does (Starry night: (2.17, 1.46, 0.74) without the aurora).
+    #[test]
+    fn the_auroras_light_keeps_the_ground_gain_a_cover_ratio() {
+        let mut thin = super::presets::preset("Starry night").unwrap();
+        thin.sky.clouds.coverage = 0.001;
+        let with = |p: &HdriParams| {
+            let mut q = p.clone();
+            q.sky.night.aurora = Some(AuroraParams { strength: 5.0, ..AuroraParams::default() });
+            q
+        };
+        let (a, b) = (Env::new(&thin).ground_gain, Env::new(&with(&thin)).ground_gain);
+        assert!((a - b).length() < 1.0e-3, "{a:?} against {b:?} with the aurora");
+        let mut deck = thin.clone();
+        deck.sky.clouds.coverage = 1.0;
+        let (off, on) = (Env::new(&deck), Env::new(&with(&deck)));
+        assert!(on.night.as_ref().unwrap().has_aurora() && off.night.as_ref().unwrap().moon_disc().is_none(), "the premise: the aurora draws, no moon");
+        let down = vec3f(0.0, -1.0, 0.0);
+        let ground = |e: &Env| e.night.as_ref().unwrap().ground(down, Vec3f::all(1.0)) * e.ground_gain;
+        let (ground_off, ground_on) = (ground(&off), ground(&on));
+        let (lit_off, lit_on) = (off.dome_light().irradiance, on.dome_light().irradiance);
+        // to within the two quadratures (the night's 16 x 32, the dome's 8 x 32: 0.2 % in green); without the aurora in
+        // the open dome the ground would grow by its own share of the aurora's light more (11 % in green)
+        let channels = |v: Vec3f| [v.x, v.y, v.z];
+        let (ground_off, ground_on, lit_off, lit_on) = (channels(ground_off), channels(ground_on), channels(lit_off), channels(lit_on));
+        for c in 0..3 {
+            let (grew, deck_grew) = (ground_on[c] / ground_off[c], lit_on[c] / lit_off[c]);
+            assert!(deck_grew > 1.0 && (grew / deck_grew - 1.0).abs() < 1.0e-2, "channel {c}: the ground under the deck grows x{grew}, the deck's light x{deck_grew}");
+        }
+    }
+
+    /// The aurora is in the strip's light (D9): its rings turn green toward it, and away from it they are what they were.
+    #[test]
+    fn the_aurora_reaches_the_strips_rings() {
+        let base = super::presets::preset("Starry night").unwrap();
+        let mut on = base.clone();
+        on.sky.night.aurora = Some(AuroraParams { height_deg: 8.0, ..AuroraParams::default() });
+        let (a, b) = (Env::new(&base).skyline_light(), Env::new(&on).skyline_light());
+        let north = skyline::RING / 2;
+        assert!(b.ring_high[north][1] > a.ring_high[north][1], "north: {:?} against {:?}", b.ring_high[north], a.ring_high[north]);
+        assert_eq!(b.ring_high[0], a.ring_high[0], "south");
+        assert!(b.ambient_rgb[1] > a.ambient_rgb[1], "the city's ambient gains its light");
+    }
+
+    /// Plan hdri-7 §4 ("it shows ... in the wet ground automatically, because those mirror the sky"): the engine's wet
+    /// ground mirrors `sky_layers` at (x, -y, z) (plan 6 Task 4's `seen`), so under Wet ground 1.00 (all water) the mirror
+    /// of a look 3 degrees into the curtain gains the aurora's light, green: at least the Fresnel term at that depression
+    /// (about 0.17 at 18 degrees) times what the aurora adds above.
+    #[test]
+    fn the_aurora_shows_in_the_wet_ground() {
+        let mut base = super::presets::preset("Starry night").unwrap();
+        base.sky.weather = Some(WeatherParams { kind: "clear".to_string(), wet_ground: 1.0, ..WeatherParams::default() });
+        let mut on = base.clone();
+        on.sky.night.aurora = Some(AuroraParams::default());
+        let (with, without) = (Env::new(&on), Env::new(&base));
+        let middle = with.night_features().unwrap().aurora_middle.expect("the arc draws");
+        let (az, el) = az_el_from_dir(middle);
+        let up = dir_from_az_el(az, el + 3.0);
+        let mirror = vec3f(up.x, -up.y, up.z);
+        let (above, below) = (with.radiance(up) - without.radiance(up), with.radiance(mirror) - without.radiance(mirror));
+        println!("the aurora 3 degrees into the curtain: {above:?} above, {below:?} in the wet ground");
+        assert!(below.y > 0.0 && below.y > below.x && below.y > below.z, "the wet ground gains green: {below:?}");
+        let lum = crate::sky::luminance;
+        assert!(lum(below) >= 0.15 * lum(above), "a mirror by Fresnel: {} against {} above", lum(below), lum(above));
+    }
+
+    #[test]
+    #[ignore = "writes PNGs: HDRI_NIGHT_VISUAL_DIR"]
+    fn aurora_looks() {
+        let base = super::presets::preset("Starry night").unwrap();
+        for (name, a) in [
+            ("aurora-classic", AuroraParams::default()),
+            ("aurora-red-tops", AuroraParams { color: "red tops".into(), ..AuroraParams::default() }),
+            ("aurora-storm", AuroraParams { color: "storm".into(), strength: 3.0, folds: 1.0, rays: 1.0, ..AuroraParams::default() }),
+            ("aurora-high", AuroraParams { height_deg: 45.0, width_deg: 160.0, ..AuroraParams::default() }),
+        ] {
+            let mut p = base.clone();
+            p.sky.night.aurora = Some(a);
+            write_look(name, &p);
         }
     }
 }

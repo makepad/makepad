@@ -18,7 +18,7 @@ use makepad_draw::*;
 use makepad_render::hdri::presets::{preset, PRESET_NAMES};
 use makepad_render::hdri::skyline::SkylineBand;
 use std::sync::Arc;
-use makepad_render::hdri::{CasterParams, Env, GoboParams, HdriParams, ImageSet, LightParams, MilkyWayParams, NebulaParams, SkylineParams, VolumetricParams, WeatherParams};
+use makepad_render::hdri::{AuroraParams, CasterParams, Env, GoboParams, HdriParams, ImageSet, LightParams, MilkyWayParams, NebulaParams, SkylineParams, VolumetricParams, WeatherParams};
 use makepad_render_material::ibl::{self, EnvMap};
 use std::time::Instant;
 
@@ -844,7 +844,11 @@ fn night_layer_extra(pool: &TaskPool, preset_name: &str, width: usize, patch: &d
 /// The night's layers a held drag pays for (plan hdri-7), each the patch that switches it on over a preset. Tasks 2
 /// to 4 add a row each.
 fn night_layers() -> Vec<(&'static str, fn(&mut HdriParams))> {
-    vec![("milky way", |p| p.sky.night.milky_way = Some(MilkyWayParams::default())), ("nebulas", |p| p.sky.night.nebulas = Some(NebulaParams::default()))]
+    vec![
+        ("milky way", |p| p.sky.night.milky_way = Some(MilkyWayParams::default())),
+        ("nebulas", |p| p.sky.night.nebulas = Some(NebulaParams::default())),
+        ("aurora", |p| p.sky.night.aurora = Some(AuroraParams::default())),
+    ]
 }
 
 /// Plan hdri-7 §5: a held Size drag over the nebulas: 24 held 512 bakes of `preset_name` with the nebulas at `seed` (a
