@@ -129,6 +129,7 @@ pub mod num {
     pub use core::num::NonZeroUsize;
     pub use core::num::ParseFloatError;
     pub use core::num::ParseIntError;
+    pub use core::num::Saturating;
     pub use core::num::TryFromIntError;
     pub use core::num::Wrapping;
 }
