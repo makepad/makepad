@@ -9,6 +9,9 @@ use makepad_vulkan::vk;
 use std::{collections::{HashMap, HashSet, VecDeque}, fs::{File, OpenOptions},
     os::fd::{AsRawFd, IntoRawFd}, path::{Path, PathBuf}, sync::{Arc, atomic::Ordering}, time::{Duration, Instant}};
 
+/// A flip outstanding this long (many refresh periods at any mode) is a stalled head.
+const FLIP_STALL: Duration = Duration::from_millis(500);
+
 fn error(e: vk::Result) -> String { format!("Vulkan display: {e:?}") }
 fn uuid(instance: &makepad_vulkan::Instance, physical: vk::PhysicalDevice) -> String {
     let mut id = vk::PhysicalDeviceIDProperties::default();
@@ -154,8 +157,24 @@ impl Drop for Card {
     fn drop(&mut self) {
         self.release();
         let fd = self.file.as_raw_fd();
-        for saved in &mut self.saved {
+        // NVIDIA's display release gives the heads back to the console itself; a legacy
+        // SetCrtc of the saved state on top fails (EINVAL) and leaves the head mid-commit for
+        // the next master (the driver's flip event timeout, then nv_flip == NULL)
+        let restore = if self.mesa { std::mem::take(&mut self.saved) } else { Vec::new() };
+        for mut saved in restore {
             let c = &mut saved.crtc;
+            // the state saved at start shows the previous master's framebuffer when that was
+            // another desktop (a WM restart): it is gone with its process, and setting it fails
+            // (EINVAL) and leaves the head mid-flip for the next master (the driver's flip event
+            // timeout). Nothing to give back then: the next master sets its own state.
+            if c.buffer_id != 0 {
+                let fb = unsafe { drm::drmModeGetFB(fd,c.buffer_id) };
+                if fb.is_null() {
+                    eprintln!("[hal-direct] CRTC {}: the saved framebuffer {} is gone (the previous desktop's); not restored",c.crtc_id,c.buffer_id);
+                    continue;
+                }
+                unsafe { drm::drmModeFreeFB(fb); }
+            }
             let mode = if c.mode_valid != 0 { &mut c.mode as *mut _ } else { std::ptr::null_mut() };
             if unsafe { drm::drmModeSetCrtc(fd,c.crtc_id,c.buffer_id,c.x,c.y,saved.connectors.as_mut_ptr(),saved.connectors.len() as i32,mode) } < 0 {
                 eprintln!("[hal-direct] restore CRTC {}: {}",c.crtc_id,std::io::Error::last_os_error());
@@ -439,6 +458,12 @@ impl Output {
 impl Drop for Output {
     fn drop(&mut self) {
         // Executed on the display worker, never under the HAL or shell state locks.
+        // The last flip completes before its swapchain (and the display) goes: a flip still in
+        // flight when the display is released completes into freed driver state (nvidia-drm:
+        // "nv_flip == NULL", then a flip event timeout on the head's next commit).
+        if self.dev.present_wait && self.serial > 0 {
+            let _ = unsafe { self.dev.raw.wait_for_present(self.chain,self.serial,200_000_000) };
+        }
         let _queue = lock(&self.dev.queue_lock);
         let _ = unsafe { self.dev.raw.queue_wait_idle(self.dev.queue) };
         if self.acquired.is_some() && !self.acquire_ready
@@ -904,10 +929,11 @@ impl Context {
             let progress = (output.generation,output.complete,output.acquired,output.acquire_ready);
             if progress != output.progress || !output.busy(self.current.as_ref()) {
                 output.progress = progress; output.progress_at = Instant::now();
-            } else if output.progress_at.elapsed() >= Duration::from_secs(2) && !output.rebuild {
-                // Native acquire watchdog: retry the retained complete frame, with no retry
-                // limit and no discarded input/image when WSI stops returning credit.
-                eprintln!("[hal-direct] {}: presentation made no progress for 2 s; reacquiring",output.connector.name);
+            } else if output.progress_at.elapsed() >= FLIP_STALL && !output.rebuild {
+                // Flip watchdog: a flip (or the WSI credit after it) outstanding this long is a
+                // stalled head; the output is rebuilt (modeset again) and retries the retained
+                // complete frame, with no retry limit and no discarded input/image.
+                eprintln!("[hal-direct] {}: flip {} made no progress for {} ms; rebuilding this output",output.connector.name,output.serial,output.progress_at.elapsed().as_millis());
                 output.rebuild = true;
             }
             if output.last_present != old {

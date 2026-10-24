@@ -14,6 +14,7 @@ mod pbr;
 mod city;
 mod grass;
 mod foliage;
+mod impostor;
 mod skinned_gpu;
 mod world;
 mod water;
@@ -34,6 +35,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     city::script_mod(vm);
     grass::script_mod(vm);
     foliage::script_mod(vm);
+    impostor::script_mod(vm);
     skinned_gpu::script_mod(vm);
     world::script_mod(vm);
     water::script_mod(vm);
@@ -401,6 +403,17 @@ pub struct DrawSceneGrass {
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawSceneFoliageLit {
+    #[deref]
+    pub pbr: DrawScenePbr,
+}
+
+/// A model's far stand-in (`shaders/impostor.rs`, `crate::impostor`): the
+/// foliage lane's layout (the lane switches only the shader id for the
+/// stand-in layer) with a vertex stage that turns one quad toward the camera
+/// and a pixel that blends the three nearest baked views.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawSceneImpostor {
     #[deref]
     pub pbr: DrawScenePbr,
 }
@@ -831,6 +844,15 @@ pub struct DrawLmSunDepthCutout {
     pub depth: DrawLmSunDepth,
 }
 
+/// [`DrawLmSunDepthCutout`] for a far stand-in's quad (shaders/lm_depth.rs):
+/// turned to the sun, cut by the baked view nearest to the sun's direction.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawLmSunDepthImpostor {
+    #[deref]
+    pub cutout: DrawLmSunDepthCutout,
+}
+
 /// [`DrawLmSunDepth`] for casters wholly inside their cascade's tile: the
 /// same projection with no tile clip, so its pipeline has no `discard` and
 /// keeps the GPU's hidden-surface removal.
@@ -1213,6 +1235,7 @@ mod shader_registration_tests {
                 ("DrawSceneCity", DrawSceneCity::script_new_with_default(vm).pbr.skinned.draw_vars),
                 ("DrawSceneGrass", DrawSceneGrass::script_new_with_default(vm).pbr.skinned.draw_vars),
                 ("DrawSceneFoliageLit", DrawSceneFoliageLit::script_new_with_default(vm).pbr.skinned.draw_vars),
+                ("DrawSceneImpostor", DrawSceneImpostor::script_new_with_default(vm).pbr.skinned.draw_vars),
                 ("DrawSceneCustom", custom.pbr.skinned.draw_vars),
                 ("DrawSceneSkinnedGpu", DrawSceneSkinnedGpu::script_new_with_default(vm).draw_vars),
             ];
@@ -1309,6 +1332,7 @@ mod shader_registration_tests {
                 ("city", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneCity)})),
                 ("grass", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneGrass)})),
                 ("foliage", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneFoliageLit)})),
+                ("impostor", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneImpostor)})),
             ] {
                 let errors = vm.heap().string_with(result, |_heap, value| value.to_string()).unwrap();
                 assert!(errors.is_empty(), "{name}: {errors}");
@@ -1399,8 +1423,10 @@ mod shader_registration_tests {
                 ("city", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneCity)})),
                 ("grass", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneGrass)})),
                 ("foliage", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneFoliageLit)})),
+                ("impostor", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneImpostor)})),
                 ("local shadow skin", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawLocalShadowSkinned)})),
                 ("sun depth", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawLmSunDepth)})),
+                ("sun impostor depth", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawLmSunDepthImpostor)})),
                 ("sun skin depth", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawLmSunDepthSkinned)})),
                 ("lamp depth", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawLmLampDepth)})),
                 ("lamp depth inside", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawLmLampDepthInside)})),
@@ -1486,6 +1512,7 @@ mod shader_registration_tests {
                 ("city", DrawSceneCity::script_new_with_default(vm).pbr.skinned.draw_vars.draw_shader_id),
                 ("grass", DrawSceneGrass::script_new_with_default(vm).pbr.skinned.draw_vars.draw_shader_id),
                 ("foliage", DrawSceneFoliageLit::script_new_with_default(vm).pbr.skinned.draw_vars.draw_shader_id),
+                ("impostor", DrawSceneImpostor::script_new_with_default(vm).pbr.skinned.draw_vars.draw_shader_id),
             ];
             for (name, id) in lanes {
                 let m = &vm.cx().draw_shaders[id.expect("registered").index].mapping;

@@ -86,7 +86,8 @@ pub(super) struct Slot {
     pool: vk::CommandPool,
     cb: vk::CommandBuffer,
     fence: vk::Fence,
-    query: vk::QueryPool,
+    /// the timestamp pool and how many queries it holds (a profiled frame's batch grew it)
+    query: (vk::QueryPool, u32),
     /// Per layout: the pool and how many sets it holds.
     descriptors: FastMap<vk::DescriptorSetLayout, (vk::DescriptorPool, u32)>,
 }
@@ -94,7 +95,7 @@ pub(super) struct Slot {
 impl Drop for Slot {
     fn drop(&mut self) { unsafe {
         for (_, (pool, _)) in self.descriptors.drain() { self.dev.raw.destroy_descriptor_pool(pool, None); }
-        if self.query != vk::QueryPool::null() { self.dev.raw.destroy_query_pool(self.query, None); }
+        if self.query.0 != vk::QueryPool::null() { self.dev.raw.destroy_query_pool(self.query.0, None); }
         self.dev.raw.destroy_fence(self.fence, None);
         self.dev.raw.destroy_command_pool(self.pool, None);
     } }
@@ -183,9 +184,14 @@ pub(super) struct Batch {
     pool: vk::CommandPool,
     pub cb: vk::CommandBuffer,
     fence: vk::Fence,
-    query: vk::QueryPool,
+    /// The timestamp pool this batch writes and its size in queries.
+    query: (vk::QueryPool, u32),
     /// The slot's timestamp pool when this batch writes no timestamps (kept for the next one).
-    idle_query: vk::QueryPool,
+    idle_query: (vk::QueryPool, u32),
+    /// The GPU profiler's timed passes when this batch encodes a recorded frame.
+    pub prof: Option<super::prof::BatchProf>,
+    /// The recorded frame this batch presents (its display time goes to the profiler).
+    pub prof_key: Option<crate::gpu_prof::FrameKey>,
     pub images: Vec<Arc<Image>>,
     pub buffers: Vec<Arc<Buffer>>,
     pub pipelines: Vec<Arc<Pipeline>>,
@@ -206,6 +212,9 @@ pub(super) struct Batch {
     /// arenas this batch had to allocate (none in steady frames): the frame stats' `arena_allocs`
     pub allocs: u64,
     pub draw_counts: FastMap<usize, u32>,
+    /// When `finish` handed the batch to the submit worker, while the frame profile records (0:
+    /// not recording): its submit queue wait, vkQueueSubmit and submit->rendered times.
+    finished_ns: u64,
     #[cfg(target_os = "linux")]
     pub external_waits: Vec<(Arc<super::share::sync::Semaphore>, u64)>,
     #[cfg(target_os = "linux")]
@@ -260,12 +269,15 @@ impl Batch {
         for sid in sids { (mailbox.notify)(sid, false); }
     }
 
-    pub fn new(dev: Arc<Device>, spares: &Spares, timestamp: bool, reserve: u64) -> Result<Self, String> {
+    /// A batch on a reset slot. `queries`: timestamps it writes (0: none; 2: its own start and
+    /// end; more: a profiled frame's passes, `prof`).
+    pub fn new(dev: Arc<Device>, spares: &Spares, queries: u32, reserve: u64) -> Result<Self, String> {
         let spare = lock(&spares.slots).pop();
+        if spare.is_none() { crate::profile::count("vk batch slot made"); }
         let mut b = Self { dev, spares: spares.clone(), reusable: false, pool: vk::CommandPool::null(), cb: vk::CommandBuffer::null(), fence: vk::Fence::null(),
-            query: vk::QueryPool::null(), idle_query: vk::QueryPool::null(),
+            query: (vk::QueryPool::null(), 0), idle_query: (vk::QueryPool::null(), 0), prof: None, prof_key: None,
             images: Vec::new(), buffers: Vec::new(), pipelines: Vec::new(), passes: Vec::new(), framebuffers: Vec::new(),
-            descriptors: FastMap::default(), tickets: Vec::new(), scanout: None, present: None, arena: None, arenas: Vec::new(), reserve, allocs: 0, draw_counts: FastMap::default(),
+            descriptors: FastMap::default(), tickets: Vec::new(), scanout: None, present: None, arena: None, arenas: Vec::new(), reserve, allocs: 0, draw_counts: FastMap::default(), finished_ns: 0,
             #[cfg(target_os = "linux")] external_waits: Vec::new(),
             #[cfg(target_os = "linux")] external_signals: Vec::new(),
             #[cfg(target_os = "linux")] release_fence: None,
@@ -275,7 +287,7 @@ impl Batch {
             b.pool = std::mem::replace(&mut slot.pool, vk::CommandPool::null());
             b.cb = slot.cb;
             b.fence = std::mem::replace(&mut slot.fence, vk::Fence::null());
-            b.idle_query = std::mem::replace(&mut slot.query, vk::QueryPool::null());
+            b.idle_query = std::mem::replace(&mut slot.query, (vk::QueryPool::null(), 0));
             b.descriptors = slot.descriptors.drain().map(|(layout, (pool, sets))| (layout, (pool, sets, false))).collect();
         }
         unsafe {
@@ -288,16 +300,30 @@ impl Batch {
                 b.fence = b.dev.raw.create_fence(&vk::FenceCreateInfo::default(), None).map_err(error)?;
             }
             b.dev.raw.begin_command_buffer(b.cb, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).map_err(error)?;
-            if timestamp && b.dev.timestamp_bits > 0 {
-                b.query = std::mem::replace(&mut b.idle_query, vk::QueryPool::null());
-                if b.query == vk::QueryPool::null() {
-                    b.query = b.dev.raw.create_query_pool(&vk::QueryPoolCreateInfo::default().query_type(vk::QueryType::TIMESTAMP).query_count(2), None).map_err(error)?;
+            if queries > 0 && b.dev.timestamp_bits > 0 {
+                let queries = queries.max(2);
+                b.query = std::mem::replace(&mut b.idle_query, (vk::QueryPool::null(), 0));
+                if b.query.1 < queries {
+                    // a profiled frame needs more than the slot's pool holds: a larger one, kept
+                    // with the slot after (sized in powers of two, so steady frames reuse it)
+                    if b.query.0 != vk::QueryPool::null() { b.dev.raw.destroy_query_pool(b.query.0, None); }
+                    let count = queries.next_power_of_two();
+                    b.query = (vk::QueryPool::null(), 0);
+                    b.query = (b.dev.raw.create_query_pool(&vk::QueryPoolCreateInfo::default().query_type(vk::QueryType::TIMESTAMP).query_count(count), None).map_err(error)?, count);
                 }
-                b.dev.raw.cmd_reset_query_pool(b.cb, b.query, 0, 2);
-                b.dev.raw.cmd_write_timestamp(b.cb, vk::PipelineStageFlags::TOP_OF_PIPE, b.query, 0);
+                b.dev.raw.cmd_reset_query_pool(b.cb, b.query.0, 0, queries);
+                b.dev.raw.cmd_write_timestamp(b.cb, vk::PipelineStageFlags::TOP_OF_PIPE, b.query.0, 0);
             }
         }
         Ok(b)
+    }
+
+    /// The GPU profiler's timestamp at query `q` of this batch's pool, written once all the work
+    /// recorded before it finished (bottom of the pipe: consecutive pairs tile the batch).
+    pub fn stamp(&self, q: u32) {
+        if self.query.0 != vk::QueryPool::null() {
+            unsafe { self.dev.raw.cmd_write_timestamp(self.cb, vk::PipelineStageFlags::BOTTOM_OF_PIPE, self.query.0, q); }
+        }
     }
 
     /// Whether this batch may read `image`: any image but a hosted one; a hosted image in the
@@ -369,12 +395,16 @@ impl Batch {
             let draws = *self.draw_counts.get(&state).ok_or("pipeline missing from frame descriptor counts")?;
             *sized = true;
             if *sets < draws {
+                crate::profile::count("vk descriptor pool too small: remade");
                 unsafe { self.dev.raw.destroy_descriptor_pool(*pool, None); }
                 self.descriptors.remove(&p.descriptors);
             }
         }
         let pool = if let Some((pool, _, _)) = self.descriptors.get(&p.descriptors) { *pool } else {
-            let draws = *self.draw_counts.get(&state).ok_or("pipeline missing from frame descriptor counts")?;
+            // Sized to the next power of two: a slot's pool serves the frames after this one, and a
+            // frame drawing one more than its pool holds remade it (a destroy and a create, both
+            // driver round trips) every few frames as a view's draw count wandered.
+            let draws = self.draw_counts.get(&state).ok_or("pipeline missing from frame descriptor counts")?.next_power_of_two();
             let mut counts: FastMap<vk::DescriptorType, u32> = FastMap::default();
             for (_, ty) in &p.descriptor_types { let count = counts.entry(*ty).or_default(); *count = count.saturating_add(draws); }
             let sizes: Vec<_> = counts.into_iter().map(|(ty, count)| vk::DescriptorPoolSize::default().ty(ty).descriptor_count(count)).collect();
@@ -390,6 +420,7 @@ impl Batch {
     }
 
     pub fn finish(mut self, submit: &Worker, complete: Arc<Worker>, mailbox: Mailbox) {
+        if crate::profile::on() { self.finished_ns = crate::clock_ns(); }
         let later = submit.later();
         #[cfg(target_os = "linux")]
         let mut published: Vec<(Arc<super::share::sync::Timeline>, u64)> = Vec::new();
@@ -412,7 +443,7 @@ impl Batch {
                     image.release_external(self.cb);
                 }
             }
-            if self.query != vk::QueryPool::null() { self.dev.raw.cmd_write_timestamp(self.cb, vk::PipelineStageFlags::BOTTOM_OF_PIPE, self.query, 1); }
+            if self.query.0 != vk::QueryPool::null() { self.dev.raw.cmd_write_timestamp(self.cb, vk::PipelineStageFlags::BOTTOM_OF_PIPE, self.query.0, 1); }
             self.dev.raw.end_command_buffer(self.cb).map_err(error)
         })();
         // a batch that is not submitted publishes no frame: its hosted images stay the writer's
@@ -446,7 +477,13 @@ impl Batch {
             let outcome = match &ended {
                 Err(e) if lost_error(e) => { eprintln!("[hal-vulkan] batch recording: {e}"); Outcome::Lost }
                 Err(e) => { eprintln!("[hal-vulkan] batch recording: {e}; its frame is dropped"); Outcome::Dropped }
-                Ok(()) => self.submit_until_room(&info, &mailbox),
+                Ok(()) => {
+                    crate::profile::since(crate::profile::Metric::SubmitQueue, self.finished_ns);
+                    let at = if self.finished_ns != 0 { crate::clock_ns() } else { 0 };
+                    let outcome = self.submit_until_room(&info, &mailbox);
+                    crate::profile::since(crate::profile::Metric::QueueSubmit, at);
+                    outcome
+                }
             };
             #[cfg(target_os = "linux")]
             if outcome == Outcome::Ran {
@@ -505,7 +542,14 @@ impl Batch {
     /// its FrameDone follows the present (or the frame's end: superseded by a newer frame,
     /// swapchain replaced, worker closing, SHOW_TRIES exhausted -- then it is not presented).
     fn show(self, present: Present, tries: u32, later: super::device::Later, complete: Arc<Worker>, mailbox: Mailbox) {
-        match present.chain.show(&present.image) {
+        let shown = present.chain.show(&present.image);
+        crate::profile::count(match &shown {
+            Ok(Shown::Presented) => "vk show: presented",
+            Ok(Shown::Dropped) => "vk show: dropped",
+            Ok(Shown::NotReady) => "vk show: no free image (retried)",
+            Err(_) => "vk show: error",
+        });
+        match shown {
             Ok(Shown::Presented) => self.deliver(Outcome::Ran, true, complete, mailbox),
             Ok(Shown::Dropped) => self.deliver(Outcome::Ran, false, complete, mailbox),
             // the frame ran; only its presentation failed (lost only if the driver says so)
@@ -574,13 +618,15 @@ impl Batch {
     }
 
     fn complete(mut self, failed: bool, mailbox: Mailbox) {
+        crate::profile::since(crate::profile::Metric::SubmitToRendered, self.finished_ns);
         #[cfg(target_os = "linux")]
         if let Some((_, reply)) = &self.release_fence {
             reply.send(if failed { Err("Vulkan release submission failed".into()) } else { Ok(None) });
         }
+        if let Some(prof) = self.prof.take() { prof.finish(&self.dev, self.query.0, failed); }
         let mut times = [0u64; 2];
-        let timed = !failed && self.query != vk::QueryPool::null()
-            && unsafe { self.dev.raw.get_query_pool_results(self.query, 0, &mut times, vk::QueryResultFlags::TYPE_64) }.is_ok();
+        let timed = !failed && self.query.0 != vk::QueryPool::null()
+            && unsafe { self.dev.raw.get_query_pool_results(self.query.0, 0, &mut times, vk::QueryResultFlags::TYPE_64) }.is_ok();
         let bits = self.dev.timestamp_bits;
         let mask = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
         let gpu_ns = if timed { ((times[1].wrapping_sub(times[0]) & mask) as f64 * self.dev.properties.limits.timestamp_period as f64) as u64 } else { 0 };
@@ -659,6 +705,7 @@ impl Batch {
             }
         }
         let scanout = self.scanout.take();
+        let self_prof_key = self.prof_key;
         // the fence signalled (or nothing was submitted): the objects may be reset and reused
         self.reusable = !failed;
         drop(self);
@@ -667,7 +714,10 @@ impl Batch {
             if failed {
                 presenter.dropped(owner, native);
             } else {
+                let prof_key = self_prof_key;
                 presenter.submit(owner, native, image, Box::new(move |time| {
+                    // the presenter's time is when the frame reached the display
+                    if let Some(key) = prof_key { crate::gpu_prof::shown(key, time); }
                     let sid = token.sid;
                     lock(&mailbox.events).push(Done { token, time, event: Event::Presented { target, frame } });
                     (mailbox.notify)(sid, true);
@@ -679,12 +729,14 @@ impl Batch {
 
 impl Drop for Batch {
     fn drop(&mut self) { unsafe {
+        // a batch dropped before it completed (never submitted): its timed passes answer nothing
+        if let Some(prof) = self.prof.take() { prof.finish(&self.dev, vk::QueryPool::null(), true); }
         for framebuffer in self.framebuffers.drain(..) { self.dev.raw.destroy_framebuffer(framebuffer, None); }
         let slot = Slot { dev: self.dev.clone(), pool: self.pool, cb: self.cb, fence: self.fence,
-            query: if self.query != vk::QueryPool::null() { self.query } else { self.idle_query },
+            query: if self.query.0 != vk::QueryPool::null() { self.query } else { self.idle_query },
             descriptors: self.descriptors.drain().map(|(layout, (pool, sets, _))| (layout, (pool, sets))).collect() };
-        if self.query != vk::QueryPool::null() && self.idle_query != vk::QueryPool::null() { self.dev.raw.destroy_query_pool(self.idle_query, None); }
-        if !self.reusable { return; } // dropping the slot destroys its objects
+        if self.query.0 != vk::QueryPool::null() && self.idle_query.0 != vk::QueryPool::null() { self.dev.raw.destroy_query_pool(self.idle_query.0, None); }
+        if !self.reusable { crate::profile::count("vk batch slot destroyed (not reusable)"); return; } // dropping the slot destroys its objects
         // the arenas go back once nothing else holds them (freed here, outside the lock, if the
         // pool is full)
         self.buffers.clear();
@@ -694,8 +746,8 @@ impl Drop for Batch {
         let reset = self.dev.raw.reset_command_buffer(slot.cb, vk::CommandBufferResetFlags::default())
             .and_then(|_| self.dev.raw.reset_fences(&[slot.fence]))
             .and_then(|_| slot.descriptors.values().try_for_each(|(pool, _)| self.dev.raw.reset_descriptor_pool(*pool, vk::DescriptorPoolResetFlags::default())));
-        if reset.is_err() { return; }
+        if reset.is_err() { crate::profile::count("vk batch slot destroyed (reset failed)"); return; }
         let mut slots = lock(&self.spares.slots);
-        if slots.len() < SPARE_SLOTS { slots.push(slot); }
+        if slots.len() < SPARE_SLOTS { slots.push(slot); } else { crate::profile::count("vk batch slot destroyed (spares full)"); }
     } }
 }

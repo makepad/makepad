@@ -69,7 +69,7 @@ mod native {
     use makepad_desk_link::server::{Control, Geometry, Input, Out, Server, ServerConfig, ToUi};
     use super::settings::DeskLinkSettings;
     use makepad_desk_link::{self as proto, ScreenInfo, ServerMsg};
-    use super::encode::{Encoder, Fence, Job, Subscribers};
+    use super::encode::{EncodeStats, Encoder, Fence, Job, Subscribers};
     use makepad_widgets::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -126,6 +126,15 @@ mod native {
         generation: u32,
         /// The pictures a second streamed now ([`Self::stream_fps`]).
         fps: u32,
+        /// The per-second timeline in the log while a viewer watches: its clock, the encoder's
+        /// and the sessions' counters, and the UI side's (frames drawn, pictures handed to the
+        /// encoder, time spent congested).
+        timeline: Timer,
+        encode_stats: Arc<EncodeStats>,
+        tl_frames: u64,
+        tl_captured: u64,
+        tl_congested_at: Option<f64>,
+        tl_congested_s: f64,
     }
 
     impl DeskLink {
@@ -314,7 +323,54 @@ mod native {
         }
 
         /// The capture follows the viewers: wanted while one watches and none is behind.
+        fn set_congested(&mut self, cx: &mut Cx, on: bool) {
+            self.congested = on;
+            let now = cx.seconds_since_app_start();
+            match (on, self.tl_congested_at.take()) {
+                (true, _) => self.tl_congested_at = Some(now),
+                (false, Some(at)) => self.tl_congested_s += now - at,
+                (false, None) => {}
+            }
+        }
+
+        /// One line a second while a viewer watches: WM frames drawn, pictures captured (and held
+        /// back as too soon), the time capture stood still for a viewer behind, pictures encoded
+        /// (refinements, the slowest submit -> bitstream), pictures written to sockets (rate,
+        /// the slowest single write), the stream rate.
+        fn timeline_line(&mut self, cx: &mut Cx) {
+            let now = cx.seconds_since_app_start();
+            if let Some(at) = self.tl_congested_at.as_mut() {
+                self.tl_congested_s += now - *at;
+                *at = now;
+            }
+            let held = std::mem::take(&mut cx.global::<CaptureState>().held);
+            let e = &self.encode_stats;
+            let (encoded, refined, enc_max) = (e.pictures.swap(0, Ordering::Relaxed), e.refined.swap(0, Ordering::Relaxed), e.encode_us_max.swap(0, Ordering::Relaxed));
+            let (sent, bytes, write_max) = match &self.server {
+                Some(s) => (s.sent.pictures.swap(0, Ordering::Relaxed), s.sent.bytes.swap(0, Ordering::Relaxed), s.sent.write_us_max.swap(0, Ordering::Relaxed)),
+                None => (0, 0, 0),
+            };
+            let backlog = self.viewers.iter().map(|v| v.backlog.load(Ordering::Acquire)).max().unwrap_or(0);
+            super::note(&format!(
+                "desk link 1s: frames {} · captured {} (held {held}) · congested {:.0} ms · encoded {encoded} (refined {refined}, max {:.1} ms) · sent {sent} ({:.0} Mbit/s, write max {:.1} ms) · backlog {backlog} · rate {}",
+                std::mem::take(&mut self.tl_frames),
+                std::mem::take(&mut self.tl_captured),
+                std::mem::take(&mut self.tl_congested_s) * 1000.0,
+                enc_max as f64 / 1000.0,
+                bytes as f64 * 8.0 / 1e6,
+                write_max as f64 / 1000.0,
+                self.fps
+            ));
+        }
+
         fn update_capture(&mut self, cx: &mut Cx) {
+            let watching = self.watching();
+            if watching && self.timeline.is_empty() {
+                self.timeline = cx.start_interval(1.0);
+            } else if !watching && !self.timeline.is_empty() {
+                cx.stop_timer(self.timeline);
+                self.timeline = Timer::default();
+            }
             let fps = self.stream_fps(cx);
             if fps != self.fps {
                 super::note(&format!("desk link: {fps} pictures a second (was {})", self.fps));
@@ -423,7 +479,7 @@ mod native {
             let fence = Fence::None;
             if self.encoder.is_none() {
                 let signal = self.signal.clone();
-                match Encoder::start(self.subscribers.clone(), Arc::new(move || signal.set())) {
+                match Encoder::start(self.subscribers.clone(), Arc::new(move || signal.set()), self.encode_stats.clone()) {
                     Ok(e) => self.encoder = Some(e),
                     Err(e) => {
                         super::note(&format!("desk link stream: encoder thread: {e}"));
@@ -434,6 +490,7 @@ mod native {
             let settings = self.settings.clone().unwrap_or_default();
             if let Some(e) = &self.encoder {
                 e.send(Job::Picture { handle, size: want.stream, fence, built_ns: makepad_hal::clock_ns(), fps: self.fps, kbps: settings.kbps, split: settings.split, full_chroma: want.full_chroma, refine: false });
+                self.tl_captured += 1;
             }
             // still for REFINE_AFTER s: the same picture again, near lossless
             self.refine_timer = cx.start_timeout(REFINE_AFTER);
@@ -484,7 +541,7 @@ mod native {
             let Some(server) = &self.server else {
                 let congested = self.viewers.iter().any(|v| !v.paused.load(Ordering::Acquire) && v.backlog.load(Ordering::Acquire) > BACKLOG);
                 if congested != self.congested {
-                    self.congested = congested;
+                    self.set_congested(cx, congested);
                     self.update_capture(cx);
                 }
                 return;
@@ -579,7 +636,7 @@ mod native {
             // a viewer behind on pictures stops the capture until it caught up
             let congested = self.viewers.iter().any(|v| !v.paused.load(Ordering::Acquire) && v.backlog.load(Ordering::Acquire) > BACKLOG);
             if congested != self.congested {
-                self.congested = congested;
+                self.set_congested(cx, congested);
                 self.update_capture(cx);
             }
         }
@@ -646,6 +703,12 @@ mod native {
             }
             if self.refine_timer.is_event(event).is_some() {
                 self.refine(cx);
+            }
+            if !self.viewers.is_empty() && matches!(event, Event::Draw(_)) {
+                self.tl_frames += 1;
+            }
+            if self.timeline.is_event(event).is_some() {
+                self.timeline_line(cx);
             }
             if self.export_next.is_event(event).is_some() {
                 cx.redraw_all();

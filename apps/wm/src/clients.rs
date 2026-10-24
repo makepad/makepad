@@ -776,6 +776,10 @@ pub fn client_log(id: ClientId, build: bool) -> PathBuf {
     host::homeless_root().join(format!("wm-client-{}{}.log", id, if build { "-build" } else { "" }))
 }
 
+/// The nice level of every client process and build the WM starts.
+#[cfg(unix)]
+const CHILD_NICE: i32 = 10;
+
 /// Start `program` as client `id`'s process: hidden, stdin closed, both
 /// output streams into `log` and onto its tile.
 fn spawn_process(
@@ -793,6 +797,9 @@ fn spawn_process(
     // (`configure` did that for an app; a build gets it here.)
     #[cfg(unix)]
     makepad_app_host::launch::own_process_group(&mut cmd);
+    // apps and their builds below the WM: its compositing and Desk Link stream keep the CPU
+    #[cfg(unix)]
+    makepad_app_host::launch::lower_priority(&mut cmd, CHILD_NICE);
     host::no_console_window(&mut cmd);
     // Both streams are piped so a reader thread can put the newest line on
     // the tile — cargo talks on stderr.

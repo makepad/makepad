@@ -11,6 +11,7 @@ mod capture_gpu;
 mod device;
 mod frame;
 mod pipeline;
+mod prof;
 mod readback;
 mod resources;
 pub(crate) mod share;
@@ -41,7 +42,10 @@ use std::sync::{Arc, Weak};
 
 struct Texture { gen: u32, image: Arc<Image> }
 struct Retained { gen: u32, buffer: Arc<Buffer>, evictable: bool }
-struct Pipe { gen: u32, state: Arc<State>, epoch: u64, announced: bool }
+/// A session's pipeline. `desc` is its own create's: the program may be shared with an identical
+/// shader of another session, whose names (string ids) are that session's; the GPU profiler names
+/// the pipeline by this one.
+struct Pipe { gen: u32, state: Arc<State>, epoch: u64, announced: bool, desc: PipelineDesc }
 
 /// Native window-system work stays outside the GPU core.
 pub trait Shell: Send {
@@ -167,7 +171,17 @@ impl Vulkan {
             flags: if dev.timestamp_bits > 0 { info_flags::GPU_TIMESTAMPS } else { 0 },
             max_texture: dev.properties.limits.max_image_dimension2_d,
             max_window: [dev.properties.limits.max_framebuffer_width, dev.properties.limits.max_framebuffer_height],
-            max_buffer: dev.properties.limits.max_storage_buffer_range as u64, working_set, ..Default::default() };
+            max_buffer: dev.properties.limits.max_storage_buffer_range as u64, working_set,
+            vendor_id: dev.properties.vendor_id,
+            device_kind: match dev.properties.device_type {
+                makepad_vulkan::vk::PhysicalDeviceType::INTEGRATED_GPU => device_kind::INTEGRATED,
+                makepad_vulkan::vk::PhysicalDeviceType::DISCRETE_GPU => device_kind::DISCRETE,
+                makepad_vulkan::vk::PhysicalDeviceType::CPU => device_kind::SOFTWARE,
+                _ => device_kind::UNKNOWN,
+            },
+            ..Default::default() };
+        let mut info = info;
+        info.set_device_name(&unsafe { std::ffi::CStr::from_ptr(dev.properties.device_name.as_ptr()) }.to_string_lossy());
         crate::gpu_limits::set_max_gpu_buffer_bytes(info.max_buffer);
         crate::gpu_limits::set_gpu_working_set_bytes(info.working_set);
         Ok(Self { #[cfg(any(target_os = "linux", target_os = "android"))] media: Default::default(), #[cfg(target_os = "linux")] capture_pool: FastMap::default(), #[cfg(any(target_os = "linux", target_os = "android"))] shell: None, dev, info, tex: FastMap::default(), buf: FastMap::default(), pipe: FastMap::default(), programs: FastMap::default(), draw_bins: Vec::new(), draw_images: Vec::new(),
@@ -189,7 +203,7 @@ impl Vulkan {
 
     fn ensure_batch(&mut self) -> Result<&mut Batch, String> {
         if self.dev.lost.load(Ordering::Acquire) { return Err("Vulkan device lost".into()); }
-        if self.batch.is_none() { self.batch = Some(Batch::new(self.dev.clone(), &self.spares, false, 0)?); }
+        if self.batch.is_none() { self.batch = Some(Batch::new(self.dev.clone(), &self.spares, 0, 0)?); }
         Ok(self.batch.as_mut().unwrap())
     }
 
@@ -800,7 +814,7 @@ impl Gpu for Vulkan {
             }
         };
         state.wait(s.id);
-        self.pipe.insert((s.id, id.index), Pipe { gen: id.gen, state, epoch: 0, announced: false }); PipeStatus::Pending
+        self.pipe.insert((s.id, id.index), Pipe { gen: id.gen, state, epoch: 0, announced: false, desc: blob.desc }); PipeStatus::Pending
     }
     fn pipeline_destroy(&mut self, sid: u32, id: Id) -> bool {
         if self.pipe.get(&(sid, id.index)).is_some_and(|p| p.gen <= id.gen) { return self.pipe.remove(&(sid, id.index)).is_some_and(|p| !p.announced); } false

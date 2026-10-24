@@ -19,6 +19,35 @@ fn chain_fade_windows(threshold: f32, distance: f32) -> Option<(f32, f32)> {
     Some((1.0 + q * 256.0 + 255.0, 1.0 + q))
 }
 
+/// The model lanes' names for their draws ("model gen/mdl/valley-oak lod1 layer2", "impostor
+/// gen/mdl/valley-oak"), which the GPU profiler and frame captures show as the draws' owners.
+/// Asked only while owners are recorded (`Cx::draw_owners_armed`); each name is formatted and
+/// interned once, after that naming a draw is a lookup.
+#[derive(Default)]
+pub(super) struct DrawNames {
+    /// model id -> ((LOD, layer, stand-in) packed, label)
+    models: std::collections::HashMap<String, Vec<(u32, DrawLabel)>>,
+}
+
+impl DrawNames {
+    pub(super) fn model(&mut self, cx: &mut Cx, model: &str, lod: usize, layer: usize, stand_in: bool) -> DrawLabel {
+        let key = (lod as u32) << 16 | (layer as u32 & 0x7fff) << 1 | stand_in as u32;
+        if let Some((_, label)) = self.models.get(model).and_then(|v| v.iter().find(|(k, _)| *k == key)) {
+            return *label;
+        }
+        let mut name = format!("{} {model}", if stand_in { "impostor" } else { "model" });
+        if lod > 0 {
+            name.push_str(&format!(" lod{lod}"));
+        }
+        if layer > 0 && !stand_in {
+            name.push_str(&format!(" layer{layer}"));
+        }
+        let label = cx.draw_label(&name);
+        self.models.entry(model.to_string()).or_default().push((key, label));
+        label
+    }
+}
+
 /// One instance list's draw order for one frame: each copy's model slot and
 /// LOD, and the copies grouped by (model, LOD).
 #[derive(Default)]
@@ -313,6 +342,18 @@ impl Renderer {
         // its shader is ready, and in no other.
         let foliage_lane = matches!(draw, ModelDraw::Foliage(_));
         let foliage_ready = self.foliage_ready && matches!(lane, WorldModelLane::Placed);
+        // A model's far stand-in draws through the impostor shader, which has
+        // the foliage/PBR lanes' layout: the lane swaps only the shader id
+        // for that layer. Without it (the diffuse lane, or before its
+        // pipeline exists) the model draws its own layers at every distance:
+        // the stand-in's quad is not a picture on its own.
+        let lane_shader = draw.base().draw_vars.draw_shader_id;
+        let impostor_shader = if matches!(draw, ModelDraw::Foliage(_) | ModelDraw::Pbr(_)) {
+            self.lane_shaders(cx.cx, variants::ModelLane::Impostor, None).0.filter(|id| cx.cx.draw_shader_ready(*id, self.hdr_output))
+        } else {
+            None
+        };
+        let impostor_scale = self.impostor_scale;
         let occluder_focus = self.occluder.focus();
         // Dynamic lights. STATICS share one transient-only block (their
         // lamp light is baked; only the dl_split prefix reaches them, so a
@@ -386,6 +427,14 @@ impl Renderer {
         // The models are read, not cloned, per copy: set aside for the walk
         // (nothing below reads them through `self`) and put back after it.
         let static_models = std::mem::take(&mut self.static_models);
+        // The layer material whose uniforms the draw holds now. Consecutive
+        // copies of one model layer (a forest, a row of props) share it, and
+        // `set_material` writes a dozen uniforms and up to four textures by
+        // name each time: on the flight island that was the hottest program
+        // code of the frame. A copy that changed the material's uniforms
+        // after it (an item's glow, a fur shell) forces the next write; the
+        // per-copy lamp gain is written for every copy anyway.
+        let mut held_material: *const LayerMaterial = std::ptr::null();
         layered.clear();
         for layer_pass in 0..layer_passes {
             let mut last: Option<(usize, usize)> = None;
@@ -596,13 +645,25 @@ impl Renderer {
                     }
                 } }
                 // A model with a far stand-in (impostor.rs) draws that layer
-                // from its distance on and every other layer before it.
-                let impostor_at = layer_draws().filter_map(|l| l.4.surface.as_ref().map(|s| s.definition.impostor)).fold(0.0f32, f32::max);
+                // from its distance on (scaled by the quality tier) and every
+                // other layer before it, the two crossfading through
+                // complementary screen-door windows over the band before the
+                // switch (no pop). A copy already crossfading between chain
+                // levels keeps its own window and switches hard.
+                let impostor_at = impostor_shader.map_or(0.0, |_| layer_draws().filter_map(|l| l.4.surface.as_ref().map(|s| s.definition.impostor)).fold(0.0f32, f32::max) * impostor_scale);
                 for (geometry_id, texture, detail, dscale, material) in layer_draws().skip(layer_pass).take(1) {
+                    let stand_in = material.surface.as_ref().is_some_and(|s| s.definition.impostor > 0.0);
+                    let mut layer_window = 0.0f32;
                     if impostor_at > 0.0 {
-                        let stand_in = material.surface.as_ref().is_some_and(|s| s.definition.impostor > 0.0);
-                        if stand_in != (distance >= impostor_at) { continue; }
+                        match chain_fade_windows(impostor_at, distance).filter(|_| window <= 0.0) {
+                            Some((near, next)) => layer_window = if stand_in { next } else { near },
+                            None => if stand_in != (distance >= impostor_at) { continue; },
+                        }
+                    } else if stand_in {
+                        continue;
                     }
+                    draw.base().color_adjust_ctl.w = if layer_window > 0.0 { layer_window } else { adjust.w };
+                    draw.base().draw_vars.draw_shader_id = if stand_in { impostor_shader } else { lane_shader };
                     draw.base().draw_vars.geometry_id = Some(geometry_id);
                     draw.base().draw_vars.set_texture(0, texture);
                     draw.base().draw_vars.set_texture(5, detail);
@@ -610,17 +671,20 @@ impl Renderer {
                     // An IBL material reads its environment on the detail slot.
                     if let ModelDraw::Custom(_, m) = &mut draw { if let Some(t) = m.texture.clone() { m.draw.draw_vars.set_texture(5, &t); } else if let (true, Some(t)) = (m.ibl, self.ibl_texture()) { m.draw.draw_vars.set_texture(5, t); } }
                     draw.base().prelit = if prelit { 1.0 } else { 0.0 };
-                    draw.set_material(cx.cx, material);
+                    if !std::ptr::eq(held_material, material) || matches!(draw, ModelDraw::Custom(..)) {
+                        draw.set_material(cx.cx, material);
+                        held_material = material;
+                    }
+                    draw.light_lamp(cx.cx, material, inst.lamps, self.lamp_level);
                     // A world item's copy may glow on its own (items.rs).
                     if matches!(lane, WorldModelLane::Placed) {
                         if let Some(e) = i.checked_sub(instances.len().saturating_sub(self.items.appended)).and_then(|k| self.items.glow.get(k)).filter(|e| e.x + e.y + e.z > 0.0) {
                             draw.add_emission(cx.cx, *e);
+                            held_material = std::ptr::null();
                         }
                     }
-                    // A far stand-in's cards in the foliage lane skip the
-                    // cascade tap (tex_mag.y < 0: foliage.rs).
-                    if foliage_lane && material.surface.as_ref().is_some_and(|s| s.definition.impostor > 0.0) {
-                        draw.base().tex_mag.y = -1.0;
+                    if material.surface.as_ref().is_some_and(|s| s.definition.fur.is_some()) {
+                        held_material = std::ptr::null();
                     }
                     if let Some(s) = material.surface.as_ref().filter(|s| s.definition.wind > 0.0) {
                         // Sway in metres at the top at wind 1; leaves (cut-out
@@ -634,14 +698,23 @@ impl Renderer {
                             draw.base().morph_weights0 = vec4(d.wind * 0.35, inv_height, self.sky_time, flutter);
                         }
                     }
-                    let cut = screen_clip || match &material.surface {
+                    let cut = screen_clip || stand_in || layer_window > 0.0 || match &material.surface {
                         // Masked layers discard; blended ones need the stock
                         // pipeline too (the no-discard variant draws opaque).
                         Some(surface) if pbr_lane => surface.definition.alpha_mode != 0,
                         _ => material.cutout,
                     };
+                    let owner = if cx.draw_owners_armed() {
+                        let label = self.draw_names.model(cx.cx, &inst.model, lod_index, layer_pass, stand_in);
+                        cx.enter_draw_label(label)
+                    } else {
+                        0
+                    };
                     stats.fur_triangles += draw.submit_as(cx, distance, &mut fur_budget, opaque.filter(|_| !cut));
+                    cx.exit_draw_label(owner);
                 }
+                draw.base().draw_vars.draw_shader_id = lane_shader;
+                draw.base().color_adjust_ctl.w = adjust.w;
                 if layer_pass > 0 {
                     continue;
                 }
@@ -699,6 +772,12 @@ impl Renderer {
                     }));
                     parts
                 };
+                let owner = if cx.draw_owners_armed() && !parts.is_empty() {
+                    let label = self.draw_names.model(cx.cx, &inst.model, lod_index, 0, false);
+                    cx.enter_draw_label(label)
+                } else {
+                    0
+                };
                 for (pose, part_tris, part_draws) in &parts {
                     draw.base().transform = Mat4f::mul(&inst.transform, pose);
                     draw.base().lm_rect = Vec4f::default();
@@ -711,8 +790,10 @@ impl Renderer {
                         if let ModelDraw::Custom(_, m) = &mut draw { if let Some(t) = m.texture.clone() { m.draw.draw_vars.set_texture(5, &t); } else if let (true, Some(t)) = (m.ibl, self.ibl_texture()) { m.draw.draw_vars.set_texture(5, t); } }
                         draw.base().prelit = if prelit { 1.0 } else { 0.0 };
                         draw.set_material(cx.cx, material);
+                        draw.light_lamp(cx.cx, material, inst.lamps, self.lamp_level);
                         stats.fur_triangles += draw.submit(cx, distance, &mut fur_budget);
                     }
+                    held_material = std::ptr::null();
                     match lane {
                         WorldModelLane::Placed => stats.model_triangles += part_tris,
                         WorldModelLane::Attachment => {
@@ -720,6 +801,7 @@ impl Renderer {
                         }
                     }
                 }
+                cx.exit_draw_label(owner);
                 // A part opened its own draw item; the next instance of the same
                 // model must re-bind its own transform rather than accumulate
                 // into the part's.

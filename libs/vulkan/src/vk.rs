@@ -13,6 +13,7 @@ pub const API_VERSION_1_1: u32 = (1 << 22) | (1 << 12);
 pub const API_VERSION_1_2: u32 = (1 << 22) | (2 << 12);
 pub const API_VERSION_1_3: u32 = (1 << 22) | (3 << 12);
 pub const EXT_ACQUIRE_DRM_DISPLAY_NAME: &CStr = c"VK_EXT_acquire_drm_display";
+pub const EXT_CALIBRATED_TIMESTAMPS_NAME: &CStr = c"VK_EXT_calibrated_timestamps";
 pub const EXT_DEBUG_UTILS_NAME: &CStr = c"VK_EXT_debug_utils";
 pub const EXT_DIRECT_MODE_DISPLAY_NAME: &CStr = c"VK_EXT_direct_mode_display";
 pub const EXT_EXTERNAL_MEMORY_DMA_BUF_NAME: &CStr = c"VK_EXT_external_memory_dma_buf";
@@ -24,6 +25,7 @@ pub const EXT_QUEUE_FAMILY_FOREIGN_NAME: &CStr = c"VK_EXT_queue_family_foreign";
 pub const EXT_YCBCR_2PLANE_444_FORMATS_NAME: &CStr = c"VK_EXT_ycbcr_2plane_444_formats";
 pub const FALSE: u32 = 0;
 pub const KHR_ANDROID_SURFACE_NAME: &CStr = c"VK_KHR_android_surface";
+pub const KHR_CALIBRATED_TIMESTAMPS_NAME: &CStr = c"VK_KHR_calibrated_timestamps";
 pub const KHR_DISPLAY_NAME: &CStr = c"VK_KHR_display";
 pub const KHR_DRIVER_PROPERTIES_NAME: &CStr = c"VK_KHR_driver_properties";
 pub const KHR_EXTERNAL_MEMORY_FD_NAME: &CStr = c"VK_KHR_external_memory_fd";
@@ -1938,6 +1940,24 @@ impl BufferView {
     pub const fn as_raw(self) -> u64 { self.0 as u64 }
 }
 impl core::fmt::Debug for BufferView { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { f.write_str("0x")?; core::fmt::LowerHex::fmt(&self.0, f) } }
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CalibratedTimestampInfoKHR {
+    pub s_type: StructureType,
+    pub p_next: *const core::ffi::c_void,
+    pub time_domain: TimeDomainKHR,
+}
+impl Default for CalibratedTimestampInfoKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000184000);
+    value
+} }
+unsafe impl Send for CalibratedTimestampInfoKHR {}
+unsafe impl Sync for CalibratedTimestampInfoKHR {}
+impl CalibratedTimestampInfoKHR {
+    #[inline]
+    pub fn time_domain(mut self, value: TimeDomainKHR) -> Self { self.time_domain = value; self }
+}
 #[repr(transparent)]
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ChromaLocation(pub i32);
@@ -10900,6 +10920,7 @@ impl StructureType {
     pub const BUFFER_CREATE_INFO: Self = Self(12 as i32);
     pub const BUFFER_DEVICE_ADDRESS_INFO: Self = Self(1000244001 as i32);
     pub const BUFFER_MEMORY_BARRIER: Self = Self(44 as i32);
+    pub const CALIBRATED_TIMESTAMP_INFO_KHR: Self = Self(1000184000 as i32);
     pub const COMMAND_BUFFER_ALLOCATE_INFO: Self = Self(40 as i32);
     pub const COMMAND_BUFFER_BEGIN_INFO: Self = Self(42 as i32);
     pub const COMMAND_BUFFER_INHERITANCE_INFO: Self = Self(41 as i32);
@@ -11124,6 +11145,7 @@ match self.0 {
     1000158003 => f.write_str("IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT"),
     1000158004 => f.write_str("IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT"),
     1000158005 => f.write_str("IMAGE_DRM_FORMAT_MODIFIER_PROPERTIES_EXT"),
+    1000184000 => f.write_str("CALIBRATED_TIMESTAMP_INFO_KHR"),
     1000196000 => f.write_str("PHYSICAL_DEVICE_DRIVER_PROPERTIES"),
     1000207000 => f.write_str("PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES"),
     1000207002 => f.write_str("SEMAPHORE_TYPE_CREATE_INFO"),
@@ -11684,6 +11706,26 @@ match self.0 {
     2 => f.write_str("CACHE"),
     3 => f.write_str("DEVICE"),
     4 => f.write_str("INSTANCE"),
+    _ => core::fmt::Debug::fmt(&self.0, f),
+}
+} }
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TimeDomainKHR(pub i32);
+impl TimeDomainKHR {
+    pub const fn from_raw(value: i32) -> Self { Self(value) }
+    pub const fn as_raw(self) -> i32 { self.0 }
+    pub const CLOCK_MONOTONIC: Self = Self(1 as i32);
+    pub const DEVICE: Self = Self(0 as i32);
+}
+impl core::fmt::Debug for TimeDomainKHR { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+match self.0 {
+    0 => f.write_str("DEVICE_EXT"),
+    1 => f.write_str("CLOCK_MONOTONIC_EXT"),
+    1000208000 => f.write_str("PRESENT_STAGE_LOCAL_EXT"),
+    1000208001 => f.write_str("SWAPCHAIN_LOCAL_EXT"),
+    2 => f.write_str("CLOCK_MONOTONIC_RAW_EXT"),
+    3 => f.write_str("QUERY_PERFORMANCE_COUNTER_EXT"),
     _ => core::fmt::Debug::fmt(&self.0, f),
 }
 } }

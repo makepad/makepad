@@ -99,7 +99,7 @@ fn morph_shadow_casters_share_visible_weights_and_exclude_rest_duplicates() {
     let mut renderer=Renderer::default();
     let uploaded=renderer.upload_static_preview(&mut cx,prepared);
     renderer.install_uploaded_static("morph",uploaded);
-    let instance=ModelInstance{model:"morph".into(),transform:Mat4f::identity(),tint:vec4(1.,1.,1.,1.),color_adjust:vec4(0.,1.,1.,0.),dynamic:false,depth_order:0.,part_poses:Vec::new(),custom_material:None};
+    let instance=ModelInstance{model:"morph".into(),transform:Mat4f::identity(),tint:vec4(1.,1.,1.,1.),color_adjust:vec4(0.,1.,1.,0.),dynamic:false,depth_order:0.,part_poses:Vec::new(),custom_material:None,lamps:Default::default()};
     renderer.set_models(vec![instance.clone()]);
     renderer.set_world_attachments(vec![instance]);
     renderer.set_model_clip(ModelTarget::Instance(0),Some("pulse".into()),0.75,false).unwrap();

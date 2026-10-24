@@ -36,10 +36,8 @@ pub(super) struct ProfPass {
 
 pub(super) struct SplitTimes {
     samples: Arc<PassSamples>,
-    /// the empty encoder with the pass's attachments
-    baseline: Option<usize>,
-    /// (shader, sample group, first recorded draw, recorded draws) per run of draws
-    groups: Vec<(String, usize, u32, u32)>,
+    /// the runs' sample groups (and the baseline's: the empty encoder with the pass's attachments)
+    runs: gpu_prof::SplitRuns<usize>,
 }
 
 fn host_ns(t: f64) -> u64 {
@@ -70,42 +68,10 @@ impl ProfPass {
             }
         }
         if let Some(sp) = &self.split {
-            let own = |i: usize| sp.samples.span(cb, i);
-            g.baseline = sp.baseline.and_then(own).map_or(0, |(a, b)| host_ns(b - a));
-            let (mut lo, mut hi) = (u64::MAX, 0u64);
-            for (shader, i, first, count) in &sp.groups {
-                if let Some((a, b)) = own(*i) {
-                    g.groups.push((shader.clone(), host_ns(b - a), *first, *count));
-                    lo = lo.min(host_ns(a));
-                    hi = hi.max(host_ns(b));
-                }
-            }
-            if g.end == 0 && hi > lo {
-                (g.start, g.end) = (lo, hi);
-            }
+            sp.runs.result(&mut g, |i| sp.samples.span(cb, i).map(|(a, b)| (host_ns(a), host_ns(b))));
         }
         g
     }
-}
-
-/// A pipeline as the GPU profiler names it: its debug name, else its source location and Cx
-/// shader index (`file.rs:line#index`), else the index.
-fn shader_name(s: &Session, desc: &PipelineDesc) -> String {
-    if let Some(n) = s.string(desc.name).filter(|n| !n.is_empty()) {
-        return n.to_string();
-    }
-    if let Some(src) = s.string(desc.source).filter(|n| !n.is_empty()) {
-        // path/to/file.rs:12:5 -> file.rs:12
-        let file = src.rsplit('/').next().unwrap_or(src);
-        let mut parts = file.splitn(3, ':');
-        // shaders that inherit one base (every DrawQuad) share its location: the Cx shader
-        // index tells them apart
-        return match (parts.next(), parts.next()) {
-            (Some(f), Some(l)) => format!("{f}:{l}#{}", desc.shader),
-            _ => format!("{file}#{}", desc.shader),
-        };
-    }
-    format!("shader#{}", desc.shader)
 }
 
 /// Short name of a pixel format and its bytes per pixel.
@@ -1177,37 +1143,29 @@ impl Metal {
         // one encoder per run of draws of one pipeline, each timed alone, after an empty encoder
         // with the same attachments (the baseline): those give each shader's share of the pass.
         let descriptor = self.dev.descriptor.as_id();
-        let runs: Vec<usize> = match prof_key.filter(|k| k.split && !pick) {
-            Some(_) => {
-                let mut v = vec![0];
-                v.extend((1..draws.len()).filter(|i| draws[*i].pipeline != draws[*i - 1].pipeline));
-                if v.len() > 1 { v } else { Vec::new() }
-            }
-            None => Vec::new(),
-        };
+        let runs = gpu_prof::split_runs(prof_key, pick, draws, |d| d.pipeline);
         let split = if runs.is_empty() { None } else { self.dev.pass_clock().and_then(PassSamples::new) };
         let runs = if split.is_some() { runs } else { Vec::new() };
         let stage = samples.as_ref().map_or(false, |x| x.clock.stage);
         let depth_obj = depth.as_ref().map(|(_, o)| *o);
         let depth_kept = depth.as_ref().is_some_and(|(id, _)| depth_kept(s, sid, pass, view, *id));
         let buffer_of = |x: &Arc<PassSamples>| x.buffer.as_ref().map_or(nil, |b| b.as_id());
-        let mut baseline = None;
-        let mut groups: Vec<(String, usize, u32, u32)> = Vec::new();
+        let mut split_runs = gpu_prof::SplitRuns::<usize>::default();
         let first_sample: Option<(ObjcId, usize)> = match &split {
             Some(sp) => {
                 if let Some(i) = sp.reserve() {
                     configure_pass(descriptor, pass, &colors, depth_obj, depth_kept, false, false, Some((buffer_of(sp), i)).filter(|_| stage));
                     let e = open_encoder(cb, descriptor, viewport, Some((buffer_of(sp), i)).filter(|_| !stage))?;
                     close_encoder(e, Some((buffer_of(sp), i)).filter(|_| !stage));
-                    baseline = Some(i);
+                    split_runs.baseline = Some(i);
                 }
                 sp.reserve().map(|i| (buffer_of(sp), i))
             }
             None => samples.as_ref().zip(sample_index).map(|(x, i)| (buffer_of(x), i)),
         };
-        let run_shader = |me: &Self, s: &Session, at: usize| me.pipe.get(&(sid, draws[at].pipeline.index)).map_or_else(|| "?".to_string(), |p| shader_name(s, &p.desc));
+        let run_shader = |me: &Self, s: &Session, at: usize| me.pipe.get(&(sid, draws[at].pipeline.index)).map_or_else(|| "?".to_string(), |p| gpu_prof::shader_name(s, &p.desc));
         if let (Some(_), Some((_, i))) = (&split, first_sample) {
-            groups.push((run_shader(self, s, 0), i, 0, 0));
+            split_runs.run(run_shader(self, s, 0), i, 0);
         }
         configure_pass(descriptor, pass, &colors, depth_obj, depth_kept, true, runs.len() <= 1, first_sample.filter(|_| stage));
         let Some(encoder_id) = open_encoder(cb, descriptor, viewport, first_sample.filter(|_| !stage)) else {
@@ -1216,9 +1174,8 @@ impl Metal {
         };
         let mut cur_sample = first_sample;
         let mut enc = Encoder { id: encoder_id, pso: nil, depth_state: nil, cull: 0, fill: 0, scissor: None, buffers: [(nil, u64::MAX); 32], textures: [nil; 31], size: [vw as u64, vh as u64] };
-        // the GPU profiler's draw records: shader, owner, list, instances, indices, geometry and texture bytes, textures
-        // (pipeline, owner string, list string, Cx list id, counts)
-        let mut prof_draws: Vec<(Id, StrId, StrId, u32, gpu_prof::DrawCounts)> = Vec::new();
+        // the GPU profiler's draw records
+        let mut prof_draws: Vec<gpu_prof::DrawRecord> = Vec::new();
         // an ablation frame of the GPU profiler leaves out one shader's draws
         let ablate = prof_key.filter(|k| k.ablate && !pick).and_then(|_| gpu_prof::ablate_target());
         let mut shaders: Vec<String> = Vec::new();
@@ -1238,11 +1195,9 @@ impl Metal {
                 close_encoder(enc.id, cur_sample.filter(|_| !stage));
                 let sp = split.as_ref().expect("split samples");
                 cur_sample = sp.reserve().map(|i| (buffer_of(sp), i));
-                if let Some(last) = groups.last_mut() {
-                    last.3 = prof_draws.len() as u32 - last.2;
-                }
+                split_runs.close(prof_draws.len() as u32);
                 if let Some((_, i)) = cur_sample {
-                    groups.push((run_shader(self, s, di), i, prof_draws.len() as u32, 0));
+                    split_runs.run(run_shader(self, s, di), i, prof_draws.len() as u32);
                 }
                 configure_pass(descriptor, pass, &colors, depth_obj, depth_kept, false, g == runs.len() - 1, cur_sample.filter(|_| stage));
                 let Some(id) = open_encoder(cb, descriptor, viewport, cur_sample.filter(|_| !stage)) else { return None };
@@ -1273,7 +1228,7 @@ impl Metal {
                 s.stale();
                 continue;
             };
-            if ablate.as_deref().is_some_and(|t| shader_name(s, &pipe.desc) == t) {
+            if ablate.as_deref().is_some_and(|t| gpu_prof::shader_name(s, &pipe.desc) == t) {
                 continue;
             }
             let pso = match pipe.state.select(&self.dev, &formats, d.flags & Draw::BLEND != 0) {
@@ -1449,32 +1404,8 @@ impl Metal {
             let first = d.index[0] as u64 * width;
             let whole = (read_pairs(view.arena, d.inst_ranges).next().is_none()).then_some([0u32, d.inst.count]);
             if prof_key.is_some() {
-                let instances: u64 = whole.into_iter().chain(read_pairs(view.arena, d.inst_ranges)).map(|[a, n]| (n as u64).min((d.inst.count as u64).saturating_sub(a as u64))).sum();
                 let size = |id: Id| self.buf.get(&(sid, id.index)).filter(|b| b.gen == id.gen).map_or(0, |b| b.size);
-                let geo = size(d.vb) + size(d.ib) + instances * stride;
-                let (mut tex_bytes, mut ntex_bound) = (0u64, 0u32);
-                for i in 0..ntex {
-                    let id = id_at(view.arena, d.tex, i);
-                    if let Some(l) = (!id.is_none()).then(|| s.ledger.get(Kind::Texture, id.index)).flatten() {
-                        tex_bytes += l.bytes;
-                        ntex_bound += 1;
-                    }
-                }
-                let [bx, by, bw, bh] = d.bounds;
-                let area = if [bx, by, bw, bh].iter().any(|v| v.is_nan()) || bw <= 0.0 || bh <= 0.0 {
-                    0
-                } else {
-                    let (x0, y0) = (bx.max(0.0), by.max(0.0));
-                    let (x1, y1) = ((bx + bw).min(vw), (by + bh).min(vh));
-                    ((x1 - x0).max(0.0) * (y1 - y0).max(0.0)) as u64
-                };
-                use makepad_gpu_trace::draw_flags as df;
-                let flags = if d.flags & Draw::BLEND != 0 { df::BLEND } else { 0 }
-                    | if d.flags & Draw::DEPTH_WRITE != 0 && depth.is_some() { df::DEPTH_WRITE } else { 0 }
-                    | if d.flags & Draw::CULL != 0 { df::CULL } else { 0 }
-                    | if depth.is_some() { df::DEPTH_TEST } else { 0 };
-                let counts = gpu_prof::DrawCounts { instances: instances as u32, indices: index_count as u32, geo_bytes: geo, tex_bytes, textures: ntex_bound, area, flags };
-                prof_draws.push((d.pipeline, d.owner, d.list_name, d.list, counts));
+                prof_draws.push(gpu_prof::DrawRecord::new(s, d, view.arena, vw, vh, depth.is_some(), stride, size(d.vb) + size(d.ib), ntex));
             }
             for [start, count] in whole.into_iter().chain(read_pairs(view.arena, d.inst_ranges)) {
                 let start = start.min(d.inst.count) as u64;
@@ -1500,43 +1431,16 @@ impl Metal {
 
         // ---- the end of the pass
         close_encoder(enc.id, cur_sample.filter(|_| !stage));
-        if let Some(last) = groups.last_mut() {
-            last.3 = prof_draws.len() as u32 - last.2;
-        }
+        split_runs.close(prof_draws.len() as u32);
         if let Some(key) = prof_key {
-            let mut name = s.string(pass.name).filter(|n| !n.is_empty()).unwrap_or("main").to_string();
-            if pick {
-                name.insert_str(0, "pick ");
-            }
             let (attach, bytes) = describe_attachments(s, sid, pass, &colors, &formats, depth.is_some().then_some(depth_kept), depth_only, vw as u64 * vh as u64);
             let timed = first_sample.is_some();
-            let pi = gpu_prof::with_frame(key, |b| {
-                let pi = b.pass(&name, pass_kind::RENDER, vw as u32, vh as u32, &attach, bytes);
-                for (pipeline, owner, list_name, list, counts) in &prof_draws {
-                    let key = (sid, 0, pipeline.index as u64 | (pipeline.gen as u64) << 32);
-                    let fresh = !b.knows(key);
-                    let pipe = self.pipe.get(&(sid, pipeline.index));
-                    let shader = b.cached(key, || pipe.map_or_else(|| "?".to_string(), |p| shader_name(s, &p.desc)));
-                    if let Some(p) = pipe.filter(|_| fresh) {
-                        b.set_shader_info(shader, &p.stats);
-                        if let Some(src) = &p.source {
-                            b.set_shader_source(shader, src.clone());
-                        }
-                    }
-                    let owner = b.cached((sid, 1, *owner as u64), || s.string(*owner).unwrap_or("").to_string());
-                    // a list without a debug name is named by its Cx id (drill down with the ledger)
-                    let list = if *list_name != 0 {
-                        b.cached((sid, 1, *list_name as u64), || s.string(*list_name).unwrap_or("").to_string())
-                    } else {
-                        b.cached((sid, 2, *list as u64), || format!("list#{list}"))
-                    };
-                    b.draw(pi, shader, owner, list, *counts);
-                }
-                if timed { b.expect(1) } else { b.untimed(1) }
-                pi
+            let (pipes, session): (_, &Session) = (&self.pipe, s);
+            let pi = gpu_prof::record_pass(key, session, sid, pass.name, pick, vw as u32, vh as u32, &attach, bytes, &prof_draws, timed, |pipeline| {
+                pipes.get(&(sid, pipeline.index)).map(|p| gpu_prof::ShaderFacts { name: gpu_prof::shader_name(session, &p.desc), stats: Some(p.stats.clone()), source: p.source.clone() })
             });
             if let Some(pi) = pi.filter(|_| timed) {
-                let split = split.map(|samples| SplitTimes { samples, baseline, groups });
+                let split = split.map(|samples| SplitTimes { samples, runs: split_runs });
                 let sample = if split.is_some() { None } else { sample_index };
                 self.prof.push(ProfPass { key, pass: pi, kind: pass_kind::RENDER, sample, split });
             }

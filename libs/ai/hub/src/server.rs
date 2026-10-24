@@ -2395,6 +2395,19 @@ fn worker_loop(shared: Arc<ServiceShared>) {
     }
 }
 
+/// The process is told to stop (SIGTERM; a WM restarting its hub): admission closes as
+/// `local-use: restarting` (the fleet routes elsewhere, a scheduler's next /health sees it
+/// closed), running jobs are cancelled with that reason so their clients reroute them, and
+/// this returns once they have unwound, or after `max`.
+pub fn drain_for_stop(shared: &Arc<ServiceShared>, max: Duration) {
+    shared.activity.begin_stop();
+    shared.jobs.with(|store| store.interrupt_for_activity());
+    let started = Instant::now();
+    while started.elapsed() < max && !shared.jobs.with(|store| store.running_models().is_empty()) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Executed only by the heavy worker, after relevant execution has unwound.
 /// The monitor never touches the backend lock or another thread's tensors.
 fn release_for_local_use(shared: &Arc<ServiceShared>) {

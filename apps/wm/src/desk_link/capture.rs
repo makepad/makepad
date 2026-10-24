@@ -135,6 +135,8 @@ pub struct CaptureState {
     picture: Option<RenderTarget>,
     /// Draws made with the current target.
     pub drawn: u64,
+    /// Frames whose picture was held back (too soon after the last one), for the timeline.
+    pub held: u64,
     /// The picture was drawn in the frame being made: once it is submitted, it is encoded.
     pub painted: bool,
     /// Raised with `painted`, so the WM looks right after the frame is submitted.
@@ -222,6 +224,7 @@ impl Widget for DeskCapture {
             st.frame = Some(frame);
             st.picture = Some(picture);
             st.owed = true;
+            st.held += 1;
             *cx.global::<CaptureState>() = st;
             return DrawStep::done();
         }

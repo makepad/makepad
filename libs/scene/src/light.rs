@@ -184,10 +184,21 @@ pub fn set_lamp_points(lights: &mut [EntityLight], head: Option<[Vec3f; 2]>, tai
     }
 }
 
-/// Brake lights: the taillights brighten while braking.
-pub fn set_brake_lights(lights: &mut [EntityLight], braking: bool) {
+/// What a vehicle's signal lamps show: set by whatever drives it (the
+/// player's pedals, an AI driver, traffic), carried to every peer with the
+/// body, and read by the renderer to light the model's lamp lenses
+/// (materials with a lamp role) and by [`signal_lamps`] for the light the
+/// taillights throw.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LampSignals {
+    pub brake: bool,
+    pub reverse: bool,
+}
+
+/// The taillights' light follows the signals: brighter while braking.
+pub fn signal_lamps(lights: &mut [EntityLight], signals: LampSignals) {
     for light in lights.iter_mut().filter(|l| l.name.starts_with("taillight_")) {
-        light.intensity = if braking { BRAKE_INTENSITY } else { TAIL_INTENSITY };
+        light.intensity = if signals.brake { BRAKE_INTENSITY } else { TAIL_INTENSITY };
     }
 }
 
@@ -247,7 +258,7 @@ mod tests {
         e.set_headlights(false).unwrap();
         assert!(e.lights.iter().all(|l| !l.enabled));
         assert_eq!(e.lights[0].intensity, 7.0);
-        set_brake_lights(&mut e.lights, true);
+        signal_lamps(&mut e.lights, LampSignals { brake: true, reverse: false });
         assert!(e.lights[2].intensity > TAIL_INTENSITY);
         set_lamp_points(&mut e.lights, Some([vec3f(-0.4, 0.1, -2.3), vec3f(0.4, 0.1, -2.3)]), None);
         assert_eq!(e.lights[0].pos, vec3f(-0.4, 0.1, -2.3));

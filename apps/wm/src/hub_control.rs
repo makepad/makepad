@@ -192,8 +192,6 @@ const POLICY_SHOWN_MS: u64 = 15 * 60 * 1000;
 /// What the hub process is doing, as the panel shows it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum HubPhase {
-    /// cargo is compiling it: its stage ("compiling 120/300 crates · makepad-ai-llm…").
-    Building(String),
     /// The process runs and does not answer yet.
     Starting,
     /// It answers; the chat model is being loaded (or downloaded).
@@ -204,8 +202,8 @@ pub enum HubPhase {
     ModelFailed,
     /// It exited; it starts again in `restart_in` seconds.
     Crashed { reason: String, restart_in: u32 },
-    /// Its build failed; the panel's Restart builds it again.
-    BuildFailed(String),
+    /// It could not start (not built, or the start failed); the panel's Restart tries again.
+    StartFailed(String),
     /// Being stopped, for a restart.
     Restarting,
 }
@@ -214,14 +212,12 @@ impl HubPhase {
     /// One line for the panel's header.
     pub fn headline(&self, model: &str) -> String {
         match self {
-            HubPhase::Building(stage) if stage.is_empty() => "Building".to_string(),
-            HubPhase::Building(stage) => format!("Building: {stage}"),
             HubPhase::Starting => "Starting".to_string(),
             HubPhase::LoadingModel => format!("Loading {model}"),
             HubPhase::Ready => "Ready".to_string(),
             HubPhase::ModelFailed => format!("{model} did not load"),
             HubPhase::Crashed { restart_in, .. } => format!("Crashed, restarting in {restart_in} s"),
-            HubPhase::BuildFailed(_) => "Build failed".to_string(),
+            HubPhase::StartFailed(_) => "Did not start".to_string(),
             HubPhase::Restarting => "Restarting".to_string(),
         }
     }
@@ -229,7 +225,7 @@ impl HubPhase {
     /// The reason under it, for a crash or a failed build.
     pub fn reason(&self) -> Option<&str> {
         match self {
-            HubPhase::Crashed { reason, .. } | HubPhase::BuildFailed(reason) => Some(reason),
+            HubPhase::Crashed { reason, .. } | HubPhase::StartFailed(reason) => Some(reason),
             _ => None,
         }
     }
@@ -809,6 +805,8 @@ pub struct HubLink {
     /// This node's compute mode (`ai-hub.conf` `compute`) and whether a game is being
     /// played (`local_use`): what the hub was last told.
     local: Option<(ComputeMode, bool)>,
+    /// The settings turn the WM's hub off: a hub an earlier WM left running is stopped.
+    stop_leftover: bool,
 }
 
 enum Link {
@@ -845,6 +843,8 @@ impl HubLink {
                 }
                 if child.is_none() {
                     makepad_widgets::log!("wm: the WM starts no AI hub (off in {}, or a hidden or in-process WM)", crate::hub_child::HubSettings::path().display());
+                    // Only the settings' own `enabled = off`: a hidden test WM leaves the real one alone.
+                    self.stop_leftover = processes && std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_none();
                 }
                 Link::Fleet { hub: FleetHub::start(base), child }
             }
@@ -861,9 +861,12 @@ impl HubLink {
         self
     }
 
-    /// Once a second: the hub child's output, exit, restart and start-up (a no-op
-    /// without one).
-    pub fn tick(&mut self, processes: bool, now: f64) {
+    /// Once a second: the hub child's exit, restart and start-up (a no-op without one).
+    pub fn tick(&mut self, processes: bool, now: f64, pool: &makepad_widgets::makepad_platform::thread::TaskPool) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if std::mem::take(&mut self.stop_leftover) {
+            crate::hub_child::stop_leftover(pool);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if let Link::Fleet { hub, child: Some(child) } = self.link(processes) {
             let (answers, model) = hub.peek(&child.settings.model);
@@ -873,10 +876,10 @@ impl HubLink {
             }
         }
         #[cfg(target_arch = "wasm32")]
-        let _ = (processes, now);
+        let _ = (processes, now, pool);
     }
 
-    /// The WM quits: its hub child stops.
+    /// The WM quits: the hub keeps running for the next WM (Unix), or stops (Windows).
     pub fn shutdown(&mut self, pool: &makepad_widgets::makepad_platform::thread::TaskPool) {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(Link::Fleet { child: Some(child), .. }) = self.link.as_mut() {

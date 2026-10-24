@@ -1090,19 +1090,22 @@ fn ablate(rec: &Recording) -> Answer {
 
 fn runs(rec: &Recording, args: &Args) -> Result<Answer, String> {
     let want = args.pos.get(1).map(String::as_str).unwrap_or("last");
+    let pass_filter = args.get("pass");
+    // a run of the asked pass: frames whose submit did not split that pass (a submit of other
+    // passes only, or a pass timed whole) are passed over
+    let in_pass = |f: &crate::Frame, g: &crate::Group| pass_filter.is_none_or(|p| f.passes.get(g.pass as usize).is_some_and(|x| rec.s(x.name) == p));
     let f = if want == "last" {
-        rec.frames.iter().rev().find(|f| f.split && !f.groups.is_empty())
+        rec.frames.iter().rev().find(|f| f.split && f.groups.iter().any(|g| in_pass(f, g)))
     } else {
         let id: u64 = want.trim_start_matches('F').parse().map_err(|_| format!("gpu prof runs {want}: want F<n> or last"))?;
         rec.frames.iter().find(|f| f.id == id)
     }
-    .ok_or("no split frame with runs in the recording (gpu prof start split=16)")?;
-    let pass_filter = args.get("pass");
+    .ok_or("no split frame with runs (of that pass) in the recording (gpu prof start split=16)")?;
     let n = args.num("n", 20) as usize;
     let mut rows: Vec<(&crate::Group, u64)> = f
         .groups
         .iter()
-        .filter(|g| pass_filter.map_or(true, |p| f.passes.get(g.pass as usize).is_some_and(|x| rec.s(x.name) == p)))
+        .filter(|g| in_pass(f, g))
         .map(|g| (g, g.ns.saturating_sub(f.passes.get(g.pass as usize).map_or(0, |p| p.baseline))))
         .collect();
     rows.sort_by(|a, b| b.1.cmp(&a.1));

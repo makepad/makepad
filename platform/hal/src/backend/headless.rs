@@ -43,6 +43,7 @@ impl Backend for Headless {
             max_window: [MAX_TEXTURE, MAX_TEXTURE],
             max_buffer: 0,
             working_set: 0,
+            ..Default::default()
         }
     }
 

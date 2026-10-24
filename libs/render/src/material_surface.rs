@@ -34,6 +34,25 @@ pub struct MaterialSurface {
     /// A number plate (`stencil_plate` layout): its digit cells show each
     /// copy's own number (`color_adjust.w` = -(1 + number)).
     pub plate: bool,
+    /// A vehicle signal lamp (`makepadShading.lamp`): the emission above is
+    /// the lamp fully lit, and each copy scales it by its own vehicle's
+    /// brake and reverse state ([`lamp_gain`]).
+    pub lamp: Option<makepad_gltf::GlbLamp>,
+}
+
+/// How lit a signal lamp of `role` is on a copy whose vehicle shows
+/// `signals`, 0..1 of its authored emission. `lamp_level` is the frame's
+/// headlight level (0 in daylight, 1 at night or in fog): tail lamps glow
+/// dimly with the lights on, as the running lamps of a real car do.
+pub fn lamp_gain(role: makepad_gltf::GlbLamp, signals: makepad_scene::light::LampSignals, lamp_level: f32) -> f32 {
+    /// A tail lamp's running glow against its braking glow.
+    const TAIL_RUNNING: f32 = 0.3;
+    let on = |b: bool| if b { 1.0f32 } else { 0.0 };
+    match role {
+        makepad_gltf::GlbLamp::Tail => on(signals.brake).max(TAIL_RUNNING * lamp_level),
+        makepad_gltf::GlbLamp::Brake => on(signals.brake),
+        makepad_gltf::GlbLamp::Reverse => on(signals.reverse),
+    }
 }
 impl MaterialSurface {
     /// The shading terms packed for a spare float lane (`tex_mag.y` on the
@@ -46,7 +65,7 @@ impl MaterialSurface {
     }
 }
 impl Default for MaterialSurface {
-    fn default()->Self {Self{wind:0.0,clearcoat:0.0,flake:0.0,rim:0.0,impostor:0.0,plate:false,fur:None,normal_png:None,normal_scale:1.0,occlusion_png:None,occlusion_strength:1.0,
+    fn default()->Self {Self{wind:0.0,clearcoat:0.0,flake:0.0,rim:0.0,impostor:0.0,plate:false,lamp:None,fur:None,normal_png:None,normal_scale:1.0,occlusion_png:None,occlusion_strength:1.0,
         emissive_png:None,emissive:[0.0;3],alpha_mode:0,alpha_cutoff:0.5,base_alpha:1.0,double_sided:false,triplanar:0.0}}
 }
 
@@ -636,5 +655,30 @@ mod prepared_texture_key_tests {
     #[test]
     fn source_keys_tell_semantics_apart() {
         assert_ne!(prepared_texture_key(b"png", PixelSemantic::Color), prepared_texture_key(b"png", PixelSemantic::MaskedColor));
+    }
+}
+
+#[cfg(test)]
+mod lamp_tests {
+    use super::*;
+    use makepad_gltf::GlbLamp;
+    use makepad_scene::light::LampSignals;
+    #[test]
+    fn signal_lamps_follow_each_cars_brake_and_reverse() {
+        let cruising = LampSignals::default();
+        let braking = LampSignals { brake: true, reverse: false };
+        let reversing = LampSignals { brake: false, reverse: true };
+        // Daylight: only a signal lights a lamp.
+        assert_eq!(lamp_gain(GlbLamp::Tail, cruising, 0.0), 0.0);
+        assert_eq!(lamp_gain(GlbLamp::Tail, braking, 0.0), 1.0);
+        assert_eq!(lamp_gain(GlbLamp::Brake, braking, 0.0), 1.0);
+        assert_eq!(lamp_gain(GlbLamp::Reverse, reversing, 0.0), 1.0);
+        assert_eq!(lamp_gain(GlbLamp::Reverse, braking, 0.0), 0.0);
+        // After dark the tail lamps run dimly; braking still reads brighter,
+        // and a stop lamp stays dark until the brake.
+        let night = lamp_gain(GlbLamp::Tail, cruising, 1.0);
+        assert!(night > 0.1 && night < 0.5);
+        assert_eq!(lamp_gain(GlbLamp::Tail, braking, 1.0), 1.0);
+        assert_eq!(lamp_gain(GlbLamp::Brake, cruising, 1.0), 0.0);
     }
 }

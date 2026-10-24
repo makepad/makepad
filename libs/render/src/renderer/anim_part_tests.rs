@@ -175,6 +175,7 @@ fn a_changed_placed_scene_drops_slot_commands_but_keeps_model_ones() {
         depth_order: 0.0,
         custom_material: None,
         part_poses: Vec::new(),
+        lamps: Default::default(),
     }]);
     assert!(renderer
         .model_anim_state

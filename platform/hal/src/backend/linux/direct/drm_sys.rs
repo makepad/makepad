@@ -13,6 +13,9 @@ extern "C" {
     pub fn drmModeFreeCrtc(crtc: *mut Crtc);
     pub fn drmModeSetCrtc(fd: c_int, crtc: u32, buffer: u32, x: u32, y: u32,
         connectors: *mut u32, count: c_int, mode: *mut Mode) -> c_int;
+    /// A framebuffer's description (opaque here: only whether it still exists is read).
+    pub fn drmModeGetFB(fd: c_int, buffer: u32) -> *mut std::ffi::c_void;
+    pub fn drmModeFreeFB(fb: *mut std::ffi::c_void);
     pub fn drmSetMaster(fd: c_int) -> c_int;
     pub fn drmDropMaster(fd: c_int) -> c_int;
 }

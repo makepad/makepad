@@ -146,8 +146,10 @@ impl GlBackend {
     fn with_source(wake: Arc<dyn Fn() + Send + Sync>, source: Box<dyn surface::EglSurfaceSource>, shell: Option<&'static super::linux::Shared>) -> Result<Self, String> {
         let mailbox = Mailbox::new(wake);
         let (queue, caps, thread) = render::start(source, mailbox.clone())?;
-        let info = HalInfo { backend: backend_id::GL, dialect: dialect::GLSL, formats: caps.formats, msaa: 1, dpi: 1.0, flags: 0,
-            max_texture: caps.max_texture, max_window: [caps.max_texture; 2], ..Default::default() };
+        let mut info = HalInfo { backend: backend_id::GL, dialect: dialect::GLSL, formats: caps.formats, msaa: 1, dpi: 1.0, flags: 0,
+            max_texture: caps.max_texture, max_window: [caps.max_texture; 2],
+            device_kind: if caps.software { device_kind::SOFTWARE } else { device_kind::UNKNOWN }, ..Default::default() };
+        info.set_device_name(&caps.renderer);
         if super::log_enabled() { eprintln!("[hal-gl] {} offscreen={} software={}", caps.renderer, shell.is_none(), caps.software); }
         Ok(Self { shell, info, caps, queue, thread: Some(thread), next_key: 1, allocated: Arc::new(AtomicU64::new(0)),
             tex: HashMap::new(), buf: HashMap::new(), pipe: HashMap::new(), programs: HashMap::new(), win: HashMap::new(),

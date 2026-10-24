@@ -4175,7 +4175,8 @@ impl App {
     /// icon. Once a second (the status tick) and on every panel command.
     fn hub_poll(&mut self, cx: &mut Cx) {
         let processes = self.processes();
-        self.hub_link.tick(processes, host::now());
+        let pool = cx.task_pool();
+        self.hub_link.tick(processes, host::now(), &pool);
         self.gpu_yield_report(cx);
         let play = self.state.as_ref().and_then(|s| {
             if s.screens.any_fullscreen() {

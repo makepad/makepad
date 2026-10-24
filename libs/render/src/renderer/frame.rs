@@ -16,6 +16,12 @@ const HDR_FOG_BASE: f32 = 0.0;
 const HDR_SKY_FILL_GAIN: f32 = 1.3;
 const HDR_GROUND_ALBEDO: f32 = 0.18;
 const HDR_FOG_SCALE_HEIGHT: f32 = 40.0;
+/// Aerial perspective (clustered.rs scene_fogged): how much brighter the
+/// haze grows toward the sun (x (1 + this x (lobe - 1)), the lobe 11x at
+/// the sun, 0.35x away from it), and how far the extinction spreads over
+/// wavelengths (red 0.7x, blue 1.35x the green optical depth at 1).
+const AERIAL_FORWARD: f32 = 0.12;
+const AERIAL_SPREAD: f32 = 1.0;
 
 impl Renderer {
     /// HDR lane: the fill comes from the sky that is actually drawn. Under
@@ -130,6 +136,7 @@ impl Renderer {
         self.stream_lights(camera_pos, sun.dir.y);
         self.build_frame_lights(&sun);
         let lamps = makepad_scene::light::lamp_level(sun.dir.y, world.sky.as_ref().map_or(0.0, |s| s.fog));
+        self.lamp_level = lamps;
         stats.stream_lights = self.frame_stream_lights;
         stats.vehicle_lamps = crate::entity_lights::append_entity_lights_with_model_headlights(
             world, &mut self.frame_lights, &self.model_headlight_owners, lamps, camera_pos, &mut self.vehicle_lamp_radius,
@@ -254,7 +261,9 @@ impl Renderer {
         draw_list.begin_always(cx);
         cx.begin_scene_3d(scene_state);
         // The environment as the background, first (a world that asks).
+        let owner = cx.enter_draw_name("sky");
         self.draw_environment_background(cx, &world.environment, &scene_state.projection);
+        cx.exit_draw_label(owner);
         // Camera-relative rendering: world geometry shifts by the render
         // origin on the GPU (the pass view was rebuilt around it by the
         // host's `Renderer::set_pass_camera`); CPU-side culling, cascades
@@ -359,7 +368,7 @@ impl Renderer {
         let underwater = world.water.as_deref()
             .filter(|_| shows_environment)
             .and_then(|w| super::water::eye_under_water(w, camera_pos, world.water_time));
-        let (fog_color, fog_density) = match underwater {
+        let (fog_color, fog_density) = match &underwater {
             Some(v) => {
                 let c = super::water::in_scatter(&v.look, &sun);
                 if self.hdr_output {
@@ -375,6 +384,14 @@ impl Renderer {
             [[0.0; 4]; 3]
         };
         self.clustered.fog_eye = [camera_pos.x, camera_pos.y, camera_pos.z, 0.0];
+        // Aerial perspective (clustered.rs scene_fogged) for the HDR lane's
+        // air; under water the water is the fog and scatters no sunlight.
+        let hue = sun.color * (1.0 / sun.color.x.max(sun.color.y).max(sun.color.z).max(1e-4));
+        (self.clustered.fog_sun, self.clustered.fog_glow) = if fog_on && underwater.is_none() {
+            ([sun.dir.x, sun.dir.y, sun.dir.z, AERIAL_FORWARD], [hue.x, hue.y, hue.z, AERIAL_SPREAD])
+        } else {
+            ([0.0; 4], [0.0; 4])
+        };
         apply_sun(cx.cx, draws, &sun, fog_color);
         // The ground light field for the cube family (statics AND dynamics —
         // a mover crossing a baked shadow should darken). Uniforms, not
@@ -1359,8 +1376,12 @@ impl Renderer {
             self.draw_custom_models(cx, camera_pos, &instances, WorldModelLane::Placed,
                 (fog_color, fog_density), &sun, frustum, &mut stats);
             self.placed_models = instances;
+            let owner = cx.enter_draw_name("stream");
             self.draw_stream(cx, draw, camera_pos, (fog_color, fog_density), &sun);
+            cx.exit_draw_label(owner);
+            let owner = cx.enter_draw_name("grass");
             self.draw_grass(cx, camera_pos, (fog_color, fog_density), &sun, frustum, &mut stats);
+            cx.exit_draw_label(owner);
 
             // Actor-attached props share the world material/depth pass, but
             // this is their ONLY renderer traversal. In particular they
@@ -1414,9 +1435,13 @@ impl Renderer {
         // 3s. The map's own sky surfaces, after the opaque world so they are
         // depth-rejected behind it rather than shading over it. Drawn even
         // when a host lends no models_draw: the sky lane owns its shader.
+        let owner = cx.enter_draw_name("sky faces");
         self.draw_sky_faces(cx, camera_pos, frustum, &mut stats);
+        cx.exit_draw_label(owner);
 
+        let owner = cx.enter_draw_name("water");
         self.draw_water(cx, draws, world, &sun, sky_frame.as_ref(), (fog_color, fog_density), frustum, shows_environment, camera_pos);
+        cx.exit_draw_label(owner);
 
         // 4. Alpha pass, one batch per shape: static sensors from the slab,
         // then blob shadows (box batch) and dynamic sensors — drawn after all
@@ -1610,7 +1635,9 @@ impl Renderer {
 
         let v = &scene_state.view.v;
         let cam_axes = (vec3f(v[0], v[4], v[8]), vec3f(v[1], v[5], v[9]));
+        let owner = cx.enter_draw_name("late layers");
         self.draw_late_layers(cx, draws, world, frustum, camera_pos, shows_environment, &mut stats, (sun, (fog_color, fog_density), cam_axes));
+        cx.exit_draw_label(owner);
         // Particles and VFX decals, after every other transparent. Particles
         // are pure decoration and the first thing thermal pressure thins
         // (quality.particle_scale): each burst keeps a prefix, so an effect
@@ -1623,13 +1650,17 @@ impl Renderer {
             fog_density,
             lin: self.lin_ctl(),
         };
+        let owner = cx.enter_draw_name("vfx");
         self.draw_vfx_layer(cx, &scene_state, stage_matrix, frustum, vfx_light, quality.particle_scale, &mut stats);
+        cx.exit_draw_label(owner);
 
         // 7. View-local held meshes, after the complete world. The dedicated
         // shader maps them into a portable near-depth band, while their queue
         // never visited any world bake/caster path above.
         if let Some(draw) = draws.view_model.as_deref_mut() {
+            let owner = cx.enter_draw_name("view model");
             self.draw_view_models_inner(cx, draw, &sun, fog_color, &mut stats);
+            cx.exit_draw_label(owner);
         }
 
         if let Some(previous_world) = previous_world {

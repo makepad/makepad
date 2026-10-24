@@ -78,7 +78,8 @@ def save(text):
     st = os.stat(helper)
     os.utime(helper, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
 
-step("live run starts prelinked", wait(lambda: last_value() == 11 and os.path.exists(ready), 120) and any("prelinked" in l for l in err))
+# (the readiness file and the prelink report come from different threads: wait for both)
+step("live run starts prelinked", wait(lambda: last_value() == 11 and os.path.exists(ready), 120) and wait(lambda: any("prelinked" in l for l in err)))
 save(base.replace("    1\n", "    2\n"))
 ok = wait(lambda: last_value() == 21)
 step("edit of the prelinked value(): the prelinked caller calls the new code", ok and any("patched" in l for l in err))

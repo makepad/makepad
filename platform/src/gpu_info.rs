@@ -23,6 +23,10 @@ pub struct GpuInfo {
     pub performance: GpuPerformance,
     pub vendor: String,
     pub renderer: String,
+    /// Whether the GPU is a discrete card (Some(false): integrated, sharing
+    /// the CPU's memory, or a software rasterizer); None when the backend
+    /// does not say.
+    pub discrete: Option<bool>,
 }
 
 impl Default for GpuInfo {
@@ -37,6 +41,7 @@ impl Default for GpuInfo {
             performance: GpuPerformance::Tier4,
             vendor: "unknown".to_string(),
             renderer: "unknown".to_string(),
+            discrete: None,
         }
     }
 }

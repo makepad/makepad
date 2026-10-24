@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use makepad_network::tls::{TlsIdentity, TlsServer, TlsStream};
 use std::io::Read;
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -132,6 +132,15 @@ impl Geometry {
     }
 }
 
+/// What the sessions wrote (all sessions together), read and reset by the owner's per-second
+/// timeline: pictures, bytes, the longest single picture write (µs).
+#[derive(Default)]
+pub struct SendStats {
+    pub pictures: AtomicU64,
+    pub bytes: AtomicU64,
+    pub write_us_max: AtomicU64,
+}
+
 pub struct Server {
     pub addr: SocketAddr,
     pub fingerprint: String,
@@ -140,6 +149,7 @@ pub struct Server {
     pub geometry: Arc<Mutex<Geometry>>,
     /// Why viewer input is not injected, when it is not (no /dev/uinput access).
     pub input_note: Arc<Mutex<String>>,
+    pub sent: Arc<SendStats>,
 }
 
 /// A failed credential this many times within the window bans the address for a while.
@@ -274,7 +284,8 @@ impl Server {
         let geometry = Arc::new(Mutex::new(Geometry::default()));
         let input_note = Arc::new(Mutex::new(String::new()));
         let verifier = Arc::new(verifier);
-        let (stop2, geometry2, note2) = (stop.clone(), geometry.clone(), input_note.clone());
+        let sent = Arc::new(SendStats::default());
+        let (stop2, geometry2, note2, sent2) = (stop.clone(), geometry.clone(), input_note.clone(), sent.clone());
         let (log, clock, input) = (config.log.clone(), config.clock, config.input.clone());
         let guard = Arc::new(Guard {
             allow: config.allow_peers.iter().copied().map(normalize).collect(),
@@ -315,6 +326,7 @@ impl Server {
                                 stop: stop2.clone(),
                                 geometry: geometry2.clone(),
                                 input_note: note2.clone(),
+                                sent: sent2.clone(),
                                 log: log.clone(),
                                 clock,
                                 input: input.clone(),
@@ -335,7 +347,7 @@ impl Server {
                 }
             })
             .map_err(|e| e.to_string())?;
-        Ok(Server { addr, fingerprint, stop, rx, geometry, input_note })
+        Ok(Server { addr, fingerprint, stop, rx, geometry, input_note, sent })
     }
 }
 
@@ -349,6 +361,7 @@ struct SessionCtx {
     stop: Arc<AtomicBool>,
     geometry: Arc<Mutex<Geometry>>,
     input_note: Arc<Mutex<String>>,
+    sent: Arc<SendStats>,
     log: Log,
     clock: fn() -> u64,
     input: InputFactory,
@@ -472,7 +485,11 @@ impl SessionCtx {
                     Ok(Out::Video(mut bytes)) => {
                         // one picture: its parts' messages back to back, stamped as they go out
                         proto::stamp_videos(&mut bytes, (self.clock)());
+                        let started = std::time::Instant::now();
                         let result = proto::write_all(&mut stream, &bytes);
+                        self.sent.pictures.fetch_add(1, Ordering::Relaxed);
+                        self.sent.bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                        self.sent.write_us_max.fetch_max(started.elapsed().as_micros() as u64, Ordering::Relaxed);
                         // caught up: the UI may make pictures again (it holds them back while
                         // a viewer is behind)
                         if backlog.fetch_sub(1, Ordering::AcqRel) == 1 {

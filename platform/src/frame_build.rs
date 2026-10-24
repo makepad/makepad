@@ -166,6 +166,8 @@ pub(crate) struct FrameBuilder {
     tex_ids: Vec<Id>,
     /// the owner (string id) of the draw list being walked
     owner: StrId,
+    /// recorded draw owners (widget uid or label key) already interned as strings
+    owner_names: HashMap<u64, StrId>,
     /// the pass being built: its origin (logical px) and dpi, mapping instance rects to target
     /// pixels (`Draw::bounds`)
     pass_px: (f32, f32, f32),
@@ -1022,6 +1024,7 @@ impl Cx {
     /// Builds the passes of this repaint into `fb.w`, in dependency order. Returns the HAL frame
     /// ids built (one per pass), which `FrameDone` answers.
     pub(crate) fn fb_build(&mut self, fb: &mut FrameBuilder, passes: &[DrawPassId], time_now: f32, input_ns: u64) -> Vec<u64> {
+        self.draw_owners_follow_profiler();
         let mut built = Vec::new();
         for &pass_id in passes {
             let uniforms_gen = self.next_uniform_gen();
@@ -1458,6 +1461,7 @@ impl Cx {
             }
             return;
         }
+        let owner = self.fb_draw_owner(fb, list_id.index(), item_id, slots, instances);
 
         let Some(geometry_id) = self.draw_lists[list_id].draw_items[item_id].kind.draw_call().and_then(|c| c.geometry_id) else { return };
         if self.geometries.skip_stale(geometry_id) {
@@ -1611,7 +1615,7 @@ impl Cx {
             zbias: z,
             pick: call.pick_id,
             flags,
-            owner: fb.owner,
+            owner,
             list: list_id.index() as u32,
             item: item_id as u32,
             list_name,
@@ -1635,6 +1639,19 @@ impl Cx {
         item.consumed_schema = item.resident_schema;
         item.consumed_serial = serial;
         item.consumed_uniforms_gen = call_gen;
+    }
+
+    /// The owner name of a draw: while owners are recorded, the widget or label that added most
+    /// of its instances; else (or when none was noted) the owner of its draw list.
+    fn fb_draw_owner(&self, fb: &mut FrameBuilder, list: usize, item: usize, slots: usize, instances: usize) -> StrId {
+        let Some(key) = self.draw_owners.as_ref().map(|o| o.dominant(list, item, slots, instances)).filter(|k| *k != 0) else { return fb.owner };
+        if let Some(id) = fb.owner_names.get(&key) {
+            return *id;
+        }
+        let Some(name) = self.draw_owner_name(key) else { return fb.owner };
+        let id = fb.intern(&name);
+        fb.owner_names.insert(key, id);
+        id
     }
 
     /// The instance source of a draw item, made resident: inline floats for an ordinary

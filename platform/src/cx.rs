@@ -307,6 +307,8 @@ pub struct Cx {
     pub widget_uid_paths_callback: Option<fn(&Cx, &[u64]) -> Vec<(u64, String, String)>>,
     /// Per-instance widget attribution, only while a capture asks for it (`draw_owners`).
     pub draw_owners: Option<Box<crate::draw_owners::DrawOwners>>,
+    /// The names drawers give their instances (`Cx::draw_label`), interned once.
+    pub(crate) draw_labels: crate::draw_owners::DrawLabels,
     /// Subsystems' counts of asynchronous loads in flight, by kind (see
     /// `Cx::register_async_load_probe`).
     pub(crate) async_load_probes: Vec<(&'static str, crate::cx_api::AsyncLoadProbe)>,
@@ -1106,6 +1108,7 @@ impl Cx {
             widget_paths_callback: None,
             widget_uid_paths_callback: None,
             draw_owners: None,
+            draw_labels: Default::default(),
             async_load_probes: Vec::new(),
             widget_tree_ptr: std::ptr::null_mut(),
             widget_tree_dump_callback: None,

@@ -9,7 +9,7 @@
 
 use makepad_desk_link as proto;
 use makepad_widgets::makepad_platform::video_file::{GpuReady, StreamTile, StreamVideoCodec, VideoStreamEncoder, VideoStreamEncoderOptions};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -43,13 +43,23 @@ pub struct Encoder {
     tx: Sender<Job>,
 }
 
+/// The encoder's side of the per-second timeline (read and reset by the WM each second):
+/// pictures whose every part is encoded, refinements among them, the slowest picture's frame
+/// submit -> bitstream (µs).
+#[derive(Default)]
+pub struct EncodeStats {
+    pub pictures: AtomicU64,
+    pub refined: AtomicU64,
+    pub encode_us_max: AtomicU64,
+}
+
 impl Encoder {
     /// The thread; `wake` tells the UI about a failure (`note`s carry the text).
-    pub fn start(subscribers: Subscribers, wake: Arc<dyn Fn() + Send + Sync>) -> Result<Encoder, String> {
+    pub fn start(subscribers: Subscribers, wake: Arc<dyn Fn() + Send + Sync>, stats: Arc<EncodeStats>) -> Result<Encoder, String> {
         let (tx, rx) = channel();
         std::thread::Builder::new()
             .name("desk-link-encode".into())
-            .spawn(move || run(rx, subscribers, wake))
+            .spawn(move || run(rx, subscribers, wake, stats))
             .map_err(|e| e.to_string())?;
         Ok(Encoder { tx })
     }
@@ -145,7 +155,7 @@ fn open_streams(size: [u32; 2], fps: u32, kbps: u32, split: Split, full_chroma: 
     Ok(streams)
 }
 
-fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + Sync>) {
+fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + Sync>, stats: Arc<EncodeStats>) {
     // the streams, for (size, split); dropping them ends their workers
     let mut streams: Option<(Vec<Stream>, [u32; 2], (Split, bool, u32), bool)> = None;
     let (done_tx, done_rx) = channel::<Done>();
@@ -192,13 +202,22 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
                     refining.set(None);
                 }
                 let msg = proto::encode_video(frame, key, built_ns, encoded_ns, 0, (i as u8, parts as u8, list[i].y0), &data);
+                stats.encode_us_max.fetch_max(encoded_ns.saturating_sub(built_ns) / 1000, Ordering::Relaxed);
+                let complete = |stats: &EncodeStats| {
+                    stats.pictures.fetch_add(1, Ordering::Relaxed);
+                    if refining.get().is_some() {
+                        stats.refined.fetch_add(1, Ordering::Relaxed);
+                    }
+                };
                 if parts == 1 {
                     send(msg);
+                    complete(&stats);
                 } else {
                     gathering[i] = Some(msg);
                     if gathering.iter().all(Option::is_some) {
                         let all: Vec<u8> = gathering.iter_mut().flat_map(|m| m.take().unwrap()).collect();
                         send(all);
+                        complete(&stats);
                     }
                 }
             }

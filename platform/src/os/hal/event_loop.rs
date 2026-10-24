@@ -78,6 +78,22 @@ impl Cx {
         self.gpu_info.float16_blend_targets = supports(makepad_hal::format::RGBA16F);
         self.gpu_info.texture_bc7 = supports(makepad_hal::format::BC7);
         self.gpu_info.texture_astc4x4 = supports(makepad_hal::format::ASTC4X4);
+        // Who the GPU is, for apps that size their work to it (a graphics
+        // quality tier): the vendor from its PCI id, the driver's device name.
+        let name = info.device_name();
+        if !name.is_empty() {
+            self.gpu_info.vendor = match info.vendor_id {
+                0x10de => "nvidia", 0x1002 | 0x1022 => "amd", 0x8086 => "intel", 0x106b => "apple",
+                0x5143 => "qualcomm", 0x13b5 => "arm", 0x1010 => "imagination", 0x14e4 => "broadcom",
+                _ => "unknown",
+            }.to_string();
+            self.gpu_info.renderer = name;
+        }
+        self.gpu_info.discrete = match info.device_kind {
+            makepad_hal::device_kind::DISCRETE => Some(true),
+            makepad_hal::device_kind::INTEGRATED | makepad_hal::device_kind::SOFTWARE | makepad_hal::device_kind::VIRTUAL => Some(false),
+            _ => None,
+        };
         crate::gpu_info::set_max_gpu_buffer_bytes(info.max_buffer);
         crate::gpu_info::set_gpu_working_set_bytes(info.working_set);
         if info.working_set != 0 { self.gpu_admission.set_device_bytes(info.working_set); }

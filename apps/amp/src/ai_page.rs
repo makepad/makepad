@@ -64,22 +64,28 @@ impl App {
     /// what the field says now: each is a job of its own, so two songs
     /// render on two GPUs at once.
     fn ai_next(&mut self, cx: &mut Cx) {
-        while self.ai.jobs.len() + self.ai.ready.len() + self.ai.queued.len() < AHEAD {
+        // All songs missing are written in one writer turn, then render in
+        // parallel: no song waits for the writer.
+        let missing = AHEAD.saturating_sub(self.ai.jobs.len() + self.ai.ready.len() + self.ai.queued.len());
+        if missing > 0 {
             let mut request = self.ui.text_input(cx, ids!(ai_prompt)).text();
             if request.trim().is_empty() {
                 request = DEFAULT_REQUEST.to_string();
             }
             let epoch = self.ai_epoch();
-            let id = self.ai.next_id;
+            let ids: Vec<u64> = (0..missing as u64).map(|n| self.ai.next_id + n).collect();
             let Some(workers) = &self.workers else { return };
-            if !workers.ai_music(AiCommand::Next { id, request, model: self.ai.model.clone(), minutes: self.ai.minutes, language: self.ai.language.clone(), epoch }) {
+            if workers.ai_music(AiCommand::Next { ids: ids.clone(), request, model: self.ai.model.clone(), minutes: self.ai.minutes, language: self.ai.language.clone(), epoch }) {
+                self.ai.next_id += missing as u64;
+                self.ai.error = None;
+                let now = Self::now(cx);
+                for id in ids {
+                    self.ai.jobs.push(Making { id, started_at: now, stage: "writing".to_string(), permille: 0, at_work: String::new(), song: None });
+                }
+                self.ai_animate(cx);
+            } else {
                 self.ai.error = Some("The AI music worker is busy; press Restart".into());
-                break;
             }
-            self.ai.next_id += 1;
-            self.ai.error = None;
-            self.ai.jobs.push(Making { id, started_at: Self::now(cx), stage: String::new(), permille: 0, at_work: String::new(), song: None });
-            self.ai_animate(cx);
         }
         self.model.requests.redraw = true;
     }

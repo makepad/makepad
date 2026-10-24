@@ -369,6 +369,23 @@ impl Renderer {
         self.gpu_baker.set_csm_far_reach(metres);
     }
 
+    /// Spend what `tier` allows (quality_tier.rs): impostor distances,
+    /// grass reach and density, the sun cascades. Screen-space occlusion and
+    /// the render scale are the host's passes: it reads them from the same
+    /// [`crate::quality_tier::TierBudget`].
+    pub fn set_graphics_tier(&mut self, tier: crate::quality_tier::GraphicsTier) {
+        let b = tier.budget();
+        self.graphics_tier = tier;
+        self.impostor_scale = b.impostor_scale;
+        self.grass_radius_scale = b.grass_radius;
+        self.grass_density = b.grass_density;
+        self.set_csm_config(b.csm_resolution, b.csm_range);
+    }
+
+    pub fn graphics_tier(&self) -> crate::quality_tier::GraphicsTier {
+        self.graphics_tier
+    }
+
     pub fn set_csm_config(
         &mut self,
         tile_resolution: usize,

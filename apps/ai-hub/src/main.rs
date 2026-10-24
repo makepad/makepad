@@ -217,9 +217,50 @@ fn run() -> Result<(), AssetAiError> {
         return run_machine_node(handle);
     }
 
-    // The http listener thread runs until the process is killed.
-    let _ = handle.http_thread.join();
-    Ok(())
+    // Serves until SIGTERM/SIGINT: then it drains (admission closed as "restarting", running
+    // jobs handed back to their clients to reroute) and exits.
+    #[cfg(unix)]
+    {
+        stop_signal::install();
+        while !stop_signal::asked() {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        eprintln!("{SERVICE_NAME}: stopping: admission closed, handing running jobs back");
+        makepad_ai_hub::server::drain_for_stop(&handle.shared, std::time::Duration::from_secs(3));
+        // Still answering for a moment: the clients' next status poll reads their job's
+        // `local-use: restarting` (their cue to reroute) instead of a dropped connection.
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        eprintln!("{SERVICE_NAME}: stopped");
+        std::process::exit(0);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = handle.http_thread.join();
+        Ok(())
+    }
+}
+
+/// SIGTERM/SIGINT as a flag the main thread polls (an atomic store is all the handler does).
+#[cfg(unix)]
+mod stop_signal {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static ASKED: AtomicBool = AtomicBool::new(false);
+    extern "C" fn on_signal(_: i32) {
+        ASKED.store(true, Ordering::SeqCst);
+    }
+    extern "C" {
+        fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
+    }
+    pub fn install() {
+        // SIGINT 2, SIGTERM 15 (both the same on Linux and macOS).
+        unsafe {
+            signal(2, on_signal);
+            signal(15, on_signal);
+        }
+    }
+    pub fn asked() -> bool {
+        ASKED.load(Ordering::SeqCst)
+    }
 }
 
 /// The machine node's life: register in ~/.makepad/run so the apps on this

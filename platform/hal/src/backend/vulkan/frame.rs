@@ -3,15 +3,18 @@
 
 use super::device::error;
 use super::pipeline::{PassKey, Pipeline, RenderPass, ABSENT};
+use super::prof::{self, BatchProf, ProfPass};
 use super::resources::{Buffer, Image};
 use super::submit::{Batch, Ticket};
 use super::{window_row, Texture, Vulkan};
 use crate::backend::exec::{self, LentState};
 use crate::backend::log_enabled;
 use crate::buffers::{id_at, read_ids, read_pairs, CmdView};
+use crate::gpu_prof::{self, ShaderFacts, SplitRuns};
 use crate::ledger::Kind;
 use crate::session::{LentRef, Session, TextureObj, HOST};
 use crate::types::*;
+use makepad_gpu_trace::kind as pass_kind;
 use makepad_vulkan::vk;
 use std::sync::Arc;
 
@@ -21,6 +24,15 @@ use std::sync::Arc;
 pub(super) struct Badged {
     pool: Vec<Arc<Image>>,
     last: Option<Arc<Image>>,
+}
+
+/// What the encoder last bound in the open render pass (`encode_pass`).
+#[derive(Default)]
+struct Bound {
+    pipeline: vk::Pipeline,
+    vertex: vk::Buffer,
+    index: (vk::Buffer, vk::IndexType),
+    scissor: Option<(i32, i32, u32, u32)>,
 }
 
 struct Prepared {
@@ -34,6 +46,24 @@ struct Prepared {
 pub(super) fn slice(range: Range, len: usize) -> Option<std::ops::Range<usize>> {
     let start = range.off as usize;
     start.checked_add(range.len as usize).filter(|end| *end <= len).map(|end| start..end)
+}
+
+/// Encodes a copy into `batch`; while the batch encodes a recorded frame, it is timed as the
+/// frame's encoder `name` (`w` x `h` texels, `bytes` read and written).
+fn timed_copy(batch: &mut Batch, name: &str, w: u32, h: u32, bytes: u64, encode: impl FnOnce(&mut Batch)) {
+    let Some(key) = batch.prof.as_ref().map(|p| p.key) else { return encode(batch) };
+    let q = batch.prof.as_mut().and_then(|p| p.reserve(1));
+    if let Some(q) = q { batch.stamp(q); }
+    encode(batch);
+    if let Some(q) = q { batch.stamp(q + 1); }
+    let pass = gpu_prof::with_frame(key, |b| {
+        let pass = b.pass(name, pass_kind::BLIT, w, h, "", bytes);
+        if q.is_some() { b.expect(1) } else { b.untimed(1) }
+        pass
+    });
+    if let (Some(pass), Some(p)) = (pass.filter(|_| q.is_some()), batch.prof.as_mut()) {
+        p.passes.push(ProfPass { pass, query: q, split: None });
+    }
 }
 
 /// Free scanout copies kept for the next frames (the shell holds the ones it shows).
@@ -84,17 +114,20 @@ impl Vulkan {
     }
 
     /// A copy of `source` into `image` (their common area); `image` is left as a copy's source.
-    fn copy_image(&self, source: &Arc<Image>, image: &Arc<Image>, batch: &mut Batch) {
-        source.transition(batch.cb, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
-        image.transition(batch.cb, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
-        let layers = vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1);
-        let copy = vk::ImageCopy::default().src_subresource(layers).dst_subresource(layers)
-            .extent(vk::Extent3D { width: source.desc.w.min(image.desc.w), height: source.desc.h.min(image.desc.h), depth: 1 });
-        unsafe { self.dev.raw.cmd_copy_image(batch.cb, source.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-            image.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[copy]); }
-        image.transition(batch.cb, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
-        source.transition(batch.cb, source.sampled_layout());
-        batch.images.extend([source.clone(), image.clone()]);
+    /// `name`: the copy as the GPU profiler times it.
+    fn copy_image(&self, name: &str, source: &Arc<Image>, image: &Arc<Image>, batch: &mut Batch) {
+        let (w, h) = (source.desc.w.min(image.desc.w), source.desc.h.min(image.desc.h));
+        timed_copy(batch, name, w, h, w as u64 * h as u64 * format::texel_bytes(image.desc.format) * 2, |batch| {
+            source.transition(batch.cb, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+            image.transition(batch.cb, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+            let layers = vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1);
+            let copy = vk::ImageCopy::default().src_subresource(layers).dst_subresource(layers).extent(vk::Extent3D { width: w, height: h, depth: 1 });
+            unsafe { self.dev.raw.cmd_copy_image(batch.cb, source.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                image.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[copy]); }
+            image.transition(batch.cb, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+            source.transition(batch.cb, source.sampled_layout());
+            batch.images.extend([source.clone(), image.clone()]);
+        });
     }
 
     /// The image a badge layer frame of host window `key` draws into: the window's retained
@@ -117,7 +150,7 @@ impl Vulkan {
         };
         trim_spares(&mut badged.pool, &image, SCANOUT_SPARES);
         badged.last = Some(image.clone());
-        self.copy_image(&base, &image, batch);
+        self.copy_image("badge layer copy", &base, &image, batch);
         Some(image)
     }
 
@@ -137,7 +170,7 @@ impl Vulkan {
         // the images it gave back are let go again, a few spares kept. Before, the pool only
         // grew: 149's WM held 70 desktop-sized copies (3.9 GB).
         trim_spares(pool, &image, SCANOUT_SPARES);
-        self.copy_image(source, &image, batch);
+        self.copy_image("scanout copy", source, &image, batch);
         Ok(image)
     }
 
@@ -206,7 +239,10 @@ impl Vulkan {
                 reserve = reserve.saturating_add(align); // pick block
             }
         }
-        let mut batch = match Batch::new(self.dev.clone(), &self.spares, true, reserve) {
+        // a recorded frame times its passes: its batch's timestamp pool is sized for them
+        let prof_key = gpu_prof::current(sid);
+        let queries = prof_key.map_or(2, |k| prof::queries_for(k, pr.len(), dr.len()));
+        let mut batch = match Batch::new(self.dev.clone(), &self.spares, queries, reserve) {
             Ok(b) => b,
             Err(e) => {
                 // at the open-file limit an out of memory is reported once, not every frame
@@ -219,6 +255,11 @@ impl Vulkan {
         s.stats.max_frame_ns = s.stats.max_frame_ns.max(packet.meta.build_end_ns.saturating_sub(packet.meta.build_start_ns));
         let is_window = kind & !target::FLAGS == target::WINDOW;
         let pick = kind & target::PICK != 0;
+        if let Some(key) = prof_key {
+            batch.prof = Some(BatchProf::new(key, if self.dev.timestamp_bits > 0 { queries } else { 0 }));
+            batch.prof_key = Some(key);
+            gpu_prof::with_frame(key, |b| b.packet(packet.frame, is_window && !pick, &packet.meta));
+        }
         let replay = kind & target::REPLAY != 0;
         // a window with a badge layer: its frames stay in the retained image, the layer's frame
         // (`target::BADGES`, from the executor right after) composes and presents it
@@ -277,7 +318,7 @@ impl Vulkan {
                         let shared = badges.then(|| self.windows.source.target(key.0, key.1, [image.desc.w, image.desc.h])).flatten();
                         let scanout = if let Some(shared) = shared {
                             // the composed image into the host's next shared image
-                            self.copy_image(&image, &shared, &mut batch);
+                            self.copy_image("host image copy", &image, &shared, &mut batch);
                             batch.rendered(&shared);
                             Ok(shared)
                         } else if self.windows.source.is_target(&image) { Ok(image.clone()) } else { self.scanout_image(key, &image, &mut batch) };
@@ -308,6 +349,11 @@ impl Vulkan {
         self.compose = None;
         if !replay { batch.tickets.push(Ticket::Frame { token: Self::token(s), target, kind, frame: packet.frame, window: presented }); }
         let scheduled = presented || batch.scanout.is_some();
+        if let Some(key) = prof_key.filter(|_| scheduled && !pick) {
+            // the window frame is handed on (to the queue's present, a presenter, or the host
+            // compositing it)
+            gpu_prof::with_frame(key, |b| b.present(crate::clock_ns()));
+        }
         s.stats.arena_allocs += batch.allocs;
         if kind & target::SNAPSHOT != 0 && !pick {
             // The reads of this frame (a grab, a window snapshot or copy) follow this command in
@@ -379,9 +425,15 @@ impl Vulkan {
             let id = pass.color.iter().copied().find(|id| !id.is_none()).unwrap_or(pass.depth);
             exec::clamped_pass(s, if id.is_none() { target } else { id }, size, target_size, pass.dpi);
         }
+        let prof_key = batch.prof.as_ref().map(|p| p.key);
+        // an ablation frame of the GPU profiler leaves out one shader's draws
+        let ablate = prof_key.filter(|k| k.ablate && !pick).and_then(|_| gpu_prof::ablate_target());
         for d in draws {
             s.stats.draws += 1;
             if d.index[1] == 0 || d.inst.count == 0 { continue; }
+            if let Some(t) = ablate.as_deref() {
+                if self.pipe.get(&(s.id, d.pipeline.index)).is_some_and(|p| gpu_prof::shader_name(s, &p.desc) == t) { continue; }
+            }
             match self.prepare(s, pass, d, view.arena, pick, render_pass.clone(), &attachments, batch, now, deps) {
                 Ok(Some(p)) => prepared.push((d, p)),
                 Ok(None) => s.stats.skipped_draws += 1,
@@ -409,13 +461,65 @@ impl Vulkan {
             .attachments(&views).width(target_size[0]).height(target_size[1]).layers(1), None) }.map_err(error)?;
         batch.framebuffers.push(framebuffer); batch.passes.push(render_pass.clone());
         let area = vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: vk::Extent2D { width: target_size[0], height: target_size[1] } };
+
+        // ---- the GPU profiler's timestamps. A recorded frame times the pass whole; a split
+        // frame cuts it into one render pass per run of draws of one pipeline on the same
+        // framebuffer (each after the first loads what the one before stored: pipelines do not
+        // depend on load operations), after an empty render pass that loads and stores the
+        // attachments (the baseline): those give each shader's share of the pass. A split pass
+        // whose queries do not fit the batch's pool is timed whole.
+        let runs = gpu_prof::split_runs(prof_key, pick, &prepared, |(d, _)| d.pipeline);
+        let split_q = if runs.is_empty() { None } else { batch.prof.as_mut().and_then(|p| p.reserve(runs.len() as u32 + 1)) };
+        let runs = if split_q.is_some() { runs } else { Vec::new() };
+        let whole_q = if prof_key.is_some() && split_q.is_none() { batch.prof.as_mut().and_then(|p| p.reserve(1)) } else { None };
+        let load_pass = match split_q {
+            Some(_) => {
+                let key = PassKey { load: [pass_load::LOAD; 5], ..key };
+                Some(if let Some(pass) = self.passes.get(&key) { pass.clone() } else {
+                    let pass = RenderPass::new(self.dev.clone(), key)?; self.passes.insert(key, pass.clone()); pass
+                })
+            }
+            None => None,
+        };
+        let viewport = vk::Viewport { x: v[0], y: v[1] + v[3], width: v[2], height: -v[3], min_depth: 0.0, max_depth: 1.0 };
+        let run_shader = |me: &Self, s: &Session, d: &Draw| me.pipe.get(&(s.id, d.pipeline.index)).map_or_else(|| "?".to_string(), |p| gpu_prof::shader_name(s, &p.desc));
+        let mut split_runs = SplitRuns::<u32>::default();
+        let mut records: Vec<gpu_prof::DrawRecord> = Vec::new();
         unsafe {
+            if let (Some(q), Some(lp)) = (split_q, &load_pass) {
+                batch.stamp(q);
+                self.dev.raw.cmd_begin_render_pass(batch.cb, &vk::RenderPassBeginInfo::default().render_pass(lp.raw).framebuffer(framebuffer)
+                    .render_area(area), vk::SubpassContents::INLINE);
+                self.dev.raw.cmd_end_render_pass(batch.cb);
+                batch.stamp(q + 1);
+                split_runs.baseline = Some(q);
+            }
+            if let (Some(q), Some((d, _))) = (split_q, prepared.first()) {
+                split_runs.run(run_shader(self, s, *d), q + 2, 0);
+                batch.stamp(q + 2);
+            }
+            if let Some(q) = whole_q { batch.stamp(q); }
             self.dev.raw.cmd_begin_render_pass(batch.cb, &vk::RenderPassBeginInfo::default().render_pass(render_pass.raw).framebuffer(framebuffer)
                 .render_area(area).clear_values(&clear), vk::SubpassContents::INLINE);
             // The existing SPIR-V emitter already maps Vulkan's coordinate conventions.
-            self.dev.raw.cmd_set_viewport(batch.cb, 0, &[vk::Viewport { x: v[0], y: v[1] + v[3], width: v[2], height: -v[3], min_depth: 0.0, max_depth: 1.0 }]);
-            for (d, p) in prepared {
-                batch.pipelines.push(p.pipeline.clone()); batch.buffers.push(p.vertex.clone()); batch.buffers.push(p.index.clone());
+            self.dev.raw.cmd_set_viewport(batch.cb, 0, &[viewport]);
+            // The state the last draw bound in this render pass: a draw binds only what changed
+            // (a run of one model's copies or layers shares the pipeline and often the buffers).
+            let mut bound = Bound::default();
+            for (di, (d, p)) in prepared.into_iter().enumerate() {
+                if let (Some(q), Some(lp), Some(g)) = (split_q, &load_pass, runs.iter().position(|r| *r == di).filter(|g| *g > 0)) {
+                    // the next run of a split pass: a render pass of its own, continuing the attachments
+                    self.dev.raw.cmd_end_render_pass(batch.cb);
+                    let q = q + 2 + 2 * g as u32;
+                    batch.stamp(q - 1);
+                    split_runs.run(run_shader(self, s, d), q, records.len() as u32);
+                    batch.stamp(q);
+                    self.dev.raw.cmd_begin_render_pass(batch.cb, &vk::RenderPassBeginInfo::default().render_pass(lp.raw).framebuffer(framebuffer)
+                        .render_area(area), vk::SubpassContents::INLINE);
+                    self.dev.raw.cmd_set_viewport(batch.cb, 0, &[viewport]);
+                    // a new render pass starts with no state bound
+                    bound = Bound::default();
+                }
                 let scissor = if d.scissor.iter().any(|n| n.is_nan()) { area } else {
                     let [x, y, w, h] = d.scissor;
                     let x0 = x.max(0.0).min(target_size[0] as f32) as u32;
@@ -425,10 +529,32 @@ impl Vulkan {
                     vk::Rect2D { offset: vk::Offset2D { x: x0 as i32, y: y0 as i32 }, extent: vk::Extent2D { width: x1 - x0, height: y1 - y0 } }
                 };
                 if scissor.extent.width == 0 || scissor.extent.height == 0 { continue; }
-                self.dev.raw.cmd_set_scissor(batch.cb, 0, &[scissor]);
-                self.dev.raw.cmd_bind_pipeline(batch.cb, vk::PipelineBindPoint::GRAPHICS, p.pipeline.raw);
-                self.dev.raw.cmd_bind_vertex_buffers(batch.cb, 0, &[p.vertex.buffer], &[0]);
-                self.dev.raw.cmd_bind_index_buffer(batch.cb, p.index.buffer, 0, if d.flags & Draw::INDEX_U32 != 0 { vk::IndexType::UINT32 } else { vk::IndexType::UINT16 });
+                if prof_key.is_some() {
+                    let program = &p.pipeline.program;
+                    records.push(gpu_prof::DrawRecord::new(s, d, view.arena, v[2], v[3], depth.is_some(), program.desc.instance_stride as u64 * 4,
+                        p.vertex.size + p.index.size, program.code.textures.len()));
+                }
+                let rect = (scissor.offset.x, scissor.offset.y, scissor.extent.width, scissor.extent.height);
+                if bound.scissor != Some(rect) {
+                    self.dev.raw.cmd_set_scissor(batch.cb, 0, &[scissor]);
+                    bound.scissor = Some(rect);
+                }
+                if bound.pipeline != p.pipeline.raw {
+                    self.dev.raw.cmd_bind_pipeline(batch.cb, vk::PipelineBindPoint::GRAPHICS, p.pipeline.raw);
+                    bound.pipeline = p.pipeline.raw;
+                    batch.pipelines.push(p.pipeline.clone());
+                }
+                if bound.vertex != p.vertex.buffer {
+                    self.dev.raw.cmd_bind_vertex_buffers(batch.cb, 0, &[p.vertex.buffer], &[0]);
+                    bound.vertex = p.vertex.buffer;
+                    batch.buffers.push(p.vertex.clone());
+                }
+                let index_type = if d.flags & Draw::INDEX_U32 != 0 { vk::IndexType::UINT32 } else { vk::IndexType::UINT16 };
+                if bound.index != (p.index.buffer, index_type) {
+                    self.dev.raw.cmd_bind_index_buffer(batch.cb, p.index.buffer, 0, index_type);
+                    bound.index = (p.index.buffer, index_type);
+                    batch.buffers.push(p.index.clone());
+                }
                 self.dev.raw.cmd_bind_descriptor_sets(batch.cb, vk::PipelineBindPoint::GRAPHICS, p.pipeline.program.layout, 0, &[p.descriptors], &[]);
                 if d.inst_ranges.len != 0 && read_pairs(view.arena, d.inst_ranges).count() != d.inst_ranges.len as usize { s.bad(); continue; }
                 let whole = (d.inst_ranges.len == 0).then_some([0, d.inst.count]);
@@ -439,6 +565,22 @@ impl Vulkan {
                 }
             }
             self.dev.raw.cmd_end_render_pass(batch.cb);
+            if let Some(q) = split_q { batch.stamp(q + 2 + 2 * runs.len() as u32 - 1); }
+            if let Some(q) = whole_q { batch.stamp(q + 1); }
+        }
+        split_runs.close(records.len() as u32);
+        if let Some(key) = prof_key {
+            let formats: Vec<(usize, u32)> = colors.iter().map(|(i, c)| (*i, c.desc.format)).collect();
+            let (attach, bytes) = prof::describe_attachments(pass, &formats, depth.as_ref().map(|d| d.desc.format), v[2] as u64 * v[3] as u64);
+            let timed = split_q.is_some() || whole_q.is_some();
+            let (pipes, session): (_, &Session) = (&self.pipe, s);
+            let sid = session.id;
+            let pi = gpu_prof::record_pass(key, session, sid, pass.name, pick, v[2] as u32, v[3] as u32, &attach, bytes, &records, timed, |pipeline| {
+                pipes.get(&(sid, pipeline.index)).map(|p| ShaderFacts { name: gpu_prof::shader_name(session, &p.desc), stats: None, source: None })
+            });
+            if let (Some(pi), Some(p)) = (pi.filter(|_| timed), batch.prof.as_mut()) {
+                p.passes.push(ProfPass { pass: pi, query: whole_q, split: split_q.map(|_| split_runs) });
+            }
         }
         for (i, color) in colors {
             if !pick && color.desc.mips > 1 { self.generate_mips(&color, pass.layer[i], batch); }
@@ -576,24 +718,29 @@ impl Vulkan {
         images: &mut Vec<(u32, vk::DescriptorType, vk::DescriptorImageInfo)>) -> Result<(), String> {
         if attachments.iter().any(|a| Arc::ptr_eq(a, &image)) { return Err("attachment feedback requires a separate pass".into()); }
         let view = image.sample_view(shape)?;
-        image.transition(batch.cb, image.sampled_layout());
+        image.to_sampled(batch.cb);
         images.push((slot, vk::DescriptorType::SAMPLED_IMAGE, vk::DescriptorImageInfo::default().image_view(view).image_layout(image.sampled_layout())));
         batch.images.push(image);
         if !id.is_none() { s.ledger.touch(Kind::Texture, id.index, id.gen, s.frame, now); }
         Ok(())
     }
 
-    fn generate_mips(&self, image: &Image, layer: u32, batch: &Batch) {
+    fn generate_mips(&self, image: &Image, layer: u32, batch: &mut Batch) {
         let features = self.dev.formats[image.desc.format as usize].optimal_tiling_features;
         let filter = if features.contains(vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR) { vk::Filter::LINEAR } else { vk::Filter::NEAREST };
-        image.transition(batch.cb, vk::ImageLayout::GENERAL);
-        for level in 1..image.desc.mips {
-            let sub = |mip| vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).mip_level(mip).base_array_layer(layer).layer_count(1);
-            let size = |mip: u32| vk::Offset3D { x: (image.desc.w >> mip).max(1) as i32, y: (image.desc.h >> mip).max(1) as i32, z: 1 };
-            let blit = vk::ImageBlit::default().src_subresource(sub(level - 1)).src_offsets([vk::Offset3D::default(), size(level - 1)])
-                .dst_subresource(sub(level)).dst_offsets([vk::Offset3D::default(), size(level)]);
-            unsafe { self.dev.raw.cmd_blit_image(batch.cb, image.image, vk::ImageLayout::GENERAL, image.image, vk::ImageLayout::GENERAL, &[blit], filter); }
+        let (w, h) = (image.desc.w, image.desc.h);
+        // every level reads the one above: about a third of level 0, read and written
+        let bytes = w as u64 * h as u64 * format::texel_bytes(image.desc.format) * 2 / 3 * 2;
+        timed_copy(batch, "mipmaps", w, h, bytes, |batch| {
             image.transition(batch.cb, vk::ImageLayout::GENERAL);
-        }
+            for level in 1..image.desc.mips {
+                let sub = |mip| vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).mip_level(mip).base_array_layer(layer).layer_count(1);
+                let size = |mip: u32| vk::Offset3D { x: (w >> mip).max(1) as i32, y: (h >> mip).max(1) as i32, z: 1 };
+                let blit = vk::ImageBlit::default().src_subresource(sub(level - 1)).src_offsets([vk::Offset3D::default(), size(level - 1)])
+                    .dst_subresource(sub(level)).dst_offsets([vk::Offset3D::default(), size(level)]);
+                unsafe { self.dev.raw.cmd_blit_image(batch.cb, image.image, vk::ImageLayout::GENERAL, image.image, vk::ImageLayout::GENERAL, &[blit], filter); }
+                image.transition(batch.cb, vk::ImageLayout::GENERAL);
+            }
+        });
     }
 }

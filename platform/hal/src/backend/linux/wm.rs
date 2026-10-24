@@ -927,7 +927,8 @@ mod tests {
         let hub = Hub::connect(port, 79, "makepad-app-game", state.clone()).unwrap();
         let mut app = App { state: state.clone(), hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, hidden: false, clip_reads: HashMap::new(),
-            next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), quit_sent: false, stopping: false };
+            next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
+            quit_sent: false, stopping: false };
         let key = (9_002, Id::new(1, 1));
         app.windows.insert(key, Win { window_id: 0, recipient: key, requested: false, awaiting: false, geom: None });
         let presenter = Presenter(state.clone());
@@ -1025,7 +1026,7 @@ mod tests {
             stream.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n").unwrap();
         });
         let state = Arc::new(State { shared: Shared::global(), inbox: Default::default(), hung_up: AtomicBool::new(false),
-            rings: Default::default(), finished: Default::default(), device: Default::default() });
+            rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
         let hub = Hub::connect(port, 80, "makepad-app-lend", state.clone()).unwrap();
         server.join().unwrap();
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),

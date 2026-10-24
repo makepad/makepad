@@ -126,6 +126,21 @@ fn image_semantics(doc: &makepad_gltf::GltfDocument) -> HashMap<usize, PixelSema
     out
 }
 
+/// The base-colour images of impostor materials (`makepadShading.impostor`,
+/// impostor.rs): an atlas of many small views, magnified about three times
+/// where the stand-in takes over, where 4x4 compression blocks of its noisy
+/// leaf texels showed as squares. They stay PNG (RGBA8 on the GPU, a few MB
+/// per species), which also spares their encode on a model's first load.
+/// Their normal atlases are smooth and compress well (two channels).
+fn impostor_color_images(doc: &makepad_gltf::GltfDocument) -> std::collections::HashSet<usize> {
+    let textures = doc.textures.as_deref().unwrap_or(&[]);
+    doc.materials.as_deref().unwrap_or(&[]).iter()
+        .filter(|m| m.extras.as_ref().and_then(|e| e.key("makepadShading")).and_then(|s| s.key("impostor"))
+            .is_some_and(|d| match d { makepad_gltf::JsonValue::F64(x) => *x > 0.0, makepad_gltf::JsonValue::U64(x) => *x > 0, makepad_gltf::JsonValue::I64(x) => *x > 0, _ => false }))
+        .filter_map(|m| m.pbr_metallic_roughness.as_ref()?.base_color_texture.as_ref())
+        .filter_map(|t| textures.get(t.index)?.source).collect()
+}
+
 /// Images sampled with NEAREST magnification anywhere in the document
 /// (pixel art: its exact colours matter and block compression softens them).
 fn nearest_images(doc: &makepad_gltf::GltfDocument) -> std::collections::HashSet<usize> {
@@ -196,12 +211,13 @@ fn load_ready_image_memo(png: &[u8], semantic: PixelSemantic, quality: makepad_t
 pub fn embed_load_ready_images(glb: &[u8], quality: makepad_texcomp::uastc::Quality, threads: usize) -> Result<Option<Vec<u8>>, String> {
     let parsed = makepad_gltf::parse_glb_bytes(glb).map_err(|e| format!("GLB: {e:?}"))?;
     let semantics = image_semantics(&parsed.document);
-    let nearest = nearest_images(&parsed.document);
+    let mut keep_png = nearest_images(&parsed.document);
+    keep_png.extend(impostor_color_images(&parsed.document));
     drop(parsed);
     let mut failure = None;
     let mut changed = false;
     let out = makepad_gltf::embed_ktx2_images(glb, |index, png| {
-        if failure.is_some() || !png.starts_with(b"\x89PNG") || nearest.contains(&index) { return None; }
+        if failure.is_some() || !png.starts_with(b"\x89PNG") || keep_png.contains(&index) { return None; }
         let semantic = semantics.get(&index).copied().unwrap_or(PixelSemantic::Color);
         match load_ready_image_memo(png, semantic, quality, threads) {
             Ok(Some(ktx)) => { changed = true; Some(ktx) }

@@ -369,6 +369,42 @@ pub struct HalInfo {
     pub max_buffer: u64,
     /// the memory the device works in, in bytes; 0 = unknown
     pub working_set: u64,
+    /// The GPU's PCI vendor id (0 = unknown; Apple GPUs report 0x106b).
+    pub vendor_id: u32,
+    /// [`device_kind`]: integrated, discrete, virtual or a software rasterizer.
+    pub device_kind: u32,
+    /// The device's name as the driver reports it, UTF-8, zero-padded (a fixed
+    /// array: this struct crosses the HAL pipe as plain data). An app picks its
+    /// graphics quality from it ([`HalInfo::device_name`]).
+    pub device_name: [u64; 8],
+}
+
+/// What kind of GPU a backend runs on (`HalInfo::device_kind`).
+pub mod device_kind {
+    pub const UNKNOWN: u32 = 0;
+    pub const INTEGRATED: u32 = 1;
+    pub const DISCRETE: u32 = 2;
+    pub const VIRTUAL: u32 = 3;
+    pub const SOFTWARE: u32 = 4;
+}
+
+impl HalInfo {
+    /// The device name (empty when the backend does not know it).
+    pub fn device_name(&self) -> String {
+        let bytes: Vec<u8> = self.device_name.iter().flat_map(|w| w.to_le_bytes()).take_while(|b| *b != 0).collect();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// Store `name`, cut at a character boundary to fit.
+    pub fn set_device_name(&mut self, name: &str) {
+        let mut end = name.len().min(63);
+        while !name.is_char_boundary(end) { end -= 1; }
+        let mut bytes = [0u8; 64];
+        bytes[..end].copy_from_slice(&name.as_bytes()[..end]);
+        for (i, w) in self.device_name.iter_mut().enumerate() {
+            *w = u64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap());
+        }
+    }
 }
 
 /// Backend ids (`OpenReq::backend`, `HalInfo::backend`).

@@ -144,6 +144,11 @@ pub struct ClusteredLights {
     /// HDR height fog (`fog_ctl`, `fog_eye`), bound with the cluster uniforms.
     pub(crate) fog_ctl: [f32; 4],
     pub(crate) fog_eye: [f32; 4],
+    /// Aerial perspective (scene_fogged): the direction toward the sun and
+    /// the forward-scatter strength; the sun's hue (unit max) and the
+    /// wavelength spread of the extinction. Zero w = plain fog.
+    pub(crate) fog_sun: [f32; 4],
+    pub(crate) fog_glow: [f32; 4],
     /// The water every lit surface below it is seen through (`uw_ctl`,
     /// `uw_rect`, `uw_color`; renderer/water.rs `water_column`).
     pub(crate) uw: [[f32; 4]; 3],
@@ -176,6 +181,8 @@ impl Default for ClusteredLights {
             lin_ctl: [0.0, 1.0, 1.0, 1.0],
             fog_ctl: [0.0; 4],
             fog_eye: [0.0; 4],
+            fog_sun: [0.0; 4],
+            fog_glow: [0.0; 4],
             uw: [[0.0; 4]; 3],
         }
     }
@@ -629,6 +636,8 @@ impl ClusteredLights {
         vars.set_uniform(cx, live_id!(lin_ctl), &self.lin_ctl);
         vars.set_uniform(cx, live_id!(fog_ctl), &self.fog_ctl);
         vars.set_uniform(cx, live_id!(fog_eye), &self.fog_eye);
+        vars.set_uniform(cx, live_id!(fog_sun), &self.fog_sun);
+        vars.set_uniform(cx, live_id!(fog_glow), &self.fog_glow);
         vars.set_uniform(cx, live_id!(uw_ctl), &self.uw[0]);
         vars.set_uniform(cx, live_id!(uw_rect), &self.uw[1]);
         vars.set_uniform(cx, live_id!(uw_color), &self.uw[2]);
@@ -712,6 +721,11 @@ script_mod! {
         // (the density). fog_eye = the true world camera.
         fog_ctl: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         fog_eye: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        // Aerial perspective over the fog above (Renderer frame setup):
+        // fog_sun = (toward the sun, forward-scatter strength), fog_glow =
+        // (the sun's hue, wavelength spread of the extinction).
+        fog_sun: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        fog_glow: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         // The water a surface below it is seen through (renderer/water.rs):
         // uw_ctl = (still level, on, clarity m, swell amplitude), uw_rect =
         // (min x, min z, max x, max z), uw_color = lit in-scatter colour.
@@ -736,7 +750,23 @@ script_mod! {
                     col = mix(c * 0.6, self.uw_color.xyz, (1.0 - t) * w)
                 }
             }
-            return mix(col, self.fog_color, self.scene_fog(legacy, wp, density))
+            let f = self.scene_fog(legacy, wp, density)
+            if self.fog_sun.w <= 0.0 || self.lin_ctl.x < 0.5 { return mix(col, self.fog_color, f) }
+            // Aerial perspective, at the cost of a few ALU per pixel: the
+            // same optical depth, but short wavelengths scatter more, so a
+            // far ridge sinks into the haze blue first and keeps its warm
+            // tones longest, and the haze toward the sun is brighter and
+            // takes the sun's hue (a cheap forward-scatter lobe, the
+            // Schlick form of Henyey-Greenstein, normalised to
+            // 1 at 90 degrees from the sun).
+            let tau = 0.0 - log(max(1.0 - f, 0.0001))
+            let spread = self.fog_glow.w
+            let t = exp(vec3(0.0 - tau * (1.0 - spread * 0.3), 0.0 - tau, 0.0 - tau * (1.0 + spread * 0.35)))
+            let mu = dot(normalize(wp - self.fog_eye.xyz), self.fog_sun.xyz)
+            let k = 0.7
+            let lobe = (1.0 - k * k) / ((1.0 - k * mu) * (1.0 - k * mu)) * (1.0 / (1.0 - k * k))
+            let inscatter = self.fog_color * (vec3(1.0, 1.0, 1.0) + self.fog_glow.xyz * (self.fog_sun.w * (lobe - 1.0)))
+            return col * t + inscatter * (vec3(1.0, 1.0, 1.0) - t)
         }
         scene_fog: fn(legacy: float, wp: vec3, density: float) -> float {
             if self.lin_ctl.x < 0.5 || self.fog_ctl.w < 0.5 { return legacy }

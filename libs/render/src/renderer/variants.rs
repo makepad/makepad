@@ -49,6 +49,8 @@ pub(super) enum ModelLane {
     Terrain = 6,
     /// GPU-skinned characters (shaders/skinned_gpu.rs).
     SkinnedGpu = 7,
+    /// Far stand-ins drawn inside the foliage lane (shaders/impostor.rs).
+    Impostor = 8,
 }
 
 /// The optional features a lane's shader keeps.
@@ -270,7 +272,7 @@ fn shader_of<T: ScriptNew + ScriptApply>(vm: &mut ScriptVm, obj: Option<ScriptOb
 
 impl ModelLane {
     fn name(self) -> &'static str {
-        ["diffuse", "PBR", "city", "foliage", "cube", "alpha", "terrain", "skinned"][self as usize]
+        ["diffuse", "PBR", "city", "foliage", "cube", "alpha", "terrain", "skinned", "impostor"][self as usize]
     }
 
     fn type_id(self) -> ScriptTypeId {
@@ -283,6 +285,7 @@ impl ModelLane {
             ModelLane::Alpha => DrawSceneAlpha::script_type_id_static(),
             ModelLane::Terrain => DrawSceneTerrain::script_type_id_static(),
             ModelLane::SkinnedGpu => DrawSceneSkinnedGpu::script_type_id_static(),
+            ModelLane::Impostor => crate::shaders::DrawSceneImpostor::script_type_id_static(),
         }
     }
 
@@ -297,6 +300,7 @@ impl ModelLane {
             ModelLane::Alpha => shader_of::<DrawSceneAlpha>(vm, obj, |d| &mut d.cube.cube.draw_vars),
             ModelLane::Terrain => shader_of::<DrawSceneTerrain>(vm, obj, |d| &mut d.draw_vars),
             ModelLane::SkinnedGpu => shader_of::<DrawSceneSkinnedGpu>(vm, obj, |d| &mut d.draw_vars),
+            ModelLane::Impostor => shader_of::<crate::shaders::DrawSceneImpostor>(vm, obj, |d| &mut d.pbr.skinned.draw_vars),
         }
     }
 }

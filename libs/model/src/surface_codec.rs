@@ -171,7 +171,9 @@ fn material_write(w: &mut Writer, m: &SurfaceMaterial) -> Result<()> {
     let rim = m.shading.is_some_and(|s| s.rim > 0.0);
     // Bit 4: a number-plate layout (only when set).
     let plate = m.shading.is_some_and(|s| s.plate > 0.0);
-    w.u8(m.double_sided as u8 | ((m.fur.is_some() as u8) << 1) | ((m.shading.is_some() as u8) << 2) | ((rim as u8) << 3) | ((plate as u8) << 4))?;
+    // Bit 5: a vehicle lamp role (only when set).
+    let lamp = m.shading.and_then(|s| s.lamp);
+    w.u8(m.double_sided as u8 | ((m.fur.is_some() as u8) << 1) | ((m.shading.is_some() as u8) << 2) | ((rim as u8) << 3) | ((plate as u8) << 4) | ((lamp.is_some() as u8) << 5))?;
     if let Some(fur) = m.fur {
         for value in [fur.length, fur.density, fur.scale] { w.f64(value)?; }
         w.u32(fur.seed)?;
@@ -180,6 +182,7 @@ fn material_write(w: &mut Writer, m: &SurfaceMaterial) -> Result<()> {
         for value in [s.wind, s.clearcoat, s.flake, s.impostor] { w.f64(value)?; }
         if rim { w.f64(s.rim)?; }
         if plate { w.f64(s.plate)?; }
+        if let Some(lamp) = lamp { w.u8(lamp_code(lamp))?; }
     }
     w.count(m.channels.len())?;
     for (ch, layers) in &m.channels {
@@ -190,6 +193,21 @@ fn material_write(w: &mut Writer, m: &SurfaceMaterial) -> Result<()> {
         }
     }
     Ok(())
+}
+fn lamp_code(lamp: makepad_gltf::GlbLamp) -> u8 {
+    match lamp {
+        makepad_gltf::GlbLamp::Tail => 0,
+        makepad_gltf::GlbLamp::Brake => 1,
+        makepad_gltf::GlbLamp::Reverse => 2,
+    }
+}
+fn lamp_from_code(code: u8) -> Result<makepad_gltf::GlbLamp> {
+    match code {
+        0 => Ok(makepad_gltf::GlbLamp::Tail),
+        1 => Ok(makepad_gltf::GlbLamp::Brake),
+        2 => Ok(makepad_gltf::GlbLamp::Reverse),
+        _ => Err(Error::Corrupt("surface lamp role")),
+    }
 }
 fn material_read(r: &mut Reader<'_>, l: &Limits) -> Result<SurfaceMaterial> {
     let base_color = read_array(r)?;
@@ -207,7 +225,7 @@ fn material_read(r: &mut Reader<'_>, l: &Limits) -> Result<SurfaceMaterial> {
     };
     let alpha_cutoff = r.f64()?;
     let flags = r.u8()?;
-    if flags > 31 || (flags & 24 != 0 && flags & 4 == 0) { return Err(Error::Corrupt("surface material flags")); }
+    if flags > 63 || (flags & 56 != 0 && flags & 4 == 0) { return Err(Error::Corrupt("surface material flags")); }
     let double_sided = flags & 1 != 0;
     let fur = if flags & 2 != 0 {
         Some(makepad_gltf::GlbFurMaterial {
@@ -218,7 +236,8 @@ fn material_read(r: &mut Reader<'_>, l: &Limits) -> Result<SurfaceMaterial> {
         let (wind, clearcoat, flake, impostor) = (r.f64()?, r.f64()?, r.f64()?, r.f64()?);
         let rim = if flags & 8 != 0 { r.f64()? } else { 0.0 };
         let plate = if flags & 16 != 0 { r.f64()? } else { 0.0 };
-        Some(makepad_gltf::GlbShading { wind, clearcoat, flake, impostor, rim, plate })
+        let lamp = if flags & 32 != 0 { Some(lamp_from_code(r.u8()?)?) } else { None };
+        Some(makepad_gltf::GlbShading { wind, clearcoat, flake, impostor, rim, plate, lamp })
     } else { None };
     let mut channels = BTreeMap::new();
     for _ in 0..r.count(5)? {
@@ -666,5 +685,17 @@ mod compatibility_tests {
         }
         let back = material_read(&mut Reader::new(&encode(&toy)), &Limits::default()).unwrap();
         assert_eq!(back.shading.unwrap().rim, 0.6);
+    }
+
+    #[test]
+    fn a_lamp_role_roundtrips_in_one_byte() {
+        let encode = |m: &SurfaceMaterial| { let mut w = Writer::new(4096); material_write(&mut w, m).unwrap(); w.bytes };
+        let plain = SurfaceMaterial { shading: Some(makepad_gltf::GlbShading::default()), ..Default::default() };
+        let tail = SurfaceMaterial { shading: Some(makepad_gltf::GlbShading { lamp: Some(makepad_gltf::GlbLamp::Reverse), ..Default::default() }), ..Default::default() };
+        let (a, b) = (encode(&plain), encode(&tail));
+        assert_eq!(b.len(), a.len() + 1);
+        let back = material_read(&mut Reader::new(&b), &Limits::default()).unwrap();
+        assert_eq!(back.shading.unwrap().lamp, Some(makepad_gltf::GlbLamp::Reverse));
+        assert_eq!(encode(&back), b);
     }
 }

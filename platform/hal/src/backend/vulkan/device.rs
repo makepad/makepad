@@ -40,6 +40,10 @@ pub struct Device {
     pub features: vk::PhysicalDeviceFeatures,
     pub formats: [vk::FormatProperties; crate::types::format::COUNT as usize],
     pub timestamp_bits: u32,
+    /// The device's timestamps can be sampled together with the host clock
+    /// (VK_KHR/EXT_calibrated_timestamps with the device and CLOCK_MONOTONIC domains): the GPU
+    /// profiler places its pass times on the HAL clock with them ([`Device::calibrate`]).
+    pub calibrated: bool,
     pub extensions: HashSet<String>,
     pub present_wait: bool,
     /// The queue of the GPU's hardware video encoder (VK_KHR_video_encode_queue + H.264), when
@@ -92,6 +96,22 @@ fn device_local_free(instance: &makepad_vulkan::Instance, physical: vk::Physical
         size += m.memory_heaps[i].size;
     }
     (size > 0).then_some((free, size))
+}
+
+/// Tells the GPU profiler what this device can time: whole render passes and copies with
+/// timestamp queries (no stage lanes), placed on the host clock by calibration where offered.
+fn report_profiling(name: &CStr, properties: &vk::PhysicalDeviceProperties, bits: u32, calibrated: bool) {
+    let period = properties.limits.timestamp_period;
+    let mut notes = vec!["render passes and copies are timed whole with timestamp queries (no vertex / fragment lanes)".to_string(),
+        "no shader cost hints: pipelines arrive as SPIR-V".to_string()];
+    if bits == 0 { notes.push("the graphics queue has no timestamps: nothing is timed".into()); }
+    if !calibrated { notes.push("no calibrated timestamps: GPU times are placed on the host clock where each frame's fence was seen (late by the completion worker's wake-up)".into()); }
+    crate::gpu_prof::set_device(crate::gpu_prof::DeviceInfo {
+        name: name.to_string_lossy().into_owned(),
+        counter_sets: vec![format!("timestamp ({bits} valid bits, {period} ns per tick)")],
+        sampling: vec!["pass boundary".into(), if calibrated { "calibrated device/host clock".into() } else { "fence-time clock anchor".into() }],
+        notes,
+    });
 }
 
 /// How long a device creation out of memory waits before it tries again.
@@ -237,6 +257,13 @@ impl Device {
         if pacing { wanted.extend([vk::KHR_PRESENT_ID_NAME, vk::KHR_PRESENT_WAIT_NAME]); }
         // the device's real budget (other processes included), for the UI's memory reserve
         if supported(vk::EXT_MEMORY_BUDGET_NAME) { wanted.push(vk::EXT_MEMORY_BUDGET_NAME); }
+        // the GPU profiler's clock: device timestamps sampled with the host's CLOCK_MONOTONIC (the
+        // HAL clock on Linux and Android); the KHR name first, the EXT one is the same functions
+        let calibration = [vk::KHR_CALIBRATED_TIMESTAMPS_NAME, vk::EXT_CALIBRATED_TIMESTAMPS_NAME].into_iter().find(|n| supported(n))
+            .filter(|_| instance.table.get_physical_device_calibrateable_time_domains_khr.is_some())
+            .filter(|_| unsafe { instance.get_physical_device_calibrateable_time_domains(physical) }
+                .is_ok_and(|d| d.contains(&vk::TimeDomainKHR::DEVICE) && d.contains(&vk::TimeDomainKHR::CLOCK_MONOTONIC)));
+        if let Some(name) = calibration { wanted.push(name); }
         // The hardware video encoder: its queue family and the four extensions it takes, when the
         // GPU has all of them (nothing else changes on a GPU without them).
         let video_names = [vk::KHR_SYNCHRONIZATION_2_NAME, vk::KHR_VIDEO_QUEUE_NAME, vk::KHR_VIDEO_ENCODE_QUEUE_NAME, vk::KHR_VIDEO_ENCODE_H264_NAME];
@@ -311,13 +338,15 @@ impl Device {
         let formats = std::array::from_fn(|f| unsafe {
             instance.get_physical_device_format_properties(physical, super::resources::vk_format(f as u32).unwrap())
         });
+        let calibrated = calibration.is_some() && raw.table.get_calibrated_timestamps_khr.is_some();
+        report_profiling(name, &properties, queue.timestamp_valid_bits, calibrated);
         let video_encode = video_family.map(|f| VideoQueue { family: f as u32, queue: unsafe { raw.get_device_queue(f as u32, 0) }, timestamp_bits: video_timestamp_bits,
             more: (1..video_count).map(|i| (unsafe { raw.get_device_queue(f as u32, i) }, Mutex::new(()))).collect(), lock: Mutex::new(()) });
         if let Some(v) = &video_encode { if log_enabled() { eprintln!("[hal-vulkan] hardware video encode queue family={}", v.family); } }
         Ok(Some(Arc::new(Self {
             queue: unsafe { raw.get_device_queue(family as u32, 0) }, queue_lock: Mutex::new(()), raw, instance: instance.clone(),
             physical, family: family as u32, properties, memory, features, formats,
-            timestamp_bits: queue.timestamp_valid_bits, extensions, present_wait: pacing, life: life.clone(),
+            timestamp_bits: queue.timestamp_valid_bits, calibrated, extensions, present_wait: pacing, life: life.clone(),
             video_encode,
             allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), budget: Mutex::new(None),
         })))
@@ -329,6 +358,17 @@ impl Device {
     }
 
     pub fn supports(&self, extension: &CStr) -> bool { self.extensions.contains(extension.to_string_lossy().as_ref()) }
+
+    /// A device timestamp and the HAL clock's ns sampled together (`None` without calibrated
+    /// timestamps): the GPU profiler's anchor for a batch's query results.
+    pub fn calibrate(&self) -> Option<(u64, u64)> {
+        if !self.calibrated { return None; }
+        let infos = [vk::CalibratedTimestampInfoKHR::default().time_domain(vk::TimeDomainKHR::DEVICE),
+            vk::CalibratedTimestampInfoKHR::default().time_domain(vk::TimeDomainKHR::CLOCK_MONOTONIC)];
+        let mut t = [0u64; 2];
+        unsafe { self.raw.get_calibrated_timestamps(&infos, &mut t) }.ok()?;
+        Some((t[0], t[1]))
+    }
 
     /// The device-local budget; `fresh` reads the driver now (after a failed allocation),
     /// otherwise a read younger than `BUDGET_REUSE` is reused. `None` without the extension.
@@ -422,7 +462,8 @@ impl Device {
         let formats = std::array::from_fn(|f| unsafe { instance.get_physical_device_format_properties(physical, super::resources::vk_format(f as u32).unwrap()) });
         Ok(Arc::new(Self { instance: instance.clone(), queue: unsafe { raw.get_device_queue(family as u32, 0) },
             raw, physical, queue_lock: Mutex::new(()), family: family as u32, properties, memory, features, formats,
-            timestamp_bits: queue.timestamp_valid_bits, extensions, present_wait: pacing, life: owner.life.clone(), video_encode: None,
+            // a display peer only scans out: the GPU profiler times the rendering device
+            timestamp_bits: queue.timestamp_valid_bits, calibrated: false, extensions, present_wait: pacing, life: owner.life.clone(), video_encode: None,
             allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), budget: Mutex::new(None) }))
     }
 }

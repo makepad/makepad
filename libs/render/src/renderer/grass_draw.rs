@@ -41,7 +41,7 @@ impl Renderer {
         if OFF.with(|o| *o) { return; }
         let Some(grass) = self.grass.as_ref() else { return };
         let mut rings = std::mem::take(&mut self.grass_rings);
-        grass.visible(eye, frustum, &mut rings);
+        grass.visible(eye, frustum, &mut rings, self.grass_radius_scale, self.grass_density);
         if rings.iter().all(Vec::is_empty) {
             self.grass_rings = rings;
             return;
@@ -66,8 +66,8 @@ impl Renderer {
             let (w, d) = (f.nx as f32 * f.cell, f.nz as f32 * f.cell);
             draw.pbr.skinned.morph_weights0 = vec4(f.origin[0], f.origin[1], 1.0 / w, 1.0 / d);
             draw.pbr.skinned.morph_weights1 = vec4(f.nx as f32, f.nz as f32, f.cell, grass.height_lo);
-            draw.pbr.skinned.morph_weights2 = vec4(b.height, b.width, b.radius, b.wind);
-            draw.pbr.skinned.morph_weights3 = vec4(b.lush[0], b.lush[1], b.lush[2], 0.0);
+            draw.pbr.skinned.morph_weights2 = vec4(b.height, b.width, b.radius * self.grass_radius_scale, b.wind);
+            draw.pbr.skinned.morph_weights3 = vec4(b.lush[0], b.lush[1], b.lush[2], self.grass_density);
             draw.pbr.skinned.morph_weights4 = vec4(b.dry[0], b.dry[1], b.dry[2], grass.height_range);
             draw.pbr.skinned.morph_weights5 = vec4(eye.x, eye.y, eye.z, self.sky_time);
             let vars = &mut draw.pbr.skinned.draw_vars;

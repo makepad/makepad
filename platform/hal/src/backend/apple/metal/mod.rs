@@ -164,7 +164,14 @@ impl Metal {
             max_window: [16384, 16384],
             max_buffer: crate::gpu_limits::max_gpu_buffer_bytes(),
             working_set: crate::gpu_limits::gpu_working_set_bytes(),
+            vendor_id: 0x106b,
+            // Apple silicon shares memory with the CPU; a Mac with a discrete
+            // card reports its own name and no unified memory.
+            device_kind: if dev.unified_memory { device_kind::INTEGRATED } else { device_kind::DISCRETE },
+            device_name: Default::default(),
         };
+        let mut info = info;
+        info.set_device_name(&dev.name);
         Some(Metal {
             dev,
             info,

@@ -1,16 +1,19 @@
-//! The AI hub as the window manager's own child. The WM starts it when it starts, from
-//! the checkout it runs from, through the shared registry launcher (`cargo run --release
-//! -p makepad-app-ai-hub`, so it never runs a hub older than its sources; an
-//! installation without sources starts the built binary), and keeps it running:
+//! The AI hub as the window manager's own child. The WM starts the built hub binary (the
+//! deploy builds it, with the settings' environment: a start takes seconds) and keeps it
+//! running:
 //!
 //! - a hub that exits on its own is started again, after a pause that doubles with each
 //!   exit in a row (2 s .. 5 min) and starts over once a hub stayed up for two minutes;
-//! - a build that fails waits for the panel's Restart (a rebuild would fail the same way);
 //! - the panel's model pick saves the choice and restarts the hub with it;
-//! - the WM's quit stops it, and so does the WM's end in any other way (the child's parent
-//!   death signal on Linux, the WM's job object on Windows). A WM restart (a switch to
-//!   another build, "Restart desktop") therefore restarts the hub too, and the chat model
-//!   loads again: about a minute for a 27B model.
+//! - a WM restart does not cost the hub (Unix). It runs outside the WM's life: its output
+//!   goes to its log file, on Linux under systemd in a scope of the user's manager (the WM's
+//!   unit stops its whole control group), and `~/.makepad/wm/ai-hub.state` names its pid and
+//!   what it was started as. The next WM keeps a live hub with the same binary and settings
+//!   (its models stay loaded, its jobs keep running); one started from another binary or
+//!   other settings is replaced.
+//! - a stop is SIGTERM: the hub closes admission ("restarting", so the fleet routes jobs to
+//!   other nodes), hands its running jobs back to their clients to reroute, and exits.
+//!   Windows: the hub ends with the WM (its job object) as before.
 //!
 //! Its settings are `~/.makepad/wm/ai-hub.conf` (`MAKEPAD_WM_AI_HUB_CONF` names another
 //! file), `key = value` lines, every key optional:
@@ -39,12 +42,10 @@
 //! `MAKEPAD_WM_AI_HUB_CONF` names its settings: test desktops must not take the GPU or the
 //! port of the real one. The hub's output goes to `~/.makepad/wm/ai-hub.log`.
 
-use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{channel, Receiver, Sender};
 
-use makepad_app_registry::{self as registry, ProcessOutput};
+use makepad_app_registry as registry;
 
 pub use crate::hub_control::{HubPhase, HubProcess};
 pub use makepad_ai_hub::activity::ComputeMode;
@@ -279,27 +280,92 @@ const LOAD_SEEN_S: f64 = 10.0;
 const STEADY_S: f64 = 120.0;
 const TAIL: usize = 24;
 
-enum Line {
-    Out(String),
-    Closed,
+/// The hub process this WM watches: its own child, or one an earlier WM started and this
+/// one adopted (`ai-hub.state`).
+enum Running {
+    Child(Child),
+    Adopted(u32),
+}
+
+impl Running {
+    fn pid(&self) -> u32 {
+        match self {
+            Running::Child(child) => child.id(),
+            Running::Adopted(pid) => *pid,
+        }
+    }
+}
+
+/// What a hub was started as: its binary (path, size, modification time) and everything the
+/// settings hand it. A WM that finds a live hub with the same identity keeps it.
+fn identity(bin: &Path, settings: &HubSettings) -> String {
+    let meta = std::fs::metadata(bin).ok();
+    let size = meta.as_ref().map_or(0, |m| m.len());
+    let modified = meta
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    format!("{} {size} {modified} nice={} args={:?} env={:?}", bin.display(), settings.nice, settings.hub_args(), settings.hub_env())
+}
+
+/// `ai-hub.state`: the pid of the hub this WM (or an earlier one) started and its identity.
+fn read_state(path: &Path) -> Option<(u32, String)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut pid = None;
+    let mut id = None;
+    for line in text.lines() {
+        match line.split_once(" = ") {
+            Some(("pid", v)) => pid = v.trim().parse().ok(),
+            Some(("identity", v)) => id = Some(v.to_string()),
+            _ => {}
+        }
+    }
+    Some((pid?, id?))
+}
+
+/// Whether `pid` is still a hub: alive, and (Linux) its command line names the hub binary, so a
+/// reused pid is never taken for it.
+fn hub_alive(pid: u32) -> bool {
+    if !makepad_app_host::launch::process_alive(pid) {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let entry = registry::find("ai-hub");
+        return std::fs::read(format!("/proc/{pid}/cmdline"))
+            .is_ok_and(|cmd| entry.is_some_and(|e| cmd.windows(e.bin.len()).any(|w| w == e.bin.as_bytes())));
+    }
+    #[cfg(not(target_os = "linux"))]
+    true
+}
+
+/// Linux under systemd: the WM's own unit stops its whole control group, so a hub that is to
+/// outlive a WM restart runs in a scope of the user's manager (`systemd-run --user --scope`,
+/// which execs it: the child's pid is the hub's).
+#[cfg(target_os = "linux")]
+fn user_scope() -> Option<PathBuf> {
+    let run = PathBuf::from("/usr/bin/systemd-run");
+    let bus = std::env::var_os("XDG_RUNTIME_DIR").map(|d| PathBuf::from(d).join("bus"));
+    (run.is_file() && bus.is_some_and(|b| b.exists())).then_some(run)
 }
 
 pub struct HubChild {
     pub settings: HubSettings,
-    child: Option<Child>,
-    lines: Option<Receiver<Line>>,
+    running: Option<Running>,
     phase: HubPhase,
-    /// Still compiling: cargo has not said `Running` yet.
-    building: bool,
-    /// The last lines of its output, for the reason of an exit.
-    tail: VecDeque<String>,
-    /// The first compiler error of a failing build.
-    diagnostic: String,
+    /// Its output's log (`~/.makepad/wm/ai-hub.log`): the reason of an exit is in its tail.
+    log: PathBuf,
+    /// `~/.makepad/wm/ai-hub.state`.
+    state: PathBuf,
     /// Exits in a row without a steady run between them.
     crashes: u32,
     restart_at: Option<f64>,
     /// Stopped on purpose: start again as soon as it is gone.
     restart_pending: bool,
+    /// The first start looks for a hub an earlier WM left running.
+    first_start: bool,
+    /// An adopted hub being replaced gets SIGKILL at this time if it is still there.
+    kill_at: Option<f64>,
     started_at: f64,
     ready_at: Option<f64>,
     /// When the chat model's load was asked for (None: not yet).
@@ -308,17 +374,18 @@ pub struct HubChild {
 
 impl HubChild {
     pub fn new(settings: HubSettings) -> HubChild {
+        let wm = crate::theme::makepad_home().join("wm");
         HubChild {
             settings,
-            child: None,
-            lines: None,
+            running: None,
             phase: HubPhase::Starting,
-            building: false,
-            tail: VecDeque::new(),
-            diagnostic: String::new(),
+            log: wm.join("ai-hub.log"),
+            state: wm.join("ai-hub.state"),
             crashes: 0,
             restart_at: Some(0.0),
             restart_pending: false,
+            first_start: true,
+            kill_at: None,
             started_at: 0.0,
             ready_at: None,
             load_sent: None,
@@ -329,43 +396,71 @@ impl HubChild {
         HubProcess { phase: self.phase.clone(), model: self.settings.model.clone() }
     }
 
-    fn log_path() -> PathBuf {
-        crate::theme::makepad_home().join("wm/ai-hub.log")
-    }
-
-    /// The command that starts it: `cargo run` from a checkout, else the built binary.
-    fn command(&self) -> Result<(Command, bool), String> {
+    /// The built hub: the deploy builds it (with the settings' environment, so its CUDA
+    /// kernels are in). Starting it takes seconds; a `cargo run` checked and relinked it for
+    /// a minute and a half on every WM start.
+    fn binary(&self) -> Result<PathBuf, String> {
         let entry = registry::find("ai-hub").ok_or("the registry has no ai-hub")?;
         let target = entry.target();
         let root = registry::repo_root();
-        let args = self.settings.hub_args();
-        let from_source = registry::builder_install().is_none() && root.as_deref().is_some_and(|r| registry::has_sources(&target, r));
-        let (program, args) = if from_source {
-            registry::run_argv(&target, root.as_deref().unwrap_or(Path::new(".")), &args)
-        } else {
-            let bin = registry::built_binary(&target, root.as_deref()).ok_or("the AI hub is not built, and there are no sources to build it from")?;
-            (bin, args)
+        let bin = match (&self.settings.target_dir, &root) {
+            (Some(dir), Some(root)) => Some(registry::checkout_binary(&target, root, Some(std::ffi::OsStr::new(dir)))),
+            _ => registry::built_binary(&target, root.as_deref()),
         };
-        let mut cmd = if cfg!(unix) && self.settings.nice > 0 {
-            let mut cmd = Command::new("nice");
-            cmd.arg("-n").arg(self.settings.nice.to_string()).arg(&program).args(&args);
-            cmd
-        } else {
-            let mut cmd = Command::new(&program);
-            cmd.args(&args);
-            cmd
-        };
-        registry::child_env::scrub(&mut cmd);
-        if from_source {
-            registry::cargo_env(&mut cmd);
+        bin.filter(|b| b.is_file())
+            .ok_or_else(|| "the AI hub is not built (the deploy builds it: cargo build --release -p makepad-app-ai-hub)".to_string())
+    }
+
+    fn command(&self, bin: &Path) -> Command {
+        let mut argv: Vec<std::ffi::OsString> = Vec::new();
+        #[cfg(target_os = "linux")]
+        if let Some(run) = user_scope() {
+            let unit = format!("makepad-ai-hub-{}-{}", self.settings.port, std::process::id());
+            argv.extend([run.into_os_string(), "--user".into(), "--scope".into(), "--quiet".into(), "--collect".into(), format!("--unit={unit}").into()]);
         }
-        if let Some(root) = &root {
+        if cfg!(unix) && self.settings.nice > 0 {
+            argv.extend(["nice".into(), "-n".into(), self.settings.nice.to_string().into()]);
+        }
+        argv.push(bin.as_os_str().to_owned());
+        argv.extend(self.settings.hub_args().into_iter().map(Into::into));
+        let mut cmd = Command::new(&argv[0]);
+        cmd.args(&argv[1..]);
+        registry::child_env::scrub(&mut cmd);
+        if let Some(root) = registry::repo_root() {
             cmd.current_dir(root);
         }
         for (k, v) in self.settings.hub_env() {
             cmd.env(k, v);
         }
-        Ok((cmd, from_source))
+        cmd
+    }
+
+    /// The first start: a live hub an earlier WM started with this identity is kept (a WM
+    /// restart no longer costs the hub, its loaded models or its running jobs). One started
+    /// from another binary or other settings is stopped, and a new one starts once it is gone.
+    fn adopt_or_replace(&mut self, now: f64, bin: &Path) -> bool {
+        let Some((pid, id)) = read_state(&self.state) else { return false };
+        if !hub_alive(pid) {
+            return false;
+        }
+        if id == identity(bin, &self.settings) {
+            makepad_widgets::log!("wm: AI hub: kept pid {pid}, started by an earlier WM with this binary and these settings");
+            self.running = Some(Running::Adopted(pid));
+            self.restart_at = None;
+            self.phase = HubPhase::Starting;
+            self.started_at = now;
+            // Its models are its own by now: no start-up load.
+            self.load_sent = Some(f64::NEG_INFINITY);
+            return true;
+        }
+        makepad_widgets::log!("wm: AI hub: pid {pid} runs another binary or other settings; replacing it");
+        #[cfg(unix)]
+        makepad_app_host::launch::signal_group(pid, false);
+        self.kill_at = Some(now + STOP_GRACE.as_secs_f64());
+        self.running = Some(Running::Adopted(pid));
+        self.restart_pending = true;
+        self.phase = HubPhase::Restarting;
+        true
     }
 
     fn spawn(&mut self, now: f64) {
@@ -373,140 +468,129 @@ impl HubChild {
         self.restart_pending = false;
         self.load_sent = None;
         self.ready_at = None;
-        self.tail.clear();
-        self.diagnostic.clear();
-        let (mut cmd, building) = match self.command() {
-            Ok(c) => c,
+        let bin = match self.binary() {
+            Ok(bin) => bin,
             Err(reason) => {
                 makepad_widgets::log!("wm: AI hub: {reason}");
-                self.phase = HubPhase::BuildFailed(reason);
+                self.phase = HubPhase::StartFailed(reason);
                 return;
             }
         };
+        if std::mem::take(&mut self.first_start) && self.adopt_or_replace(now, &bin) {
+            return;
+        }
+        let mut cmd = self.command(&bin);
         #[cfg(unix)]
         makepad_app_host::launch::own_process_group(&mut cmd);
-        #[cfg(target_os = "linux")]
-        makepad_app_host::launch::exit_with_parent(&mut cmd);
         crate::host::no_console_window(&mut cmd);
-        cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = match cmd.spawn() {
+        if let Some(dir) = self.log.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        // Its output goes to the log file, not a pipe: it outlives this WM.
+        let out = std::fs::File::create(&self.log).ok();
+        let err = out.as_ref().and_then(|f| f.try_clone().ok());
+        cmd.stdin(Stdio::null())
+            .stdout(out.map_or(Stdio::null(), Stdio::from))
+            .stderr(err.map_or(Stdio::null(), Stdio::from));
+        let child = match cmd.spawn() {
             Ok(child) => child,
             Err(e) => {
                 let reason = format!("could not start {:?}: {e}", cmd.get_program());
                 makepad_widgets::log!("wm: AI hub: {reason}");
-                self.phase = HubPhase::BuildFailed(reason);
+                self.phase = HubPhase::StartFailed(reason);
                 return;
             }
         };
+        // Windows: no re-adoption; the hub ends with the WM's job object.
         #[cfg(windows)]
         makepad_app_host::launch::exit_with_parent(&child);
+        #[cfg(unix)]
+        if let Err(e) = std::fs::write(&self.state, format!("pid = {}\nidentity = {}\n", child.id(), identity(&bin, &self.settings))) {
+            makepad_widgets::log!("wm: AI hub: {}: {e}", self.state.display());
+        }
         makepad_widgets::log!(
             "wm: AI hub: started pid {} ({}, port {}{})",
             child.id(),
-            if building { "cargo run --release -p makepad-app-ai-hub" } else { "built binary" },
+            bin.display(),
             self.settings.port,
             if self.settings.model.is_empty() { String::new() } else { format!(", model {}", self.settings.model) }
         );
-        let log = Self::log_path();
-        if let Some(dir) = log.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let log = std::fs::File::create(&log).ok();
-        let (tx, rx) = channel();
-        if let Some(out) = child.stdout.take() {
-            read_lines(out, log.as_ref().and_then(|f| f.try_clone().ok()), tx.clone());
-        }
-        if let Some(err) = child.stderr.take() {
-            read_lines(err, log, tx);
-        }
-        self.child = Some(child);
-        self.lines = Some(rx);
-        self.building = building;
-        self.phase = if building { HubPhase::Building(String::new()) } else { HubPhase::Starting };
+        self.running = Some(Running::Child(child));
+        self.phase = HubPhase::Starting;
         self.started_at = now;
     }
 
-    fn take_line(&mut self, text: String) {
-        if self.building {
-            if text.starts_with("error:") || text.starts_with("error[") || !self.diagnostic.is_empty() && self.diagnostic.lines().count() < 12 {
-                self.diagnostic.push_str(&text);
-                self.diagnostic.push('\n');
-            }
-            if text.trim_start().starts_with("Running ") {
-                self.building = false;
-                self.phase = HubPhase::Starting;
-            } else if let Some((stage, _)) = registry::cargo_progress(&text) {
-                self.phase = HubPhase::Building(stage);
-            }
-        }
-        if !text.starts_with("Building [") {
-            if self.tail.len() == TAIL {
-                self.tail.pop_front();
-            }
-            self.tail.push_back(text);
-        }
+    /// The last lines of its log.
+    fn tail(&self) -> Vec<String> {
+        let text = std::fs::read_to_string(&self.log).unwrap_or_default();
+        let lines: Vec<String> = text.lines().map(str::to_string).collect();
+        lines[lines.len().saturating_sub(TAIL)..].to_vec()
     }
 
     /// Why it ended: its exit status, with the hub's last error or panic line when it said one.
-    fn exit_reason(&self, status: std::process::ExitStatus) -> String {
-        let said = self.tail.iter().rev().find(|l| l.contains("panicked") || l.contains("error") || l.contains("Error"));
+    fn exit_reason(&self, status: &str) -> String {
+        let tail = self.tail();
+        let said = tail.iter().rev().find(|l| l.contains("panicked") || l.contains("error") || l.contains("Error"));
         match said {
             Some(line) => format!("{status}: {line}"),
-            None => format!("{status}"),
+            None => status.to_string(),
         }
     }
 
-    /// Once a second from the WM's tick: output, exit, restart, the start's progress.
+    /// Once a second from the WM's tick: exit, restart, the start's progress.
     /// `answers` = the control client reached it; `model` = the chat model's state there.
     /// True when the chat model should be asked to load now.
     pub fn tick(&mut self, now: f64, answers: bool, model: Option<crate::hub_control::ModelState>) -> bool {
         use crate::hub_control::ModelState;
-        if let Some(rx) = &self.lines {
-            let lines: Vec<Line> = rx.try_iter().collect();
-            for line in lines {
-                if let Line::Out(text) = line {
-                    self.take_line(text);
-                }
+        if let (Some(Running::Adopted(pid)), Some(at)) = (&self.running, self.kill_at) {
+            if now >= at && hub_alive(*pid) {
+                makepad_widgets::log!("wm: AI hub: pid {pid} outlived its stop; SIGKILL");
+                #[cfg(unix)]
+                makepad_app_host::launch::signal_group(*pid, true);
+                self.kill_at = None;
             }
         }
-        if let Some(child) = self.child.as_mut() {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    self.child = None;
-                    // Its last words first.
-                    if let Some(rx) = self.lines.take() {
-                        for line in rx.try_iter() {
-                            if let Line::Out(text) = line {
-                                self.take_line(text);
-                            }
-                        }
-                    }
-                    if self.restart_pending {
-                        makepad_widgets::log!("wm: AI hub stopped ({status}) for a restart");
-                        self.crashes = 0;
-                        self.spawn(now);
-                    } else if self.building {
-                        let detail = if self.diagnostic.is_empty() { self.exit_reason(status) } else { self.diagnostic.trim_end().to_string() };
-                        makepad_widgets::log!("wm: AI hub: the build failed ({status}):\n{detail}");
-                        self.phase = HubPhase::BuildFailed(detail);
-                    } else {
-                        if self.ready_at.is_some_and(|t| now - t >= STEADY_S) {
-                            self.crashes = 0;
-                        }
-                        self.crashes += 1;
-                        let wait = backoff_s(self.crashes);
-                        let reason = self.exit_reason(status);
-                        makepad_widgets::log!("wm: AI hub exited ({reason}); restart {} in {wait} s", self.crashes);
-                        self.restart_at = Some(now + wait as f64);
-                        self.phase = HubPhase::Crashed { reason, restart_in: wait };
-                    }
-                    return false;
+        let exited = match self.running.as_mut() {
+            Some(Running::Child(child)) => match child.try_wait() {
+                Ok(Some(status)) => Some(status.to_string()),
+                Ok(None) => None,
+                Err(e) => {
+                    makepad_widgets::log!("wm: AI hub: {e}");
+                    None
                 }
-                Ok(None) => {}
-                Err(e) => makepad_widgets::log!("wm: AI hub: {e}"),
+            },
+            Some(Running::Adopted(pid)) => (!hub_alive(*pid)).then(|| "exited".to_string()),
+            None => None,
+        };
+        if let Some(status) = exited {
+            let adopted = matches!(self.running, Some(Running::Adopted(_)));
+            self.running = None;
+            self.kill_at = None;
+            if self.restart_pending {
+                makepad_widgets::log!("wm: AI hub stopped ({status}) for a restart");
+                self.crashes = 0;
+                if adopted {
+                    // Not our child: gone from its command line, it may still hold its cache
+                    // lock until its own parent reaps it. The new one starts on the next tick.
+                    self.restart_pending = false;
+                    self.restart_at = Some(now + 1.0);
+                } else {
+                    self.spawn(now);
+                }
+            } else {
+                if self.ready_at.is_some_and(|t| now - t >= STEADY_S) {
+                    self.crashes = 0;
+                }
+                self.crashes += 1;
+                let wait = backoff_s(self.crashes);
+                let reason = self.exit_reason(&status);
+                makepad_widgets::log!("wm: AI hub exited ({reason}); restart {} in {wait} s", self.crashes);
+                self.restart_at = Some(now + wait as f64);
+                self.phase = HubPhase::Crashed { reason, restart_in: wait };
             }
+            return false;
         }
-        if self.child.is_none() {
+        if self.running.is_none() {
             match self.restart_at {
                 Some(at) if now >= at => self.spawn(now),
                 Some(at) => {
@@ -518,7 +602,7 @@ impl HubChild {
             }
             return false;
         }
-        if self.building || self.restart_pending {
+        if self.restart_pending {
             return false;
         }
         if !answers {
@@ -577,15 +661,31 @@ impl HubChild {
         self.phase = HubPhase::Ready;
     }
 
-    /// Stop it and start it again (with `settings` from now on). A failed build or a
+    /// SIGTERM to its process group: the hub closes admission ("restarting", so the fleet
+    /// routes elsewhere), hands its running jobs back to their clients, then exits; SIGKILL
+    /// after the grace.
+    fn stop_pid(&self, pid: u32, pool: &makepad_widgets::makepad_platform::thread::TaskPool) {
+        #[cfg(unix)]
+        makepad_app_host::launch::kill_group_pid(pid, STOP_GRACE, pool);
+        #[cfg(not(unix))]
+        let _ = (pid, pool);
+    }
+
+    /// Stop it and start it again (with `settings` from now on). A failed start or a
     /// waiting restart starts at once.
     pub fn restart(&mut self, settings: HubSettings, now: f64, pool: &makepad_widgets::makepad_platform::thread::TaskPool) {
         self.settings = settings;
         self.crashes = 0;
-        match self.child.as_mut() {
-            Some(child) => {
-                makepad_widgets::log!("wm: AI hub: restarting pid {}", child.id());
-                makepad_app_host::launch::kill_child_group(child, STOP_GRACE, pool);
+        match self.running.as_mut() {
+            Some(running) => {
+                makepad_widgets::log!("wm: AI hub: restarting pid {}", running.pid());
+                match running {
+                    Running::Child(child) => makepad_app_host::launch::kill_child_group(child, STOP_GRACE, pool),
+                    Running::Adopted(pid) => {
+                        let pid = *pid;
+                        self.stop_pid(pid, pool);
+                    }
+                }
                 self.restart_pending = true;
                 self.phase = HubPhase::Restarting;
             }
@@ -593,35 +693,36 @@ impl HubChild {
         }
     }
 
-    /// The WM quits: the hub and whatever it started (a build's rustc) end with it.
+    /// The WM quits. Unix: the hub keeps running, and the next WM keeps it. Windows: it ends
+    /// with the WM.
     pub fn stop(&mut self, pool: &makepad_widgets::makepad_platform::thread::TaskPool) {
         self.restart_at = None;
         self.restart_pending = false;
-        if let Some(child) = self.child.as_mut() {
+        let Some(running) = self.running.as_mut() else { return };
+        if cfg!(unix) {
+            makepad_widgets::log!("wm: the AI hub (pid {}) keeps running for the next WM", running.pid());
+        } else if let Running::Child(child) = running {
             makepad_widgets::log!("wm: shutdown stops the AI hub (pid {})", child.id());
             makepad_app_host::launch::kill_child_group(child, STOP_GRACE, pool);
         }
     }
 }
 
-/// From SIGTERM to SIGKILL when stopping it: the hub ends at SIGTERM; a rustc in the
-/// middle of a big crate may take a moment.
-const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
-
-fn read_lines(stream: impl std::io::Read + Send + 'static, log: Option<std::fs::File>, tx: Sender<Line>) {
-    let spawned = std::thread::Builder::new().name("wm-ai-hub-output".into()).spawn(move || {
-        registry::read_output(stream, log, |output| {
-            let line = match output {
-                ProcessOutput::Line(text) => Line::Out(text),
-                ProcessOutput::Closed => Line::Closed,
-            };
-            tx.send(line).is_ok()
-        });
-    });
-    if let Err(e) = spawned {
-        makepad_widgets::log!("wm: AI hub output: {e}");
+/// The WM's hub is off (`enabled = off`): one an earlier WM left running stops.
+pub fn stop_leftover(pool: &makepad_widgets::makepad_platform::thread::TaskPool) {
+    let state = crate::theme::makepad_home().join("wm/ai-hub.state");
+    if let Some((pid, _)) = read_state(&state).filter(|(pid, _)| hub_alive(*pid)) {
+        makepad_widgets::log!("wm: the AI hub is off: stopping pid {pid}, left by an earlier WM");
+        #[cfg(unix)]
+        makepad_app_host::launch::kill_group_pid(pid, STOP_GRACE, pool);
+        #[cfg(not(unix))]
+        let _ = pool;
     }
 }
+
+/// From SIGTERM to SIGKILL when stopping it: the hub drains (admission closed, running jobs
+/// handed back) for up to 3 s at SIGTERM, answers their status for 2 s more, then exits.
+const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(7);
 
 #[cfg(test)]
 mod tests {
@@ -675,13 +776,30 @@ mod tests {
         assert_eq!((1..=10).map(backoff_s).collect::<Vec<_>>(), [2, 4, 8, 16, 32, 64, 128, 256, 300, 300]);
     }
 
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("wm-hub-child-test-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     fn running(model: &str) -> HubChild {
         let mut h = HubChild::new(HubSettings { model: model.into(), ..Default::default() });
-        // As if spawned from a binary: the phases after the process runs.
+        let dir = scratch(model);
+        h.log = dir.join("ai-hub.log");
+        h.state = dir.join("ai-hub.state");
+        // As if spawned: the phases after the process runs.
         h.restart_at = None;
+        h.first_start = false;
         h.phase = HubPhase::Starting;
-        h.child = Some(Command::new("sleep").arg("30").spawn().unwrap());
+        h.running = Some(Running::Child(Command::new("sleep").arg("30").spawn().unwrap()));
         h
+    }
+
+    fn end(h: &mut HubChild) {
+        if let Some(Running::Child(mut c)) = h.running.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
     }
 
     #[test]
@@ -696,13 +814,13 @@ mod tests {
         assert_eq!(h.phase, HubPhase::Ready);
         assert!(!h.tick(5.0, true, Some(ModelState::Unloaded)), "a yield's unload is the hub's business");
         assert_eq!(h.phase, HubPhase::Ready);
-        let _ = h.child.take().map(|mut c| c.kill());
+        end(&mut h);
     }
 
     #[test]
     fn a_load_taken_over_by_another_job_ends_in_ready_not_loading() {
         // 149: the 27B's start-up load gave way to a music job; the model stays unloaded
-        let mut h = running("q");
+        let mut h = running("r");
         assert!(h.tick(1.0, true, Some(ModelState::Unloaded)));
         assert!(!h.tick(4.0, true, Some(ModelState::Loading)));
         assert_eq!(h.phase, HubPhase::LoadingModel);
@@ -710,43 +828,73 @@ mod tests {
         assert_eq!(h.phase, HubPhase::LoadingModel, "not yet: the hub may not have said so");
         h.tick(12.0, true, Some(ModelState::Unloaded));
         assert_eq!(h.phase, HubPhase::Ready);
-        let _ = h.child.take().map(|mut c| c.kill());
+        end(&mut h);
     }
 
     #[test]
-    fn a_build_reports_its_stage_then_runs() {
-        let mut h = running("");
-        h.building = true;
-        h.phase = HubPhase::Building(String::new());
-        h.take_line("Compiling makepad-ai-llm v0.1.0 (/x)".into());
-        assert_eq!(h.phase, HubPhase::Building("compiling makepad-ai-llm v0.1.0…".into()));
-        h.take_line("Running `target/release/makepad-app-ai-hub --port 8123`".into());
-        assert_eq!(h.phase, HubPhase::Starting);
-        h.tick(1.0, true, None);
-        assert_eq!(h.phase, HubPhase::Ready, "no model to load: ready when it answers");
-        let _ = h.child.take().map(|mut c| c.kill());
-    }
-
-    #[test]
-    fn an_exit_is_a_crash_with_its_reason_and_a_timed_restart() {
-        let mut h = running("q");
-        h.child.take().map(|mut c| c.kill());
-        h.child = Some(Command::new("cargo").arg("--no-such-hub-flag").stderr(Stdio::piped()).spawn().unwrap());
-        let (tx, rx) = channel();
-        read_lines(h.child.as_mut().unwrap().stderr.take().unwrap(), None, tx);
-        h.lines = Some(rx);
-        let _ = h.child.as_mut().unwrap().wait();
-        std::thread::sleep(std::time::Duration::from_millis(50));
+    fn an_exit_is_a_crash_with_its_reason_from_the_log_and_a_timed_restart() {
+        let mut h = running("s");
+        end(&mut h);
+        std::fs::write(&h.log, "listening\nthread 'main' panicked at server.rs:1: no such hub flag\n").unwrap();
+        let mut child = Command::new("false").spawn().unwrap();
+        let _ = child.wait();
+        h.running = Some(Running::Child(child));
         h.tick(10.0, false, None);
         match &h.phase {
             HubPhase::Crashed { reason, restart_in } => {
-                assert!(reason.contains("error") && reason.contains("--no-such-hub-flag"), "its last error: {reason}");
+                assert!(reason.contains("panicked") && reason.contains("no such hub flag"), "its last error: {reason}");
                 assert_eq!(*restart_in, 2);
             }
             other => panic!("{other:?}"),
         }
         assert_eq!(h.restart_at, Some(12.0));
         h.tick(11.0, false, None);
-        assert_eq!(h.phase.headline("q"), "Crashed, restarting in 1 s");
+        assert_eq!(h.phase.headline("s"), "Crashed, restarting in 1 s");
+    }
+
+    #[test]
+    fn the_state_file_names_the_hub_and_its_identity_follows_binary_and_settings() {
+        let dir = scratch("state");
+        let state = dir.join("ai-hub.state");
+        std::fs::write(&state, "pid = 4242\nidentity = /x/hub 10 20 nice=10 args=[] env=[]\n").unwrap();
+        assert_eq!(read_state(&state), Some((4242, "/x/hub 10 20 nice=10 args=[] env=[]".to_string())));
+        std::fs::write(&state, "pid = nope\n").unwrap();
+        assert_eq!(read_state(&state), None);
+        let bin = dir.join("hub-bin");
+        std::fs::write(&bin, b"one").unwrap();
+        let settings = HubSettings::default();
+        let first = identity(&bin, &settings);
+        assert_eq!(first, identity(&bin, &settings), "the same hub is kept");
+        let other = HubSettings { model: "qwen3.8-27b".into(), ..Default::default() };
+        assert_ne!(first, identity(&bin, &other), "other settings replace it");
+        std::fs::write(&bin, b"rebuilt").unwrap();
+        assert_ne!(first, identity(&bin, &settings), "a new build replaces it");
+        // Adoption needs a live hub: a gone pid is never taken.
+        let mut h = HubChild::new(settings);
+        h.state = state.clone();
+        std::fs::write(&state, format!("pid = {}\nidentity = {}\n", u32::MAX - 7, identity(&bin, &h.settings))).unwrap();
+        assert!(!h.adopt_or_replace(0.0, &bin));
+        assert!(h.running.is_none());
+    }
+
+    #[test]
+    fn an_adopted_hub_is_watched_by_pid_and_needs_no_start_up_load() {
+        let mut h = running("t");
+        end(&mut h);
+        let mut sleeper = Command::new("sleep").arg("30").spawn().unwrap();
+        h.running = Some(Running::Adopted(sleeper.id()));
+        h.load_sent = Some(f64::NEG_INFINITY);
+        // (hub_alive checks the command line on Linux: a sleep is not a hub, so it reads as
+        // gone there; elsewhere it is alive.)
+        let gone_here = cfg!(target_os = "linux");
+        let asked = h.tick(1.0, true, Some(ModelState::Unloaded));
+        assert!(!asked, "an adopted hub's models are its own");
+        if gone_here {
+            assert!(matches!(h.phase, HubPhase::Crashed { .. }));
+        } else {
+            assert_eq!(h.phase, HubPhase::Ready);
+        }
+        let _ = sleeper.kill();
+        let _ = sleeper.wait();
     }
 }

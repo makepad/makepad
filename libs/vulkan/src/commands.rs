@@ -103,6 +103,7 @@ pub type PfnFreeMemory = unsafe extern "system" fn(Device, DeviceMemory, *const 
 pub type PfnGetAndroidHardwareBufferPropertiesANDROID = unsafe extern "system" fn(Device, *const AHardwareBuffer, *mut AndroidHardwareBufferPropertiesANDROID) -> Result;
 pub type PfnGetBufferDeviceAddress = unsafe extern "system" fn(Device, *const BufferDeviceAddressInfo) -> DeviceAddress;
 pub type PfnGetBufferMemoryRequirements = unsafe extern "system" fn(Device, Buffer, *mut MemoryRequirements) -> ();
+pub type PfnGetCalibratedTimestampsKHR = unsafe extern "system" fn(Device, u32, *const CalibratedTimestampInfoKHR, *mut u64, *mut u64) -> Result;
 pub type PfnGetDeviceProcAddr = unsafe extern "system" fn(Device, *const core::ffi::c_char) -> PfnVoidFunction;
 pub type PfnGetDeviceQueue = unsafe extern "system" fn(Device, u32, u32, *mut Queue) -> ();
 pub type PfnGetDisplayModePropertiesKHR = unsafe extern "system" fn(PhysicalDevice, DisplayKHR, *mut u32, *mut DisplayModePropertiesKHR) -> Result;
@@ -117,6 +118,7 @@ pub type PfnGetImageSubresourceLayout = unsafe extern "system" fn(Device, Image,
 pub type PfnGetInstanceProcAddr = unsafe extern "system" fn(Instance, *const core::ffi::c_char) -> PfnVoidFunction;
 pub type PfnGetMemoryFdKHR = unsafe extern "system" fn(Device, *const MemoryGetFdInfoKHR, *mut i32) -> Result;
 pub type PfnGetMemoryFdPropertiesKHR = unsafe extern "system" fn(Device, ExternalMemoryHandleTypeFlags, i32, *mut MemoryFdPropertiesKHR) -> Result;
+pub type PfnGetPhysicalDeviceCalibrateableTimeDomainsKHR = unsafe extern "system" fn(PhysicalDevice, *mut u32, *mut TimeDomainKHR) -> Result;
 pub type PfnGetPhysicalDeviceCooperativeMatrixPropertiesKHR = unsafe extern "system" fn(PhysicalDevice, *mut u32, *mut CooperativeMatrixPropertiesKHR) -> Result;
 pub type PfnGetPhysicalDeviceDisplayPlanePropertiesKHR = unsafe extern "system" fn(PhysicalDevice, *mut u32, *mut DisplayPlanePropertiesKHR) -> Result;
 pub type PfnGetPhysicalDeviceDisplayPropertiesKHR = unsafe extern "system" fn(PhysicalDevice, *mut u32, *mut DisplayPropertiesKHR) -> Result;
@@ -196,6 +198,7 @@ pub struct InstanceTable {
     pub get_display_plane_capabilities_khr: Option<PfnGetDisplayPlaneCapabilitiesKHR>,
     pub get_display_plane_supported_displays_khr: Option<PfnGetDisplayPlaneSupportedDisplaysKHR>,
     pub get_drm_display_ext: Option<PfnGetDrmDisplayEXT>,
+    pub get_physical_device_calibrateable_time_domains_khr: Option<PfnGetPhysicalDeviceCalibrateableTimeDomainsKHR>,
     pub get_physical_device_cooperative_matrix_properties_khr: Option<PfnGetPhysicalDeviceCooperativeMatrixPropertiesKHR>,
     pub get_physical_device_display_plane_properties_khr: Option<PfnGetPhysicalDeviceDisplayPlanePropertiesKHR>,
     pub get_physical_device_display_properties_khr: Option<PfnGetPhysicalDeviceDisplayPropertiesKHR>,
@@ -241,6 +244,7 @@ impl InstanceTable { pub unsafe fn load(handle: Instance, get: PfnGetInstancePro
         get_display_plane_capabilities_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnGetDisplayPlaneCapabilitiesKHR>>(lookup(c"vkGetDisplayPlaneCapabilitiesKHR")),
         get_display_plane_supported_displays_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnGetDisplayPlaneSupportedDisplaysKHR>>(lookup(c"vkGetDisplayPlaneSupportedDisplaysKHR")),
         get_drm_display_ext: core::mem::transmute::<PfnVoidFunction, Option<PfnGetDrmDisplayEXT>>(lookup(c"vkGetDrmDisplayEXT")),
+        get_physical_device_calibrateable_time_domains_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnGetPhysicalDeviceCalibrateableTimeDomainsKHR>>(lookup(c"vkGetPhysicalDeviceCalibrateableTimeDomainsKHR").or_else(|| lookup(c"vkGetPhysicalDeviceCalibrateableTimeDomainsEXT"))),
         get_physical_device_cooperative_matrix_properties_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnGetPhysicalDeviceCooperativeMatrixPropertiesKHR>>(lookup(c"vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR")),
         get_physical_device_display_plane_properties_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnGetPhysicalDeviceDisplayPlanePropertiesKHR>>(lookup(c"vkGetPhysicalDeviceDisplayPlanePropertiesKHR")),
         get_physical_device_display_properties_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnGetPhysicalDeviceDisplayPropertiesKHR>>(lookup(c"vkGetPhysicalDeviceDisplayPropertiesKHR")),
@@ -356,6 +360,7 @@ pub struct DeviceTable {
     pub get_android_hardware_buffer_properties_android: Option<PfnGetAndroidHardwareBufferPropertiesANDROID>,
     pub get_buffer_device_address: Option<PfnGetBufferDeviceAddress>,
     pub get_buffer_memory_requirements: Option<PfnGetBufferMemoryRequirements>,
+    pub get_calibrated_timestamps_khr: Option<PfnGetCalibratedTimestampsKHR>,
     pub get_device_queue: Option<PfnGetDeviceQueue>,
     pub get_encoded_video_session_parameters_khr: Option<PfnGetEncodedVideoSessionParametersKHR>,
     pub get_fence_status: Option<PfnGetFenceStatus>,
@@ -475,6 +480,7 @@ impl DeviceTable { pub unsafe fn load(handle: Device, get: PfnGetDeviceProcAddr)
         get_android_hardware_buffer_properties_android: core::mem::transmute::<PfnVoidFunction, Option<PfnGetAndroidHardwareBufferPropertiesANDROID>>(lookup(c"vkGetAndroidHardwareBufferPropertiesANDROID")),
         get_buffer_device_address: core::mem::transmute::<PfnVoidFunction, Option<PfnGetBufferDeviceAddress>>(lookup(c"vkGetBufferDeviceAddress").or_else(|| lookup(c"vkGetBufferDeviceAddressEXT")).or_else(|| lookup(c"vkGetBufferDeviceAddressKHR"))),
         get_buffer_memory_requirements: core::mem::transmute::<PfnVoidFunction, Option<PfnGetBufferMemoryRequirements>>(lookup(c"vkGetBufferMemoryRequirements")),
+        get_calibrated_timestamps_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnGetCalibratedTimestampsKHR>>(lookup(c"vkGetCalibratedTimestampsKHR").or_else(|| lookup(c"vkGetCalibratedTimestampsEXT"))),
         get_device_queue: core::mem::transmute::<PfnVoidFunction, Option<PfnGetDeviceQueue>>(lookup(c"vkGetDeviceQueue")),
         get_encoded_video_session_parameters_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnGetEncodedVideoSessionParametersKHR>>(lookup(c"vkGetEncodedVideoSessionParametersKHR")),
         get_fence_status: core::mem::transmute::<PfnVoidFunction, Option<PfnGetFenceStatus>>(lookup(c"vkGetFenceStatus")),
@@ -1393,6 +1399,15 @@ impl crate::Device {
 }
 impl crate::Device {
     #[inline]
+    pub unsafe fn get_calibrated_timestamps(&self, timestamp_infos: &[CalibratedTimestampInfoKHR], timestamps: &mut [u64]) -> std::result::Result<u64, Result> {
+        let call = self.table.get_calibrated_timestamps_khr.expect("vkGetCalibratedTimestampsKHR is unavailable");
+        let mut value: u64 = u64::default();
+        call(self.handle, timestamp_infos.len() as _, timestamp_infos.as_ptr(), timestamps.as_mut_ptr(), &mut value).result()?;
+        Ok(value)
+    }
+}
+impl crate::Device {
+    #[inline]
     pub unsafe fn get_device_queue(&self, queue_family_index: u32, queue_index: u32) -> Queue {
         let call = self.table.get_device_queue.expect("vkGetDeviceQueue is unavailable");
         let mut value: Queue = Queue::default();
@@ -1517,6 +1532,23 @@ impl crate::Device {
         let call = self.table.get_memory_fd_properties_khr.expect("vkGetMemoryFdPropertiesKHR is unavailable");
         call(self.handle, handle_type, fd, memory_fd_properties).result()?;
         Ok(())
+    }
+}
+impl crate::Instance {
+    #[inline]
+    pub unsafe fn get_physical_device_calibrateable_time_domains(&self, physical_device: PhysicalDevice) -> std::result::Result<Vec<TimeDomainKHR>, Result> {
+        let call = self.table.get_physical_device_calibrateable_time_domains_khr.expect("vkGetPhysicalDeviceCalibrateableTimeDomainsKHR is unavailable");
+        loop {
+            let mut count: u32 = 0;
+            call(physical_device, &mut count, core::ptr::null_mut()).result()?;
+            let mut values: Vec<TimeDomainKHR> = Vec::with_capacity(count as usize);
+            values.resize(count as usize, TimeDomainKHR::default());
+            let code = call(physical_device, &mut count, values.as_mut_ptr());
+            if code == Result::INCOMPLETE { continue; }
+            code.result()?;
+            values.truncate(count as usize);
+            return Ok(values);
+        }
     }
 }
 impl crate::Instance {

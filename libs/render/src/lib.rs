@@ -46,6 +46,7 @@ pub mod shaders;
 pub mod skin;
 pub mod stage;
 pub mod particles;
+pub mod quality_tier;
 pub mod play;
 pub mod preview;
 pub mod shadow;

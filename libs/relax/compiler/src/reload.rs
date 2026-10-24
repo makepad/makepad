@@ -3294,9 +3294,15 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             rebind_code.push((*o, c.clone()));
         }
     }
-    // a layout-changing patch: the program threads stand still while it installs, so their stacks
-    // show every frame in code it replaces (invalid::hold_old_frames, after the install)
-    let paused = !saved_adts.is_empty() && crate::inspect::instrument::pause_for_patch();
+    // An enum layout edit (variants added): code built before it can meet a variant it does not
+    // know (a match falls through), so it never runs again. A struct edit (M10) does not change
+    // the running layout -- its first fields stay where they are and added fields live in the
+    // extension block -- so code built before it stays valid for every value and its frames run on
+    // (a hold there stopped every loop that holds such a struct: the UI thread). The program
+    // threads stand still while an enum edit installs, so their stacks show every frame in code it
+    // replaces (invalid::hold_old_frames, after the install).
+    let breaking: Vec<DefId> = saved_adts.iter().filter(|(_, old)| old.is_enum).map(|(d, _)| *d).collect();
+    let paused = !breaking.is_empty() && crate::inspect::instrument::pause_for_patch();
     for (id, r) in pre {
         match r {
             Ok(c) => {
@@ -3333,15 +3339,16 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         if out.names.len() > 4 { shown.push(".."); }
         crate::invalid::patch_event(gen, format!("gen {}: {} fn(s) [{}]{}", gen, out.names.len(), shown.join(", "), if layout_names.is_empty() { String::new() } else { format!("; layout of {}", layout_names.join(", ")) }));
     }
-    // a layout-changing patch: the earlier patch versions of the slots it rebuilt were built for the
-    // old fields or variants and never run again (invalid.rs; a slot's first code shares pages with
+    // an enum layout patch: the earlier patch versions of the slots it rebuilt were built for the
+    // old variants and never run again (invalid.rs; a slot's first code shares pages with
     // other code and is not invalidated: only frames live at the patch can still reach it, and their
     // threads are held for good, found in the stacks captured while the program is paused)
-    if !layout_names.is_empty() {
+    if !breaking.is_empty() {
+        let breaking_names: Vec<String> = breaking.iter().map(|d| def_name(&u.prog, *d)).collect();
         let rebuilt: std::collections::HashSet<u32> = u.patch_log.iter().filter(|(_, g)| *g == gen).map(|(id, _)| *id).collect();
-        let why = format!("layout-changing patch gen {} (fields or variants of {}) replaced it: code built for the old layout never runs again", gen, layout_names.join(", "));
+        let why = format!("layout-changing patch gen {} (variants of {}) replaced it: code built for the old layout never runs again", gen, breaking_names.join(", "));
         crate::invalid::invalidate(u, |g| matches!(g, crate::invalid::Group::Patch { slot, gen: g0 } if g0 < gen && rebuilt.contains(&slot)), gen, "invalidated code", None, &why);
-        let held = crate::invalid::hold_old_frames(u, gen, &layout_names.join(", "), paused);
+        let held = crate::invalid::hold_old_frames(u, gen, &breaking_names.join(", "), paused);
         if held > 0 {
             out.lines.push(format!("held: {} thread(s) with a frame in the first-version code of a rebuilt fn (makepad inspect {} stale; resume restart | stop)", held, std::process::id()));
         }
@@ -3690,6 +3697,24 @@ fn note_restart_pending(why: &str) {
 }
 
 /// The edits that wait for a relaunch, oldest first (cleared by a relaunch).
+/// `session relaunch`: applies the edits waiting for a restart. A hosted app relaunches its domain
+/// (window kept); a directly running program that restarts itself (std::relax::restart_supported)
+/// is asked to, at its next safe point, carrying its state over. Returns how.
+pub fn relaunch_pending() -> Result<&'static str, String> {
+    if crate::run::app_domain().is_some() {
+        crate::run::relaunch()?;
+        return Ok("domain relaunch");
+    }
+    if !RESTART_SUPPORTED.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("no hosted app domain, and the program does not restart itself (std::relax::restart_supported): stop and start it".into());
+    }
+    let why = RESTART_PENDING.lock().unwrap_or_else(|e| e.into_inner()).join("; ");
+    *RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()) = why;
+    RESTART_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+    wake_program();
+    Ok("program restart with state")
+}
+
 pub fn restart_pending() -> Vec<String> {
     RESTART_PENDING.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }

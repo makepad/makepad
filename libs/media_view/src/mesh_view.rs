@@ -1069,6 +1069,7 @@ impl MeshView {
                 depth_order: 0.0,
                 custom_material: None,
                 part_poses: Vec::new(),
+                lamps: Default::default(),
             });
         }
     }
@@ -1550,6 +1551,7 @@ impl MeshView {
                         depth_order: 0.0,
                         custom_material: None,
                         part_poses: Vec::new(),
+                        lamps: Default::default(),
                     });
                     self.status = format!("{triangles} tris{ao_note} · CSM · WASD walk, drag look");
                 } else {
@@ -1572,6 +1574,7 @@ impl MeshView {
                         depth_order: 0.0,
                         custom_material: None,
                         part_poses: Vec::new(),
+                        lamps: Default::default(),
                     });
                     self.status =
                         format!("{triangles} tris, fit scale {scale:.2}{ao_note} · CSM");

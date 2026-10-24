@@ -417,6 +417,19 @@ impl ModelDraw<'_> {
         }
     }
 
+    /// Light a signal lamp layer (a material with a lamp role) from the
+    /// copy's vehicle signals: `set_material` bound the lamp fully lit, and
+    /// this scales it to what the lamp shows now. Other layers keep theirs.
+    pub(super) fn light_lamp(&mut self, cx: &Cx, m: &LayerMaterial, lamps: makepad_scene::light::LampSignals, lamp_level: f32) {
+        let Some(surface) = m.surface.as_ref() else { return };
+        let Some(role) = surface.definition.lamp else { return };
+        if let Some(d) = self.pbr() {
+            let gain = crate::material_surface::lamp_gain(role, lamps, lamp_level);
+            let e = surface.definition.emissive;
+            d.skinned.draw_vars.set_uniform(cx, live_id!(emissive), &[e[0] * gain, e[1] * gain, e[2] * gain]);
+        }
+    }
+
     /// Bind one layer's metallic-roughness. A no-op on the diffuse lane,
     /// which has no such lanes to bind — that is the whole reason the two
     /// shaders are siblings.

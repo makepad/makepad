@@ -153,9 +153,10 @@ pub struct ReadySong {
 pub enum AiCommand {
     /// Write and render the next song. `epoch` is the shared epoch when the
     /// command was sent: a later Cancel or Restart cancels it.
-    /// `id` names this song's events; `language`: the one to translate the
-    /// lyrics into ([`LANGUAGES`]).
-    Next { id: u64, request: String, model: String, minutes: u32, language: String, epoch: u64 },
+    /// Write and render one song per id, written in ONE writer turn and then
+    /// rendered in parallel. Each `id` names its song's events; `language`:
+    /// the one to translate the lyrics into ([`LANGUAGES`]).
+    Next { ids: Vec<u64>, request: String, model: String, minutes: u32, language: String, epoch: u64 },
     /// Keep the current conversation aside and start a fresh one.
     NewConversation,
     /// List the fleet's music models.
@@ -279,6 +280,28 @@ pub fn parse_song(answer: &str, model: &str) -> Result<SongPrompt, String> {
     let start = answer.find('{').ok_or("the writer's answer has no JSON object")?;
     let end = first_object_end(answer, start).ok_or("the writer's answer has no complete JSON object")?;
     let value = json::parse(answer[start..=end].as_bytes()).map_err(|e| format!("the writer's answer is not JSON: {e}"))?;
+    song_from(&value, model)
+}
+
+/// The songs in a writer's answer to a turn that asked for `count`: a JSON
+/// array of song objects (or, for one song, the object alone).
+pub fn parse_songs(answer: &str, model: &str, count: usize) -> Result<Vec<SongPrompt>, String> {
+    let array = answer.find('[').filter(|a| answer.find('{').is_none_or(|o| *a < o));
+    let Some(start) = array else {
+        return parse_song(answer, model).map(|song| vec![song]);
+    };
+    let end = answer.rfind(']').ok_or("the writer's answer has no complete JSON array")?;
+    let value = json::parse(answer[start..=end].as_bytes()).map_err(|e| format!("the writer's answer is not JSON: {e}"))?;
+    let json::Value::Arr(items) = value else { return Err("the writer's answer is not a JSON array".into()) };
+    let songs = items.iter().map(|item| song_from(item, model)).collect::<Result<Vec<_>, _>>()?;
+    if songs.is_empty() || songs.len() < count {
+        return Err(format!("the writer wrote {} of the {count} songs asked for", songs.len()));
+    }
+    Ok(songs.into_iter().take(count).collect())
+}
+
+/// One song object of the writer's answer.
+fn song_from(value: &json::Value, model: &str) -> Result<SongPrompt, String> {
     let text = |key: &str| value.get(key).and_then(|v| v.as_str()).map(|s| s.trim().to_string());
     let number = |key: &str| match value.get(key) {
         Some(json::Value::Int(i)) => Some(*i as f64),
@@ -391,7 +414,8 @@ impl Session {
         }
         let fold = self.turns.len() - KEEP_RECENT;
         let folded: Vec<Turn> = self.turns.drain(..fold).collect();
-        let answers = folded.iter().filter(|t| t.role == "assistant").count();
+        // An answer holds one song, or several (an array): one "title" each.
+        let answers: usize = folded.iter().filter(|t| t.role == "assistant").map(|t| t.text.matches("\"title\"").count().max(1)).sum();
         let already = self.summary.lines().filter(|l| l.starts_with(|c: char| c.is_ascii_digit())).count();
         if self.summary.is_empty() {
             self.summary.push_str("Songs so far:\n");
@@ -440,10 +464,11 @@ fn first_chorus_line(lyrics: &str) -> String {
 }
 
 /// The writer's next user turn.
-pub fn next_turn(request: &str, model: &str, minutes: u32, language: &str) -> String {
+pub fn next_turn(request: &str, model: &str, minutes: u32, language: &str, count: usize) -> String {
     let unit = if minutes == 1 { "minute" } else { "minutes" };
     let language = if language == NO_TRANSLATION || language.is_empty() { "none".to_string() } else { language.to_string() };
-    format!("Music model: {model}\nSong length: about {minutes} {unit}\nTranslation language: {language}\nMy request: {}\nWrite the next song.", request.trim())
+    let ask = if count <= 1 { "Write the next song.".to_string() } else { format!("Write the next {count} songs, each clearly different, as a JSON array of {count} song objects.") };
+    format!("Music model: {model}\nSong length: about {minutes} {unit}\nTranslation language: {language}\nMy request: {}\n{ask}", request.trim())
 }
 
 // ---- the worker ------------------------------------------------------------
@@ -503,29 +528,39 @@ pub fn run(rx: Receiver<AiCommand>, epoch: Arc<AtomicU64>, tx: SyncSender<Messag
                 send(&tx, Message::AiMusic(AiEvent::Conversation(String::new())));
                 send(&tx, Message::AiMusic(AiEvent::Songs(Vec::new())));
             }
-            Some(AiCommand::Next { id, request, model, minutes, language, epoch: at }) => {
+            Some(AiCommand::Next { ids, request, model, minutes, language, epoch: at }) => {
                 save_settings(&dir, &request, &model, minutes, &language);
                 let shared = epoch.clone();
                 let cancelled = move || shared.load(Ordering::SeqCst) != at;
-                let job = Job { epoch: at, id, tx: tx.clone() };
-                let (index, song) = match write_song_text(&mut session, &dir, &request, &model, minutes, &language, &job, &cancelled) {
+                let jobs: Vec<Job> = ids.iter().map(|&id| Job { epoch: at, id, tx: tx.clone() }).collect();
+                let written = match write_songs_text(&mut session, &dir, &request, &model, minutes, &language, &jobs, &cancelled) {
                     Ok(written) => written,
                     Err(error) => {
-                        job.finish(Err(error));
+                        for job in &jobs {
+                            job.finish(Err(match &error {
+                                GenerateError::Unavailable(e) => GenerateError::Unavailable(e.clone()),
+                                GenerateError::Failed(e) => GenerateError::Failed(e.clone()),
+                                GenerateError::Cancelled => GenerateError::Cancelled,
+                            }));
+                        }
                         continue;
                     }
                 };
-                let made_tx = made_tx.clone();
-                let started = std::thread::Builder::new().name("ai-music-render".into()).spawn(move || {
-                    let fleet = Arc::new(FleetRouter { installed_only: true });
-                    let result = render_song(song, minutes, &job, &cancelled, fleet);
-                    if let Ok(ready) = &result {
-                        let _ = made_tx.send(Made { generation, index, song: ready.song.clone() });
+                // Each song on its own thread: the fleet router puts them on
+                // different GPUs.
+                for (job, (index, song)) in jobs.into_iter().zip(written) {
+                    let (made_tx, cancelled, id) = (made_tx.clone(), cancelled.clone(), job.id);
+                    let started = std::thread::Builder::new().name("ai-music-render".into()).spawn(move || {
+                        let fleet = Arc::new(FleetRouter { installed_only: true });
+                        let result = render_song(song, minutes, &job, &cancelled, fleet);
+                        if let Ok(ready) = &result {
+                            let _ = made_tx.send(Made { generation, index, song: ready.song.clone() });
+                        }
+                        job.finish(result);
+                    });
+                    if let Err(error) = started {
+                        send(&tx, Message::AiMusic(AiEvent::Failed { epoch: at, id, error: format!("cannot start the render: {error}") }));
                     }
-                    job.finish(result);
-                });
-                if let Err(error) = started {
-                    send(&tx, Message::AiMusic(AiEvent::Failed { epoch: at, id, error: format!("cannot start the render: {error}") }));
                 }
             }
         }
@@ -594,26 +629,30 @@ fn save_settings(dir: &Path, request: &str, model: &str, minutes: u32, language:
     }
 }
 
-/// The writer's next song, added to the conversation: its index there and
-/// the song.
-fn write_song_text(
+/// The writer's next songs (one per job), written in ONE turn and added to
+/// the conversation: each one's index there and the song.
+fn write_songs_text(
     session: &mut Session,
     dir: &Path,
     request: &str,
     model: &str,
     minutes: u32,
     language: &str,
-    job: &Job,
+    jobs: &[Job],
     cancelled: &dyn Fn() -> bool,
-) -> Result<(usize, SongPrompt), GenerateError> {
-    job.stage("writing", 0);
+) -> Result<Vec<(usize, SongPrompt)>, GenerateError> {
+    for job in jobs {
+        job.stage("writing", 0);
+    }
     let system = writer_system(model).map_err(GenerateError::Failed)?;
     if session.compact(COMPACT_AT) > 0 {
         session.save(dir);
     }
-    let turn = next_turn(request, model, minutes, language);
+    let turn = next_turn(request, model, minutes, language, jobs.len());
     let writer = writer_hub().map_err(GenerateError::Unavailable)?;
-    job.at(format!("Claude Code on {}", node_name(&writer)));
+    for job in jobs {
+        job.at(format!("Claude Code on {}", node_name(&writer)));
+    }
     let ask = GenerateRequestJson {
         model: WRITER_MODEL.to_string(),
         domain: Some("chat".to_string()),
@@ -637,23 +676,30 @@ fn write_song_text(
         .clone()
         .or_else(|| answer.artifacts.iter().find(|a| a.content_type.starts_with("text/")).map(|a| String::from_utf8_lossy(&a.bytes).into_owned()))
         .ok_or_else(|| GenerateError::Failed("the writer answered nothing".into()))?;
-    let mut song = parse_song(&text, model).map_err(GenerateError::Failed)?;
-    // A translation is in the asked language; one equal to the lyrics is none.
-    if song.translation.as_deref().is_some_and(|t| t.trim() == song.lyrics.trim()) || language == NO_TRANSLATION {
-        song.translation = None;
+    let mut songs = parse_songs(&text, model, jobs.len()).map_err(GenerateError::Failed)?;
+    for song in &mut songs {
+        // A translation is in the asked language; one equal to the lyrics is none.
+        if song.translation.as_deref().is_some_and(|t| t.trim() == song.lyrics.trim()) || language == NO_TRANSLATION {
+            song.translation = None;
+        }
+        // The language asked for (none: translation off), kept also when the
+        // lyrics were in it already.
+        song.language = Some(language.to_string()).filter(|l| l != NO_TRANSLATION && !l.is_empty());
     }
-    // The language asked for (none: translation off), kept also when the
-    // lyrics were in it already.
-    song.language = Some(language.to_string()).filter(|l| l != NO_TRANSLATION && !l.is_empty());
     session.turns.push(Turn { role: "user".into(), text: turn });
     session.turns.push(Turn { role: "assistant".into(), text: text.trim().to_string() });
-    session.songs.push(song.clone());
+    let first = session.songs.len();
+    session.songs.extend(songs.iter().cloned());
     session.save(dir);
-    let index = session.songs.len() - 1;
-    job.send(AiEvent::Conversation(session.render()));
-    job.send(AiEvent::Songs(session.songs.clone()));
-    job.send(AiEvent::Song { epoch: job.epoch, id: job.id, index, song: song.clone() });
-    Ok((index, song))
+    if let Some(job) = jobs.first() {
+        job.send(AiEvent::Conversation(session.render()));
+        job.send(AiEvent::Songs(session.songs.clone()));
+    }
+    let written: Vec<(usize, SongPrompt)> = songs.into_iter().enumerate().map(|(n, song)| (first + n, song)).collect();
+    for (job, (index, song)) in jobs.iter().zip(&written) {
+        job.send(AiEvent::Song { epoch: job.epoch, id: job.id, index: *index, song: song.clone() });
+    }
+    Ok(written)
 }
 
 /// Render the written song and file it. `route` is the hub's fleet router
@@ -897,8 +943,7 @@ impl Making {
     pub fn step(&self) -> String {
         let who = if self.at_work.is_empty() { String::new() } else { format!(" · {}", self.at_work) };
         match self.stage.as_str() {
-            "" => "Waiting for the writer (it writes one song at a time)".to_string(),
-            "writing" => format!("Writing the song{who}"),
+            "" | "writing" => format!("Writing the song{who}"),
             "queued" => format!("Waiting for a GPU{who}"),
             "saving" => "Saving to the AI music playlist".to_string(),
             stage => {
@@ -1078,6 +1123,17 @@ mod tests {
     }
 
     #[test]
+    fn one_turn_writes_several_songs() {
+        let two = "[{\"title\":\"A\",\"prompt\":\"French, jazz\",\"lyrics\":\"[Verse]\\nla\"},{\"title\":\"B\",\"prompt\":\"English, pop\"}]";
+        let songs = parse_songs(two, "yue2-3b", 2).unwrap();
+        assert_eq!(songs.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(), ["A", "B"]);
+        assert!(parse_songs(two, "yue2-3b", 3).is_err(), "fewer songs than asked");
+        let one = parse_songs("{\"title\":\"C\",\"prompt\":\"EDM\"}", "yue2-3b", 1).unwrap();
+        assert_eq!(one[0].title, "C");
+        assert!(next_turn("x", "yue2-3b", 1, "English", 2).contains("JSON array of 2 song objects"));
+    }
+
+    #[test]
     fn answers_need_title_and_prompt() {
         assert!(parse_song("sure!", "yue2-3b").is_err());
         assert!(parse_song("{\"prompt\":\"x\"}", "yue2-3b").is_err());
@@ -1145,7 +1201,7 @@ mod tests {
         for n in 0..2 {
             let request = if n == 0 { asked.clone() } else { format!("{asked}, a wide variety: something very different from the last song") };
             let job = Job { epoch: 0, id: n, tx: tx.clone() };
-            let (_, written) = write_song_text(&mut session, &dir, &request, &model, minutes, &language, &job, &|| false).unwrap_or_else(|e| panic!("{e}"));
+            let (_, written) = write_songs_text(&mut session, &dir, &request, &model, minutes, &language, std::slice::from_ref(&job), &|| false).unwrap_or_else(|e| panic!("{e}")).remove(0);
             let route: Arc<dyn GenRouter> = match std::env::var("AMP_AI_LIVE_NODE") {
                 Ok(node) => Arc::new(FixedRouter(node)),
                 Err(_) => Arc::new(FleetRouter { installed_only: true }),

@@ -143,6 +143,20 @@ impl Image {
             vk::DependencyFlags::empty(), &[], &[], &[barrier]); }
     }
 
+    /// Readies the image for a draw that samples it. A barrier is recorded only when its layout
+    /// changes (or another queue family owns it): every write to an image (render pass,
+    /// copy, mip chain) leaves it in its sampled layout through a barrier of its own, which
+    /// already orders the reads that follow on this queue; a read after a read needs none. A
+    /// barrier per sampled texture per draw was a full pipeline drain for each one (a scene of
+    /// 470 draws recorded 8418 of them: 20 ms in vkQueueSubmit on NVIDIA, and GPU stalls).
+    pub(super) fn to_sampled(&self, cb: vk::CommandBuffer) {
+        let to = self.sampled_layout();
+        if *lock(&self.layout) == to && !self.external_owner.load(Ordering::Acquire) {
+            return;
+        }
+        self.transition(cb, to);
+    }
+
     pub(super) fn supports_transfer(&self) -> bool {
         #[cfg(target_os = "linux")]
         if self.external.as_ref().and_then(|e| e.downcast_ref::<super::NativeHandle>()).is_some_and(|n| n.sample_only) {

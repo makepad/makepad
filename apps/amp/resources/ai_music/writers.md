@@ -23,6 +23,9 @@ song only.
 Rules for every answer:
 - Answer with exactly one JSON object and nothing else: no Markdown fence,
   no preamble, no explanation. Its keys are given in the model section below.
+- When the message asks for several songs ("Write the next 2 songs"),
+  answer with a JSON array of that many song objects instead, each clearly
+  different from the others and from earlier songs.
 - "title": a short original song title (2 to 6 words). It names the track in
   the listener's library.
 - Size the song to the length the message asks for ("Song length: about
@@ -52,7 +55,7 @@ Rules for every answer:
   "Translation language: none", and for a song without lyrics.
 - A message that starts with "Songs so far:" summarizes earlier songs of this
   conversation that were compacted; treat them as already written.
-- Keep the whole JSON under 5,000 bytes.
+- Keep each song object under 5,000 bytes.
 
 ## model: yue2-3b
 The model is YuE2-3B. It writes its own score (melody and chords, as ABC

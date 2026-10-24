@@ -236,10 +236,13 @@ impl GrassGpu {
 
     /// Patch origins to draw this frame, by ring: (x, z) of each patch's
     /// corner. The frustum and emptiness tests are all the CPU does.
-    pub fn visible(&self, eye: Vec3f, frustum: Option<&crate::renderer::Frustum>, out: &mut [Vec<(f32, f32)>; 3]) {
+    /// The patches in reach of `eye`, by ring. The quality tier scales the
+    /// reach (`radius_scale`) and thins the blades (`density`: the sparser
+    /// rings start closer in, and the shader keeps that fraction).
+    pub fn visible(&self, eye: Vec3f, frustum: Option<&crate::renderer::Frustum>, out: &mut [Vec<(f32, f32)>; 3], radius_scale: f32, density: f32) {
         for ring in out.iter_mut() { ring.clear(); }
         let f = &self.field;
-        let radius = f.blades.radius.max(PATCH);
+        let radius = (f.blades.radius * radius_scale).max(PATCH);
         let span = PATCH;
         let (x0, z0) = (((eye.x - radius - f.origin[0]) / span).floor().max(0.0) as usize, ((eye.z - radius - f.origin[1]) / span).floor().max(0.0) as usize);
         let (x1, z1) = ((((eye.x + radius - f.origin[0]) / span).ceil().max(0.0)) as usize, (((eye.z + radius - f.origin[1]) / span).ceil().max(0.0)) as usize);
@@ -257,7 +260,7 @@ impl GrassGpu {
                 if let Some(fr) = frustum {
                     if !fr.intersects_aabb(vec3f(x, lo - 0.2, z), vec3f(x + span, hi + height, z + span)) { continue; }
                 }
-                let ring = if d < radius * 0.3 { 0 } else if d < radius * 0.6 { 1 } else { 2 };
+                let ring = if d < radius * 0.3 * density { 0 } else if d < radius * 0.6 * density { 1 } else { 2 };
                 out[ring].push((x, z));
             }
         }

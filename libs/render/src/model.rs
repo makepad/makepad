@@ -1710,6 +1710,7 @@ pub(crate) fn gltf_material_surface(json:&Val,bin:&[u8],index:usize)->Option<cra
         wind:term("wind"),clearcoat:term("clearcoat"),flake:term("flake"),rim:term("rim"),
         impostor:value(shading,"impostor",0.0).max(0.0),
         plate:value(shading,"plate",0.0)>0.5,
+        lamp:shading.and_then(|s|s.get("lamp")).and_then(Val::str).and_then(makepad_gltf::GlbLamp::from_name),
         fur,
         normal_png:image("normalTexture"),normal_scale:value(material.get("normalTexture"),"scale",1.0),
         occlusion_png:image("occlusionTexture"),occlusion_strength:value(material.get("occlusionTexture"),"strength",1.0),
@@ -2902,7 +2903,8 @@ fn plain_surface_signature(json: &Val, bin: &[u8], index: usize) -> Option<Vec<u
     let material = json.get("materials")?.idx(index)?;
     let textured = material.get("pbrMetallicRoughness").is_some_and(|p| p.get("baseColorTexture").is_some() || p.get("metallicRoughnessTexture").is_some())
         || material.get("extras").is_some_and(|e| e.get("makepadMips").is_some());
-    if textured || s.fur.is_some() || s.normal_png.is_some() || s.occlusion_png.is_some() || s.emissive_png.is_some() || s.impostor > 0.0 || s.plate {
+    // A lamp keeps its own layer too: its emission changes per copy.
+    if textured || s.fur.is_some() || s.normal_png.is_some() || s.occlusion_png.is_some() || s.emissive_png.is_some() || s.impostor > 0.0 || s.plate || s.lamp.is_some() {
         return None;
     }
     let factor = |key: &str| material.get("pbrMetallicRoughness").and_then(|p| p.get(key)).and_then(Val::f64).unwrap_or(1.0) as f32;

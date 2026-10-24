@@ -102,6 +102,8 @@ pub struct Device {
     /// a GPU fault)
     pub fallback: ObjcId,
     pub name: String,
+    /// The GPU shares memory with the CPU (Apple silicon).
+    pub unified_memory: bool,
     /// highest command buffer sequence number that COMPLETED; the one queue executes buffers in
     /// enqueue order, so completion of N implies everything below it
     pub completed: Arc<AtomicU64>,
@@ -138,6 +140,10 @@ impl Device {
             return None;
         }
         let name = nsstring_to_string(unsafe { msg_send![device, name] });
+        let unified_memory: bool = unsafe {
+            let available: bool = msg_send![device, respondsToSelector: sel!(hasUnifiedMemory)];
+            available && msg_send![device, hasUnifiedMemory]
+        };
         let recommended: u64 = unsafe {
             let available: bool = msg_send![device, respondsToSelector: sel!(recommendedMaxWorkingSetSize)];
             if available {
@@ -197,6 +203,7 @@ impl Device {
             queue,
             fallback,
             name,
+            unified_memory,
             completed,
             seq: 0,
             mailbox,

@@ -1,4 +1,5 @@
-// Not Copy, named fields, the app's own crate: a field edit applies live (M10), a layout patch.
+// Not Copy, named fields, the app's own crate: a field edit applies live (M10) and keeps the
+// running layout (no hold, no invalidation).
 pub struct State {
     pub a: u64,
 }
@@ -7,6 +8,17 @@ impl State {
     pub fn new() -> State {
         State { a: 1 }
     }
+}
+
+/// The layout edits add a variant to it (M10: variants added at the end apply in place): code built
+/// before such an edit can meet a variant it does not know, so it never runs again.
+pub enum Mode {
+    A,
+}
+
+#[inline(never)]
+pub fn mode(_n: u64) -> Mode {
+    Mode::A
 }
 
 /// The worker's state, made here: the worker's loop holds only a reference (no State on its frame,

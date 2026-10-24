@@ -5,7 +5,7 @@ usage: run.py --makepad <makepad binary>   (MAKEPAD_RUN_STD in the environment)
 
 Copies pkg/ to a temporary dir, runs it live with MAKEPAD_RUN_STALE_PARK=1 and edits src/work.rs:
   1. body edit (patch gen 1): step() now calls park_here -> the worker blocks inside gen 1's step
-  2. layout edit (gen 2): State gets a field   -> gen 1's step is invalidated (PROT_NONE) while the
+  2. layout edit (gen 2): Mode gets a variant  -> gen 1's step is invalidated (PROT_NONE) while the
                                                  worker's frame is in it; `stale` lists the range
   3. free the worker                            -> it returns into invalidated code: parked, the app
                                                  pauses; `stale` says RETURNED, the layout patch,
@@ -100,12 +100,14 @@ try:
     step("body edit applies; the worker blocks inside the patched step", wait(lambda: since(out, n_out, r"^out parked \d+$") and since(err, n_err, "patched")))
     # 2. gen 2: a layout edit replaces it while the worker's frame is in it
     n_err = len(err)
-    layout = gen1.replace("    pub a: u64,\n", "    pub a: u64,\n    pub b: u64,\n").replace("State { a: 1 }", "State { a: 1, b: 0 }")
+    layout = gen1.replace("    A,\n}", "    A,\n    B,\n}")
     layout = layout.replace("""    let g = crate::park_here(n);
     s.a = s.a.wrapping_add(g & 1);
-    20""", """    s.b = s.b.wrapping_add(1);
-    s.a = s.a.wrapping_add(n & 1);
-    30""")
+    20""", """    s.a = s.a.wrapping_add(n & 1);
+    match mode(n) {
+        Mode::A => 30,
+        Mode::B => 31,
+    }""")
     save(layout)
     ok = wait(lambda: since(err, n_err, "patched"))
     told = inspect("stale")
@@ -132,12 +134,14 @@ try:
     step("resume restart: the process starts again on the current source", ok and "process restart" in r, r + "\n".join(err[n_err:][-20:]))
     # 5. SPEC-V: an edit the borrow checker rejects after it ran, the worker blocked inside it
     n_out, n_err = len(out), len(err)
-    rejected = layout.replace("""    s.b = s.b.wrapping_add(1);
-    s.a = s.a.wrapping_add(n & 1);
-    30""", """    let g = crate::park_here(n + 1000000);
+    rejected = layout.replace("""    s.a = s.a.wrapping_add(n & 1);
+    match mode(n) {
+        Mode::A => 30,
+        Mode::B => 31,
+    }""", """    let g = crate::park_here(n + 1000000);
     let mut v = vec![s.a, g];
     let r = &v[0];
-    v.push(s.b);
+    v.push(s.a);
     *r + 40""")
     save(rejected)
     ok = wait(lambda: since(out, n_out, r"^out parked 1\d{6}$") and since(err, n_err, "REVERTED"), 60)
@@ -165,10 +169,12 @@ try:
     step("hold0: the worker blocks inside step's first version (gen 0)", wait(lambda: since(out, n_out, r"^out parked \d+$")))
     # 9. a layout edit replaces it while the worker's frame is in it: held at the patch
     n_err = len(err)
-    layout0 = base.replace("    pub a: u64,\n", "    pub a: u64,\n    pub b: u64,\n").replace("State { a: 1 }", "State { a: 1, b: 0 }").replace("""    s.a = s.a.wrapping_add(n & 1);
-    10""", """    s.b = s.b.wrapping_add(1);
-    s.a = s.a.wrapping_add(n & 1);
-    30""")
+    layout0 = base.replace("    A,\n}", "    A,\n    B,\n}").replace("""    s.a = s.a.wrapping_add(n & 1);
+    10""", """    s.a = s.a.wrapping_add(n & 1);
+    match mode(n) {
+        Mode::A => 30,
+        Mode::B => 31,
+    }""")
     save(layout0)
     ok = wait(lambda: parked_id(n_err) is not None, 60)
     pid3 = parked_id(n_err)

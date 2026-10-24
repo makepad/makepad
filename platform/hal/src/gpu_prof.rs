@@ -10,18 +10,29 @@
 //! (the baseline). They only give each shader's SHARE of its pass; absolute pass and frame times
 //! come from the normal frames (the queries leave split frames out of every time statistic).
 //!
+//! Backends: Metal (counter sample buffers, backend/apple/metal) and Vulkan (timestamp queries,
+//! backend/vulkan/prof.rs; an encoder there is a render pass or a copy, a split run a render
+//! pass of its own on the same framebuffer). What they record alike lives here: shader names,
+//! split runs ([`SplitRuns`]), draw records ([`DrawRecord`]) and the pass record ([`record_pass`]).
+//!
 //! Commands: `gpu prof start|stop|status` here, the queries in `makepad_gpu_trace::query`.
 
 use makepad_gpu_trace::query::{self, Answer, Args};
 use makepad_gpu_trace::{CpuSpan, Draw, Frame, Group, Header, Interner, Pass, Recording};
+use crate::buffers::{id_at, read_pairs};
+use crate::ledger::Kind;
+use crate::session::Session;
+use crate::types::{Draw as CmdDraw, Id, PipelineDesc, StrId};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use makepad_relax_api::relax_api;
 
 static REC: AtomicBool = AtomicBool::new(false);
 
-/// A recording runs: backends time every encoder and call the hooks below.
-#[inline]
+/// A recording runs: backends time every encoder and call the hooks below. The app's frame
+/// builder asks it once per frame (it names every draw's owner while a recording runs).
+#[relax_api]
 pub fn recording() -> bool {
     REC.load(Ordering::Relaxed)
 }
@@ -458,6 +469,181 @@ pub fn shown(key: FrameKey, ns: u64) {
 /// (seq, frame id) of recently closed frames, for display times that arrive after the frame
 /// joined the ring.
 static SHOWN_IDS: Mutex<VecDeque<(u64, u64)>> = Mutex::new(VecDeque::new());
+
+// ------------------------------------------------------------------ what every backend records alike
+
+/// A pipeline as the GPU profiler names it: its debug name, else its source location and Cx
+/// shader index (`file.rs:line#index`), else the index.
+pub fn shader_name(s: &Session, desc: &PipelineDesc) -> String {
+    if let Some(n) = s.string(desc.name).filter(|n| !n.is_empty()) {
+        return n.to_string();
+    }
+    if let Some(src) = s.string(desc.source).filter(|n| !n.is_empty()) {
+        // path/to/file.rs:12:5 -> file.rs:12
+        let file = src.rsplit('/').next().unwrap_or(src);
+        let mut parts = file.splitn(3, ':');
+        // shaders that inherit one base (every DrawQuad) share its location: the Cx shader
+        // index tells them apart
+        return match (parts.next(), parts.next()) {
+            (Some(f), Some(l)) => format!("{f}:{l}#{}", desc.shader),
+            _ => format!("{file}#{}", desc.shader),
+        };
+    }
+    format!("shader#{}", desc.shader)
+}
+
+/// The draws that start a run of draws of one pipeline, when frame `key` is a split frame and
+/// the pass has more than one run (a pass of one run is timed whole); empty otherwise.
+pub fn split_runs<T>(key: Option<FrameKey>, pick: bool, draws: &[T], pipeline: impl Fn(&T) -> Id) -> Vec<usize> {
+    if !key.is_some_and(|k| k.split) || pick {
+        return Vec::new();
+    }
+    let mut v = vec![0];
+    v.extend((1..draws.len()).filter(|i| pipeline(&draws[*i]) != pipeline(&draws[*i - 1])));
+    if v.len() > 1 { v } else { Vec::new() }
+}
+
+/// The runs of a split pass while it encodes, and their times once it ran. `S` is the backend's
+/// handle of a run's timestamps (a sample group, a query pair).
+pub struct SplitRuns<S> {
+    /// the empty pass with the same attachments
+    pub baseline: Option<S>,
+    /// (shader, timestamps, first recorded draw, recorded draws) per run
+    pub groups: Vec<(String, S, u32, u32)>,
+}
+
+impl<S: Copy> Default for SplitRuns<S> {
+    fn default() -> Self {
+        SplitRuns { baseline: None, groups: Vec::new() }
+    }
+}
+
+impl<S: Copy> SplitRuns<S> {
+    /// A run of `shader` begins with `recorded` draws recorded so far in the pass.
+    pub fn run(&mut self, shader: String, sample: S, recorded: u32) {
+        self.close(recorded);
+        self.groups.push((shader, sample, recorded, 0));
+    }
+
+    /// The current run ends with `recorded` draws recorded so far in the pass.
+    pub fn close(&mut self, recorded: u32) {
+        if let Some(last) = self.groups.last_mut() {
+            last.3 = recorded.saturating_sub(last.2);
+        }
+    }
+
+    /// The pass's GPU facts from its runs: each run's own time, the baseline's, and (when the
+    /// pass has no time of its own) its span from the first run's start to the last one's end.
+    /// `span` answers a run's (start, end) in host ns.
+    pub fn result(&self, g: &mut PassGpu, span: impl Fn(S) -> Option<(u64, u64)>) {
+        g.baseline = self.baseline.and_then(&span).map_or(0, |(a, b)| b.saturating_sub(a));
+        let (mut lo, mut hi) = (u64::MAX, 0u64);
+        for (shader, sample, first, count) in &self.groups {
+            if let Some((a, b)) = span(*sample) {
+                g.groups.push((shader.clone(), b.saturating_sub(a), *first, *count));
+                lo = lo.min(a);
+                hi = hi.max(b);
+            }
+        }
+        if g.end == 0 && hi > lo {
+            (g.start, g.end) = (lo, hi);
+        }
+    }
+}
+
+/// One draw as a pass records it while it encodes; the pass writes them with itself at its end
+/// ([`record_pass`]).
+pub struct DrawRecord {
+    pub pipeline: Id,
+    pub owner: StrId,
+    pub list_name: StrId,
+    pub list: u32,
+    pub counts: DrawCounts,
+}
+
+impl DrawRecord {
+    /// Draw `d` of a pass with a `vw` x `vh` viewport: `stride` instance bytes, `geo` vertex and
+    /// index buffer bytes, `textures` the slots its pipeline samples, `depth` whether the pass
+    /// has a depth target.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(s: &Session, d: &CmdDraw, arena: &[u8], vw: f32, vh: f32, depth: bool, stride: u64, geo: u64, textures: usize) -> Self {
+        let whole = (read_pairs(arena, d.inst_ranges).next().is_none()).then_some([0u32, d.inst.count]);
+        let instances: u64 = whole.into_iter().chain(read_pairs(arena, d.inst_ranges)).map(|[a, n]| (n as u64).min((d.inst.count as u64).saturating_sub(a as u64))).sum();
+        let (mut tex_bytes, mut bound) = (0u64, 0u32);
+        for i in 0..textures {
+            let id = id_at(arena, d.tex, i);
+            if let Some(l) = (!id.is_none()).then(|| s.ledger.get(Kind::Texture, id.index)).flatten() {
+                tex_bytes += l.bytes;
+                bound += 1;
+            }
+        }
+        let [bx, by, bw, bh] = d.bounds;
+        let area = if [bx, by, bw, bh].iter().any(|v| v.is_nan()) || bw <= 0.0 || bh <= 0.0 {
+            0
+        } else {
+            let (x0, y0) = (bx.max(0.0), by.max(0.0));
+            let (x1, y1) = ((bx + bw).min(vw), (by + bh).min(vh));
+            ((x1 - x0).max(0.0) * (y1 - y0).max(0.0)) as u64
+        };
+        use makepad_gpu_trace::draw_flags as df;
+        let flags = if d.flags & CmdDraw::BLEND != 0 { df::BLEND } else { 0 }
+            | if d.flags & CmdDraw::DEPTH_WRITE != 0 && depth { df::DEPTH_WRITE } else { 0 }
+            | if d.flags & CmdDraw::CULL != 0 { df::CULL } else { 0 }
+            | if depth { df::DEPTH_TEST } else { 0 };
+        let counts = DrawCounts { instances: instances as u32, indices: d.index[1], geo_bytes: geo + instances * stride, tex_bytes, textures: bound, area, flags };
+        DrawRecord { pipeline: d.pipeline, owner: d.owner, list_name: d.list_name, list: d.list, counts }
+    }
+}
+
+/// What the profiler keeps of a pipeline the first time a recording sees it: its name, the cost
+/// hints of its generated source, and the source when sources are kept.
+pub struct ShaderFacts {
+    pub name: String,
+    pub stats: Option<std::sync::Arc<str>>,
+    pub source: Option<std::sync::Arc<str>>,
+}
+
+/// A render pass of frame `key` encoded: the pass (`name` with `pick ` before a pick replay's)
+/// and its draws join the frame; `timed`: its GPU result follows through [`gpu_pass`]. `shader`
+/// describes a pipeline the recording has not named yet. The pass's index in the frame.
+#[allow(clippy::too_many_arguments)]
+pub fn record_pass(key: FrameKey, s: &Session, sid: u32, name: StrId, pick: bool, w: u32, h: u32, attach: &str, bytes: u64, draws: &[DrawRecord], timed: bool, shader: impl Fn(Id) -> Option<ShaderFacts>) -> Option<u16> {
+    let mut name = s.string(name).filter(|n| !n.is_empty()).unwrap_or("main").to_string();
+    if pick {
+        name.insert_str(0, "pick ");
+    }
+    with_frame(key, |b| {
+        let pi = b.pass(&name, makepad_gpu_trace::kind::RENDER, w, h, attach, bytes);
+        for r in draws {
+            let pipe = (sid, 0, r.pipeline.index as u64 | (r.pipeline.gen as u64) << 32);
+            let id = if b.knows(pipe) {
+                b.cached(pipe, String::new)
+            } else {
+                let facts = shader(r.pipeline);
+                let id = b.cached(pipe, || facts.as_ref().map_or_else(|| "?".to_string(), |f| f.name.clone()));
+                if let Some(f) = facts {
+                    if let Some(stats) = &f.stats {
+                        b.set_shader_info(id, stats);
+                    }
+                    if let Some(src) = f.source {
+                        b.set_shader_source(id, src);
+                    }
+                }
+                id
+            };
+            let owner = b.cached((sid, 1, r.owner as u64), || s.string(r.owner).unwrap_or("").to_string());
+            // a list without a debug name is named by its Cx id (drill down with the ledger)
+            let list = if r.list_name != 0 {
+                b.cached((sid, 1, r.list_name as u64), || s.string(r.list_name).unwrap_or("").to_string())
+            } else {
+                b.cached((sid, 2, r.list as u64), || format!("list#{}", r.list))
+            };
+            b.draw(pi, id, owner, list, r.counts);
+        }
+        if timed { b.expect(1) } else { b.untimed(1) }
+        pi
+    })
+}
 
 // ------------------------------------------------------------------ shader cost hints
 
