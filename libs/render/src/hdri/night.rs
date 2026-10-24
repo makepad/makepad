@@ -1292,26 +1292,36 @@ mod tests {
     }
 
     /// Plan hdri-7 §3 ("they fade with ... the moon like the Milky Way"): through the light the moon puts in the air, a
-    /// full moon 8 degrees above a glowing cloud takes its contrast over the sky down more than five times (the Milky Way's
-    /// test, `the_moon_washes_the_milky_way_out`, on a nebula).
+    /// full moon 8 degrees above a glowing cloud takes its contrast over the sky down more than five times, and more near
+    /// the moon than far from it (the Milky Way's test, `the_moon_washes_the_milky_way_out`, on two nebulas): the far cloud
+    /// stands more than 60 degrees off and at least as high, so its moonless glow is no brighter, and a moon that lit the
+    /// sky evenly would wash it out at least as much as the near one.
     #[test]
     fn the_moon_washes_the_nebulas_out() {
         for seed in 1..=32u32 {
             let neb = NebulaParams { amount: 1.0, seed, ..NebulaParams::default() };
             let dark = night_at(&NightParams { moon: false, nebulas: Some(neb.clone()), ..Default::default() }, -30.0);
             let n = dark.nebulas.as_ref().unwrap();
-            let glowing = n.centres().into_iter().map(|(c, _)| c).find(|c| luminance(n.at(*c, 0.0).0) > 0.0 && (0.3..0.8).contains(&dark.to_world(*c).y));
-            let Some(c) = glowing else { continue };
-            let w = dark.to_world(c);
-            let (az, el) = crate::hdri::az_el_from_dir(w);
+            let glowing: Vec<Vec3f> = n.centres().into_iter().map(|(c, _)| dark.to_world(c)).filter(|w| luminance(n.at(dark.to_star(*w), 0.0).0) > 0.0 && w.y > 0.3).collect();
+            let pair = glowing.iter().filter(|w| w.y < 0.8).find_map(|&near| {
+                let far = glowing.iter().filter(|f| f.y >= near.y && f.dot(near) < 0.5).min_by(|a, b| a.dot(near).total_cmp(&b.dot(near)))?;
+                Some((near, *far))
+            });
+            let Some((near, far)) = pair else { continue };
+            let (az, el) = crate::hdri::az_el_from_dir(near);
             let p = NightParams { moon: true, moon_azimuth_deg: az, moon_elevation_deg: (el + 8.0).min(85.0), nebulas: Some(neb), ..Default::default() };
             let lit = NightSky::new(&p, 7, dir_from_az_el(az + 180.0, -30.0), 22.0, 45.0);
-            let contrast = |sky: &NightSky| luminance(sky.nebulas.as_ref().unwrap().at(sky.to_star(w), 0.0).0) / luminance(sky.glow(w));
-            let (c_dark, c_lit) = (contrast(&dark), contrast(&lit));
-            println!("seed {seed}: a nebula's contrast near the moon: moonless {c_dark:.3}, full moon {c_lit:.4}");
+            let contrast = |sky: &NightSky, w: Vec3f| luminance(sky.nebulas.as_ref().unwrap().at(sky.to_star(w), 0.0).0) / luminance(sky.glow(w));
+            let (c_dark, c_lit) = (contrast(&dark, near), contrast(&lit, near));
+            let (c_far_dark, c_far) = (contrast(&dark, far), contrast(&lit, far));
+            println!(
+                "seed {seed}: a nebula's contrast near the moon: moonless {c_dark:.3}, full moon {c_lit:.4}; {:.0} degrees off: moonless {c_far_dark:.3}, full moon {c_far:.4}",
+                far.dot(near).clamp(-1.0, 1.0).acos().to_degrees()
+            );
             assert!(c_dark > 5.0 * c_lit, "the moon takes {c_dark} only to {c_lit}");
+            assert!(c_lit / c_dark < c_far / c_far_dark, "more near the moon: x{} of the moonless contrast, against x{} far from it", c_lit / c_dark, c_far / c_far_dark);
             return;
         }
-        panic!("the premise: a glowing cloud well up among 32 seeds");
+        panic!("the premise: a glowing cloud well up, and a second one far off and as high, among 32 seeds");
     }
 }
