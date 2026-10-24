@@ -10,6 +10,9 @@
 //! screen = primary        # the screen a viewer that names none gets: primary or a connector name
 //! kbps = 0                # stream rate, 0 = by picture size
 //! fps = 60                # the rate the encoder plans for
+//! split = tiles           # a GPU with several encode engines: tiles (each picture in bands, one
+//!                         # per engine, at once: the lowest latency), interleave (whole pictures,
+//!                         # the engines in turn: the most pictures per second) or off
 //! fleet_dir =             # where fleet.key / revoked are; default: the AI hub's <cache_dir>/fleet
 //! dump =                  # <file>[,<pictures>]: a check of the encoder without the network: the
 //!                         # first pictures (default 600) go to an Annex-B file (no socket opens)
@@ -21,6 +24,17 @@
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
+/// How the streams of a GPU with several encode engines share the pictures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Split {
+    /// One stream (one engine).
+    Off,
+    /// Each picture in bands, one per engine, encoded at once.
+    Tiles,
+    /// Whole pictures, the engines in turn.
+    Interleave,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeskLinkSettings {
     pub enabled: bool,
@@ -29,6 +43,7 @@ pub struct DeskLinkSettings {
     pub screen: String,
     pub kbps: u32,
     pub fps: u32,
+    pub split: Split,
     pub fleet_dir: Option<PathBuf>,
     /// The only peers served (`allow_peers`).
     pub allow_peers: Vec<IpAddr>,
@@ -44,6 +59,7 @@ impl Default for DeskLinkSettings {
             screen: "primary".into(),
             kbps: 0,
             fps: 60,
+            split: Split::Tiles,
             fleet_dir: None,
             allow_peers: Vec::new(),
             dump: None,
@@ -95,6 +111,12 @@ impl DeskLinkSettings {
                 }
                 "kbps" => value.parse().map(|k| s.kbps = k).is_ok(),
                 "fps" => value.parse::<u32>().ok().filter(|f| (1..=240).contains(f)).map(|f| s.fps = f).is_some(),
+                "split" => match value {
+                    "tiles" => { s.split = Split::Tiles; true }
+                    "interleave" => { s.split = Split::Interleave; true }
+                    "off" => { s.split = Split::Off; true }
+                    _ => false,
+                },
                 "allow_peers" => {
                     let mut ok = true;
                     s.allow_peers = value

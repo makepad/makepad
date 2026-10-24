@@ -52,6 +52,9 @@ mod widgets;
 mod worker;
 // The AI stylist and the style manager.
 mod ai;
+mod ai_music;
+mod ai_strip;
+use crate::ai_music::AiMode;
 mod ai_schema;
 mod theme_manager;
 
@@ -513,6 +516,50 @@ script_mod! {
                                         flow: Down
                                         spacing: 4
                                         padding: Inset{left: 10 right: 8 top: 12 bottom: 10}
+                                        // AI music (ai_strip.rs): the prompt, one status
+                                        // line, and the songs' prompts and the writer's
+                                        // conversation behind the chevron.
+                                        ai_strip := View{
+                                            width: Fill
+                                            height: Fit
+                                            flow: Down
+                                            spacing: 4
+                                            margin: Inset{bottom: 6}
+                                            ai_prompt := mod.widgets.HwTextInput{
+                                                width: Fill
+                                                height: 30
+                                                text: "EDM christmas music"
+                                                empty_text: "AI music: what to hear"
+                                            }
+                                            View{
+                                                width: Fill
+                                                height: Fit
+                                                flow: Right
+                                                spacing: 4
+                                                align: Align{y: 0.5}
+                                                ai_on_cap := mod.widgets.HwKey{width: Fit height: 28 inset: 3 padding: Inset{left: 10 right: 10} draw_bg +: {has_led: 1.0}
+                                                    ai_on := mod.widgets.HwKeyText{text: "AI" width: Fit draw_text +: {text_style: theme.font_bold{font_size: 10.5}}}
+                                                }
+                                                ai_model := mod.widgets.HwDropDown{width: 120 height: 26 labels: ["yue2-3b"]}
+                                                ai_status := mod.widgets.HwPanelText{width: Fill max_lines: 1 text_overflow: TextOverflow.Ellipsis text: "AI music off"}
+                                                ai_cancel_cap := mod.widgets.HwKey{width: 28 height: 28 inset: 3 ai_cancel := mod.widgets.HwKeyButton{text: "\u{f00d}"}}
+                                                ai_restart_cap := mod.widgets.HwKey{width: 28 height: 28 inset: 3 ai_restart := mod.widgets.HwKeyButton{text: "\u{f01e}"}}
+                                                ai_more_cap := mod.widgets.HwKey{width: 28 height: 28 inset: 3 ai_more := mod.widgets.HwKeyButton{text: "\u{f078}"}}
+                                            }
+                                            ai_details := View{
+                                                visible: false
+                                                width: Fill
+                                                height: Fit
+                                                flow: Down
+                                                spacing: 6
+                                                ai_note := mod.widgets.HwPanelText{width: Fill text: ""}
+                                                ai_songs := mod.widgets.HwPanelText{width: Fill max_lines: 14 text_overflow: TextOverflow.Ellipsis text: ""}
+                                                ai_conversation := mod.widgets.HwPanelText{width: Fill max_lines: 16 text_overflow: TextOverflow.Ellipsis text: ""}
+                                                ai_new_cap := mod.widgets.HwKey{width: Fit height: 26 inset: 3 padding: Inset{left: 10 right: 10}
+                                                    ai_new := mod.widgets.HwKeyText{text: "New conversation" width: Fit}
+                                                }
+                                            }
+                                        }
                                         search := mod.widgets.HwTextInput{
                                             width: Fill
                                             height: 30
@@ -998,6 +1045,12 @@ pub struct App {
     model: Model,
     #[rust]
     workers: Option<Workers>,
+    /// AI music (`ai_music.rs`, `ai_strip.rs`).
+    #[rust]
+    ai: AiMode,
+    /// The model picker shows `ai.models`.
+    #[rust]
+    ai_models_shown: bool,
     #[rust]
     art: Art,
     /// Waits for typing to settle before the catalog is searched.
@@ -1713,6 +1766,7 @@ impl App {
     /// Everything outside the two lists, from the model. Cheap: labels are
     /// only set when their text changed.
     fn update_chrome(&mut self, cx: &mut Cx) {
+        self.update_ai_strip(cx);
         let (title, _) = self.model.heading();
         self.set_label(cx, live_id!(title), ids!(title), &title);
         // The list's name rides on its tab key, cut short.
@@ -1970,6 +2024,7 @@ impl App {
 
     /// Act on what the widgets asked for.
     fn after_event(&mut self, cx: &mut Cx) {
+        self.ai_tick(cx);
         let requests = std::mem::take(&mut self.model.requests);
         let mut redraw = requests.redraw;
         for command in requests.transport {
@@ -2300,6 +2355,7 @@ impl App {
                 }
                 Message::Folders(folders) => self.model.set_folders(folders),
                 Message::LocalEnded { generation } => self.model.local_ended(generation),
+                Message::AiMusic(event) => self.ai_message(cx, event),
                 Message::LocalError { generation, error } => {
                     log!("amp: {error}");
                     self.model.error = Some(error);
@@ -2758,6 +2814,7 @@ impl MatchEvent for App {
         self.popout_actions(cx, actions);
         self.torch_actions(cx, actions);
         self.connection_actions(cx, actions);
+        self.ai_actions(cx, actions);
         let search = self.ui.text_input(cx, ids!(search));
         if let Some(query) = search.changed(actions) {
             self.model.set_query(&query);

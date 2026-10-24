@@ -156,9 +156,9 @@ mod native {
                     clock: makepad_hal::clock_ns,
                     input: Arc::new(|| -> Result<Box<dyn Input>, String> {
                         #[cfg(target_os = "linux")]
-                        return super::inject::Injector::new().map(|i| Box::new(i) as Box<dyn Input>).map_err(|e| format!("view only: /dev/uinput: {e}"));
+                        return super::inject::Injector::new().map(|i| Box::new(i) as Box<dyn Input>).map_err(|e| format!("input unavailable on this host: /dev/uinput: {e} (it needs the uinput permission: group input, mode 0660)"));
                         #[cfg(not(target_os = "linux"))]
-                        return Err("view only: no input injection on this desktop".into());
+                        return Err("input unavailable on this host: no input injection on this desktop".into());
                     }),
                 });
                 match config.and_then(|c| Server::start(c, Arc::new(move || signal.set()))) {
@@ -196,21 +196,34 @@ mod native {
             let gone2 = gone.clone();
             let spawned = std::thread::Builder::new().name("desk-link-dump".into()).spawn(move || {
                 use std::io::Write;
-                let Ok(mut file) = std::fs::File::create(&path) else {
-                    super::note(&format!("desk link dump: cannot create {path}"));
-                    return;
-                };
+                // stream 0 to `path`, stream N (a tile, or an interleaved stream) to `path.N`
+                let mut files: Vec<Option<std::fs::File>> = Vec::new();
                 let mut written = 0;
                 while let Ok(out) = rx.recv() {
                     if let Out::Video(bytes) = out {
                         let mut inbox = proto::Inbox::default();
                         inbox.feed(&bytes);
-                        if let Ok(Some((ty, payload))) = inbox.next() {
-                            if let Ok(ServerMsg::Video { data, frame, key, built_ns, encoded_ns, .. }) = ServerMsg::decode(ty, &payload) {
-                                let _ = file.write_all(&data);
-                                written += 1;
-                                super::note(&format!("desk link dump: picture {frame}{} {} bytes, encode {:.2} ms", if key { " (key)" } else { "" }, data.len(), (encoded_ns.saturating_sub(built_ns)) as f64 / 1e6));
+                        while let Ok(Some((ty, payload))) = inbox.next() {
+                            let Ok(ServerMsg::Video { data, frame, key, built_ns, encoded_ns, stream, parts, .. }) = ServerMsg::decode(ty, &payload) else { continue };
+                            let s = stream as usize;
+                            if files.len() <= s {
+                                files.resize_with(s + 1, || None);
                             }
+                            if files[s].is_none() {
+                                let name = if s == 0 { path.clone() } else { format!("{path}.{s}") };
+                                match std::fs::File::create(&name) {
+                                    Ok(f) => files[s] = Some(f),
+                                    Err(_) => {
+                                        super::note(&format!("desk link dump: cannot create {name}"));
+                                        continue;
+                                    }
+                                }
+                            }
+                            let _ = files[s].as_mut().unwrap().write_all(&data);
+                            if parts <= 1 || stream + 1 == parts {
+                                written += 1;
+                            }
+                            super::note(&format!("desk link dump: picture {frame} stream {stream}{} {} bytes, encode {:.2} ms", if key { " (key)" } else { "" }, data.len(), (encoded_ns.saturating_sub(built_ns)) as f64 / 1e6));
                         }
                         backlog2.fetch_sub(1, Ordering::AcqRel);
                         if written >= count {
@@ -374,7 +387,7 @@ mod native {
             }
             let settings = self.settings.clone().unwrap_or_default();
             if let Some(e) = &self.encoder {
-                e.send(Job::Picture { handle, size: want.stream, fence, built_ns: makepad_hal::clock_ns(), fps: settings.fps, kbps: settings.kbps });
+                e.send(Job::Picture { handle, size: want.stream, fence, built_ns: makepad_hal::clock_ns(), fps: settings.fps, kbps: settings.kbps, split: settings.split });
             }
         }
 
@@ -465,6 +478,17 @@ mod native {
                                 }
                             }
                             Control::Keyframe => self.keyframe(),
+                            Control::Split(split) => {
+                                let split = match split {
+                                    proto::split::OFF => super::settings::Split::Off,
+                                    proto::split::INTERLEAVE => super::settings::Split::Interleave,
+                                    _ => super::settings::Split::Tiles,
+                                };
+                                super::note(&format!("desk link: a viewer asks for {split:?}"));
+                                if let Some(s) = self.settings.as_mut() {
+                                    s.split = split;
+                                }
+                            }
                             Control::Clipboard(text) => cx.copy_to_clipboard(&text),
                             Control::Stats { .. } => {}
                         }

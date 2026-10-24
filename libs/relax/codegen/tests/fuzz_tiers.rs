@@ -820,7 +820,7 @@ fn random_programs_agree_across_tiers() {
 ///   its low bits, coalesced with s (equal_copies) in a caller-saved register, both saved around a
 ///   call in a loop; the checker took the cast for a copy in the register only, so the restore
 ///   of s's save slot (stored before t existed) dropped t.
-const FOUND_SEEDS: [u64; 1] = [0x3853_108f_782e_2d2a];
+const FOUND_SEEDS: [u64; 2] = [0x3853_108f_782e_2d2a, 0x475f_7b26_c831_6268];
 
 #[test]
 fn found_seeds_agree_across_tiers() {
@@ -929,6 +929,91 @@ fn regress_narrow_store_forwarded_to_load() {
         for p in [Pipe::Raw, Pipe::O2, Pipe::O3] {
             for thorough in [false, true] {
                 assert!(!disagrees(&f, 0xf880_dbd7_8069_5b33, p, &[], thorough), "{:?} {:?} thorough={}", m, p, thorough);
+            }
+        }
+    }
+}
+
+/// copy_reuse served a read of a spilled value from the register of its copy after the copy's
+/// value was dead: `u = v; t = ..; w = t ? v : y; u = 0; .. u ..` with u's first value never read.
+/// The read of u's second value kept u "read later in the block", but the allocator gives u's
+/// register away between its two definitions, here to t, so the select read t for v. Seed
+/// 475f7b26c8316268 (after O2: v1 spilled, `Mov v3, v1` in b29) had t a compare fused into the
+/// select (never written: only the allocation check saw it); `load`: t is a load, written, and the
+/// result is wrong.
+fn regress_dead_copy_reuse(load: bool) -> Func {
+    let mut f = Func::new("regress_dead_copy_reuse".to_string(), 0);
+    let v: Vec<VReg> = (0..20).map(|_| f.vreg(Cls::I)).collect();
+    f.params = vec![v[0], v[1], v[2], v[3]];
+    f.rets = vec![Cls::I];
+    let (b0, b1, b2, b4, b5, b6, b12, b27, b29) = (f.block(), f.block(), f.block(), f.block(), f.block(), f.block(), f.block(), f.block(), f.block());
+    let push = |f: &mut Func, b: u32, i: Inst| {
+        f.blocks[b as usize].insts.push(i);
+        f.blocks[b as usize].pos.push(0);
+    };
+    push(&mut f, b0, Inst::Iconst(v[4], 0));
+    for (d, s) in [(5, 4), (6, 3), (7, 3), (8, 4), (9, 3), (10, 4), (11, 3), (12, 4), (13, 4)] {
+        push(&mut f, b0, Inst::Mov(v[d], v[s]));
+    }
+    f.blocks[b0 as usize].term = Term::Jump(b1);
+    push(&mut f, b1, Inst::ICmp(Cond::Lt, false, v[14], v[13], v[2]));
+    f.blocks[b1 as usize].term = Term::Branch(v[14], b2, b27);
+    f.blocks[b2 as usize].term = Term::Branch(v[3], b4, b5);
+    push(&mut f, b4, Inst::Mov(v[4], v[11]));
+    push(&mut f, b4, Inst::Mov(v[10], v[7]));
+    f.blocks[b4 as usize].term = Term::Jump(b6);
+    push(&mut f, b5, Inst::Iconst(v[15], 0));
+    push(&mut f, b5, Inst::Sel(v[7], v[6], v[15], v[7]));
+    push(&mut f, b5, Inst::Mov(v[8], v[0]));
+    f.blocks[b5 as usize].term = Term::Jump(b6);
+    push(&mut f, b6, Inst::IBinI(IOp::Add, W64, v[13], v[13], 1));
+    f.blocks[b6 as usize].term = Term::Jump(b1);
+    let (x16, x17, x18) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
+    push(&mut f, b12, Inst::IBin(IOp::Xor, W64, x16, v[5], v[8]));
+    push(&mut f, b12, Inst::IBin(IOp::Xor, W64, x17, x16, v[10]));
+    push(&mut f, b12, Inst::IBin(IOp::Xor, W64, x18, x17, v[12]));
+    f.blocks[b12 as usize].term = Term::Ret(vec![x18]);
+    f.blocks[b27 as usize].term = Term::Branch(v[3], b12, b29);
+    push(&mut f, b29, Inst::Mov(v[3], v[1]));
+    push(&mut f, b29, if load { Inst::Load(Mem::Int(8, false), v[19], v[0], 8) } else { Inst::ICmpI(Cond::Ne, false, v[19], v[4], 0) });
+    push(&mut f, b29, Inst::Sel(v[12], v[19], v[1], v[9]));
+    push(&mut f, b29, Inst::Iconst(v[3], 0));
+    push(&mut f, b29, Inst::Mov(v[5], v[3]));
+    f.blocks[b29 as usize].term = Term::Jump(b12);
+    f
+}
+
+#[test]
+fn regress_dead_copy_not_reused() {
+    // (the select's path needs the last parameter 0; memory word 1 = 1 selects v)
+    let cases: Vec<[u64; 3]> = vec![[0x1234_5678_9abc_def1, 3, 0], [0xfeed_beef_0000_0005, 0, 0], [7, 5, 9]];
+    // (the code without the allocation check first: the wrong register shows in the result)
+    for check in [false, true] {
+        for load in [true, false] {
+            let f = regress_dead_copy_reuse(load);
+            f.verify().unwrap();
+            assert!(undefined_read(&f).is_none());
+            for p in [Pipe::Raw, Pipe::O2, Pipe::O3] {
+                for knobs in KNOBS {
+                    for thorough in [false, true] {
+                        let mut o = options(knobs);
+                        if !check {
+                            o.opt.retain(|k| k != "+checkra");
+                        }
+                        let g = pipe(&o, &f, p);
+                        let bytes = native(&o, &g, thorough).unwrap_or_else(|e| panic!("load {} {:?} {:?} thorough={}: {}", load, p, knobs, thorough, e));
+                        let code = Code::new(&bytes).unwrap();
+                        let run: extern "C" fn(*mut u64, u64, u64, u64) -> u64 = unsafe { std::mem::transmute(code.ptr()) };
+                        for a in &cases {
+                            // (one buffer for both: the result folds in its address)
+                            let mut m = [0u64; WORDS];
+                            m[1] = 1;
+                            let want = eval(&f, &mut m, *a).unwrap();
+                            let got = run(m.as_mut_ptr(), a[0], a[1], a[2]);
+                            assert_eq!(got, want, "load {} {:?} {:?} thorough={} check={} args {:?}", load, p, knobs, thorough, check, a);
+                        }
+                    }
+                }
             }
         }
     }

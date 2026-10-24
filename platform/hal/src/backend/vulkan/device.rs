@@ -18,6 +18,11 @@ pub(super) fn error(e: vk::Result) -> String { format!("Vulkan: {e:?}") }
 pub struct VideoQueue {
     pub family: u32,
     pub queue: vk::Queue,
+    /// Its queue family's timestamp bits (0: no timestamps on it).
+    pub timestamp_bits: u32,
+    /// The family's further queues: one per further encode engine (a 4090 has two engines and
+    /// exposes two queues), so tiles of a picture encode at once.
+    pub more: Vec<(vk::Queue, Mutex<()>)>,
     pub lock: Mutex<()>,
 }
 
@@ -253,8 +258,12 @@ impl Device {
             // line fill: frame capture's wireframe view (`Draw::WIREFRAME`)
             .fill_mode_non_solid(supported_features.fill_mode_non_solid == vk::TRUE);
         let priorities = [1.0];
+        // every encode engine's queue (up to 4)
+        let video_count = video_family.map_or(0, |f| queues[f].queue_count.min(4));
+        let video_priorities = [1.0; 4];
         let mut queue_infos = vec![vk::DeviceQueueCreateInfo::default().queue_family_index(family as u32).queue_priorities(&priorities)];
-        if let Some(video) = video_family { queue_infos.push(vk::DeviceQueueCreateInfo::default().queue_family_index(video as u32).queue_priorities(&priorities)); }
+        if let Some(video) = video_family { queue_infos.push(vk::DeviceQueueCreateInfo::default().queue_family_index(video as u32).queue_priorities(&video_priorities[..video_count as usize])); }
+        let video_timestamp_bits = video_family.map_or(0, |f| queues[f].timestamp_valid_bits);
         let queues = queue_infos;
         let mut create = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queues).enabled_extension_names(&wanted).enabled_features(&features);
@@ -292,7 +301,8 @@ impl Device {
         let formats = std::array::from_fn(|f| unsafe {
             instance.get_physical_device_format_properties(physical, super::resources::vk_format(f as u32).unwrap())
         });
-        let video_encode = video_family.map(|f| VideoQueue { family: f as u32, queue: unsafe { raw.get_device_queue(f as u32, 0) }, lock: Mutex::new(()) });
+        let video_encode = video_family.map(|f| VideoQueue { family: f as u32, queue: unsafe { raw.get_device_queue(f as u32, 0) }, timestamp_bits: video_timestamp_bits,
+            more: (1..video_count).map(|i| (unsafe { raw.get_device_queue(f as u32, i) }, Mutex::new(()))).collect(), lock: Mutex::new(()) });
         if let Some(v) = &video_encode { if log_enabled() { eprintln!("[hal-vulkan] hardware video encode queue family={}", v.family); } }
         Ok(Some(Arc::new(Self {
             queue: unsafe { raw.get_device_queue(family as u32, 0) }, queue_lock: Mutex::new(()), raw, instance: instance.clone(),

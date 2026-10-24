@@ -189,6 +189,9 @@ pub struct BarData {
     pub maximized: bool,
     /// Some model of the AI hub is working: its icon pulses.
     pub hub_active: bool,
+    /// The AI hub's compute admission: open, and its line ("Automatic: paused for local
+    /// use (gaming)"). A closed hub's icon is dimmed; the line is its tooltip.
+    pub hub_admission: Option<(bool, String)>,
     /// Desk Link viewers right now (`name`, address); the bar shows its item while any is
     /// connected.
     pub desk_link: Vec<(String, String)>,
@@ -249,6 +252,7 @@ impl BarData {
             open_panel: None,
             maximized: false,
             hub_active: false,
+            hub_admission: None,
             desk_link: vec![],
         }
     }
@@ -1100,6 +1104,9 @@ impl ShellBar {
             if *module == BarModule::Audio && data.muted {
                 color = fade(fg, 0.45);
             }
+            if *module == BarModule::Hub && data.hub_admission.as_ref().is_some_and(|(open, _)| !open) {
+                color = fade(fg, 0.45);
+            }
             if *module == BarModule::Hub && data.hub_active {
                 // A slow breath between the text colour and the accent.
                 let k = (0.5 - 0.5 * (self.pulse_t * std::f64::consts::TAU / 1.6).cos()) as f32;
@@ -1154,7 +1161,11 @@ impl ShellBar {
                 (None, _) => "Audio unavailable".into(),
             },
             BarModule::Gamepad => "Controllers & device batteries".into(),
-            BarModule::Hub => if data.hub_active { "AI hub: working".into() } else { "AI hub".into() },
+            BarModule::Hub => match (&data.hub_admission, data.hub_active) {
+                (Some((false, line)), _) => format!("AI hub \u{b7} {line}"),
+                (_, true) => "AI hub: working".into(),
+                _ => "AI hub".into(),
+            },
             BarModule::DeskLink => {
                 let who: Vec<String> = data.desk_link.iter().map(|(name, ip)| format!("{name} ({ip})")).collect();
                 format!("Desk Link: viewed by {}", who.join(", "))

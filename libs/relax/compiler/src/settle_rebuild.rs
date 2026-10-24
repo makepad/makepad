@@ -51,6 +51,20 @@ pub(crate) fn rebuilds() -> u32 {
     REBUILDS.load(Ordering::Relaxed)
 }
 
+/// A rebuild is running now (its preconditions held; postframe::activity).
+static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn running() -> bool {
+    RUNNING.load(Ordering::Relaxed)
+}
+
+struct Running;
+impl Drop for Running {
+    fn drop(&mut self) {
+        RUNNING.store(false, Ordering::Relaxed);
+    }
+}
+
 /// How many monitor tries (one a second) a rebuild waits for the tier-up tail before it runs anyway.
 pub(crate) const TAIL_WAIT: u32 = 60;
 
@@ -228,6 +242,8 @@ pub(crate) fn run(up: *mut Unit, patient: bool) -> Outcome {
     }
     // the recipe, the session, the images: process state
     let _k = crate::zone_alloc::kept();
+    RUNNING.store(true, Ordering::Relaxed);
+    let _running = Running;
     let t_all = Instant::now();
     let rss0 = crate::memstat::resident();
     let pre = BOOT.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap();

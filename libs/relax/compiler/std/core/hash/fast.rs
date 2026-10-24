@@ -2,9 +2,10 @@
 //! Fast on integer keys (one 64x64->128 multiply per word) and good enough in its low bits
 //! (bucket index) and high bits (control byte) for open addressing.
 //!
-//! Differences from real std, both unobservable by correct programs: the seed is fixed
-//! (RandomState is deterministic, so HashMap iteration order is the same on every run but
-//! differs from real std's), and the hash function is not SipHash (no HashDoS resistance).
+//! RandomState's keys are real std's (random.rs: per-thread OS randomness, k0 + 1 per new), so
+//! HashMap iteration order differs between processes and maps, as in real std; DefaultHasher::new
+//! has fixed keys, as real std's (0, 0). The difference from real std: the hash function is not
+//! SipHash-1-3 (the keys are not a cryptographic secret here).
 
 use super::{BuildHasher, Hasher};
 
@@ -47,6 +48,10 @@ pub struct FastHasher {
 impl FastHasher {
     pub const fn with_seed(seed: u64) -> FastHasher {
         FastHasher { acc: seed, seed }
+    }
+    /// A RandomState's hasher: k0 starts the accumulator, k1 keys every mixing step.
+    pub const fn with_keys(k0: u64, k1: u64) -> FastHasher {
+        FastHasher { acc: k0, seed: k1 }
     }
 }
 
@@ -117,15 +122,28 @@ impl Hasher for FastHasher {
     }
 }
 
-/// `std::hash::RandomState`: builds FastHashers. Deterministic (fixed seed), see above.
-#[derive(Clone, Debug)]
+/// `std::hash::RandomState`: builds FastHashers keyed with real std's random keys (random.rs).
+#[derive(Clone)]
 pub struct RandomState {
-    seed: u64,
+    k0: u64,
+    k1: u64,
 }
 
 impl RandomState {
     pub fn new() -> RandomState {
-        RandomState { seed: DEFAULT_SEED }
+        let (k0, k1) = super::random::next_keys();
+        RandomState { k0, k1 }
+    }
+}
+
+// real std: `RandomState { .. }`, the keys not shown
+#[cfg(not(relax_check))]
+use crate::fmt;
+#[cfg(relax_check)]
+use std::fmt;
+impl fmt::Debug for RandomState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RandomState").finish_non_exhaustive()
     }
 }
 
@@ -138,7 +156,7 @@ impl Default for RandomState {
 impl BuildHasher for RandomState {
     type Hasher = DefaultHasher;
     fn build_hasher(&self) -> DefaultHasher {
-        DefaultHasher { inner: FastHasher::with_seed(self.seed) }
+        DefaultHasher { inner: FastHasher::with_keys(self.k0, self.k1) }
     }
 }
 

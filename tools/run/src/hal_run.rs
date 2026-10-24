@@ -10,6 +10,7 @@ use relax_boot::{
 use relax_compiler::{
     diag::Diagnostic,
     domain::{AppSpec, DomainState},
+    postframe::Activity,
     run_state::{self, Mode, ParkedPanic, Phase, State},
 };
 use relax_session::sync::{Condvar, Mutex, MutexGuard};
@@ -84,11 +85,14 @@ fn ui_wait_began() {
     }
 }
 
-/// The JIT ring shows once the JIT has had work in flight this long (one short build shows
+/// The JIT ring shows once the JIT has been building this long (one short build shows
 /// nothing)...
 const RING_SHOW_AFTER: Duration = Duration::from_millis(600);
-/// ...and settles (fades out) once it has had none this long.
-const RING_SETTLE_AFTER: Duration = Duration::from_millis(800);
+/// ...and settles (fades out) once nothing has been built or run for this long (queued builds
+/// nobody works on are not work).
+const RING_SETTLE_AFTER: Duration = Duration::from_millis(500);
+/// the build rate's smoothing (s)
+const RATE_TAU: f32 = 0.5;
 /// the run looks at the JIT's queues at most this often (the ring eases between looks)
 const WATCH_EVERY: Duration = Duration::from_millis(100);
 /// how often the run looks at the JIT while the app runs and no ring shows (new work is seen
@@ -110,21 +114,25 @@ fn ring_on() -> bool {
     }
 }
 
-/// What the run sees of the JIT for its ring: the functions compiled and still queued (built
-/// ahead), the UI thread's JIT duty cycle, the O2/O3 builds, a true UI block. Atomics and one lock
-/// of the O3 queue a look; the app's threads never wait for it.
+/// What the run sees of the JIT for its ring: builds running now and finished since the last
+/// look (the work rate), the queues, the UI thread's JIT duty cycle, a true UI block. Busy means
+/// something was built or is building, never only that a queue is non-empty. Atomics and two
+/// queue locks a look; the app's threads never wait for it.
 struct Watch {
     shown: bool,
     busy_since: Option<Instant>,
-    idle_since: Option<Instant>,
-    /// the last look at the JIT's queues (at most every WATCH_EVERY), what they held then
+    /// the last time anything was running or finished
+    worked: Option<Instant>,
+    /// the last look at the JIT (at most every WATCH_EVERY), what it showed then
     looked: Instant,
-    o3: u64,
-    done: u64,
-    queued: u64,
-    /// the functions built ahead so far when this compile began
+    a: Activity,
+    /// the queues' builds finished when this busy spell began
     done_from: Option<u64>,
-    wait_ns: u64,
+    /// a program thread's first compiles finished since the last look
+    demand: bool,
+    /// builds finished a second (smoothed), and of the last look's, warm links only
+    rate: f32,
+    linking: bool,
     duty: f32,
     /// the UI block shows (for the trace)
     blocked: bool,
@@ -137,13 +145,13 @@ impl Watch {
         Self {
             shown: false,
             busy_since: None,
-            idle_since: None,
+            worked: None,
             looked: Instant::now(),
-            o3: 0,
-            done: 0,
-            queued: 0,
+            a: relax_compiler::postframe::activity(),
             done_from: None,
-            wait_ns: relax_compiler::postframe::activity().ui_wait_ns,
+            demand: false,
+            rate: 0.0,
+            linking: false,
             duty: 0.0,
             blocked: false,
             trace,
@@ -154,37 +162,43 @@ impl Watch {
     /// The ring's wish now (`None`: the JIT is settled). `clock`: the frame dump's clock (ms),
     /// for the trace.
     fn look(&mut self, clock: Option<u128>) -> Option<RingWant> {
-        use relax_compiler::postframe::{activity, ahead_progress, ui_hang_ns, ui_stall_ns};
+        use relax_compiler::postframe::{activity, ui_hang_ns, ui_stall_ns};
         let now = Instant::now();
         let dt = now.duration_since(self.looked).as_secs_f32();
         if dt >= WATCH_EVERY.as_secs_f32() {
             let a = activity();
-            let waited = a.ui_wait_ns.saturating_sub(self.wait_ns) as f32 / 1e9;
+            let waited = a.ui_wait_ns.saturating_sub(self.a.ui_wait_ns) as f32 / 1e9;
             self.duty = (waited / dt).clamp(0.0, 1.0);
-            self.wait_ns = a.ui_wait_ns;
-            self.o3 = a.o3;
-            (self.done, self.queued) = ahead_progress();
+            let built = a.finished().saturating_sub(self.a.finished());
+            self.linking = built > 0 && a.linked > self.a.linked && a.finished() - a.linked == self.a.finished() - self.a.linked;
+            self.demand = a.demand() > self.a.demand();
+            let k = 1.0 - (-dt / RATE_TAU).exp();
+            self.rate += (built as f32 / dt - self.rate) * k;
+            if built > 0 || a.running() || self.duty > 0.02 {
+                self.worked = Some(now);
+            }
+            self.a = a;
             self.looked = now;
         }
+        let a = self.a;
         let stalled = Duration::from_nanos(ui_hang_ns().max(ui_stall_ns()));
         let block = stalled >= BLOCK_AFTER;
-        let lazy = self.duty > 0.02;
-        let compiling = self.queued > 0 || lazy || block;
-        if compiling {
-            self.done_from.get_or_insert(self.done);
-        } else {
-            self.done_from = None;
+        // a program thread compiles lazily: the UI thread's JIT duty is up, or other threads'
+        // first compiles finished
+        let lazy = self.duty > 0.02 || self.demand;
+        if block {
+            self.worked = Some(now);
         }
-        if compiling || self.o3 > 0 {
-            self.idle_since = None;
+        let busy = self.worked.is_some_and(|t| now.duration_since(t) < RING_SETTLE_AFTER);
+        if busy {
+            self.done_from.get_or_insert(a.queue_done());
             let since = *self.busy_since.get_or_insert(now);
             self.shown |= block || now.duration_since(since) >= RING_SHOW_AFTER;
         } else {
-            let since = *self.idle_since.get_or_insert(now);
-            self.shown &= now.duration_since(since) < RING_SETTLE_AFTER;
-            if !self.shown {
-                self.busy_since = None;
-            }
+            self.shown = false;
+            self.busy_since = None;
+            self.done_from = None;
+            self.rate = 0.0;
         }
         if self.trace && block != self.blocked {
             if block {
@@ -195,22 +209,31 @@ impl Watch {
         }
         self.blocked = block;
         let want = RingWant {
-            done: self.done.saturating_sub(self.done_from.unwrap_or(self.done)),
-            queued: self.queued,
+            done: a.queue_done().saturating_sub(self.done_from.unwrap_or(a.queue_done())),
+            pending: a.pending(),
+            ahead: a.ahead,
+            o2: a.o2,
+            o3: a.o3 + a.o3_running,
             lazy,
-            tier_up: self.o3,
             block,
+            settling: a.settling,
+            linking: self.linking,
+            rate: self.rate,
             busy: self.busy_since.map_or(Duration::ZERO, |t| now.duration_since(t)),
         };
         // the trace: what the ring was told, at most 4 times a second while it shows
         if self.trace && (self.shown || self.traced.is_some()) && self.traced.is_none_or(|t| now.duration_since(t) >= Duration::from_millis(250)) {
             let at = clock.map_or(String::new(), |ms| format!(" @{ms}"));
+            let state = if !self.shown {
+                "settled"
+            } else if want.ahead > 0 || lazy || block {
+                "compiling"
+            } else {
+                "tier-up"
+            };
             eprintln!(
-                "makepad-run: jit ring{at}: {} (compiling {} of {}, o3 {}, ui duty {:.2}){}",
-                if !self.shown { "settled" } else if compiling { "compiling" } else { "tier-up" },
-                want.queued,
-                want.done + want.queued,
-                want.tier_up,
+                "makepad-run: jit ring{at}: {state} ({}, ui duty {:.2}){}",
+                relax_boot::ring_summary(Some(want), None),
                 self.duty,
                 if block { " UI BLOCK" } else { "" }
             );

@@ -5611,28 +5611,45 @@ pub fn copy_reuse(options: &relax_session::Options, f: &Func, al: &Alloc) -> Has
         if !reach[bi] || !b.insts.iter().any(|i| matches!(i, Inst::Mov(..))) {
             continue;
         }
-        // last read of each vreg in the block (the terminator reads at index n)
-        let mut last: HashMap<u32, usize> = HashMap::new();
+        // the reads and the definitions of each vreg in the block, by index (the terminator reads
+        // at index n)
+        let mut reads: HashMap<u32, Vec<usize>> = HashMap::new();
+        let mut defs: HashMap<u32, Vec<usize>> = HashMap::new();
         for (ii, i) in b.insts.iter().enumerate() {
             uses_defs(i, &mut us, &mut ds);
             for u in &us {
-                last.insert(u.0, ii);
+                let r = reads.entry(u.0).or_default();
+                if r.last() != Some(&ii) {
+                    r.push(ii);
+                }
+            }
+            for d in &ds {
+                defs.entry(d.0).or_default().push(ii);
             }
         }
         term_uses(&b.term, &mut tu);
         for u in &tu {
-            last.insert(u.0, b.insts.len());
+            reads.entry(u.0).or_default().push(b.insts.len());
         }
-        // last definition of each vreg in the block: a copy defined again later in the block is not
-        // what is live out (`u = v; ..read v..; u = w`: the allocator gives u's register away
-        // between the two definitions, the deflate counted-code fault of PGO3, 10-22)
-        let mut last_def: HashMap<u32, usize> = HashMap::new();
-        for (ii, i) in b.insts.iter().enumerate() {
-            uses_defs(i, &mut us, &mut ds);
-            for d in &ds {
-                last_def.insert(d.0, ii);
+        // the copy c holds its value in its register at index ii only while that value is live:
+        // its next read at or after ii comes no later than its next definition (a read and a
+        // definition in one instruction read first). `u = v; t = ..; ..read v..; u = w; ..read u..`
+        // with u's first value dead: u's register is given away between the two definitions, and
+        // a read of v served from it reads t (FUZZ 475f7b26c8316268). Some(true): read again in
+        // the block; Some(false): neither read nor defined again (live out if a successor reads
+        // it); None: redefined first (the deflate counted-code fault of PGO3, 10-22, live out)
+        let next = |m: &HashMap<u32, Vec<usize>>, c: u32, ii: usize| -> Option<usize> {
+            let v = m.get(&c)?;
+            v.get(v.partition_point(|&k| k < ii)).copied()
+        };
+        let holds = |c: u32, ii: usize| -> Option<bool> {
+            match (next(&reads, c, ii), next(&defs, c, ii)) {
+                (Some(r), Some(d)) if r > d => None,
+                (Some(_), _) => Some(true),
+                (None, Some(_)) => None,
+                (None, None) => Some(false),
             }
-        }
+        };
         // spilled vreg -> (its register copy, that register)
         let mut have: Vec<(u32, u32, u8)> = Vec::new();
         for (ii, i) in b.insts.iter().enumerate() {
@@ -5640,12 +5657,14 @@ pub fn copy_reuse(options: &relax_session::Options, f: &Func, al: &Alloc) -> Has
             if !have.is_empty() {
                 for u in &us {
                     if let Some(&(_, c, r)) = have.iter().find(|h| h.0 == u.0) {
-                        if last.get(&c).map_or(false, |&l| l >= ii) {
-                            out.insert((al.inst_pos(bi, ii), u.0), r);
-                        } else if !no_live_out && last_def.get(&c).map_or(true, |&d| d < ii) {
+                        match holds(c, ii) {
+                            Some(true) => {
+                                out.insert((al.inst_pos(bi, ii), u.0), r);
+                            }
                             // not read again in the block: its register still holds it when the
                             // copy is live out of the block (not redefined since: `have` drops it)
-                            pending.push((bi as u32, al.inst_pos(bi, ii), u.0, c, r));
+                            Some(false) if !no_live_out => pending.push((bi as u32, al.inst_pos(bi, ii), u.0, c, r)),
+                            _ => {}
                         }
                     }
                 }

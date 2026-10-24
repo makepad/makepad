@@ -103,6 +103,9 @@ pub struct ActivityJson {
     /// The failing probe step behind an `unknown` state (a fixed identifier
     /// such as `gpu_counter_array_unknown`), so operators can tell causes apart.
     pub probe_error: Option<String>,
+    /// The node's compute mode as its hosting WM set it (`auto`, `ui-first`,
+    /// `ai-first`, `unavailable`). Missing on older services.
+    pub mode: Option<String>,
 }
 
 /// What a box advertises about its concurrent decode capacity.

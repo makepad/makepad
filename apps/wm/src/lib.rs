@@ -53,11 +53,13 @@ mod hub_control;
 mod hub_child;
 mod hub_glow;
 mod gpu_yield;
+mod local_use;
 mod scroll_gesture;
 use scroll_gesture::Gesture as ScrollGesture;
 use hub_control::HubLink;
 use desk_link::DeskLink;
 use gpu_yield::YieldPolicy;
+use local_use::LocalUse;
 mod motion;
 mod spaces;
 mod spacewarp;
@@ -595,6 +597,9 @@ pub struct App {
     /// The steps the WM takes when the GPU is short of memory for the UI (`gpu_yield`).
     #[rust]
     yield_policy: YieldPolicy,
+    /// Whether a game is being played, for the AI hub's compute admission (`local_use`).
+    #[rust]
+    local_use: LocalUse,
     #[rust]
     shelf_pointer: Vec2d,
     /// The last pointer position the dock auto-hide saw.
@@ -4172,6 +4177,20 @@ impl App {
         let processes = self.processes();
         self.hub_link.tick(processes, host::now());
         self.gpu_yield_report(cx);
+        let play = self.state.as_ref().and_then(|s| {
+            if s.screens.any_fullscreen() {
+                return Some("a fullscreen space".to_string());
+            }
+            let slot = s.clients.get(&s.screens.focused_client()?)?;
+            local_use::is_game(&slot.app).then(|| format!("{} in focus", slot.app))
+        });
+        let gaming = self.local_use.tick(host::now(), play, cx.game_input_states());
+        self.hub_link.set_gaming(processes, gaming);
+        let admission = self.hub_link.get(processes).admission().map(|a| (a.open, a.line()));
+        if self.bar_sample.hub_admission != admission {
+            self.bar_sample.hub_admission = admission;
+            self.update_bar(cx);
+        }
         let panel = self.ui.widget(cx, ids!(shell_panel));
         let open = panel.borrow::<shell::panels::ShellPanel>().is_some_and(|p| p.open == Some(shell::panels::PanelKind::Hub));
         let active = if open {
@@ -4197,6 +4216,15 @@ impl App {
         let now = START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64();
         let was_exhausted = self.yield_policy.exhausted();
         let processes = self.processes();
+        if e.wanted_mb > 0 && self.hub_link.compute_mode(processes) == hub_control::ComputeMode::AiFirst {
+            // The operator chose AI First: the hub gives nothing back. The HAL's own last
+            // resort (textures handed back to their apps, made again once memory frees) goes on.
+            log!(
+                "wm: GPU allocation failure while in AI First: short {} MB for the UI ({} MB free{}); the AI hub keeps its memory",
+                e.wanted_mb, e.free_mb, if e.failed { ", a texture create failed" } else { "" }
+            );
+            return;
+        }
         match self.yield_policy.on_pressure(e.wanted_mb, e.reserve_mb, now) {
             Some(ask) if ask.mb == 0 => {
                 log!("wm: GPU memory for the UI is back ({} MB free): the AI hub may grow its model back", e.free_mb);

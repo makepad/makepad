@@ -24,14 +24,15 @@ pub(crate) struct LinuxStreamEncoder {
 }
 
 impl LinuxStreamEncoder {
-    pub fn new(options: &VideoStreamEncoderOptions) -> Result<Self, VideoFileError> {
+    /// On encode engine `engine` (`crate::VideoStreamEncoder::engines`).
+    pub fn new(options: &VideoStreamEncoderOptions, engine: u32) -> Result<Self, VideoFileError> {
         if options.codec != StreamVideoCodec::H264 {
             return Err(VideoFileError::new("the Linux stream encoder makes H.264 only"));
         }
         if options.width % 4 != 0 {
             return Err(VideoFileError::new(format!("stream width {} must be a multiple of 4", options.width)));
         }
-        let id = hal::hal_stream_encoder_open(options.width, options.height, options.fps, options.bitrate_kbps);
+        let id = hal::hal_stream_encoder_open(options.width, options.height, options.fps, options.bitrate_kbps, engine);
         if id == 0 {
             return Err(last_error());
         }
@@ -72,13 +73,14 @@ impl LinuxStreamEncoder {
         self.take(bytes, key, pts_100ns)
     }
 
-    pub fn push_shared_texture(&mut self, handle: u64, ready: GpuReady, pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
+    /// The rows `y0..` (its height) of the `source_height` tall picture in `handle`.
+    pub fn push_shared_texture(&mut self, handle: u64, ready: GpuReady, pts_100ns: i64, source_height: u32, y0: u32) -> Result<Vec<EncodedPacket>, VideoFileError> {
         let sync = match ready {
             GpuReady::Done => -1,
             GpuReady::SyncFile(fd) => fd.into_raw_fd(),
         };
         let (flags, key) = self.flags();
-        let bytes = hal::hal_stream_encoder_texture(self.id, handle, sync, flags);
+        let bytes = hal::hal_stream_encoder_texture(self.id, handle, source_height, y0, sync, flags);
         self.take(bytes, key, pts_100ns)
     }
 

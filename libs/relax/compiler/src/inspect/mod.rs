@@ -164,6 +164,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("hal", "pump", "HAL pump loop per session: turns and wake causes, totals and per second since the last call (an idle app shows none)"),
     ("writes", "<Type::field> | (none: the watches) | W<n> [n=20] | rm <W<n>|all>", "who writes a struct field: the compiled fns that assign `x.field` (`=`, `op=`) are rebuilt to record every write: its site (fn, file:line), the value written and the field's address; `writes W<n>` reads the sites and the latest writes"),
     ("vms", "", "every live Splash VM: label, thread, heap objects / strings / arrays and bytes, GC runs and time, errors, evaluations"),
+    ("jit", "[ms=250]", "live compile activity in one line (what the JIT ring shows): busy or idle, the jobs running now, the queues per tier (ahead, O2, O3), builds finished and their rate over ms, the UI thread's JIT duty"),
     ("threads", "", "every thread: name, role, state, CPU time, what it waits on; JIT threads: alive/restarting/dead, panics, heartbeat"),
     ("stacks", "[thread=<name|tid|main|owner|all>] [depth=12]", "symbolised stacks (identical stacks folded)"),
     ("waits", "", "the wait registry: who waits for what, held by whom"),
@@ -203,6 +204,7 @@ fn dispatch_command(req: &Req, out: &mut Out) {
         "pf" => out.err("pf is answered by the client: makepad inspect <app> pf <query> (it attaches to the app's prof stream)"),
         "ping" => out.line(&format!("{{\"pid\":{},\"app\":{},\"ms\":{}}}", std::process::id(), json_str(&APP.lock().unwrap()), now_ms())),
         "threads" => cmd_threads(out),
+        "jit" => cmd_jit(req, out),
         "stacks" => cmd_stacks(req, out),
         "waits" => cmd_waits(out),
         "owner" => cmd_owner(out),
@@ -948,6 +950,68 @@ fn cmd_waits(out: &mut Out) {
         }
         out.line(&format!("{{\"thread\":{},\"waits\":{}}}", json_str(&thread_label(w.thread, &list)), json_str(&wait_text(w, &list))));
     }
+}
+
+/// `jit`: the JIT's compile activity over a short window, one line, answer first.
+fn cmd_jit(req: &Req, out: &mut Out) {
+    use crate::postframe::activity;
+    let ms = req.num("ms", 250).clamp(20, 10_000);
+    let t0 = std::time::Instant::now();
+    let a = activity();
+    std::thread::sleep(std::time::Duration::from_millis(ms));
+    let b = activity();
+    // the window as it was (a loaded machine oversleeps)
+    let ms = (t0.elapsed().as_millis() as u64).max(1);
+    out.measured("JIT compile activity", "postframe::activity (atomics + O2/O3 queue locks), two looks", &[]);
+    out.line(&jit_line(&a, &b, ms));
+}
+
+/// The `jit` answer from two looks `ms` apart.
+fn jit_line(a: &crate::postframe::Activity, b: &crate::postframe::Activity, ms: u64) -> String {
+    let k = |n: u64| if n >= 10_000 { format!("{:.1}k", n as f64 / 1e3) } else { n.to_string() };
+    let d = |x: u64, y: u64| y.saturating_sub(x);
+    let built = d(a.finished(), b.finished());
+    let duty = d(a.ui_wait_ns, b.ui_wait_ns) as f64 / (ms as f64 * 1e6);
+    let busy = built > 0 || b.running() || duty > 0.02;
+    let background = b.background() && duty <= 0.02 && b.demand() == a.demand();
+    let mut parts = vec![if busy { if background { "busy (background)" } else { "busy" } } else { "idle" }.to_string()];
+    let current = b.current();
+    let mut running = Vec::new();
+    if !current.is_empty() {
+        running.push(current);
+    }
+    if b.o3_running > 1 || (b.o3_running > 0 && b.o3_slot.is_none()) {
+        running.push(format!("{} O3 builds", b.o3_running));
+    }
+    if b.ahead_running > 0 && !b.ui_waiting {
+        running.push(format!("{} ahead", b.ahead_running));
+    }
+    if b.o2_running && b.o3_slot.is_some() {
+        running.push("O2 build".into());
+    }
+    parts.push(format!("running: {}", if running.is_empty() { "nothing".into() } else { running.join(", ") }));
+    parts.push(format!("queued: ahead {}, O2 {}, O3 {}", k(b.ahead), k(b.o2), k(b.o3)));
+    let rate = built as f64 * 1000.0 / ms as f64;
+    parts.push(format!(
+        "finished {} (+{} in {} ms = {:.0} fns/s: lazy {}, ahead {}, O2 {}, O3 {}, linked {})",
+        k(b.finished()),
+        built,
+        ms,
+        rate,
+        d(a.demand(), b.demand()),
+        d(a.ahead_done, b.ahead_done),
+        d(a.o2_done, b.o2_done),
+        d(a.o3_done, b.o3_done),
+        d(a.linked, b.linked)
+    ));
+    parts.push(format!("UI JIT duty {:.0}%", duty * 100.0));
+    if b.settling {
+        parts.push("settle rebuild running".into());
+    }
+    if !busy && b.pending() > 0 {
+        parts.push(format!("{} queued but nothing building", k(b.pending())));
+    }
+    parts.join(" · ")
 }
 
 fn cmd_owner(out: &mut Out) {

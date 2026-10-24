@@ -8201,6 +8201,20 @@ static O2_QUEUE: relax_session::sync::Mutex<Vec<(usize, u32)>> = relax_session::
 static O2_SEEN: relax_session::sync::Mutex<Option<std::collections::HashSet<(usize, u32)>>> = relax_session::sync::Mutex::new(None);
 static O2_WAKE: relax_session::sync::Condvar = relax_session::sync::Condvar::new();
 static O2_THREAD: std::sync::Once = std::sync::Once::new();
+/// the O2 worker is building one (O2 or a verified O1 rebuild) now
+static O2_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// O2 builds and verified O1 rebuilds queued, whether the O2 worker builds one now, and the
+/// worker's builds finished so far (installed or dropped; postframe::activity). Each queue's lock
+/// is taken alone, never nested.
+pub(crate) fn o2_counts() -> (u64, bool, u64) {
+    use crate::cache::warm_count as wc;
+    let queued = O2_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).len()
+        + O2_BASE.lock().unwrap_or_else(|e| e.into_inner()).len()
+        + O1V_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).len();
+    let done = O2_STATS[0].load(Ordering::Relaxed) + O2_STATS[2].load(Ordering::Relaxed) + wc::get(wc::O1V_BUILT) + wc::get(wc::O1V_DROPPED);
+    (queued as u64, O2_RUNNING.load(Ordering::Relaxed), done)
+}
 /// O2 builds installed, their worker CPU ns (front + back end), dropped builds, the main
 /// thread's unit-lock wait ns while the O2 worker held it, and the number of such waits
 pub static O2_STATS: [AtomicU64; 5] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
@@ -8519,6 +8533,7 @@ fn o2_thread(runtime: &crate::options::RuntimeOptions) {
             }
         };
         let _job = compile_job();
+        O2_RUNNING.store(true, Ordering::Relaxed);
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             let live = || {
                 let up = SPEC_UNIT.load(Ordering::Acquire);
@@ -8542,6 +8557,7 @@ fn o2_thread(runtime: &crate::options::RuntimeOptions) {
                 owner::publish(|| o2_finish(up, done));
             }
         }));
+        O2_RUNNING.store(false, Ordering::Relaxed);
         if r.is_err() {
             if o1 { crate::cache::warm_count::add(crate::cache::warm_count::O1V_DROPPED, 1) } else { O2_STATS[2].fetch_add(1, Ordering::Relaxed); }
         }
@@ -12598,9 +12614,17 @@ fn progress_start() {
 /// for a benchmark that times only once the optimised code has settled: `pending` = builds queued or
 /// running or counting (PGO), plus one while the startup phase holds the workers; `installs` = O3 installs so far.
 /// The file exists from the first write on; a program that never reads it pays nothing.
-/// O3 builds queued or running now (postframe::activity, the run's JIT ring).
-pub(crate) fn o3_pending() -> u64 {
-    (tier_queue().map_or(0, |q| q.len()) + TIER_ACTIVE.lock().map_or(0, |a| a.len())) as u64
+/// O3 builds queued, and running now, with the slot of one running (postframe::activity: the
+/// run's JIT ring, makepad inspect `jit`).
+pub(crate) fn o3_counts() -> (u64, u64, Option<u32>) {
+    let queued = tier_queue().map_or(0, |q| q.len()) as u64;
+    let active = TIER_ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
+    (queued, active.len() as u64, active.first().copied())
+}
+
+/// O3 builds finished so far (installed, dropped or failed: a worker's job ended).
+pub(crate) fn o3_finished() -> u64 {
+    TIER1_FINISHED.load(Ordering::Relaxed)
 }
 
 fn o3_progress_write(last: &mut std::time::Instant) {

@@ -1,4 +1,4 @@
-# Desk Link protocol, version 1
+# Desk Link protocol, version 2
 
 Desk Link is how a viewer (this app) sees and drives a desktop (the window manager's
 `desk_link` server, `apps/wm/src/desk_link/`). It runs between machines on one LAN only: no
@@ -75,7 +75,7 @@ Gamepad buttons: bit 0 A, 1 B, 2 X, 3 Y, 4 left shoulder, 5 right shoulder, 6 se
 |---|---|---|
 | 100 | Welcome | `version u16, session u32, screens (n u32, then per screen: name str, x u32, y u32, width u32, height u32), screen u32, stream_w u32, stream_h u32, input bool, input_note str, server str` |
 | 101 | Refused | `reason str` (then the desktop closes) |
-| 102 | Video | `frame u32, key bool, built_ns u64, encoded_ns u64, sent_ns u64, data bytes` |
+| 102 | Video | `frame u32, key bool, built_ns u64, encoded_ns u64, sent_ns u64, stream u8, parts u8, y0 u32, data bytes` (see Streams) |
 | 103 | Cursor | `x u16, y u16 (over the stream picture), shape u8, visible bool` |
 | 104 | Pong | `client_ns u64 (echoed), server_ns u64` |
 | 105 | Stream | `screen u32, stream_w u32, stream_h u32` (the stream shows another screen now) |
@@ -109,6 +109,22 @@ example, no `/dev/uinput` access); `input_note` says why.
 - **Backpressure.** The desktop never drops an encoded picture: the next one references it. While
   a watching viewer has more than 2 pictures unsent, it makes none. The newest picture goes out
   once the viewer has caught up.
+
+## Streams (tiles and interleaving)
+
+A desktop whose GPU has several hardware encode engines encodes one H.264 stream per engine;
+each stream is a stream of its own (its own SPS and PPS, its own decoder on the viewer):
+
+- **Tiles** (the default: the lowest latency). Each picture is split into horizontal bands,
+  one per engine, encoded at once. Bands are whole 16-row macroblock rows except the last, and
+  cover the picture's rows exactly once. Every part of picture `frame` carries `parts` = the band
+  count and its first row `y0`; the band's height is its stream's SPS size. The parts of one
+  picture are sent back to back, and the viewer shows a picture only once it has all its parts
+  (never a torn picture).
+- **Interleave** (the most pictures per second, at one picture's latency). The engines take whole
+  pictures in turn: picture `frame` comes from stream `frame % streams` with `parts = 1, y0 = 0`.
+- A key frame request makes every stream start again from a key frame.
+- One engine (or `split = off`): one stream, `stream 0, parts 1, y0 0`.
 
 ## Cursor
 

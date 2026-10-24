@@ -1,16 +1,20 @@
-//! The JIT ring: a small ring in the running app's caption that says what the JIT is doing.
-//! No text in it. While functions are compiled (built ahead, or the UI thread's lazy compiles)
-//! an arc spins and grows as the compile queue drains; while only background tier-up (O2/O3) is
-//! left it is a thin, dimmer ring; once settled it fades out in about half a second and is gone.
-//! A program stopped on invalidated code (amber) or a panic (red) shows a solid dot that stays
-//! until it is clicked. Hovering it shows a tooltip with the numbers; a click is the run's
-//! (`Event::RingClick`). Placement follows the caption the app draws (`WindowCaption`): just left
-//! of window buttons at the caption's right (Windows, Linux), else ~12 pt from the window's right
-//! edge (macOS), vertically centred. It is a badge of the window (`window_kind::BADGE` with
-//! `window_style::BADGE_INPUT`): the window system composites it over the app's frames, which
-//! neither wait for it nor pay for it; the pointer over it is session 0's, everywhere else the
-//! app's. The tooltip is a second badge (no input) while hovered. Every value eases on this
-//! session's clock; the ring is the boot document's `jit_ring_px` (GPU), a frame one quad.
+//! The JIT ring: a small ring in the running app's caption that answers "is the JIT doing
+//! something right now?". No text in it. While the JIT builds anything (lazy compiles, builds
+//! ahead, O2/O3 tier-up, the settle rebuild, warm-cache links) a bright head with a fading tail
+//! turns around it, faster the more builds finish a second; work the program waits for (lazy
+//! compiles, builds ahead, a UI block) turns bright and fast, background tier-up slower and dimmer,
+//! but it always moves: nothing static means busy. Under the head a progress arc from the top
+//! covers the builds finished of those queued since the JIT got busy (when a queue says). Once
+//! nothing has been built for half a second the ring fades out and is gone: nothing static means
+//! idle either. A program stopped on invalidated code (amber) or a panic (red) shows a solid dot
+//! that stays until it is clicked. Hovering it shows a tooltip with the live numbers; a click is
+//! the run's (`Event::RingClick`). Placement follows the caption the app draws (`WindowCaption`):
+//! just left of window buttons at the caption's right (Windows, Linux), else ~12 pt from the
+//! window's right edge (macOS), vertically centred. It is a badge of the window
+//! (`window_kind::BADGE` with `window_style::BADGE_INPUT`): the HAL composes it over the app's
+//! frames, which neither wait for it nor pay for it; the pointer over it is session 0's,
+//! everywhere else the app's. The tooltip draws in the same badge layer while hovered. Every value
+//! eases on this session's clock; the ring is the boot document's `jit_ring_px` (GPU), one quad.
 use makepad_hal::{AppCaption, Id};
 use std::time::{Duration, Instant};
 
@@ -29,13 +33,18 @@ const TIP_GAP: f32 = 2.0;
 pub const TIP_FONT: f32 = 11.0;
 /// the pointer rests this long on the ring before the tooltip shows
 const TIP_AFTER: Duration = Duration::from_millis(250);
-/// time constants (s): the fill, the thin ring's blend, the fades
+/// time constants (s): the progress arc, the foreground / background blend, the head's pace, the fades
 const FILL: f32 = 0.25;
-const THIN: f32 = 0.3;
+const BLEND: f32 = 0.3;
+const PACE: f32 = 0.4;
 const SHOW: f32 = 0.12;
 const HIDE: f32 = 0.15;
-/// the arc's turns a second (reduce motion: a third of it)
-const SPIN: f32 = 0.8;
+/// the head's turns a second with work the program waits for and with background work, at a
+/// trickle; up to twice that as the build rate rises to RATE_TOP builds a second (logarithmic);
+/// reduce motion: a third of it, still moving
+const SPIN_FG: f32 = 0.9;
+const SPIN_BG: f32 = 0.4;
+const RATE_TOP: f32 = 1000.0;
 /// the ring draws at most this often
 pub const FRAME: Duration = Duration::from_nanos(33_333_333);
 
@@ -48,37 +57,54 @@ pub enum Alert {
     Panic,
 }
 
-/// What the run sees of the JIT (hal_run).
+/// What the run sees of the JIT (hal_run): it is busy (a ring without a `Want` fades out).
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Want {
-    /// functions compiled since this compile began, and still queued or building
+    /// builds finished out of the queues since the JIT got busy, and builds still queued or
+    /// running (ahead, O2, O3)
     pub done: u64,
-    pub queued: u64,
-    /// the UI thread waits on the JIT (lazy compiles) without a queue to show
+    pub pending: u64,
+    /// of the pending: functions queued or building ahead, O2 / verified O1 builds, O3 builds
+    pub ahead: u64,
+    pub o2: u64,
+    pub o3: u64,
+    /// a program thread compiles lazily (the UI thread's JIT duty cycle is up, or first compiles
+    /// finished) without a queue to show
     pub lazy: bool,
-    /// O2/O3 builds queued or running
-    pub tier_up: u64,
     /// the UI is blocked on the JIT right now
     pub block: bool,
+    /// the settle rebuild runs
+    pub settling: bool,
+    /// of the builds a second, warm-cache links (no compile)
+    pub linking: bool,
+    /// builds finished a second (smoothed)
+    pub rate: f32,
     /// how long the JIT has been busy
     pub busy: Duration,
 }
 
 impl Want {
-    fn compiling(&self) -> bool {
-        self.queued > 0 || self.lazy || self.block
+    /// Work the program waits for (bright and fast); else background tier-up (slower, dimmer).
+    fn foreground(&self) -> bool {
+        self.ahead > 0 || self.lazy || self.block
+    }
+
+    /// The builds finished of those queued since the JIT got busy (None: no queue says).
+    fn progress(&self) -> Option<f32> {
+        let total = self.done + self.pending;
+        (self.pending > 0 && total > 0).then(|| self.done as f32 / total as f32)
     }
 }
 
 /// One frame of the ring: its eased values (document `jit_ring_px`).
 #[derive(Clone, Copy, Debug)]
 pub struct Look {
-    /// how much of the ring the arc covers (0..1)
+    /// the progress arc from the top (0..1; 0: no queue says)
     pub fill: f32,
-    /// 0 compiling .. 1 the thin tier-up ring; 2 the amber dot, 3 the red one
+    /// 0 work the program waits for .. 1 background tier-up (dimmer); 2 the amber dot, 3 the red one
     pub mode: f32,
     pub opacity: f32,
-    /// the arc's turn so far (turns)
+    /// the head's turn so far (turns)
     pub spin: f32,
     pub hover: f32,
 }
@@ -96,7 +122,10 @@ pub struct Ring {
     want: Option<Want>,
     alert: Option<Alert>,
     fill: f32,
-    thin: f32,
+    /// 0 foreground .. 1 background, eased
+    back: f32,
+    /// the head's turns a second, eased
+    pace: f32,
     opacity: f32,
     spin: f32,
     hover: f32,
@@ -126,7 +155,8 @@ impl Ring {
             want: None,
             alert: None,
             fill: 0.0,
-            thin: 0.0,
+            back: 0.0,
+            pace: 0.0,
             opacity: 0.0,
             spin: 0.0,
             hover: 0.0,
@@ -144,8 +174,9 @@ impl Ring {
     pub fn set(&mut self, want: Option<Want>, alert: Option<Alert>) {
         if self.window.is_none() && (want.is_some() || alert.is_some()) {
             // a new ring starts from nothing
-            self.fill = 0.0;
-            self.thin = want.is_some_and(|w| !w.compiling()) as u8 as f32;
+            self.fill = want.and_then(|w| w.progress()).unwrap_or(0.0);
+            self.back = want.is_some_and(|w| !w.foreground()) as u8 as f32;
+            self.pace = want.map_or(0.0, |w| pace(&w));
             self.opacity = 0.0;
             self.spin = 0.0;
             self.hover = 0.0;
@@ -221,33 +252,36 @@ impl Ring {
         let hover = (self.hovered.is_some() || self.pressed) as u8 as f32;
         self.hover = ease(self.hover, hover, dt, 0.06, 0.12);
         if let Some(w) = self.want {
-            let thin = (!w.compiling()) as u8 as f32;
-            self.thin = ease(self.thin, thin, dt, THIN, THIN);
-            let total = w.done + w.queued;
-            let fill = if w.compiling() {
-                if total > 0 { w.done as f32 / total as f32 } else { self.fill }
-            } else {
-                1.0
-            };
-            self.fill = ease(self.fill, fill, dt, FILL, FILL);
+            let back = (!w.foreground()) as u8 as f32;
+            self.back = ease(self.back, back, dt, BLEND, BLEND);
+            // no queue says: the progress arc goes (the head alone turns)
+            self.fill = ease(self.fill, w.progress().unwrap_or(0.0), dt, FILL, FILL);
+            self.pace = ease(self.pace, pace(&w), dt, PACE, PACE);
         }
-        // the arc turns while compiling; the thin ring and the dot stand still
-        let pace = SPIN * (1.0 - self.thin) * if reduce_motion { 0.33 } else { 1.0 };
+        // the head always turns while the ring shows (fading out too); the dot stands still
+        let pace = self.pace * if reduce_motion { 0.33 } else { 1.0 };
         self.spin = (self.spin + dt * pace) % 1000.0;
         // a dot that goes (clicked, nothing else to show) fades out as the dot
         let alert = self.alert.or(self.want.is_none().then_some(self.last_alert).filter(|_| self.dot));
         let mode = match alert {
             Some(Alert::Stale) => 2.0,
             Some(Alert::Panic) => 3.0,
-            None => self.thin,
+            None => self.back,
         };
         Look { fill: self.fill, mode, opacity: self.opacity, spin: self.spin, hover: self.hover }
     }
 
 }
 
-/// What the JIT does, what is queued, how long it has been at it (the ring's tooltip and the
-/// run's inspect view), or what the program is stopped on.
+/// The head's turns a second for this work: a base by kind, up to twice it with the build rate.
+fn pace(w: &Want) -> f32 {
+    let base = if w.foreground() { SPIN_FG } else { SPIN_BG };
+    let boost = ((1.0 + w.rate.max(0.0)).log10() / (1.0 + RATE_TOP).log10()).clamp(0.0, 1.0);
+    base * (1.0 + boost)
+}
+
+/// What the JIT does, what is queued, how fast it goes, how long it has been at it (the ring's
+/// tooltip and the run's inspect view), or what the program is stopped on.
 pub fn summary(want: Option<Want>, alert: Option<Alert>) -> String {
     if let Some(alert) = alert {
         return match alert {
@@ -260,16 +294,31 @@ pub fn summary(want: Option<Want>, alert: Option<Alert>) -> String {
     if w.block {
         parts.push("UI waiting on the JIT".to_string());
     }
-    if w.queued > 0 {
-        parts.push(format!("compiling {}", w.queued));
-    } else if w.compiling() {
+    if w.ahead > 0 {
+        parts.push(format!("compiling {} fns", w.ahead));
+    } else if w.lazy || w.block {
         parts.push("compiling".to_string());
     }
-    if w.tier_up > 0 {
-        parts.push(format!("O3 queue {}", w.tier_up));
+    if w.o2 > 0 {
+        parts.push(format!("O2 queue {}", w.o2));
+    }
+    if w.o3 > 0 {
+        parts.push(format!("O3 queue {}", w.o3));
+    }
+    if w.settling {
+        parts.push("settle rebuild".to_string());
     }
     if parts.is_empty() {
-        parts.push("settling".to_string());
+        parts.push(if w.linking { "warm install" } else { "finishing" }.to_string());
+    } else if w.linking {
+        parts.push("warm install".to_string());
+    }
+    if let Some(p) = w.progress() {
+        // the last word gets the percentage ("warm install 30%", "O3 queue 40 · 62%")
+        parts.push(format!("{:.0}%", p * 100.0));
+    }
+    if w.rate >= 1.0 {
+        parts.push(format!("{:.0} fns/s", w.rate));
     }
     parts.push(format!("{:.1} s", w.busy.as_secs_f32()));
     parts.join(" · ")
@@ -315,29 +364,57 @@ mod tests {
         assert!(tip[1] >= ring[1] + ring[3]);
     }
 
+    /// Steps the ring `n` times 50 ms apart with `want`; the last look.
+    fn run(ring: &mut Ring, want: Want, n: usize) -> Look {
+        for _ in 0..n {
+            ring.set(Some(want), None);
+            ring.last -= Duration::from_millis(50);
+            ring.look(false);
+        }
+        ring.last -= Duration::from_millis(50);
+        ring.look(false)
+    }
+
     #[test]
-    fn the_arc_fills_as_the_queue_drains_and_settles_thin() {
+    fn the_progress_fills_as_the_queue_drains_and_the_head_always_turns() {
         let mut ring = Ring::new();
         ring.window = Some(Id::new(1, 1));
-        ring.set(Some(Want { done: 0, queued: 100, ..Default::default() }), None);
+        ring.set(Some(Want { pending: 100, ahead: 100, ..Default::default() }), None);
         let a = ring.look(false);
-        assert!(a.mode < 0.5 && a.fill < 0.1);
-        for _ in 0..40 {
-            ring.set(Some(Want { done: 90, queued: 10, ..Default::default() }), None);
-            ring.last -= Duration::from_millis(50);
-            ring.look(false);
-        }
-        let b = ring.look(false);
-        assert!(b.fill > 0.8, "{b:?}");
-        for _ in 0..40 {
-            ring.set(Some(Want { tier_up: 40, ..Default::default() }), None);
-            ring.last -= Duration::from_millis(50);
-            ring.look(false);
-        }
-        let c = ring.look(false);
-        assert!(c.mode > 0.95 && c.fill > 0.99, "{c:?}");
-        assert_eq!(ring.tip_text(), "O3 queue 40 · 0.0 s");
+        assert!(a.mode < 0.5 && a.fill < 0.1, "{a:?}");
+        let b = run(&mut ring, Want { done: 90, pending: 10, ahead: 10, rate: 200.0, ..Default::default() }, 40);
+        assert!(b.fill > 0.8 && b.mode < 0.05, "{b:?}");
+        // background tier-up: dimmer, still turning
+        let bg = Want { done: 12, pending: 40, o3: 40, rate: 5.0, ..Default::default() };
+        let c = run(&mut ring, bg, 40);
+        assert!(c.mode > 0.95 && (c.fill - 12.0 / 52.0).abs() < 0.02, "{c:?}");
+        let d = run(&mut ring, bg, 4);
+        assert!(d.spin > c.spin + 0.05, "the head stood still: {c:?} {d:?}");
+        assert_eq!(ring.tip_text(), "O3 queue 40 · 23% · 5 fns/s · 0.0 s");
+        // a lazy compile without a queue: no progress arc, the head turns fast
+        let e = run(&mut ring, Want { lazy: true, rate: 30.0, ..Default::default() }, 40);
+        assert!(e.fill < 0.02 && e.mode < 0.05, "{e:?}");
+        assert!(ring.pace > SPIN_FG, "{}", ring.pace);
         ring.set(None, Some(Alert::Stale));
         assert_eq!(ring.look(false).mode, 2.0);
+    }
+
+    #[test]
+    fn faster_work_turns_faster_background_slower() {
+        let fg_slow = pace(&Want { ahead: 5, rate: 1.0, ..Default::default() });
+        let fg_fast = pace(&Want { ahead: 5, rate: 500.0, ..Default::default() });
+        let bg = pace(&Want { o3: 5, rate: 500.0, ..Default::default() });
+        assert!(fg_fast > fg_slow && bg < fg_fast && bg > 0.3, "{fg_slow} {fg_fast} {bg}");
+    }
+
+    #[test]
+    fn the_tooltip_says_what_runs() {
+        let w = Want { done: 30, pending: 70, ahead: 70, rate: 120.0, busy: Duration::from_millis(1800), ..Default::default() };
+        assert_eq!(summary(Some(w), None), "compiling 70 fns · 30% · 120 fns/s · 1.8 s");
+        let w = Want { done: 3, pending: 7, linking: true, ahead: 7, ..Default::default() };
+        assert_eq!(summary(Some(w), None), "compiling 7 fns · warm install · 30% · 0.0 s");
+        let w = Want { settling: true, busy: Duration::from_secs(2), ..Default::default() };
+        assert_eq!(summary(Some(w), None), "settle rebuild · 2.0 s");
+        assert_eq!(summary(None, None), "settled");
     }
 }

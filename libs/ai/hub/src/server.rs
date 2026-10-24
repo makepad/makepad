@@ -878,7 +878,69 @@ fn route_post_request(
     let Some(caller) = caller_of(shared, headers) else {
         return unauthorized_response();
     };
+    if headers.path == "/control/local-use" {
+        // Only the WM hosting this hub sets its mode and local use: a request
+        // from this machine. A fleet credential from elsewhere never does.
+        if !same_machine(shared, headers) {
+            return error_json(403, "local-use is set by this machine's window manager only".to_string());
+        }
+        return control_local_use(shared, body);
+    }
     route_post_by(shared, &caller, &headers.path, body)
+}
+
+/// A request that comes from this machine: a loopback-only hub takes no other,
+/// and behind the TLS front the front's peer stamp (it strips a client's own) is loopback.
+fn same_machine(shared: &ServiceShared, headers: &HttpServerHeaders) -> bool {
+    if shared.front_secret.is_none() {
+        return true;
+    }
+    let peer = headers.lines.iter().find_map(|l| {
+        let (n, v) = l.trim_end().split_once(':')?;
+        n.trim().eq_ignore_ascii_case(makepad_network::fleet::front::HEADER_PEER).then(|| v.trim().parse::<std::net::IpAddr>().ok()).flatten()
+    });
+    peer.is_some_and(|ip| ip.is_loopback())
+}
+
+/// `POST /control/local-use {"mode": "auto"|"ui-first"|"ai-first"|"unavailable", "use": "gaming"|""}`:
+/// the hosting WM's report (`crate::activity::ComputeMode`). Closing admission goes the way
+/// of all local use: running jobs are cancelled as `local-use: …` (their clients reroute),
+/// queued ones wait or reroute, and the model worker unloads. AI First drops the UI reserve:
+/// it never yields GPU memory.
+fn control_local_use(shared: &Arc<ServiceShared>, body: &[u8]) -> HttpServerResponse {
+    let Ok(value) = json::parse(body) else {
+        return error_json(400, "need {\"mode\": \"auto\"|\"ui-first\"|\"ai-first\"|\"unavailable\", \"use\": \"gaming\"|\"\"}".to_string());
+    };
+    let mode = match value.get("mode").and_then(Value::as_str) {
+        None => shared.activity.mode(),
+        Some(name) => match crate::activity::ComputeMode::parse(name) {
+            Some(mode) => mode,
+            None => return error_json(400, format!("unknown mode {name:?}")),
+        },
+    };
+    let gaming = match value.get("use").and_then(Value::as_str) {
+        None => shared.activity.gaming(),
+        Some("gaming") => true,
+        Some("") => false,
+        Some(other) => return error_json(400, format!("unknown local use {other:?}")),
+    };
+    let (was_mode, was_gaming) = (shared.activity.mode(), shared.activity.gaming());
+    shared.activity.set_local_use(mode, gaming);
+    if mode == crate::activity::ComputeMode::AiFirst {
+        crate::gpu_yield::set_ui_reserve_mb(0);
+    }
+    shared.jobs.with(|store| store.interrupt_for_activity());
+    let snap = shared.activity.snapshot();
+    if (was_mode, was_gaming) != (mode, gaming) {
+        eprintln!(
+            "[local-use] mode {} {}: admission {} ({})",
+            mode.name(),
+            if gaming { "gaming" } else { "no game" },
+            if snap.admission_open { "open" } else { "closed" },
+            snap.reason
+        );
+    }
+    ok_json(snap.serialize_json())
 }
 
 /// Looks up the live session a connected websocket belongs to.
@@ -1233,6 +1295,11 @@ fn control_yield(shared: &Arc<ServiceShared>, caller: &makepad_network::fleet::f
         return error_json(400, "need \"mb\"".to_string());
     };
     let unload = value.get("unload").and_then(Value::as_bool).unwrap_or(false);
+    if shared.activity.mode() == crate::activity::ComputeMode::AiFirst {
+        // The operator chose AI over the UI: nothing is given back.
+        eprintln!("[gpu-yield] AI First: not yielding {mb} MB to the UI");
+        return ok_json(json::obj(vec![("ai_first", Value::Bool(true))]).to_json());
+    }
     if let Some(reserve) = value.get("reserve_mb").and_then(Value::as_u64) {
         crate::gpu_yield::set_ui_reserve_mb(reserve);
     }
@@ -1628,6 +1695,7 @@ fn control_json(shared: &Arc<ServiceShared>) -> String {
             ]),
         ),
         ("llm", llm),
+        ("activity", json::parse(shared.activity.snapshot().serialize_json().as_bytes()).unwrap_or(Value::Null)),
         (
             "policy",
             Value::Arr(
@@ -4151,6 +4219,30 @@ mod lifecycle_tests {
             accept_encoding: None,
             sec_websocket_key: None,
         }
+    }
+
+    #[test]
+    fn local_use_is_set_from_this_machine_only() {
+        let shared = fixture_shared_with_secret(&[], Some("s3cret"));
+        let body = br#"{"mode":"unavailable","use":""}"#;
+        // A fleet credential from another machine: the front stamps its address.
+        let mut remote = request_headers("POST", "/control/local-use", Some(("s3cret", "peer-node")));
+        remote.lines.push("X-Makepad-Peer: 10.0.0.5\r\n".to_string());
+        assert!(route_post_request(&shared, &remote, body).header.starts_with("HTTP/1.1 403"));
+        // No peer stamp proves nothing.
+        let unstamped = request_headers("POST", "/control/local-use", Some(("s3cret", "peer-node")));
+        assert!(route_post_request(&shared, &unstamped, body).header.starts_with("HTTP/1.1 403"));
+        assert!(shared.activity.allows_work(), "a refused request changes nothing");
+        // Without the front's secret it is no caller at all.
+        let mut forged = request_headers("POST", "/control/local-use", Some(("guess", "wm")));
+        forged.lines.push("X-Makepad-Peer: 127.0.0.1\r\n".to_string());
+        assert!(route_post_request(&shared, &forged, body).header.starts_with("HTTP/1.1 401"));
+        // The hosting WM, over the front on loopback.
+        let mut wm = request_headers("POST", "/control/local-use", Some(("s3cret", "wm")));
+        wm.lines.push("X-Makepad-Peer: 127.0.0.1\r\n".to_string());
+        assert!(route_post_request(&shared, &wm, br#"{"mode":"auto","use":"gaming"}"#).header.starts_with("HTTP/1.1 200"));
+        assert_eq!(shared.activity.refusal().as_deref(), Some("local-use: gaming"));
+        assert!(route_post_request(&shared, &wm, br#"{"mode":"nope"}"#).header.starts_with("HTTP/1.1 400"));
     }
 
     #[test]

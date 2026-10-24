@@ -1154,6 +1154,8 @@ mod tests {
                 "Terminal",
                 "Mixer",
                 "Amp",
+                "Flow",
+                "Synth",
                 "Code",
                 "Task Manager",
                 "Sheets",
@@ -1175,6 +1177,7 @@ mod tests {
                 "Fab",
                 "Scope",
                 "Stage",
+                "Makepad Story",
                 "Sandbox",
             ]
             .map(str::to_string)

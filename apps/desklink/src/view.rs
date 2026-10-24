@@ -4,6 +4,7 @@
 
 use crate::conn::{Latency, State};
 use makepad_widgets::makepad_draw::shader::draw_nv12::DrawNv12;
+use crate::conn::Part;
 use makepad_widgets::makepad_platform::video_file::{DecodedPicture, PicturePlane, VideoColor};
 use makepad_widgets::*;
 use std::collections::VecDeque;
@@ -105,14 +106,13 @@ pub struct RemoteView {
     draw_label: DrawText,
     #[live]
     draw_note_bg: DrawColor,
+    /// The newest picture's parts (its tiles, or all of it), as textures.
     #[rust]
-    texture: Option<Texture>,
-    /// The newest GPU picture: its luma and chroma planes as textures over the decoder's memory.
+    parts: Vec<ShownPart>,
+    /// GPU parts drawn before them, held until no frame in flight can still sample them.
     #[rust]
-    planes: Option<(Texture, Texture, DecodedPicture)>,
-    /// Pictures drawn before it, held until no frame in flight can still sample them.
-    #[rust]
-    retired: VecDeque<(Texture, Texture, DecodedPicture)>,
+    retired: VecDeque<ShownPart>,
+    /// The whole picture's size.
     #[rust]
     size: [u32; 2],
     /// 1:1 device pixels instead of fit-to-window.
@@ -140,44 +140,68 @@ pub struct RemoteView {
 /// GPU pictures kept alive after they were replaced (frames in flight may sample them).
 const RETIRED_PICTURES: usize = 3;
 
+/// A part of the shown picture: its rows from `y0` on, `size`, and its texture(s).
+pub struct ShownPart {
+    y0: u32,
+    size: [u32; 2],
+    tex: PartTex,
+}
+
+enum PartTex {
+    /// A decoder's GPU picture: its luma and chroma planes as textures over its memory (the
+    /// picture held so the decoder does not reuse it meanwhile).
+    Gpu { luma: Texture, chroma: Texture, _picture: DecodedPicture },
+    /// CPU NV12 in a texture of its own (replaced in place).
+    Cpu(Texture),
+}
+
 impl RemoteView {
-    /// The newest decoded picture: into the view's NV12 texture (replaced in place).
-    /// The newest decoded picture, on the GPU: its planes are sampled where the decoder put
-    /// them, nothing is copied.
-    pub fn set_gpu_picture(&mut self, cx: &mut Cx, width: u32, height: u32, picture: DecodedPicture, frame: u32, decoded_ns: u64) {
-        let luma = cx.import_picture_plane(picture.handle, PicturePlane::Luma);
-        let chroma = cx.import_picture_plane(picture.handle, PicturePlane::Chroma);
-        if let Some(old) = self.planes.replace((luma, chroma, picture)) {
-            self.retired.push_back(old);
-            // a frame in flight may still sample the last few: the GPU is at most a couple behind
-            while self.retired.len() > RETIRED_PICTURES {
-                self.retired.pop_front();
+    /// The newest decoded picture (`width` x `height`), all its parts at once: GPU parts are
+    /// sampled where the decoder put them (nothing is copied), CPU parts uploaded.
+    pub fn set_picture(&mut self, cx: &mut Cx, width: u32, height: u32, parts: Vec<Part>, frame: u32, decoded_ns: u64) {
+        let mut old = std::mem::take(&mut self.parts);
+        for (i, part) in parts.into_iter().enumerate() {
+            let tex = match part.gpu {
+                Some(picture) => {
+                    let luma = cx.import_picture_plane(picture.handle, PicturePlane::Luma);
+                    let chroma = cx.import_picture_plane(picture.handle, PicturePlane::Chroma);
+                    PartTex::Gpu { luma, chroma, _picture: picture }
+                }
+                None => {
+                    // the same part's CPU texture is written again in place
+                    let reuse = old.get(i).and_then(|o| match &o.tex {
+                        PartTex::Cpu(t) if o.size == [part.width, part.height] => Some(t.clone()),
+                        _ => None,
+                    });
+                    match reuse {
+                        Some(t) => {
+                            let _ = t.take_vec_u8(cx);
+                            t.put_back_vec_u8(cx, part.nv12, None);
+                            PartTex::Cpu(t)
+                        }
+                        None => PartTex::Cpu(Texture::new_nv12(cx, part.width, part.height, part.nv12)),
+                    }
+                }
+            };
+            self.parts.push(ShownPart { y0: part.y0, size: [part.width, part.height], tex });
+        }
+        // a frame in flight may still sample the last few GPU pictures: the GPU is at most a
+        // couple behind
+        for o in old.drain(..) {
+            if matches!(o.tex, PartTex::Gpu { .. }) {
+                self.retired.push_back(o);
             }
         }
-        self.texture = None;
+        while self.retired.len() > RETIRED_PICTURES * self.parts.len().max(1) {
+            self.retired.pop_front();
+        }
         self.size = [width, height];
         self.pending = Some((frame, decoded_ns));
         self.draw_bg.redraw(cx);
     }
 
-    pub fn set_picture(&mut self, cx: &mut Cx, width: u32, height: u32, nv12: Vec<u8>, frame: u32, decoded_ns: u64) {
-        self.planes = None;
-        self.retired.clear();
-        let fits = self.texture.is_some() && self.size == [width, height];
-        if !fits {
-            self.texture = Some(Texture::new_nv12(cx, width, height, nv12));
-            self.size = [width, height];
-        } else if let Some(t) = &self.texture {
-            let _ = t.take_vec_u8(cx);
-            t.put_back_vec_u8(cx, nv12, None);
-        }
-        self.pending = Some((frame, decoded_ns));
-        self.draw_bg.redraw(cx);
-    }
-
     pub fn clear(&mut self, cx: &mut Cx) {
-        self.texture = None;
-        self.planes = None;
+        self.parts.clear();
         self.retired.clear();
         self.size = [0, 0];
         self.draw_bg.redraw(cx);
@@ -229,18 +253,22 @@ impl Widget for RemoteView {
         self.draw_bg.draw_abs(cx, view);
         let rect = self.place(cx, view);
         self.placement = Placement { rect };
-        let [w, h] = self.size;
-        let drawn = if let Some((luma, chroma, _)) = &self.planes {
-            self.draw_nv12.set_planes(luma, chroma, w, h, VideoColor::BT709);
-            true
-        } else if let Some(texture) = &self.texture {
-            self.draw_nv12.set_nv12(texture, w, h, VideoColor::BT709, None);
-            true
-        } else {
-            false
-        };
+        let full_h = self.size[1].max(1) as f64;
+        for part in &self.parts {
+            // each part's rows of the placed picture: the parts tile it exactly
+            let top = rect.pos.y + rect.size.y * part.y0 as f64 / full_h;
+            let bottom = rect.pos.y + rect.size.y * (part.y0 + part.size[1]) as f64 / full_h;
+            let [pw, ph] = part.size;
+            match &part.tex {
+                PartTex::Gpu { luma, chroma, .. } => self.draw_nv12.set_planes(luma, chroma, pw, ph, VideoColor::BT709),
+                PartTex::Cpu(t) => self.draw_nv12.set_nv12(t, pw, ph, VideoColor::BT709, None),
+            }
+            // a draw call per part: each samples its own textures
+            self.draw_nv12.new_draw_call(cx);
+            self.draw_nv12.draw_abs(cx, Rect { pos: dvec2(rect.pos.x, top), size: dvec2(rect.size.x, bottom - top) });
+        }
+        let drawn = !self.parts.is_empty();
         if drawn {
-            self.draw_nv12.draw_abs(cx, rect);
             if let Some(p) = self.pending.take() {
                 // stamped here, in the frame that draws it (the app reads it later, at its next sync)
                 self.drawn = Some((p.0, p.1, crate::conn::now_ns()));

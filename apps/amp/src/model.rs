@@ -13,7 +13,7 @@ use crate::source::{CatalogResults, Device, NowPlaying, Repeat, TrackDetail, Tra
 use crate::worker::Availability;
 use crate::Theme;
 use makepad_audio_route::AnalyzerHandle;
-use makepad_widgets::{GridColumns, GridSort};
+use makepad_widgets::{log, GridColumns, GridSort};
 use std::sync::Arc;
 
 /// Tracks a search lists at most; the count says how many matched.
@@ -344,6 +344,12 @@ pub struct Model {
     /// The local file played out with nothing of ours after it: Play
     /// starts it again.
     pub local_done: bool,
+    /// AI music is on and an AI song plays (`ai_music.rs`): when it plays
+    /// out with nothing after it, its last [`crate::ai_music::LOOP_TAIL_MS`]
+    /// play again until the next song is ready, rather than silence.
+    pub ai_hold: bool,
+    /// Set when that happened; the next AI song then starts at once.
+    pub ai_waiting: bool,
     pub filter: Filter,
     /// The folders of music files, as added.
     pub folders: Vec<String>,
@@ -390,6 +396,8 @@ impl Model {
             local_path: None,
             local_generation: 0,
             local_done: false,
+            ai_hold: false,
+            ai_waiting: false,
             filter: Filter::All,
             folders: Vec::new(),
             local_progress: String::new(),
@@ -885,10 +893,33 @@ impl Model {
         } else if self.queue.driving && self.queue.upcoming_len() > 0 {
             let next = self.queue.advance();
             self.start(next);
+        } else if self.ai_hold && !failed {
+            // The next AI song is still being made: the end of this one
+            // again, never silence (`ai_music.rs`).
+            let tail = self.playback.duration_ms.saturating_sub(crate::ai_music::LOOP_TAIL_MS);
+            log!("amp: ai-music: the next song is not ready; playing the last {} s again", crate::ai_music::LOOP_TAIL_MS / 1000);
+            self.ai_waiting = true;
+            self.requests.player.push(PlayerRequest::Seek(tail));
+            self.changed();
         } else {
             // Played out: the output closes until something plays again.
             self.local_done = true;
             self.requests.player.push(PlayerRequest::Stop);
+            self.changed();
+        }
+    }
+
+    /// A finished AI song (a local file the index knows): next in the queue,
+    /// or playing now when `now` (nothing of the AI plays, or the last one
+    /// is replaying its end while it waited).
+    pub fn ai_enqueue(&mut self, item: QueueItem, now: bool) {
+        self.queue.play_next(item);
+        if now {
+            self.ai_waiting = false;
+            let next = self.queue.advance();
+            self.start(next);
+        } else {
+            self.requests.queue = true;
             self.changed();
         }
     }

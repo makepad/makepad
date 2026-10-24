@@ -151,42 +151,57 @@ let caption_button_px = fn(p: vec2, s: vec2, glyph: float, hover: float, down: f
     return vec4(col + vec3(dither(px) * step(0.001, alpha)), alpha)
 }
 // the JIT ring in the running app's caption (makepad run; ring.rs), in its 24 pt badge: a ring
-// 14 pt across. mode 0: compiling -- an arc that turns (spin: its turn so far) and covers `fill`
-// of the ring as the compile queue drains, over a faint track; 1: background tier-up -- a thin,
-// dimmer full ring (0..1 blends them); 2 / 3: the program is stopped on invalidated code / a panic
-// -- a solid amber / red dot. hover 0..1 lifts it on a faint disc. ink 1: on a dark caption,
-// 0: on a light one. a: opacity. Premultiplied. GPU-only.
+// 14 pt across that moves whenever the JIT builds. A head with a fading tail turns around it
+// (spin: its turn so far) over a faint track; under it a progress arc from the top covers `fill`
+// of the ring (0: none). mode 0: work the program waits for -- bright, a 2 pt stroke; 1:
+// background tier-up -- the same motion, dimmer and 1.6 pt (0..1 blends them); 2 / 3: the program
+// is stopped on invalidated code / a panic -- a solid amber / red dot. hover 0..1 lifts it on a
+// faint disc. ink 1: on a dark caption, 0: on a light one. a: opacity. Premultiplied. GPU-only.
 let jit_ring_px = fn(p: vec2, s: vec2, fill: float, mode: float, a: float, spin: float, hover: float, ink: float, dp: float, px: vec2) -> vec4 {
     let d = p - s * 0.5
     let r = length(d)
     let dot = step(1.5, mode)
-    let thin = clamp(mode, 0.0, 1.0) * (1.0 - dot)
+    let back = clamp(mode, 0.0, 1.0) * (1.0 - dot)
     // the ring's centre line and stroke
     let rad = 6.0
-    let w = mix(2.0, 1.25, thin)
+    let w = mix(2.0, 1.6, back)
     let band = clamp((w * 0.5 - abs(r - rad)) * dp + 0.5, 0.0, 1.0)
-    // the arc: from its head (spin) back over its length, in turns clockwise from the top
+    // where this pixel is on the ring: turns clockwise from the top
     let t = fract(atan2(d.x, 0.0 - d.y) / 6.2831853 + 1.0)
-    let len = mix(0.16 + 0.84 * clamp(fill, 0.0, 1.0), 1.0, thin)
-    let back = fract(fract(spin) - t + 1.0)
     let arc_px = 6.2831853 * rad * dp
-    let on_arc = max(clamp((len - back) * arc_px + 0.5, 0.0, 1.0) * clamp(back * arc_px + 1.0, 0.0, 1.0), step(0.999, len))
+    // the progress arc: from the top to `fill` (quiet: the head is what says busy)
+    let f = clamp(fill, 0.0, 1.0)
+    let on_fill = clamp((f - t) * arc_px + 0.5, 0.0, 1.0) * step(0.004, f)
+    // the head and its tail: full at the head, fading over `tail` turns behind it, a little
+    // wider than the stroke
+    let tail = 0.35
+    let behind = fract(fract(spin) - t + 1.0)
+    let head_in = clamp(behind * arc_px + 0.5, 0.0, 1.0)
+    let fade = clamp(1.0 - behind / tail, 0.0, 1.0)
+    let head = head_in * fade * fade
+    let head_band = clamp(((w + 0.8) * 0.5 - abs(r - rad)) * dp + 0.5, 0.0, 1.0)
     let ink_c = mix(#2a2638, #ece6ff, ink)
     let arc_c = mix(#5b4fd0, #b8acff, ink)
-    let track_a = mix(0.13, 0.18, ink) * (1.0 - thin)
-    let arc_a = mix(0.92, mix(0.42, 0.5, ink), thin)
-    let arc_col = mix(arc_c.rgb, ink_c.rgb, thin)
+    let head_c = mix(#4433d6, #d4ccff, ink)
+    let track_a = mix(0.10, 0.13, ink)
+    let fill_a = mix(mix(0.26, 0.3, ink), mix(0.18, 0.22, ink), back)
+    let head_a = mix(1.0, 0.8, back)
     var col = ink_c.rgb * track_a * band
     var alpha = track_a * band
-    let arc = band * on_arc * arc_a
-    col = col * (1.0 - arc) + arc_col * arc
-    alpha = alpha * (1.0 - arc) + arc
-    // the dot
+    let fa = band * on_fill * fill_a
+    col = col * (1.0 - fa) + arc_c.rgb * fa
+    alpha = alpha * (1.0 - fa) + fa
+    let ha = head_band * head * head_a
+    col = col * (1.0 - ha) + head_c.rgb * ha
+    alpha = alpha * (1.0 - ha) + ha
+    // the dot (replaces the ring)
+    col = col * (1.0 - dot)
+    alpha = alpha * (1.0 - dot)
     let dot_c = mix(#f5a524, #e5484d, step(2.5, mode))
     let disc = clamp((5.0 - r) * dp + 0.5, 0.0, 1.0) * dot
     let rim = clamp((0.6 - abs(r - 4.6)) * dp, 0.0, 1.0) * dot * (1.0 - ink) * 0.35
-    col = col * (1.0 - dot) + dot_c.rgb * (1.0 - rim) * disc
-    alpha = alpha * (1.0 - dot) + disc
+    col = col + dot_c.rgb * (1.0 - rim) * disc
+    alpha = alpha + disc
     // the hover disc under it all
     let lift = clamp((10.5 - r) * dp + 0.5, 0.0, 1.0) * hover * mix(0.09, 0.14, ink)
     col = col + ink_c.rgb * lift * (1.0 - alpha)

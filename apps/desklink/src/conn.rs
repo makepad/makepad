@@ -70,13 +70,21 @@ pub struct Shared {
     pub warning: Option<String>,
 }
 
-/// A decoded picture: the decoder's GPU picture where the platform has one (no CPU copy),
-/// else tight NV12.
-pub struct Picture {
+/// A decoded part of a picture: rows `y0..` of it (all of it, or one tile), the decoder's GPU
+/// picture where the platform has one (no CPU copy), else tight NV12.
+pub struct Part {
+    pub y0: u32,
     pub width: u32,
     pub height: u32,
     pub nv12: Vec<u8>,
     pub gpu: Option<DecodedPicture>,
+}
+
+/// A decoded picture: all of its parts (its tiles, shown together), `width` x `height`.
+pub struct Picture {
+    pub width: u32,
+    pub height: u32,
+    pub parts: Vec<Part>,
     pub frame: u32,
     pub built_ns: u64,
     pub encoded_ns: u64,
@@ -89,6 +97,9 @@ pub struct Picture {
 struct Packet {
     frame: u32,
     key: bool,
+    stream: u8,
+    parts: u8,
+    y0: u32,
     built_ns: u64,
     encoded_ns: u64,
     sent_ns: u64,
@@ -327,10 +338,13 @@ impl Net {
                         ended = Some(Ok(format!("the desktop said goodbye: {reason}")));
                         break;
                     }
-                    ServerMsg::Video { frame, key, built_ns, encoded_ns, sent_ns, data } => {
-                        second.1 += 1;
+                    ServerMsg::Video { frame, key, built_ns, encoded_ns, sent_ns, stream, parts, y0, data } => {
+                        // pictures per second: each picture's last part (tiles) or each picture
+                        if parts <= 1 || stream + 1 == parts {
+                            second.1 += 1;
+                        }
                         second.2 += data.len();
-                        let _ = dec_tx.send(Packet { frame, key, built_ns, encoded_ns, sent_ns, received_ns: now_ns(), data });
+                        let _ = dec_tx.send(Packet { frame, key, stream, parts, y0, built_ns, encoded_ns, sent_ns, received_ns: now_ns(), data });
                     }
                     ServerMsg::Cursor { x, y, shape, visible } => {
                         self.shared.lock().unwrap().cursor = Some((x, y, shape, visible));
@@ -386,46 +400,62 @@ impl Net {
     }
 }
 
+/// `path`: one Annex-B file, or several comma separated: the tiles of each picture, top to
+/// bottom (a tiled desktop's `dump`, one file per stream).
 fn play_loop(path: String, gpu: bool, still: Option<u32>, shared: Arc<Mutex<Shared>>, latest: Arc<Mutex<Option<Picture>>>, stop: Arc<AtomicBool>, signal: SignalToUI) {
     use makepad_widgets::makepad_platform::video_file::annex_b;
     let fail = |e: String| {
         shared.lock().unwrap().state = Some(State::Offline(e));
         signal.set();
     };
-    let data = match std::fs::read(&path) {
-        Ok(d) => d,
-        Err(e) => return fail(format!("{path}: {e}")),
-    };
-    // one access unit per coded picture, parameter sets with the picture after them
-    let mut units = Vec::new();
-    let mut unit = Vec::new();
-    for nal in annex_b::split_annex_b(&data) {
-        unit.extend_from_slice(&[0, 0, 0, 1]);
-        unit.extend_from_slice(nal);
-        if matches!(annex_b::nal_unit_type(nal), 1 | 5) {
-            units.push(std::mem::take(&mut unit));
+    // per tile: one access unit per coded picture, parameter sets with the picture after them
+    let mut tiles: Vec<Vec<Vec<u8>>> = Vec::new();
+    for path in path.split(',') {
+        let data = match std::fs::read(path) {
+            Ok(d) => d,
+            Err(e) => return fail(format!("{path}: {e}")),
+        };
+        let mut units = Vec::new();
+        let mut unit = Vec::new();
+        for nal in annex_b::split_annex_b(&data) {
+            unit.extend_from_slice(&[0, 0, 0, 1]);
+            unit.extend_from_slice(nal);
+            if matches!(annex_b::nal_unit_type(nal), 1 | 5) {
+                units.push(std::mem::take(&mut unit));
+            }
         }
+        tiles.push(units);
     }
+    let pictures = tiles.iter().map(Vec::len).min().unwrap_or(0);
     let mut frame = 0u32;
     while !stop.load(Ordering::Acquire) {
-        let decoder = if gpu { VideoStreamDecoder::new_gpu(StreamVideoCodec::H264) } else { VideoStreamDecoder::new(StreamVideoCodec::H264) };
-        let mut decoder = match decoder {
-            Ok(d) => d,
-            Err(e) => return fail(format!("hardware decoder: {e:?}")),
-        };
-        for unit in &units {
+        let mut decoders = Vec::new();
+        for _ in &tiles {
+            let decoder = if gpu { VideoStreamDecoder::new_gpu(StreamVideoCodec::H264) } else { VideoStreamDecoder::new(StreamVideoCodec::H264) };
+            match decoder {
+                Ok(d) => decoders.push(d),
+                Err(e) => return fail(format!("hardware decoder: {e:?}")),
+            }
+        }
+        for at in 0..pictures {
             if stop.load(Ordering::Acquire) {
                 return;
             }
             let start = now_ns();
-            let frames = decoder.push_packet(unit, frame as i64).unwrap_or_default();
+            let mut parts = Vec::new();
+            let mut y0 = 0;
+            for (decoder, units) in decoders.iter_mut().zip(&tiles) {
+                for f in decoder.push_packet(&units[at], frame as i64).unwrap_or_default() {
+                    parts.push(Part { y0, width: f.width, height: f.height, nv12: f.nv12, gpu: f.gpu });
+                    y0 += f.height;
+                }
+            }
             let decoded_ns = now_ns();
-            for f in frames {
+            if parts.len() == tiles.len() {
                 *latest.lock().unwrap() = Some(Picture {
-                    width: f.width,
-                    height: f.height,
-                    nv12: f.nv12,
-                    gpu: f.gpu,
+                    width: parts[0].width,
+                    height: y0,
+                    parts,
                     frame,
                     built_ns: start,
                     encoded_ns: start,
@@ -437,7 +467,7 @@ fn play_loop(path: String, gpu: bool, still: Option<u32>, shared: Arc<Mutex<Shar
                 signal.set();
             }
             if still == Some(frame) {
-                // the decoder (and its pictures) stay alive while the view shows this one
+                // the decoders (and their pictures) stay alive while the view shows this one
                 while !stop.load(Ordering::Acquire) {
                     std::thread::sleep(Duration::from_millis(50));
                 }
@@ -450,20 +480,29 @@ fn play_loop(path: String, gpu: bool, still: Option<u32>, shared: Arc<Mutex<Shar
 }
 
 fn decode_loop(rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal: SignalToUI, shared: Arc<Mutex<Shared>>, cmd: Sender<ClientMsg>) {
-    let mut decoder: Option<VideoStreamDecoder> = None;
-    let mut waiting_key = false;
+    // one decoder per encoder stream (a tile, or an interleaved stream), each waiting for its
+    // key frame after a failure
+    let mut decoders: Vec<Option<VideoStreamDecoder>> = Vec::new();
+    let mut waiting_key: Vec<bool> = Vec::new();
+    // the parts of the tiled picture being put together: its frame, the parts so far, its times
+    let mut gathering: Option<(u32, Vec<Option<Part>>, Picture)> = None;
     loop {
         let packet = match rx.recv_timeout(Duration::from_millis(500)) {
             Ok(p) => p,
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => return,
         };
-        if waiting_key && !packet.key {
+        let s = packet.stream as usize;
+        if decoders.len() <= s {
+            decoders.resize_with(s + 1, || None);
+            waiting_key.resize(s + 1, false);
+        }
+        if waiting_key[s] && !packet.key {
             continue;
         }
-        if decoder.is_none() || packet.key && waiting_key {
+        if decoders[s].is_none() || packet.key && waiting_key[s] {
             match VideoStreamDecoder::new_gpu(StreamVideoCodec::H264) {
-                Ok(d) => decoder = Some(d),
+                Ok(d) => decoders[s] = Some(d),
                 Err(e) => {
                     shared.lock().unwrap().warning = Some(format!("hardware decoder: {e:?}"));
                     signal.set();
@@ -471,33 +510,61 @@ fn decode_loop(rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal
                 }
             }
         }
-        waiting_key = false;
+        waiting_key[s] = false;
         let start = now_ns();
-        let out = decoder.as_mut().unwrap().push_packet(&packet.data, packet.frame as i64);
+        let out = decoders[s].as_mut().unwrap().push_packet(&packet.data, packet.frame as i64);
         let decoded_ns = now_ns();
-        match out {
-            Ok(frames) => {
-                for f in frames {
-                    *latest.lock().unwrap() = Some(Picture {
-                        width: f.width,
-                        height: f.height,
-                        nv12: f.nv12,
-                        gpu: f.gpu,
-                        frame: packet.frame,
-                        built_ns: packet.built_ns,
-                        encoded_ns: packet.encoded_ns,
-                        sent_ns: packet.sent_ns,
-                        received_ns: packet.received_ns,
-                        decoded_ns,
-                        decode_ns: decoded_ns - start,
-                    });
-                    signal.set();
-                }
-            }
+        let frames = match out {
+            Ok(frames) => frames,
             Err(e) => {
-                eprintln!("desklink: decode of picture {}: {e:?}; asking for a key frame", packet.frame);
-                waiting_key = true;
+                eprintln!("desklink: decode of picture {} (stream {s}): {e:?}; asking for a key frame", packet.frame);
+                waiting_key[s] = true;
                 let _ = cmd.send(ClientMsg::RequestKeyframe);
+                continue;
+            }
+        };
+        for f in frames {
+            let part = Part { y0: packet.y0, width: f.width, height: f.height, nv12: f.nv12, gpu: f.gpu };
+            let mut picture = Picture {
+                width: part.width,
+                height: packet.y0 + part.height,
+                parts: Vec::new(),
+                frame: packet.frame,
+                built_ns: packet.built_ns,
+                encoded_ns: packet.encoded_ns,
+                sent_ns: packet.sent_ns,
+                received_ns: packet.received_ns,
+                decoded_ns,
+                decode_ns: decoded_ns - start,
+            };
+            let parts = packet.parts.max(1) as usize;
+            if parts == 1 {
+                picture.parts.push(part);
+                *latest.lock().unwrap() = Some(picture);
+                signal.set();
+                continue;
+            }
+            // a tile: the picture is shown once all its tiles are here (never a torn picture);
+            // a tile of a newer picture drops an incomplete older one
+            if gathering.as_ref().is_none_or(|(frame, got, _)| *frame != packet.frame || got.len() != parts) {
+                gathering = Some((packet.frame, (0..parts).map(|_| None).collect(), picture));
+            } else if let Some((_, _, p)) = gathering.as_mut() {
+                p.height = p.height.max(picture.height);
+                p.encoded_ns = p.encoded_ns.max(picture.encoded_ns);
+                p.received_ns = p.received_ns.max(picture.received_ns);
+                p.decoded_ns = decoded_ns;
+                p.decode_ns += picture.decode_ns;
+            }
+            let (_, got, _) = gathering.as_mut().unwrap();
+            if s < got.len() {
+                got[s] = Some(part);
+            }
+            if got.iter().all(Option::is_some) {
+                let (_, got, mut p) = gathering.take().unwrap();
+                p.parts = got.into_iter().flatten().collect();
+                p.height = p.parts.iter().map(|part| part.y0 + part.height).max().unwrap_or(0);
+                *latest.lock().unwrap() = Some(p);
+                signal.set();
             }
         }
     }

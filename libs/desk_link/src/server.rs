@@ -95,6 +95,8 @@ pub enum Control {
     Resume,
     SelectScreen(u32),
     Keyframe,
+    /// `split::*` for the stream.
+    Split(u8),
     Clipboard(String),
     Stats { frame: u32, decode_us: u32, present_us: u32 },
 }
@@ -434,7 +436,9 @@ impl SessionCtx {
                 Some(i)
             }
             Err(e) => {
-                *self.input_note.lock().unwrap() = format!("view only: /dev/uinput: {e}");
+                // said in the log and to the viewer (its Welcome): never a silently dead mouse
+                (self.log)(&format!("desk link session {}: view only: {e}", self.session));
+                *self.input_note.lock().unwrap() = e;
                 None
             }
         };
@@ -463,10 +467,8 @@ impl SessionCtx {
                 match out_rx.try_recv() {
                     Ok(Out::Msg(bytes)) => proto::write_all(&mut stream, &bytes).map_err(|e| format!("write: {e}"))?,
                     Ok(Out::Video(mut bytes)) => {
-                        let now = (self.clock)();
-                        if bytes.len() >= proto::VIDEO_SENT_AT + 8 {
-                            bytes[proto::VIDEO_SENT_AT..proto::VIDEO_SENT_AT + 8].copy_from_slice(&now.to_le_bytes());
-                        }
+                        // one picture: its parts' messages back to back, stamped as they go out
+                        proto::stamp_videos(&mut bytes, (self.clock)());
                         let result = proto::write_all(&mut stream, &bytes);
                         // caught up: the UI may make pictures again (it holds them back while
                         // a viewer is behind)
@@ -496,6 +498,7 @@ impl SessionCtx {
                     ClientMsg::Resume => Some(Control::Resume),
                     ClientMsg::SelectScreen { index } => Some(Control::SelectScreen(index)),
                     ClientMsg::RequestKeyframe => Some(Control::Keyframe),
+                    ClientMsg::SetSplit { split } => Some(Control::Split(split)),
                     ClientMsg::Clipboard { text } => Some(Control::Clipboard(text)),
                     ClientMsg::Stats { frame, decode_us, present_us } => Some(Control::Stats { frame, decode_us, present_us }),
                     ClientMsg::Hello { .. } => return Err("a second hello".into()),

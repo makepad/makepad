@@ -9,7 +9,7 @@
 //!
 //! Dev flags: `--connect host[:port]` (repeatable), `--select N`, `--stats` (latency lines on
 //! stderr once a second), `--dump-check <file.h264>` (decode an Annex-B dump with the hardware
-//! decoder, print what came out, exit), `--dump-play <file.h264>` (show a dump as a desktop, at
+//! decoder, print what came out, exit), `--dump-play <file.h264>[,<tile.h264>...]` (show a dump, or the tiles of one, as a desktop, at
 //! 60 pictures a second, looping; `--cpu-decode` takes the CPU NV12 path instead of GPU pictures, `--still N` stops at picture N).
 
 mod conn;
@@ -50,6 +50,7 @@ script_mod! {
                             one_to_one := CheckBox{text: "1:1 pixels"}
                             details := CheckBox{text: "Latency details"}
                             screen_next := Button{width: Fill text: "Next screen"}
+                            split_mode := Button{width: Fill text: "Engines: tiles"}
                         }
                         b: View{
                             width: Fill height: Fill
@@ -90,6 +91,9 @@ pub struct App {
     tick: Timer,
     #[rust]
     stats_log: bool,
+    /// The engine split asked of the desktop (`proto::split::*`; desktops start with tiles).
+    #[rust(proto::split::TILES)]
+    split: u8,
     /// The overlay shows the per-stage latency (the panel's "Latency details", or `--stats`).
     #[rust]
     details: bool,
@@ -316,10 +320,7 @@ impl App {
             l.encode = (p.encoded_ns as f64 - p.built_ns as f64) / 1e6;
             l.network = (p.received_ns as i64 - local(p.sent_ns)) as f64 / 1e6;
             l.decode = p.decode_ns as f64 / 1e6;
-            match p.gpu {
-                Some(gpu) => view.set_gpu_picture(cx, p.width, p.height, gpu, p.frame, p.decoded_ns),
-                None => view.set_picture(cx, p.width, p.height, p.nv12, p.frame, p.decoded_ns),
-            }
+            view.set_picture(cx, p.width, p.height, p.parts, p.frame, p.decoded_ns);
         }
         if let Some((frame, decoded, drawn)) = view.drawn.take() {
             self.latency.present = drawn.saturating_sub(decoded) as f64 / 1e6;
@@ -337,6 +338,10 @@ impl App {
             lines.push(format!("{} · {screen} {}x{}{}", w.server, w.stream[0], w.stream[1], if w.input { String::new() } else { format!(" · {}", w.input_note) }));
         }
         lines.push(view::rate_line(fps, mbps));
+        // view only (the desktop cannot inject input): always said, never a silent dead mouse
+        if let Some(w) = welcome.as_ref().filter(|w| !w.input) {
+            lines.push(if w.input_note.is_empty() { "input unavailable on this host".to_string() } else { w.input_note.clone() });
+        }
         if self.details {
             lines.push(view::latency_line(&self.latency));
         }
@@ -547,6 +552,25 @@ impl MatchEvent for App {
             if let Some(mut v) = self.remote(cx).borrow_mut::<RemoteView>() {
                 v.one_to_one = on;
                 v.redraw(cx);
+            }
+        }
+        // a desktop with several encode engines: tiles (lowest latency) -> interleave (most
+        // pictures per second) -> one engine
+        if self.ui.button(cx, ids!(split_mode)).clicked(actions) {
+            self.split = match self.split {
+                proto::split::TILES => proto::split::INTERLEAVE,
+                proto::split::INTERLEAVE => proto::split::OFF,
+                _ => proto::split::TILES,
+            };
+            let label = match self.split {
+                proto::split::TILES => "Engines: tiles",
+                proto::split::INTERLEAVE => "Engines: interleave",
+                _ => "Engines: one",
+            };
+            self.ui.button(cx, ids!(split_mode)).set_text(cx, label);
+            if let Some(c) = self.current() {
+                c.send(ClientMsg::SetSplit { split: self.split });
+                c.send(ClientMsg::RequestKeyframe);
             }
         }
         if self.ui.button(cx, ids!(screen_next)).clicked(actions) {

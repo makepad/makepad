@@ -208,7 +208,7 @@ fn run(settings: Settings, desktop: &mut dyn Desktop) {
                                 key_wanted = true;
                             }
                         }
-                        Control::Clipboard(_) | Control::Stats { .. } => {}
+                        Control::Clipboard(_) | Control::Stats { .. } | Control::Split(_) => {}
                     }
                 }
                 ToUi::Closed { session, reason } => {
@@ -302,7 +302,7 @@ fn run(settings: Settings, desktop: &mut dyn Desktop) {
             Ok(packets) => {
                 let encoded_ns = clock_ns();
                 for p in packets {
-                    let bytes = proto::encode_video(frame_no, p.is_key, frame.captured_ns, encoded_ns, 0, &p.data);
+                    let bytes = proto::encode_video(frame_no, p.is_key, frame.captured_ns, encoded_ns, 0, (0, 1, 0), &p.data);
                     for v in &viewers {
                         if v.paused.load(Ordering::Acquire) {
                             continue;

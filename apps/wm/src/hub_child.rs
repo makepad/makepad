@@ -26,9 +26,14 @@
 //! kv = q8_0
 //! pin = kokoro,whisper-large-v3-turbo   # models kept loaded besides the chat model
 //! nice = 10                       # the build's and the hub's scheduling priority (Unix)
+//! compute = auto                  # compute jobs: auto (a game pauses them) | ui-first | ai-first | unavailable
 //! target_dir = /home/arch/makepad-target-hub     # its own cargo target (a CUDA build env differs from the apps')
 //! env MAKEPAD_CUDA_ROOT = /opt/cuda              # any other variable for the build and the hub
 //! ```
+//!
+//! Without `env MAKEPAD_CUDA_ROOT` the toolkit installed here is named for the build
+//! (`/opt/cuda`, `/usr/local/cuda`, Windows' `CUDA_PATH`): without it the hub's CUDA
+//! kernels are not built and it serves no GPU model.
 //!
 //! A hidden WM (`MAKEPAD_HIDE_WINDOWS`, the test runs) starts no hub unless
 //! `MAKEPAD_WM_AI_HUB_CONF` names its settings: test desktops must not take the GPU or the
@@ -42,6 +47,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use makepad_app_registry::{self as registry, ProcessOutput};
 
 pub use crate::hub_control::{HubPhase, HubProcess};
+pub use makepad_ai_hub::activity::ComputeMode;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct HubSettings {
@@ -55,6 +61,8 @@ pub struct HubSettings {
     pub kv: Option<String>,
     pub pin: Vec<String>,
     pub nice: i32,
+    /// Whether this node takes compute jobs (the panel's picker; `local_use`).
+    pub compute: ComputeMode,
     pub target_dir: Option<String>,
     pub env: Vec<(String, String)>,
 }
@@ -72,6 +80,7 @@ impl Default for HubSettings {
             kv: None,
             pin: Vec::new(),
             nice: 10,
+            compute: ComputeMode::Automatic,
             target_dir: None,
             env: Vec::new(),
         }
@@ -134,6 +143,7 @@ impl HubSettings {
                 "kv" => { s.kv = Some(value.to_string()).filter(|v| !v.is_empty()); true }
                 "pin" => { s.pin = value.split(',').map(str::trim).filter(|m| !m.is_empty()).map(str::to_string).collect(); true }
                 "nice" => value.parse().map(|n| s.nice = n).is_ok(),
+                "compute" => ComputeMode::parse(value).map(|m| s.compute = m).is_some(),
                 "target_dir" => { s.target_dir = Some(value.to_string()).filter(|v| !v.is_empty()); true }
                 _ => match key.strip_prefix("env ").map(str::trim) {
                     Some(var) if !var.is_empty() && !var.contains(char::is_whitespace) => {
@@ -171,6 +181,7 @@ impl HubSettings {
             out.push_str(&format!("pin = {}\n", self.pin.join(",")));
         }
         out.push_str(&format!("nice = {}\n", self.nice));
+        out.push_str(&format!("compute = {}\n", self.compute.name()));
         if let Some(dir) = &self.target_dir {
             out.push_str(&format!("target_dir = {dir}\n"));
         }
@@ -219,8 +230,40 @@ impl HubSettings {
             env.push(("CARGO_TARGET_DIR".to_string(), dir.clone()));
         }
         env.extend(self.env.iter().cloned());
+        // The hub's GPU models need its CUDA kernels, and makepad-ai-cuda builds them only
+        // when MAKEPAD_CUDA_ROOT names the toolkit: a hub built without it serves no GPU
+        // model at all ("needs a CUDA device"). The WM's session environment never has it,
+        // so the toolkit installed on this machine is named unless the settings say otherwise.
+        let explicit = env.iter().any(|(k, _)| k == CUDA_ROOT) || std::env::var_os(CUDA_ROOT).is_some();
+        if !explicit {
+            if let Some(root) = installed_cuda_root(&cuda_root_candidates()) {
+                env.push((CUDA_ROOT.to_string(), root.to_string_lossy().into_owned()));
+            }
+        }
         env
     }
+}
+
+const CUDA_ROOT: &str = "MAKEPAD_CUDA_ROOT";
+
+/// Where a CUDA toolkit is usually installed: the distribution's (/opt/cuda, Arch) or
+/// NVIDIA's (/usr/local/cuda); on Windows the installer's CUDA_PATH.
+fn cuda_root_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(path) = std::env::var_os("CUDA_PATH").filter(|p| !p.is_empty()) {
+        out.push(PathBuf::from(path));
+    }
+    if cfg!(target_os = "linux") {
+        out.push(PathBuf::from("/opt/cuda"));
+        out.push(PathBuf::from("/usr/local/cuda"));
+    }
+    out
+}
+
+/// The first candidate that holds nvcc.
+fn installed_cuda_root(candidates: &[PathBuf]) -> Option<PathBuf> {
+    let nvcc = if cfg!(windows) { "nvcc.exe" } else { "nvcc" };
+    candidates.iter().find(|root| root.join("bin").join(nvcc).is_file()).cloned()
 }
 
 /// Seconds before the `n`th restart in a row (n >= 1).
@@ -586,12 +629,26 @@ mod tests {
     use crate::hub_control::ModelState;
 
     #[test]
+    fn the_installed_cuda_toolkit_is_found_by_its_nvcc() {
+        let base = std::env::temp_dir().join(format!("wm-cuda-{}", std::process::id()));
+        let (none, found) = (base.join("none"), base.join("cuda"));
+        let nvcc = if cfg!(windows) { "nvcc.exe" } else { "nvcc" };
+        std::fs::create_dir_all(found.join("bin")).unwrap();
+        std::fs::create_dir_all(none.join("bin")).unwrap();
+        std::fs::write(found.join("bin").join(nvcc), b"").unwrap();
+        assert_eq!(installed_cuda_root(&[none.clone(), found.clone()]), Some(found.clone()));
+        assert_eq!(installed_cuda_root(&[none.clone()]), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn settings_read_what_the_service_ran_with_and_write_back_the_same() {
         let text = "port = 8123\nhost = 0.0.0.0\ncache_dir = /home/arch/.makepad/weights-chat\nmodel = qwen3.8-27b # the 27B\n\
-                    context = 32768\ncontext_max = 81920\nkv = q8_0\npin = kokoro, whisper-large-v3-turbo\nnice = 10\n\
+                    context = 32768\ncontext_max = 81920\nkv = q8_0\npin = kokoro, whisper-large-v3-turbo\nnice = 10\ncompute = ai-first\n\
                     target_dir = /home/arch/makepad-target-hub\nenv MAKEPAD_CUDA_ROOT = /opt/cuda\nenv MAKEPAD_AI_UI_RESERVE_MB = 1536\nbogus = 1\n";
         let s = HubSettings::parse(text);
         assert!(s.enabled);
+        assert_eq!(s.compute, ComputeMode::AiFirst);
         assert_eq!(s.hub_args(), ["--host", "0.0.0.0", "--port", "8123", "--cache-dir", "/home/arch/.makepad/weights-chat"]);
         assert_eq!(s.base_url(), "https://127.0.0.1:8123");
         let env = s.hub_env();
@@ -604,8 +661,12 @@ mod tests {
         // Nothing set: the defaults, loopback http when asked for.
         let d = HubSettings::parse("host = 127.0.0.1\nenabled = off\n");
         assert!(!d.enabled);
+        assert_eq!(d.compute, ComputeMode::Automatic);
         assert_eq!(d.base_url(), "http://127.0.0.1:8123");
-        assert!(d.hub_env().is_empty());
+        // (Only the installed CUDA toolkit, on a machine that has one.)
+        assert!(d.hub_env().iter().all(|(k, _)| k == CUDA_ROOT));
+        // The conf's own CUDA root is the one passed, once.
+        assert_eq!(env.iter().filter(|(k, _)| k == CUDA_ROOT).count(), 1);
         assert_eq!(d.hub_args(), ["--host", "127.0.0.1", "--port", "8123"]);
     }
 

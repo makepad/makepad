@@ -71,6 +71,16 @@ pub struct EncodedPacket {
     pub is_key: bool,
 }
 
+/// A horizontal band of a taller source picture (`source_height` rows), from its row `y0` on,
+/// encoded as a stream of its own on encode engine `engine`: the tiles of one picture encode at
+/// once on a GPU with several engines ([`VideoStreamEncoder::engines`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StreamTile {
+    pub engine: u32,
+    pub y0: u32,
+    pub source_height: u32,
+}
+
 /// When a shared texture's picture may be read: its producer's GPU work is complete, or it
 /// completes when the sync_file signals (Linux: the release fence of the frame that rendered it,
 /// `makepad_hal::dmabuf::hal_dmabuf_fence`).
@@ -92,12 +102,38 @@ const UNSUPPORTED: &str = "hardware video stream encode is not implemented on th
 
 pub struct VideoStreamEncoder {
     options: VideoStreamEncoderOptions,
+    /// The band of its pictures this encoder takes (all of them: `y0` 0, `source_height` its
+    /// height).
+    tile: StreamTile,
     #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
     os: OsStreamEncoder,
 }
 
 impl VideoStreamEncoder {
     pub fn new(options: VideoStreamEncoderOptions) -> Result<Self, VideoFileError> {
+        Self::new_tile(options, StreamTile { engine: 0, y0: 0, source_height: options.height })
+    }
+
+    /// The hardware encode engines of this machine: how many tiles a picture is best split into
+    /// (1 where there is one, or where pictures are not split).
+    pub fn engines() -> u32 {
+        #[cfg(target_os = "linux")]
+        return makepad_hal::stream_encode::hal_stream_encoder_engines().max(1);
+        #[cfg(not(target_os = "linux"))]
+        return 1;
+    }
+
+    /// An encoder of the band `tile` of the shared-texture pictures pushed to it
+    /// (`options.height` rows of them). Bands other than the whole picture are Linux's (the
+    /// other platforms have one engine).
+    pub fn new_tile(options: VideoStreamEncoderOptions, tile: StreamTile) -> Result<Self, VideoFileError> {
+        if tile.y0 % 2 != 0 || tile.y0 + options.height > tile.source_height {
+            return Err(VideoFileError::new(format!("tile rows {}..+{} outside a {} tall picture", tile.y0, options.height, tile.source_height)));
+        }
+        #[cfg(not(target_os = "linux"))]
+        if tile.y0 != 0 || tile.source_height != options.height || tile.engine != 0 {
+            return Err(VideoFileError::new("tiled stream encoding is Linux's"));
+        }
         if options.width == 0 || options.height == 0 || options.width % 2 != 0 || options.height % 2 != 0 {
             return Err(VideoFileError::new(format!(
                 "invalid stream encoder frame size {}x{} (must be nonzero and even)",
@@ -109,12 +145,15 @@ impl VideoStreamEncoder {
         }
         #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
         {
+            #[cfg(target_os = "linux")]
+            let os = OsStreamEncoder::new(&options, tile.engine)?;
+            #[cfg(not(target_os = "linux"))]
             let os = OsStreamEncoder::new(&options)?;
-            return Ok(Self { options, os });
+            return Ok(Self { options, tile, os });
         }
         #[cfg(not(any(target_vendor = "apple", target_os = "windows", target_os = "linux")))]
         {
-            let _ = &options;
+            let _ = (&options, tile);
             return Err(VideoFileError::new(UNSUPPORTED));
         }
     }
@@ -168,7 +207,7 @@ impl VideoStreamEncoder {
     /// `makepad_hal::shared_texture`). No pixel crosses the CPU.
     pub fn push_shared_texture(&mut self, handle: u64, ready: GpuReady, pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
         #[cfg(target_os = "linux")]
-        return self.os.push_shared_texture(handle, ready, pts_100ns);
+        return self.os.push_shared_texture(handle, ready, pts_100ns, self.tile.source_height, self.tile.y0);
         #[cfg(any(target_vendor = "apple", target_os = "windows"))]
         {
             let GpuReady::Done = ready;

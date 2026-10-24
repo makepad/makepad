@@ -8,7 +8,7 @@
 use crate::backend::vulkan::{share::copy, video_encode::StreamEncoder};
 use std::collections::HashMap;
 use std::os::fd::{FromRawFd, OwnedFd};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 struct Open {
     encoder: StreamEncoder,
@@ -16,8 +16,14 @@ struct Open {
     out: Vec<u8>,
 }
 
-static ENCODERS: Mutex<Option<HashMap<u64, Open>>> = Mutex::new(None);
+/// Each encoder behind its own lock: the tiles of one picture encode at once, each on its own
+/// engine (the map's lock is held only to find one).
+static ENCODERS: Mutex<Option<HashMap<u64, Arc<Mutex<Open>>>>> = Mutex::new(None);
 static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn get(encoder: u64) -> Option<Arc<Mutex<Open>>> {
+    crate::lock(&ENCODERS).as_ref()?.get(&encoder).cloned()
+}
 
 thread_local! {
     static LAST_ERROR: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
@@ -42,15 +48,22 @@ pub fn hal_stream_encoder_error(out: &mut [u8]) -> u64 {
     })
 }
 
-/// Opens an H.264 stream of `width` x `height` pictures (width % 4 == 0, height even) planned
-/// for `fps` at `kbps` (0: a rate for the size). Its number, 0 when this machine cannot (the
-/// error says why).
+/// How many hardware encode engines the GPU has (its encode queues): the tiles a picture is
+/// best split into. 0 when this machine has no hardware encoder.
 #[makepad_relax_api::relax_api]
-pub fn hal_stream_encoder_open(width: u32, height: u32, fps: u32, kbps: u32) -> u64 {
-    match StreamEncoder::open(width, height, fps, kbps) {
+pub fn hal_stream_encoder_engines() -> u32 {
+    StreamEncoder::engines()
+}
+
+/// Opens an H.264 stream of `width` x `height` pictures (width % 4 == 0, height even) planned
+/// for `fps` at `kbps` (0: a rate for the size), encoded on engine `engine`. Its number, 0 when
+/// this machine cannot (the error says why).
+#[makepad_relax_api::relax_api]
+pub fn hal_stream_encoder_open(width: u32, height: u32, fps: u32, kbps: u32, engine: u32) -> u64 {
+    match StreamEncoder::open(width, height, fps, kbps, engine as usize) {
         Ok(encoder) => {
             let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            crate::lock(&ENCODERS).get_or_insert_with(Default::default).insert(id, Open { encoder, out: Vec::new() });
+            crate::lock(&ENCODERS).get_or_insert_with(Default::default).insert(id, Arc::new(Mutex::new(Open { encoder, out: Vec::new() })));
             id
         }
         Err(e) => {
@@ -63,8 +76,8 @@ pub fn hal_stream_encoder_open(width: u32, height: u32, fps: u32, kbps: u32) -> 
 /// What the encoder is (codec, sizes, rate, GPU): the first `out.len()` bytes; its length.
 #[makepad_relax_api::relax_api]
 pub fn hal_stream_encoder_info(encoder: u64, out: &mut [u8]) -> u64 {
-    let encoders = crate::lock(&ENCODERS);
-    let Some(open) = encoders.as_ref().and_then(|e| e.get(&encoder)) else { return 0 };
+    let Some(open) = get(encoder) else { return 0 };
+    let open = crate::lock(&open);
     let info = open.encoder.info.as_bytes();
     let n = info.len().min(out.len());
     out[..n].copy_from_slice(&info[..n]);
@@ -72,11 +85,11 @@ pub fn hal_stream_encoder_info(encoder: u64, out: &mut [u8]) -> u64 {
 }
 
 fn encode(encoder: u64, f: impl FnOnce(&mut StreamEncoder) -> Result<Vec<u8>, String>) -> i64 {
-    let mut encoders = crate::lock(&ENCODERS);
-    let Some(open) = encoders.as_mut().and_then(|e| e.get_mut(&encoder)) else {
+    let Some(open) = get(encoder) else {
         failed("unknown stream encoder".into());
         return -1;
     };
+    let mut open = crate::lock(&open);
     match f(&mut open.encoder) {
         Ok(bytes) => {
             open.out = bytes;
@@ -90,11 +103,12 @@ fn encode(encoder: u64, f: impl FnOnce(&mut StreamEncoder) -> Result<Vec<u8>, St
 }
 
 /// Encodes the picture in the registered DMA-BUF image `handle` (`hal_dmabuf_register`: NV12
-/// packed into BGRA8 texels, `width/4` a row, the luma rows then the chroma rows) once the
-/// sync_file `sync_fd` has signalled (taken over; -1 when the picture's GPU work is complete).
-/// The bitstream's length, -1 when it failed.
+/// packed into BGRA8 texels, `width/4` a row, the luma rows then the chroma rows of a
+/// `source_height` tall picture), from its row `y0` on (this encoder's height of them: a tile),
+/// once the sync_file `sync_fd` has signalled (taken over; -1 when the picture's GPU work is
+/// complete). The bitstream's length, -1 when it failed.
 #[makepad_relax_api::relax_api]
-pub fn hal_stream_encoder_texture(encoder: u64, handle: u64, sync_fd: i32, flags: u32) -> i64 {
+pub fn hal_stream_encoder_texture(encoder: u64, handle: u64, source_height: u32, y0: u32, sync_fd: i32, flags: u32) -> i64 {
     let sync = (sync_fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(sync_fd) });
     let (image, size) = match copy::registered_image(handle) {
         Ok(image) => image,
@@ -109,7 +123,7 @@ pub fn hal_stream_encoder_texture(encoder: u64, handle: u64, sync_fd: i32, flags
         if !e.on_device(&image.dev) {
             return Err("the GPU device was replaced: the encoder must be opened again".into());
         }
-        e.encode_image(image.image, size, sync, flags & KEY != 0)
+        e.encode_rows(image.image, size, source_height, y0, sync, flags & KEY != 0)
     })
 }
 
@@ -122,8 +136,8 @@ pub fn hal_stream_encoder_nv12(encoder: u64, nv12: &[u8], flags: u32) -> i64 {
 /// Takes the last picture's bitstream into `out` (its length, -1 when `out` is short).
 #[makepad_relax_api::relax_api]
 pub fn hal_stream_encoder_read(encoder: u64, out: &mut [u8]) -> i64 {
-    let mut encoders = crate::lock(&ENCODERS);
-    let Some(open) = encoders.as_mut().and_then(|e| e.get_mut(&encoder)) else { return -1 };
+    let Some(open) = get(encoder) else { return -1 };
+    let mut open = crate::lock(&open);
     if out.len() < open.out.len() {
         return -1;
     }
@@ -136,8 +150,8 @@ pub fn hal_stream_encoder_read(encoder: u64, out: &mut [u8]) -> i64 {
 /// The rate for the pictures from the next one on (kbit/s).
 #[makepad_relax_api::relax_api]
 pub fn hal_stream_encoder_bitrate(encoder: u64, kbps: u32) {
-    if let Some(open) = crate::lock(&ENCODERS).as_mut().and_then(|e| e.get_mut(&encoder)) {
-        open.encoder.set_kbps(kbps);
+    if let Some(open) = get(encoder) {
+        crate::lock(&open).encoder.set_kbps(kbps);
     }
 }
 

@@ -52,6 +52,10 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
     let mut next_move = Instant::now();
     let mut toggle = false;
     let mut latencies: Vec<f64> = Vec::new();
+    // the desktop's frame submit to its bitstream, per picture (ms), and the encoder streams seen
+    let mut encodes: Vec<f64> = Vec::new();
+    let mut streams = 0u32;
+    let mut slowest = (u32::MAX, 0f64);
     let epoch = Instant::now();
     let mut flapped = (Instant::now(), paused, 0u32);
     while start.elapsed() < Duration::from_secs(secs) {
@@ -88,10 +92,18 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
                 }
                 ServerMsg::Refused { reason } => return Err(format!("refused: {reason}")),
                 ServerMsg::Bye { reason } => return Err(format!("bye: {reason}")),
-                ServerMsg::Video { key, data, .. } => {
-                    pictures += 1;
-                    keys += key as u64;
+                ServerMsg::Video { key, data, stream, parts, built_ns, encoded_ns, frame, .. } => {
+                    // a picture is counted with its last part (tiles) or as itself (interleaved);
+                    // its encode time is its slowest part's
                     bytes += data.len() as u64;
+                    streams = streams.max(stream as u32 + 1);
+                    let ms = encoded_ns.saturating_sub(built_ns) as f64 / 1e6;
+                    slowest = if slowest.0 == frame { (frame, slowest.1.max(ms)) } else { (frame, ms) };
+                    if parts <= 1 || stream + 1 == parts {
+                        pictures += 1;
+                        keys += key as u64;
+                        encodes.push(slowest.1);
+                    }
                 }
                 ServerMsg::Pong { client_ns, .. } => rtts.push((epoch.elapsed().as_nanos() as u64 - client_ns) as f64 / 1e6),
                 ServerMsg::Cursor { x, y, .. } => {
@@ -119,6 +131,11 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
         median(&mut rtts),
         rtts.len()
     );
+    println!("probe: {streams} encoder stream(s); frame submit to bitstream median {:.2} ms, p90 {:.2} ms", median(&mut encodes.clone()), {
+        let mut e = encodes.clone();
+        e.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        e.get(e.len() * 9 / 10).copied().unwrap_or(f64::NAN)
+    });
     if flap.is_some() {
         println!("probe: {} pause/resume flips", flapped.2);
     }

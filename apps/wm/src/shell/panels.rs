@@ -356,6 +356,8 @@ enum Hit {
     HubPickOpen,
     /// A chat model of that list (index into `hub_chat_models`).
     HubPick(usize),
+    /// A compute mode of the picker (index into `ComputeMode::ALL`).
+    HubCompute(usize),
     #[cfg(target_os = "linux")]
     Wifi(WifiHit),
     #[cfg(target_os = "linux")]
@@ -1395,6 +1397,12 @@ impl ShellPanel {
     // ------------------------------------------------------------- power
 
     fn hub_height(&self) -> f64 {
+        fn hub_compute_height(h: &crate::hub_control::HubSnapshot) -> f64 {
+            match &h.admission {
+                Some(a) => 22.0 + 28.0 + 18.0 + if a.mode == crate::hub_control::ComputeMode::AiFirst { 18.0 } else { 0.0 },
+                None => 0.0,
+            }
+        }
         let h = &self.data.hub;
         if !h.available {
             return match &h.process {
@@ -1402,7 +1410,7 @@ impl ShellPanel {
                 None => 40.0 + 12.0 + 40.0,
             };
         }
-        let policy = if h.policy.is_some() { 18.0 } else { 0.0 };
+        let policy = if h.policy.is_some() { 18.0 } else { 0.0 } + hub_compute_height(h);
         let process = if h.process.is_some() { 30.0 + if self.hub_pick { hub_chat_models(h).len() as f64 * 26.0 } else { 0.0 } } else { 0.0 };
         let activity = h.activity.len().max(1) as f64 * 20.0;
         let recent = h.recent.len().min(3) as f64 * 16.0;
@@ -1501,6 +1509,31 @@ impl ShellPanel {
             Some(note) => {
                 let (row, rest) = cut_top(rest, 18.0);
                 self.d.label_elided(cx, row, false, tok.font.caption, darker(fg, 1.2), HAlign::Left, note);
+                rest
+            }
+            None => rest,
+        };
+        // Compute jobs: the node's mode (saved in ai-hub.conf) and what it makes of now.
+        let rest = match &hub.admission {
+            Some(a) => {
+                use crate::hub_control::{compute_label, ComputeMode};
+                let (row, rest) = cut_top(rest, 22.0);
+                self.d.label(cx, row, false, tok.font.caption, darker(fg, 1.4), HAlign::Left, "Compute jobs");
+                let (row, rest) = cut_top(rest, 28.0);
+                let w = row.size.x / ComputeMode::ALL.len() as f64;
+                for (i, mode) in ComputeMode::ALL.into_iter().enumerate() {
+                    let r = rect(row.pos.x + i as f64 * w + 1.0, row.pos.y + 2.0, w - 2.0, row.size.y - 4.0);
+                    let state = if a.mode == mode { CtrlState::Selected } else if self.hot == Some(Hit::HubCompute(i)) { CtrlState::Hover } else { CtrlState::Normal };
+                    self.d.button(cx, r, &tok, state, None, compute_label(mode), tok.font.body_small, fg, true);
+                    self.hits.push((Hit::HubCompute(i), r));
+                }
+                let (row, mut rest) = cut_top(rest, 18.0);
+                self.d.label_elided(cx, row, false, tok.font.caption, fg, HAlign::Left, &a.line());
+                if a.mode == ComputeMode::AiFirst {
+                    let (row, r2) = cut_top(rest, 18.0);
+                    rest = r2;
+                    self.d.label_elided(cx, row, false, tok.font.caption, darker(fg, 1.2), HAlign::Left, AI_FIRST_WARNING);
+                }
                 rest
             }
             None => rest,
@@ -2868,6 +2901,12 @@ impl Widget for ShellPanel {
                         }
                         self.redraw(cx);
                     }
+                    Some(Hit::HubCompute(i)) => {
+                        let mode = crate::hub_control::ComputeMode::ALL[i];
+                        if self.data.hub.admission.as_ref().is_some_and(|a| a.mode != mode) {
+                            cx.widget_action(self.uid, ShellPanelAction::Hub(crate::hub_control::HubCommand::SetCompute(mode)));
+                        }
+                    }
                     Some(Hit::HubKv(q8)) => {
                         let kv = if q8 { crate::hub_control::KvPrecision::Q8 } else { crate::hub_control::KvPrecision::F16 };
                         cx.widget_action(self.uid, ShellPanelAction::Hub(crate::hub_control::HubCommand::SetKv(kv)));
@@ -3027,6 +3066,8 @@ fn hub_context_up(hub: &crate::hub_control::HubSnapshot) -> Option<u32> {
 
 /// Lines of a hub crash's or failed build's reason the panel shows.
 const HUB_REASON_LINES: usize = 6;
+/// Under the AI First option: it never gives GPU memory back to the desktop.
+const AI_FIRST_WARNING: &str = "AI keeps its GPU memory: the desktop and games may slow down or fail.";
 
 /// The chat models of the hub's registry, for the WM's chat model pick.
 fn hub_chat_models(hub: &crate::hub_control::HubSnapshot) -> Vec<String> {

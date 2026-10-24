@@ -148,6 +148,42 @@ pub struct HubSnapshot {
     /// What the hub's memory policy did last, when it was recent ("ran flux1-schnell-q4
     /// for flux1-schnell: …", "unloaded qwen3.8-27b for flux1-schnell-q4 …").
     pub policy: Option<String>,
+    /// Whether it takes compute jobs now, and why (`GET /control` "activity").
+    pub admission: Option<Admission>,
+}
+
+pub use makepad_ai_hub::activity::ComputeMode;
+
+/// The hub's compute admission: its mode and what it makes of local use now.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Admission {
+    pub open: bool,
+    /// The hub's reason code (`gaming`, `releasing-models`, `operator-unavailable`, …).
+    pub reason: String,
+    pub mode: ComputeMode,
+}
+
+/// The picker's name for a mode.
+pub fn compute_label(mode: ComputeMode) -> &'static str {
+    match mode {
+        ComputeMode::Automatic => "Automatic",
+        ComputeMode::UiFirst => "UI First",
+        ComputeMode::AiFirst => "AI First",
+        ComputeMode::Unavailable => "Unavailable",
+    }
+}
+
+impl Admission {
+    /// "Automatic: paused for local use (gaming)", for the panel and the bar's tooltip.
+    pub fn line(&self) -> String {
+        let state = match (self.open, self.reason.as_str()) {
+            (true, _) => "taking compute jobs".to_string(),
+            (false, "operator-unavailable") => "not taking compute jobs".to_string(),
+            (false, "releasing-models") => "releasing models".to_string(),
+            (false, why) => format!("paused for local use ({why})"),
+        };
+        format!("{}: {state}", compute_label(self.mode))
+    }
 }
 
 /// A policy note older than this is not shown.
@@ -270,6 +306,10 @@ pub enum HubCommand {
     Restart,
     /// The chat model the WM's hub loads at start: saved, and the hub restarts with it.
     SetModel(String),
+    /// This node's compute mode (the panel's picker): saved, and sent to the hub.
+    SetCompute(ComputeMode),
+    /// What the WM tells its hub about this machine (`POST /control/local-use`).
+    LocalUse { mode: ComputeMode, gaming: bool },
 }
 
 pub trait HubControl {
@@ -280,6 +320,10 @@ pub trait HubControl {
     fn send(&mut self, command: HubCommand);
     /// The hub's report of the last finished yield, once.
     fn take_report(&mut self) -> Option<String> {
+        None
+    }
+    /// The hub's compute admission as last read (cheap; for the bar).
+    fn admission(&mut self) -> Option<Admission> {
         None
     }
 }
@@ -345,6 +389,7 @@ impl Default for StubHub {
                 process: Some(HubProcess { phase: HubPhase::Ready, model: "chat".into() }),
                 chat_models: vec!["chat".into(), "qwen3.5-9b".into()],
                 policy: Some("ran flux1-schnell-q4 for flux1-schnell: flux1-schnell needs 21504 MB, 21872 MB can be free and the UI keeps 2048 MB".into()),
+                admission: Some(Admission { open: true, reason: "unsupported".into(), mode: ComputeMode::Automatic }),
             },
             loading: Vec::new(),
             polls: 0,
@@ -414,7 +459,18 @@ impl HubControl for StubHub {
             }
             HubCommand::SetKv(kv) => self.snap.kv = kv,
             HubCommand::SetContext(c) => self.snap.context = c,
-            HubCommand::Restart | HubCommand::SetModel(_) => {}
+            HubCommand::Restart | HubCommand::SetModel(_) | HubCommand::SetCompute(_) => {}
+            HubCommand::LocalUse { mode, gaming } => {
+                let open = matches!(mode, ComputeMode::UiFirst | ComputeMode::AiFirst) || (mode == ComputeMode::Automatic && !gaming);
+                let reason = match mode {
+                    ComputeMode::Unavailable => "operator-unavailable",
+                    ComputeMode::Automatic if gaming => "gaming",
+                    ComputeMode::UiFirst => "ui-first",
+                    ComputeMode::AiFirst => "ai-first",
+                    ComputeMode::Automatic => "unsupported",
+                };
+                self.snap.admission = Some(Admission { open, reason: reason.into(), mode });
+            }
             HubCommand::Yield { mb, unload, .. } => {
                 let chat = self.snap.models.iter_mut().find(|m| m.id == "chat" && m.state == ModelState::Loaded);
                 self.report = Some(match (chat, unload) {
@@ -435,6 +491,9 @@ impl HubControl for StubHub {
     }
     fn take_report(&mut self) -> Option<String> {
         self.report.take()
+    }
+    fn admission(&mut self) -> Option<Admission> {
+        self.snap.admission.clone()
     }
 }
 
@@ -486,6 +545,9 @@ impl HubControl for FleetHub {
     fn take_report(&mut self) -> Option<String> {
         self.shared.lock().ok().and_then(|mut s| s.report.take())
     }
+    fn admission(&mut self) -> Option<Admission> {
+        self.shared.lock().ok().and_then(|s| s.snap.admission.clone())
+    }
 }
 
 impl FleetHub {
@@ -498,9 +560,10 @@ impl FleetHub {
 
 /// Sends one command. A yield is followed to its end (`GET /job/<id>`), and the hub's
 /// report lands in the shared state for the WM to log and show.
-fn run_command(t: &mut makepad_ai_hub::providers::qwen::HttpFleetTransport, base: &str, cmd: &HubCommand, shared: &std::sync::Mutex<Shared>) {
+/// True when the hub took it.
+fn run_command(t: &mut makepad_ai_hub::providers::qwen::HttpFleetTransport, base: &str, cmd: &HubCommand, shared: &std::sync::Mutex<Shared>) -> bool {
     use makepad_ai_hub::providers::qwen::FleetTransport;
-    let Some((url, body)) = command_request(base, cmd) else { return };
+    let Some((url, body)) = command_request(base, cmd) else { return false };
     let answer = match t.post_json(&url, &body) {
         Ok(v) => v,
         Err(err) => {
@@ -510,14 +573,14 @@ fn run_command(t: &mut makepad_ai_hub::providers::qwen::HttpFleetTransport, base
                     s.report = Some(format!("the AI hub did not take the yield: {err}"));
                 }
             }
-            return;
+            return false;
         }
     };
     if !matches!(cmd, HubCommand::Yield { .. }) {
-        return;
+        return true;
     }
     let Some(job) = answer.get("job_id").and_then(|j| j.as_str()).map(|j| j.to_string()) else {
-        return;
+        return true;
     };
     let report = loop {
         std::thread::sleep(std::time::Duration::from_millis(400));
@@ -533,6 +596,23 @@ fn run_command(t: &mut makepad_ai_hub::providers::qwen::HttpFleetTransport, base
     if let Ok(mut s) = shared.lock() {
         s.report = Some(report);
     }
+    true
+}
+
+/// Runs one command; a local-use report is also kept, to be sent again to a hub that lost it.
+fn take_command(
+    t: &mut makepad_ai_hub::providers::qwen::HttpFleetTransport,
+    base: &str,
+    cmd: HubCommand,
+    shared: &std::sync::Mutex<Shared>,
+    local: &mut Option<HubCommand>,
+    local_sent: &mut bool,
+) {
+    let ok = run_command(t, base, &cmd, shared);
+    if matches!(cmd, HubCommand::LocalUse { .. }) {
+        *local = Some(cmd);
+        *local_sent = ok;
+    }
 }
 
 fn worker(
@@ -544,6 +624,10 @@ fn worker(
     use makepad_ai_hub::providers::qwen::{FleetTransport, HttpFleetTransport};
     use std::sync::atomic::Ordering;
     use std::time::Duration;
+    // The WM's last local-use report: sent again to a hub that does not hold it (a
+    // restarted hub starts in Automatic with no game).
+    let mut local: Option<HubCommand> = None;
+    let mut local_sent = false;
     // The same client identity the other apps use: the credential in
     // MAKEPAD_AI_HUB_CREDENTIAL or ~/.makepad/ai-hub/client.credential, the
     // node's certificate recorded in ~/.makepad/ai-hub/known_nodes.
@@ -554,7 +638,7 @@ fn worker(
     let mut chat_models: Option<Vec<String>> = None;
     loop {
         while let Ok(cmd) = rx.try_recv() {
-            run_command(&mut t, &base, &cmd, &shared);
+            take_command(&mut t, &base, cmd, &shared, &mut local, &mut local_sent);
             since = 0;
         }
         let watching = open.load(Ordering::Relaxed);
@@ -571,13 +655,20 @@ fn worker(
                     chat_models = t.get_json(&format!("{base}/models")).ok().map(|m| parse_chat_models(&m));
                 }
                 snap.chat_models = chat_models.clone().unwrap_or_default();
+                if let Some(cmd @ HubCommand::LocalUse { mode, gaming }) = &local {
+                    // Not taken yet, or a hub that lost it (restarted between two polls).
+                    let lost = snap.admission.as_ref().is_some_and(|a| a.mode != *mode || (*mode == ComputeMode::Automatic && *gaming && a.open));
+                    if !local_sent || lost {
+                        local_sent = run_command(&mut t, &base, cmd, &shared);
+                    }
+                }
                 if let Ok(mut s) = shared.lock() {
                     s.snap = snap;
                 }
                 if !watching {
                     // Closed: look again in a few seconds, or at once for a command.
                     if let Ok(cmd) = rx.recv_timeout(Duration::from_secs(3)) {
-                        run_command(&mut t, &base, &cmd, &shared);
+                        take_command(&mut t, &base, cmd, &shared, &mut local, &mut local_sent);
                     }
                 }
             }
@@ -587,6 +678,7 @@ fn worker(
                 }
                 since = 0;
                 chat_models = None;
+                local_sent = false;
                 std::thread::sleep(Duration::from_secs(3));
             }
         }
@@ -605,7 +697,11 @@ fn command_request(base: &str, cmd: &HubCommand) -> Option<(String, makepad_stri
             format!("{base}/control/yield"),
             obj(vec![("mb", Value::Int(*mb as i64)), ("unload", Value::Bool(*unload)), ("reserve_mb", Value::Int(*reserve_mb as i64))]),
         ),
-        HubCommand::Restart | HubCommand::SetModel(_) => return None,
+        HubCommand::LocalUse { mode, gaming } => (
+            format!("{base}/control/local-use"),
+            obj(vec![("mode", s(mode.name())), ("use", s(if *gaming { "gaming" } else { "" }))]),
+        ),
+        HubCommand::Restart | HubCommand::SetModel(_) | HubCommand::SetCompute(_) => return None,
     })
 }
 
@@ -689,6 +785,11 @@ pub fn parse_snapshot(v: &makepad_strict_json::Value) -> HubSnapshot {
         kv: if llm.and_then(|l| l.get("kv")).and_then(|k| k.as_str()) == Some("q8") { KvPrecision::Q8 } else { KvPrecision::F16 },
         process: None,
         chat_models: Vec::new(),
+        admission: v.get("activity").filter(|a| a.get("admission_open").is_some()).map(|a| Admission {
+            open: a.get("admission_open").and_then(|o| o.as_bool()).unwrap_or(false),
+            reason: str_of(a.get("reason")),
+            mode: a.get("mode").and_then(|m| m.as_str()).and_then(ComputeMode::parse).unwrap_or_default(),
+        }),
         policy: v
             .get("policy")
             .and_then(|p| p.as_arr())
@@ -705,6 +806,9 @@ pub fn parse_snapshot(v: &makepad_strict_json::Value) -> HubSnapshot {
 #[derive(Default)]
 pub struct HubLink {
     link: Option<Link>,
+    /// This node's compute mode (`ai-hub.conf` `compute`) and whether a game is being
+    /// played (`local_use`): what the hub was last told.
+    local: Option<(ComputeMode, bool)>,
 }
 
 enum Link {
@@ -801,9 +905,64 @@ impl HubLink {
                 crate::host::set_child_env("MAKEPAD_AI_MODEL", std::ffi::OsStr::new(&settings.model));
                 child.restart(settings, now, pool);
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            (HubCommand::SetCompute(mode), Some(Link::Fleet { child: Some(child), .. })) => {
+                let mut settings = crate::hub_child::HubSettings::load_or(&child.settings);
+                settings.compute = mode;
+                if let Err(e) = settings.save() {
+                    makepad_widgets::log!("wm: AI hub settings not saved: {e}");
+                }
+                child.settings.compute = mode;
+                let gaming = self.local.map_or(false, |(_, g)| g);
+                self.report_local(mode, gaming);
+            }
+            (HubCommand::SetCompute(mode), _) => {
+                let gaming = self.local.map_or(false, |(_, g)| g);
+                self.report_local(mode, gaming);
+            }
             (HubCommand::Restart | HubCommand::SetModel(_), _) => {}
             (command, _) => self.send(command),
         }
+    }
+
+    /// The compute mode the hub runs under: the WM's own hub's setting, else Automatic.
+    pub fn compute_mode(&mut self, processes: bool) -> ComputeMode {
+        if let Some((mode, _)) = self.local {
+            return mode;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Link::Fleet { child: Some(child), .. } = self.link(processes) {
+            return child.settings.compute;
+        }
+        let _ = processes;
+        ComputeMode::Automatic
+    }
+
+    /// Once a second: whether a game is being played (`local_use`). The hub hears of a
+    /// change (and of the mode at the start).
+    pub fn set_gaming(&mut self, processes: bool, gaming: bool) {
+        let mode = self.compute_mode(processes);
+        if self.local != Some((mode, gaming)) {
+            if self.local.map_or(gaming, |(_, was)| was != gaming) {
+                makepad_widgets::log!(
+                    "wm: {} ({} mode): telling the AI hub",
+                    if gaming { "a game is being played" } else { "play ended" },
+                    compute_label(mode)
+                );
+            }
+            self.report_local(mode, gaming);
+        }
+    }
+
+    /// Only to the WM's own hub (or the stub): a hub elsewhere takes local use from its
+    /// own machine only.
+    fn report_local(&mut self, mode: ComputeMode, gaming: bool) {
+        self.local = Some((mode, gaming));
+        #[cfg(not(target_arch = "wasm32"))]
+        if matches!(self.link, Some(Link::Fleet { child: None, .. })) {
+            return;
+        }
+        self.send(HubCommand::LocalUse { mode, gaming });
     }
 }
 
@@ -843,6 +1002,13 @@ impl HubControl for HubLink {
             None => None,
         }
     }
+    fn admission(&mut self) -> Option<Admission> {
+        match &mut self.link {
+            Some(Link::Stub(h)) => h.admission(),
+            Some(Link::Fleet { hub, .. }) => hub.admission(),
+            None => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -878,6 +1044,13 @@ mod tests {
         assert_eq!(s.activity[0].tokens_per_s, Some(31.5));
         assert_eq!((s.context, s.kv, s.context_options.clone()), (16384, KvPrecision::Q8, vec![16384, 32768]));
         assert_eq!((s.recent[0].app.as_str(), s.recent[0].ok), ("c1", false));
+        assert_eq!(s.admission, None, "an older hub says nothing about admission");
+        let paused = parse_snapshot(&makepad_strict_json::parse(br#"{"activity":{"admission_open":false,"state":"busy","reason":"gaming","mode":"auto"}}"#).unwrap());
+        let a = paused.admission.unwrap();
+        assert_eq!((a.open, a.mode), (false, ComputeMode::Automatic));
+        assert_eq!(a.line(), "Automatic: paused for local use (gaming)");
+        let ai = parse_snapshot(&makepad_strict_json::parse(br#"{"activity":{"admission_open":true,"state":"disabled","reason":"ai-first","mode":"ai-first"}}"#).unwrap());
+        assert_eq!(ai.admission.unwrap().line(), "AI First: taking compute jobs");
         let models = makepad_strict_json::parse(br#"{"models":[{"id":"qwen3.8-27b","domain":"text","available":true},{"id":"kokoro","domain":"speech"},
           {"id":"qwen3.5-4b","domain":"text"},{"id":"old","domain":"text","available":false}]}"#).unwrap();
         assert_eq!(parse_chat_models(&models), ["qwen3.5-4b", "qwen3.8-27b"]);

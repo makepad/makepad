@@ -92,6 +92,12 @@ struct Encoder {
     slots: Vec<Slot>,
     pool: vk::CommandPool,
     queries: vk::QueryPool,
+    /// GPU timestamps around the encode (when its queue family has them).
+    stamps: Option<vk::QueryPool>,
+    /// Which queue (engine) of the encode family it encodes on.
+    queue_index: usize,
+    /// The last picture's encode on the GPU (ns), when measured.
+    last_encode_ns: std::cell::Cell<Option<u64>>,
     /// The picture (w, h) and the coded size (aligned).
     size: [u32; 2],
     coded: [u32; 2],
@@ -319,6 +325,9 @@ impl Encoder {
                 slots: Vec::new(),
                 pool: vk::CommandPool::null(),
                 queries: vk::QueryPool::null(),
+                stamps: None,
+                queue_index: 0,
+                last_encode_ns: std::cell::Cell::new(None),
                 size,
                 coded,
                 parameter_sets: Vec::new(),
@@ -476,6 +485,9 @@ impl Encoder {
                     None,
                 )
                 .map_err(error)?;
+            if video.timestamp_bits > 0 {
+                enc.stamps = Some(dev.raw.create_query_pool(&vk::QueryPoolCreateInfo::default().query_type(vk::QueryType::TIMESTAMP).query_count(2), None).map_err(error)?);
+            }
             let families = [dev.family, video.family];
             let plane_bytes = size[0] as u64 * size[1] as u64 * 3 / 2;
             let align = caps.min_bitstream_buffer_size_alignment.max(1);
@@ -508,6 +520,10 @@ impl Encoder {
         d.reset_command_buffer(slot.cb, vk::CommandBufferResetFlags::empty()).map_err(|e| format!("vkResetCommandBuffer: {e:?}"))?;
         d.begin_command_buffer(slot.cb, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).map_err(|e| format!("vkBeginCommandBuffer: {e:?}"))?;
         d.cmd_reset_query_pool(slot.cb, self.queries, pic.slot as u32, 1);
+        if let Some(stamps) = self.stamps {
+            d.cmd_reset_query_pool(slot.cb, stamps, 0, 2);
+            d.cmd_write_timestamp(slot.cb, vk::PipelineStageFlags::TOP_OF_PIPE, stamps, 0);
+        }
         if pic.reset {
             // the DPB images start in the DPB layout
             let barriers: Vec<_> = self
@@ -633,6 +649,9 @@ impl Encoder {
         d.cmd_encode_video(slot.cb, &encode);
         d.cmd_end_query(slot.cb, self.queries, pic.slot as u32);
         d.cmd_end_video_coding(slot.cb, &vk::VideoEndCodingInfoKHR::default());
+        if let Some(stamps) = self.stamps {
+            d.cmd_write_timestamp(slot.cb, vk::PipelineStageFlags::BOTTOM_OF_PIPE, stamps, 1);
+        }
         d.end_command_buffer(slot.cb).map_err(|e| format!("vkEndCommandBuffer (encode): {e:?}"))
     }
 
@@ -647,9 +666,13 @@ impl Encoder {
         let stages = [vk::PipelineStageFlags::ALL_COMMANDS];
         let sems = [copied];
         let info = vk::SubmitInfo::default().command_buffers(&cbs).wait_semaphores(&sems).wait_dst_stage_mask(&stages);
+        let (queue, queue_lock) = match self.queue_index.checked_sub(1).and_then(|i| video.more.get(i)) {
+            Some((queue, l)) => (*queue, l),
+            None => (video.queue, &video.lock),
+        };
         {
-            let _q = lock(&video.lock);
-            d.queue_submit(video.queue, &[info], slot.fence).map_err(|e| format!("vkQueueSubmit (video): {e:?}"))?;
+            let _q = lock(queue_lock);
+            d.queue_submit(queue, &[info], slot.fence).map_err(|e| format!("vkQueueSubmit (video): {e:?}"))?;
         }
         loop {
             match d.wait_for_fences(&[slot.fence], true, 1_000_000_000) {
@@ -663,6 +686,15 @@ impl Encoder {
             }
         }
         d.reset_fences(&[slot.fence]).map_err(error)?;
+        if let Some(stamps) = self.stamps {
+            let mut t = [0u64; 2];
+            let results = d.table.get_query_pool_results.ok_or("vkGetQueryPoolResults is unavailable")?;
+            if results(d.handle(), stamps, 0, 2, std::mem::size_of_val(&t), t.as_mut_ptr().cast(), 8, vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT) == vk::Result::SUCCESS {
+                let bits = video.timestamp_bits;
+                let mask = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
+                self.last_encode_ns.set(Some(((t[1].wrapping_sub(t[0]) & mask) as f64 * self.dev.properties.limits.timestamp_period as f64) as u64));
+            }
+        }
         // one query, three 32-bit values: bitstream offset, bytes written, status
         let mut result = [0u32; 3];
         let results = d.table.get_query_pool_results.ok_or("vkGetQueryPoolResults is unavailable")?;
@@ -711,6 +743,9 @@ impl Drop for Encoder {
             }
             if self.queries != vk::QueryPool::null() {
                 d.destroy_query_pool(self.queries, None);
+                if let Some(stamps) = self.stamps {
+                    d.destroy_query_pool(stamps, None);
+                }
             }
             if self.pool != vk::CommandPool::null() {
                 d.destroy_command_pool(self.pool, None);
@@ -751,19 +786,66 @@ pub(crate) struct StreamEncoder {
     applied_kbps: Option<u32>,
     /// What the encoder is, for logs and status lines.
     pub info: String,
+    /// GPU timestamps around the copy (graphics queue): where a picture's time goes.
+    stamps: vk::QueryPool,
+    timing: Timing,
 }
 
 unsafe impl Send for StreamEncoder {}
+
+/// Where texture pictures' encode time went, summed over a window, written to the log every
+/// `TIMING_WINDOW_NS` while pictures come: the whole call (frame fence imported to bitstream
+/// read), the copy on the GPU, how often the frame was not yet finished at submit.
+#[derive(Default)]
+struct Timing {
+    since_ns: u64,
+    pictures: u32,
+    total_ns: u64,
+    copy_ns: u64,
+    encode_ns: u64,
+    frame_pending: u32,
+}
+
+const TIMING_WINDOW_NS: u64 = 10_000_000_000;
+
+impl Timing {
+    fn add(&mut self, info: &str, total_ns: u64, copy_ns: u64, encode_ns: u64, frame_pending: bool) {
+        let now = crate::clock_ns();
+        if self.pictures == 0 {
+            self.since_ns = now;
+        }
+        self.pictures += 1;
+        self.total_ns += total_ns;
+        self.copy_ns += copy_ns;
+        self.encode_ns += encode_ns;
+        self.frame_pending += frame_pending as u32;
+        if now - self.since_ns >= TIMING_WINDOW_NS {
+            let n = self.pictures as f64;
+            eprintln!(
+                "[hal-video] {}: {} pictures, mean {:.2} ms from the call to the bitstream: the copy {:.2} ms and the encode {:.2} ms on the GPU, the rest waiting (the frame was still rendering at submit for {} of them)",
+                info, self.pictures, self.total_ns as f64 / n / 1e6, self.copy_ns as f64 / n / 1e6, self.encode_ns as f64 / n / 1e6, self.frame_pending
+            );
+            *self = Timing::default();
+        }
+    }
+}
 
 fn default_kbps_for(w: u32, h: u32, fps: u32) -> u32 {
     default_kbps(w, h, fps)
 }
 
 impl StreamEncoder {
-    pub fn open(width: u32, height: u32, fps: u32, kbps: u32) -> Result<StreamEncoder, String> {
+    /// The encode engines (queues) of the process's GPU; 0 without hardware encode.
+    pub fn engines() -> u32 {
+        Device::existing().and_then(|d| d.video_encode.as_ref().map(|v| 1 + v.more.len() as u32)).unwrap_or(0)
+    }
+
+    /// An encoder on engine `engine` (its queue; an engine the GPU does not have is engine 0).
+    pub fn open(width: u32, height: u32, fps: u32, kbps: u32, engine: usize) -> Result<StreamEncoder, String> {
         let dev = Device::existing().ok_or("the HAL has no Vulkan device yet (no window rendered)")?;
         let fps = fps.clamp(1, 240);
-        let enc = Encoder::new(dev.clone(), [width, height], fps)?;
+        let mut enc = Encoder::new(dev.clone(), [width, height], fps)?;
+        enc.queue_index = engine;
         let kbps = if kbps == 0 { default_kbps_for(width, height, fps) } else { kbps };
         unsafe {
             let d = &dev.raw;
@@ -773,6 +855,7 @@ impl StreamEncoder {
             let copy_cb = d.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(copy_pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1)).map_err(error)?[0];
             let copied = d.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).map_err(error)?;
             let ready = d.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).map_err(error)?;
+            let stamps = d.create_query_pool(&vk::QueryPoolCreateInfo::default().query_type(vk::QueryType::TIMESTAMP).query_count(2), None).map_err(error)?;
             let name = std::ffi::CStr::from_ptr(dev.properties.device_name.as_ptr()).to_string_lossy().into_owned();
             let info = format!("H.264 High {width}x{height} (coded {}x{}) {fps} fps {kbps} kbit/s on {name}", enc.coded[0], enc.coded[1]);
             Ok(StreamEncoder {
@@ -789,6 +872,8 @@ impl StreamEncoder {
                 kbps,
                 applied_kbps: None,
                 info,
+                stamps,
+                timing: Timing::default(),
             })
         }
     }
@@ -841,7 +926,11 @@ impl StreamEncoder {
     unsafe fn begin_copy(&self) -> Result<(), String> {
         let d = &self.enc.dev.raw;
         d.reset_command_buffer(self.copy_cb, vk::CommandBufferResetFlags::empty()).map_err(error)?;
-        d.begin_command_buffer(self.copy_cb, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).map_err(error)
+        d.begin_command_buffer(self.copy_cb, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).map_err(error)?;
+        // the copy's start (after the waits on its submit) and end, on the GPU's clock
+        d.cmd_reset_query_pool(self.copy_cb, self.stamps, 0, 2);
+        d.cmd_write_timestamp(self.copy_cb, vk::PipelineStageFlags::TOP_OF_PIPE, self.stamps, 0);
+        Ok(())
     }
 
     /// The staged planes (in `buffer`) into the encode source image, which then goes to the
@@ -898,6 +987,7 @@ impl StreamEncoder {
     unsafe fn finish(&mut self, pic: Picture, wait_ready: bool) -> Result<Vec<u8>, String> {
         let dev = self.enc.dev.clone();
         let d = &dev.raw;
+        d.cmd_write_timestamp(self.copy_cb, vk::PipelineStageFlags::BOTTOM_OF_PIPE, self.stamps, 1);
         d.end_command_buffer(self.copy_cb).map_err(|e| format!("vkEndCommandBuffer (copy): {e:?}"))?;
         let cbs = [self.copy_cb];
         let signals = [self.copied];
@@ -924,14 +1014,24 @@ impl StreamEncoder {
         Arc::ptr_eq(&self.enc.dev, dev) && !self.enc.dev.lost.load(Ordering::Acquire)
     }
 
-    /// A picture from the registered DMA-BUF `image` (`layout`: its size), once its producer's
-    /// `sync` (a sync_file; `None` when its work is known to be complete) has signalled.
-    pub fn encode_image(&mut self, image: vk::Image, image_size: [u32; 2], sync: Option<OwnedFd>, key: bool) -> Result<Vec<u8>, String> {
+    /// A picture from the registered DMA-BUF `image` (`image_size`: its size) holding a
+    /// `source_height` tall packed NV12 picture: its rows from `y0` on (this encoder's height of
+    /// them: a tile of it, or all of it), once its producer's `sync` (a sync_file; `None` when its
+    /// work is known to be complete) has signalled.
+    pub fn encode_rows(&mut self, image: vk::Image, image_size: [u32; 2], source_height: u32, y0: u32, sync: Option<OwnedFd>, key: bool) -> Result<Vec<u8>, String> {
         let [w, h] = self.enc.size;
-        if image_size[0] * 4 < w || image_size[1] < h + h / 2 {
-            return Err(format!("the picture texture {}x{} is too small for a {w}x{h} NV12 picture", image_size[0], image_size[1]));
+        if image_size[0] * 4 < w || image_size[1] < source_height + source_height / 2 || y0 + h > source_height || y0 % 2 != 0 {
+            return Err(format!("rows {y0}.. ({h}) of a {source_height} tall NV12 picture in a {}x{} texture: out of it", image_size[0], image_size[1]));
         }
         let pic = self.next_picture(key);
+        let started = crate::clock_ns();
+        // the frame that rendered the picture still running on the GPU when this is called
+        let frame_pending = sync.as_ref().is_some_and(|fd| {
+            use crate::backend::linux::io::{poll, PollFd, READ};
+            use std::os::fd::AsRawFd;
+            let mut p = PollFd { fd: fd.as_raw_fd(), events: READ, revents: 0 };
+            unsafe { poll(&mut p, 1, 0) == 0 }
+        });
         unsafe {
             let dev = self.enc.dev.clone();
             let d = &dev.raw;
@@ -982,11 +1082,11 @@ impl StreamEncoder {
                 vk::ImageLayout::GENERAL,
                 slot.staging,
                 &[
-                    vk::BufferImageCopy::default().image_subresource(layer).image_extent(vk::Extent3D { width: w / 4, height: h, depth: 1 }),
+                    vk::BufferImageCopy::default().image_subresource(layer).image_offset(vk::Offset3D { x: 0, y: y0 as i32, z: 0 }).image_extent(vk::Extent3D { width: w / 4, height: h, depth: 1 }),
                     vk::BufferImageCopy::default()
                         .buffer_offset(w as u64 * h as u64)
                         .image_subresource(layer)
-                        .image_offset(vk::Offset3D { x: 0, y: h as i32, z: 0 })
+                        .image_offset(vk::Offset3D { x: 0, y: (source_height + y0 / 2) as i32, z: 0 })
                         .image_extent(vk::Extent3D { width: w / 4, height: h / 2, depth: 1 }),
                 ],
             );
@@ -1000,7 +1100,17 @@ impl StreamEncoder {
                 .subresource_range(range);
             d.cmd_pipeline_barrier(self.copy_cb, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::BOTTOM_OF_PIPE, vk::DependencyFlags::empty(), &[], &[], &[release]);
             self.record_planes(slot.staging);
-            self.finish(pic, wait_ready)
+            let out = self.finish(pic, wait_ready)?;
+            let mut stamps = [0u64; 2];
+            let results = d.table.get_query_pool_results.ok_or("vkGetQueryPoolResults is unavailable")?;
+            let read = results(d.handle(), self.stamps, 0, 2, std::mem::size_of_val(&stamps), stamps.as_mut_ptr().cast(), 8, vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT);
+            if read == vk::Result::SUCCESS {
+                let mask = if dev.timestamp_bits >= 64 { u64::MAX } else { (1u64 << dev.timestamp_bits) - 1 };
+                let copy_ns = (stamps[1].wrapping_sub(stamps[0]) & mask) as f64 * dev.properties.limits.timestamp_period as f64;
+                let encode_ns = self.enc.last_encode_ns.get().unwrap_or(0);
+                self.timing.add(&self.info, crate::clock_ns() - started, copy_ns as u64, encode_ns, frame_pending);
+            }
+            Ok(out)
         }
     }
 
@@ -1048,6 +1158,7 @@ impl Drop for StreamEncoder {
             }
             d.destroy_semaphore(self.copied, None);
             d.destroy_semaphore(self.ready, None);
+            d.destroy_query_pool(self.stamps, None);
             d.destroy_command_pool(self.copy_pool, None);
         }
     }
