@@ -86,12 +86,15 @@ script_mod! {
 
         // the fragment's centre in pass pixels, exactly (the page's gl_FragCoord): the interpolated pos rounds by the quad's size
         frag: fn() -> vec2 { return floor(self.rect_pos + self.pos * self.rect_size) + 0.5 }
-        // a host's beacon's core (`point_core` set) at d2 squared pixels from its centre, pixels of px rad: its sigma held
-        // to half a pixel, its peak point_core.y times the designed one (the example's core, exp(-d2 / 3), is written at
-        // its callers, unchanged)
-        beacon_core: fn(d2: float, px: float) -> float {
-            let s = max(self.point_core.x / px, 0.5)
-            return self.point_core.y * exp(0.0 - 0.5 * d2 / (s * s))
+        // a host's beacon's core (`point_core` set) at d pixels from its centre (across, up), pixels of px rad, at
+        // point_core.y times the designed peak: a core whose sigma is under half a pixel lights only the pixel its centre
+        // falls in, its edges soft over 0.05 px (a centre on an edge shares it between the two, their sum the peak, so it
+        // never drops out), so in a map it is one texel, not a few; a wider one is that Gaussian (the example's core,
+        // exp(-d2 / 3), is written at its callers, unchanged)
+        beacon_core: fn(d: vec2, px: float) -> float {
+            let s = self.point_core.x / px
+            if s < 0.5 { let b = clamp((0.5 - abs(d)) / 0.05 + 0.5, vec2(0.0), vec2(1.0)); return self.point_core.y * b.x * b.y }
+            return self.point_core.y * exp(0.0 - 0.5 * dot(d, d) / (s * s))
         }
         // radians per pixel of the raw view
         px0: fn() -> float { return self.view_span.y * 6.2831853 / self.view_in().x }

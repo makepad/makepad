@@ -72,17 +72,18 @@ pub struct SkyLight {
     /// Host light, never coded: `plan()` carries it in the host's part (`Split`; never `Unit` while it is handed), the
     /// designed part has none. None in the example. Plan hdri-7 D12.
     pub aurora_sky: Option<([[f32; 3]; RING], [[f32; 3]; RING])>,
-    /// A host's beacons are points (`point_core`): a red aviation light's core is POINT_SIGMA_DEG in sigma, held to half
-    /// a pixel of the strip, at POINT_GAIN times its designed peak, so in a map, whose strip is a few tenths of a degree a
-    /// texel, it stays a small red point clear of the sky behind it. False (the example): a core of 1.22 px of the view at
-    /// its designed peak, as the example draws it on a screen. Plan hdri-7 Task 9.
+    /// A host's beacons are points (`point_core`): a red aviation light's core is POINT_SIGMA_DEG in sigma at POINT_GAIN
+    /// times its designed peak, and where that is under half a pixel of the strip (a map's strip at 2048 px and less, a
+    /// few tenths of a degree a texel) it lights only the texel its centre falls in, so in a map it stays a small red
+    /// point, one texel, clear of the sky behind it. False (the example): a core of 1.22 px of the view at its designed
+    /// peak, as the example draws it on a screen. Plan hdri-7 Task 9.
     pub point_lights: bool,
 }
 
-/// A host's beacon (`SkyLight::point_lights`): its core's sigma, degrees (0.19 degrees at half its peak), held to half a
-/// pixel of the strip (0.18 degrees at 1024 px), and its peak over the designed one (0.07 x Lights at its core, dimmed by
-/// the haze with distance): with it the core stands over the night sky behind it as the light it is, red, not a plum
-/// smudge of red light and blue sky. Plan hdri-7 Task 9.
+/// A host's beacon (`SkyLight::point_lights`): its core's sigma, degrees (0.19 degrees at half its peak; under half a
+/// pixel of the strip, at 2048 px and less, the one texel its centre falls in: the shaders' `beacon_core`), and its peak
+/// over the designed one (0.07 x Lights at its core, dimmed by the haze with distance): with it the core stands over
+/// the night sky behind it as the light it is, red, not a plum smudge of red light and blue sky. Plan hdri-7 Task 9.
 pub const POINT_SIGMA_DEG: f32 = 0.08;
 pub const POINT_GAIN: f32 = 5.0;
 

@@ -378,7 +378,7 @@ script_mod! {
                             if lr < 0.0 { la = la * 0.07 * (1.0 - 0.6 * (1.0 - exp(0.0 - gr / 70.0 * (0.004 + 0.0185 * self.haze)))); col = vec3(1.0, 0.08, 0.03); lfog = 1.0 }
                             // (a host's beacon a point, `beacon_core`; the example's 1.22 px)
                             if lr > 0.0 { li = la * self.glow_pt(lq, lr, pxm) }
-                            else if self.point_core.x > 0.0 { li = la * self.beacon_core(dot(lq, lq) / (pxm * pxm), w.z) }
+                            else if self.point_core.x > 0.0 { li = la * self.beacon_core(lq / pxm, w.z) }
                             else { li = la * exp(0.0 - dot(lq, lq) / (3.0 * pxm * pxm)) }
                         }
                         if clp { m = max(m0, m * ck); li = li * ck }

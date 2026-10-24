@@ -208,9 +208,14 @@ script_mod! {
                     if above > 0.5 && nt >= 40.0 && h6.z > 0.3 {
                         var pb = vec3(ctr.x + off.x, ytop + ha, ctr.y + off.y); if mast > 0.5 { pb = vec3(mp.x, ytop + hm, mp.z) }
                         pb = pb - ray.o; let tb2 = dot(pb, ray.d); let bd = length(pb - ray.d * tb2) / (max(tb2, 0.01) * px)
-                        // it burns day and night; a host's is a point (`beacon_core`), the example's 1.22 px
+                        // it burns day and night; a host's is a point (`beacon_core`, its centre's pixel offset from the
+                        // fragment's by the azimuth and elevation it stands at from the camera, as the fragment's own view
+                        // places it), the example's 1.22 px
                         var bcore = 0.0
-                        if self.point_core.x > 0.0 { bcore = self.beacon_core(bd * bd, px) } else { bcore = exp(-bd * bd / 3.0) }
+                        if self.point_core.x > 0.0 {
+                            var bu = atan2(pb.z, pb.x) / tau - u; bu = bu - floor(bu + 0.5)
+                            bcore = self.beacon_core(vec2(bu * tau, atan2(pb.y, length(pb.xz)) - ang) / px, px)
+                        } else { bcore = exp(-bd * bd / 3.0) }
                         em += tr * vec3(1.0, 0.08, 0.03) * (bcore * step(0.0, tb2) * self.lights * 0.07 * (0.4 + 0.6 * exp(-tb2 * sz * (0.004 + 0.0185 * self.haze))) * self.design_gain)
                         // where no surface covers the pixel yet, its depth is the beacon's own, so the beacon's halo over
                         // the sky burns at its distance (a band's light plane, `at_lit`); a pixel without a surface has no
