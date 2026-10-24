@@ -223,9 +223,8 @@ impl Program {
         self.collected_writer_with(&|| false)
     }
 
-    /// `stop`: asked every 256 files and between the tables; yes drops the image (None) -- the
-    /// settle swap's encode under a front read gives way to a waiting writer (relax-compiler
-    /// zone_swap.rs).
+    /// `stop`: asked every 256 files and between the tables; yes drops the image (None) -- an
+    /// encode under a front read gives way to a waiting writer.
     pub fn collected_writer_with(&self, stop: &dyn Fn() -> bool) -> Option<crate::image::Writer<'_>> {
         if !self.imports_done || !self.errors.is_empty() || !self.pending_macs.is_empty() {
             if crate::preload::trace() { eprintln!("makepad-run collected: Program not recordable: imports {}, errors {}, macros {}", self.imports_done, self.errors.len(), self.pending_macs.len()); if let Some(e) = self.errors.first() { eprintln!("makepad-run collected: first program error: {e}"); } }

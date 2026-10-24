@@ -7,7 +7,7 @@ macro_rules! d { ($($a:tt)*) => { println!("D {}", format!($($a)*)) } }
 #[path = "../../../../../libs/relax/compiler/rwbench/src/box3d_scene.rs"]
 mod box3d_scene;
 
-const PROGRAMS: &[(&str, fn())] = &[("box3d", box3d), ("static_tables", static_tables), ("font", font), ("zone_swap", zone_swap), ("inflate_files", inflate_files)];
+const PROGRAMS: &[(&str, fn())] = &[("box3d", box3d), ("static_tables", static_tables), ("font", font), ("late_tables", late_tables), ("inflate_files", inflate_files)];
 
 fn main() {
     let arg = std::env::args().nth(1).unwrap_or_default();
@@ -80,21 +80,21 @@ fn font() {
     }
 }
 
-/// include_bytes!/include_str! statics first used after the compiler-zone swap (2026-10-21: the
-/// swap's restore had no payload table, so FONT's slice was the 36-byte payload marker and
-/// Sandbox's vector font failed with UnknownMagic). Under Relax the program reports its first
-/// present (loader symbol `relax_first_present`; the swap waits for it) and waits for the swap
-/// (`relax_zone_swaps`) before anything reads the tables; natively both symbols are absent.
-fn zone_swap() {
+/// include_bytes!/include_str! statics first used after the first present, when the run has
+/// settled (2026-10-21: payload tables lost across a compiler-state rebuild made FONT's slice the
+/// 36-byte payload marker and Sandbox's vector font failed with UnknownMagic). Under Relax the
+/// program reports its first present (loader symbol `relax_first_present`) and waits a moment
+/// before anything reads the tables; natively the symbol is absent.
+fn late_tables() {
     static WAITED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !WAITED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        wait_for_swap();
+        wait_for_settle();
     }
-    after_swap();
+    read_tables();
 }
 
 #[inline(never)]
-fn after_swap() {
+fn read_tables() {
     use relax_diffpkg_tables as t;
     let sum = |b: &[u8]| b.iter().map(|&x| x as u64).sum::<u64>();
     d!("zone font {} {:?} sum {}", t::FONT.len(), &t::FONT[..8], sum(t::FONT));
@@ -118,25 +118,14 @@ fn host_symbol(name: &std::ffi::CStr) -> *mut std::ffi::c_void {
     unsafe { dlsym(default, name.as_ptr()) }
 }
 
-fn wait_for_swap() {
+fn wait_for_settle() {
     let present = host_symbol(c"relax_first_present");
     if present.is_null() {
         return;
     }
     unsafe { std::mem::transmute::<*mut std::ffi::c_void, extern "C" fn()>(present)() };
-    let swaps = host_symbol(c"relax_zone_swaps");
-    if swaps.is_null() {
-        d!("zone: the loader has no relax_zone_swaps");
-        return;
-    }
-    let swaps = unsafe { std::mem::transmute::<*mut std::ffi::c_void, extern "C" fn() -> u32>(swaps) };
-    for _ in 0..1800 {
-        if swaps() > 0 {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    d!("zone: no swap within 180 s");
+    // the run settles (drops what the compiles held, trims) once compiles have been quiet a moment
+    std::thread::sleep(std::time::Duration::from_secs(3));
 }
 
 /// zlib streams of real PNG files (their IDAT chunks) through makepad-fast-inflate with the size hint

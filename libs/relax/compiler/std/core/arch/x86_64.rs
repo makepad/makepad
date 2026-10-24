@@ -1426,6 +1426,999 @@ pub unsafe fn _mm_xor_ps(a: __m128, b: __m128) -> __m128 {
     vx::vx_binary(a, b, 8, 32)
 }
 
+// ---------------------------------------------------------------- SSE2 double precision (_pd / _sd)
+// stdarch's x86/sse2.rs and x86_64/sse2.rs f64 family. The packed float ops are the bridge's SSE
+// float selectors at lane width 64 (addpd .. cmppd, Intel NaN results: the first NaN operand
+// quieted, else the negative default NaN; on every host); the scalar `_sd` forms are the packed op
+// with lane 1 taken from `a` (move_sd), as the instructions define them. Float -> integer
+// conversions follow Intel: rounding by MXCSR (or toward zero for cvtt*), NaN and out-of-range
+// lanes give the integer indefinite (0x8000_0000 / 0x8000_0000_0000_0000).
+
+#[inline(always)]
+pub unsafe fn _mm_add_pd(a: __m128d, b: __m128d) -> __m128d {
+    vx::vx_binary(a, b, 40, 64)
+}
+#[inline(always)]
+pub unsafe fn _mm_sub_pd(a: __m128d, b: __m128d) -> __m128d {
+    vx::vx_binary(a, b, 41, 64)
+}
+#[inline(always)]
+pub unsafe fn _mm_mul_pd(a: __m128d, b: __m128d) -> __m128d {
+    vx::vx_binary(a, b, 42, 64)
+}
+#[inline(always)]
+pub unsafe fn _mm_div_pd(a: __m128d, b: __m128d) -> __m128d {
+    vx::vx_binary(a, b, 43, 64)
+}
+/// minpd / maxpd: a < b ? a : b / a > b ? a : b, so either operand NaN (or both zero) gives b
+#[inline(always)]
+pub unsafe fn _mm_min_pd(a: __m128d, b: __m128d) -> __m128d {
+    vx::vx_binary(a, b, 44, 64)
+}
+#[inline(always)]
+pub unsafe fn _mm_max_pd(a: __m128d, b: __m128d) -> __m128d {
+    vx::vx_binary(a, b, 45, 64)
+}
+#[inline(always)]
+pub unsafe fn _mm_sqrt_pd(a: __m128d) -> __m128d {
+    vx::vx_unary(a, 7, 64, 0)
+}
+#[inline(always)]
+pub unsafe fn _mm_and_pd(a: __m128d, b: __m128d) -> __m128d {
+    vx::vx_binary(a, b, 6, 64)
+}
+/// (!a) & b
+#[inline(always)]
+pub unsafe fn _mm_andnot_pd(a: __m128d, b: __m128d) -> __m128d {
+    vx::vx_binary(b, a, 9, 64)
+}
+#[inline(always)]
+pub unsafe fn _mm_or_pd(a: __m128d, b: __m128d) -> __m128d {
+    vx::vx_binary(a, b, 7, 64)
+}
+#[inline(always)]
+pub unsafe fn _mm_xor_pd(a: __m128d, b: __m128d) -> __m128d {
+    vx::vx_binary(a, b, 8, 64)
+}
+
+/// all ones per f64 lane
+#[inline(always)]
+unsafe fn pd_ones() -> __m128d {
+    vx::vx_splat(u64::MAX, 64)
+}
+
+// compares: all ones / zero per lane. eq, lt, le, gt, ge are ordered (false for NaN lanes);
+// neq and the negated forms (nlt, nle, ngt, nge) are unordered (true for NaN lanes).
+#[inline(always)]
+pub unsafe fn _mm_cmpeq_pd(a: __m128d, b: __m128d) -> __m128d {
+    vx::vx_binary(a, b, 46, 64)
+}
+#[inline(always)]
+pub unsafe fn _mm_cmpneq_pd(a: __m128d, b: __m128d) -> __m128d {
+    vx::vx_binary(a, b, 47, 64)
+}
+#[inline(always)]
+pub unsafe fn _mm_cmplt_pd(a: __m128d, b: __m128d) -> __m128d {
+    vx::vx_binary(a, b, 48, 64)
+}
+#[inline(always)]
+pub unsafe fn _mm_cmple_pd(a: __m128d, b: __m128d) -> __m128d {
+    vx::vx_binary(a, b, 49, 64)
+}
+#[inline(always)]
+pub unsafe fn _mm_cmpgt_pd(a: __m128d, b: __m128d) -> __m128d {
+    vx::vx_binary(a, b, 50, 64)
+}
+#[inline(always)]
+pub unsafe fn _mm_cmpge_pd(a: __m128d, b: __m128d) -> __m128d {
+    vx::vx_binary(a, b, 51, 64)
+}
+/// neither lane NaN
+#[inline(always)]
+pub unsafe fn _mm_cmpord_pd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_and_pd(_mm_cmpeq_pd(a, a), _mm_cmpeq_pd(b, b))
+}
+/// either lane NaN
+#[inline(always)]
+pub unsafe fn _mm_cmpunord_pd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_or_pd(_mm_cmpneq_pd(a, a), _mm_cmpneq_pd(b, b))
+}
+#[inline(always)]
+pub unsafe fn _mm_cmpnlt_pd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_xor_pd(_mm_cmplt_pd(a, b), pd_ones())
+}
+#[inline(always)]
+pub unsafe fn _mm_cmpnle_pd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_xor_pd(_mm_cmple_pd(a, b), pd_ones())
+}
+#[inline(always)]
+pub unsafe fn _mm_cmpngt_pd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_xor_pd(_mm_cmpgt_pd(a, b), pd_ones())
+}
+#[inline(always)]
+pub unsafe fn _mm_cmpnge_pd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_xor_pd(_mm_cmpge_pd(a, b), pd_ones())
+}
+
+/// [b0, a1]
+#[inline(always)]
+pub unsafe fn _mm_move_sd(a: __m128d, b: __m128d) -> __m128d {
+    // zip_hi([b0, b0], a) = [b0, a1]
+    let lo: __m128d = vx::vx_binary(b, b, 17, 64);
+    vx::vx_binary(lo, a, 18, 64)
+}
+
+pub unsafe fn _mm_add_sd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_move_sd(a, _mm_add_pd(a, b))
+}
+pub unsafe fn _mm_sub_sd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_move_sd(a, _mm_sub_pd(a, b))
+}
+pub unsafe fn _mm_mul_sd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_move_sd(a, _mm_mul_pd(a, b))
+}
+pub unsafe fn _mm_div_sd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_move_sd(a, _mm_div_pd(a, b))
+}
+pub unsafe fn _mm_min_sd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_move_sd(a, _mm_min_pd(a, b))
+}
+pub unsafe fn _mm_max_sd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_move_sd(a, _mm_max_pd(a, b))
+}
+/// [sqrt(b0), a1]
+pub unsafe fn _mm_sqrt_sd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_move_sd(a, _mm_sqrt_pd(b))
+}
+pub unsafe fn _mm_cmpeq_sd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_move_sd(a, _mm_cmpeq_pd(a, b))
+}
+pub unsafe fn _mm_cmpneq_sd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_move_sd(a, _mm_cmpneq_pd(a, b))
+}
+pub unsafe fn _mm_cmplt_sd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_move_sd(a, _mm_cmplt_pd(a, b))
+}
+pub unsafe fn _mm_cmple_sd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_move_sd(a, _mm_cmple_pd(a, b))
+}
+pub unsafe fn _mm_cmpgt_sd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_move_sd(a, _mm_cmpgt_pd(a, b))
+}
+pub unsafe fn _mm_cmpge_sd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_move_sd(a, _mm_cmpge_pd(a, b))
+}
+pub unsafe fn _mm_cmpord_sd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_move_sd(a, _mm_cmpord_pd(a, b))
+}
+pub unsafe fn _mm_cmpunord_sd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_move_sd(a, _mm_cmpunord_pd(a, b))
+}
+pub unsafe fn _mm_cmpnlt_sd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_move_sd(a, _mm_cmpnlt_pd(a, b))
+}
+pub unsafe fn _mm_cmpnle_sd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_move_sd(a, _mm_cmpnle_pd(a, b))
+}
+pub unsafe fn _mm_cmpngt_sd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_move_sd(a, _mm_cmpngt_pd(a, b))
+}
+pub unsafe fn _mm_cmpnge_sd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_move_sd(a, _mm_cmpnge_pd(a, b))
+}
+
+// comisd / ucomisd as rustc's LLVM lowers them: eq, lt, le, gt, ge are 0 for unordered operands,
+// neq is 1 (the two families differ only in the invalid-operation exception for quiet NaNs).
+pub unsafe fn _mm_comieq_sd(a: __m128d, b: __m128d) -> i32 {
+    (a.0[0] == b.0[0]) as i32
+}
+pub unsafe fn _mm_comilt_sd(a: __m128d, b: __m128d) -> i32 {
+    (a.0[0] < b.0[0]) as i32
+}
+pub unsafe fn _mm_comile_sd(a: __m128d, b: __m128d) -> i32 {
+    (a.0[0] <= b.0[0]) as i32
+}
+pub unsafe fn _mm_comigt_sd(a: __m128d, b: __m128d) -> i32 {
+    (a.0[0] > b.0[0]) as i32
+}
+pub unsafe fn _mm_comige_sd(a: __m128d, b: __m128d) -> i32 {
+    (a.0[0] >= b.0[0]) as i32
+}
+pub unsafe fn _mm_comineq_sd(a: __m128d, b: __m128d) -> i32 {
+    (a.0[0] != b.0[0]) as i32
+}
+pub unsafe fn _mm_ucomieq_sd(a: __m128d, b: __m128d) -> i32 {
+    _mm_comieq_sd(a, b)
+}
+pub unsafe fn _mm_ucomilt_sd(a: __m128d, b: __m128d) -> i32 {
+    _mm_comilt_sd(a, b)
+}
+pub unsafe fn _mm_ucomile_sd(a: __m128d, b: __m128d) -> i32 {
+    _mm_comile_sd(a, b)
+}
+pub unsafe fn _mm_ucomigt_sd(a: __m128d, b: __m128d) -> i32 {
+    _mm_comigt_sd(a, b)
+}
+pub unsafe fn _mm_ucomige_sd(a: __m128d, b: __m128d) -> i32 {
+    _mm_comige_sd(a, b)
+}
+pub unsafe fn _mm_ucomineq_sd(a: __m128d, b: __m128d) -> i32 {
+    _mm_comineq_sd(a, b)
+}
+
+/// the sign bit of each f64 lane, lane i at bit i (movmskpd)
+#[inline(always)]
+pub unsafe fn _mm_movemask_pd(a: __m128d) -> i32 {
+    vx::vx_mask(a, 64)
+}
+
+#[inline(always)]
+pub unsafe fn _mm_unpacklo_pd(a: __m128d, b: __m128d) -> __m128d {
+    vx::vx_binary(a, b, 17, 64)
+}
+#[inline(always)]
+pub unsafe fn _mm_unpackhi_pd(a: __m128d, b: __m128d) -> __m128d {
+    vx::vx_binary(a, b, 18, 64)
+}
+/// [a[MASK & 1], b[(MASK >> 1) & 1]]
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[inline(always)]
+pub unsafe fn _mm_shuffle_pd<const MASK: i32>(a: __m128d, b: __m128d) -> __m128d {
+    shuffle_pd(a, b, MASK)
+}
+/// [a[k & 1], b[(k >> 1) & 1]] for a constant k
+#[inline(always)]
+unsafe fn shuffle_pd(a: __m128d, b: __m128d, k: i32) -> __m128d {
+    // zip_lo picks lane 0 of each input, zip_hi lane 1; a lane picked from the other half of `a`
+    // first becomes both lanes of `a`
+    match k & 3 {
+        0 => vx::vx_binary(a, b, 17, 64),
+        1 => {
+            let x: __m128d = vx::vx_binary(a, a, 18, 64);
+            vx::vx_binary(x, b, 17, 64)
+        }
+        2 => {
+            let x: __m128d = vx::vx_binary(a, a, 17, 64);
+            vx::vx_binary(x, b, 18, 64)
+        }
+        _ => vx::vx_binary(a, b, 18, 64),
+    }
+}
+
+// ---- set / load / store
+#[inline(always)]
+pub unsafe fn _mm_set1_pd(a: f64) -> __m128d {
+    vx::vx_splat(a.to_bits(), 64)
+}
+#[inline(always)]
+pub unsafe fn _mm_set_pd1(a: f64) -> __m128d {
+    _mm_set1_pd(a)
+}
+/// [b, a] (the arguments high to low)
+pub unsafe fn _mm_set_pd(a: f64, b: f64) -> __m128d {
+    __m128d([b, a])
+}
+pub unsafe fn _mm_setr_pd(a: f64, b: f64) -> __m128d {
+    __m128d([a, b])
+}
+pub unsafe fn _mm_set_sd(a: f64) -> __m128d {
+    __m128d([a, 0.0])
+}
+#[inline(always)]
+pub unsafe fn _mm_setzero_pd() -> __m128d {
+    vx::vx_splat(0, 64)
+}
+/// stdarch returns zeros
+pub unsafe fn _mm_undefined_pd() -> __m128d {
+    _mm_setzero_pd()
+}
+pub unsafe fn _mm_undefined_si128() -> __m128i {
+    __m128i([0, 0])
+}
+pub unsafe fn _mm_undefined_ps() -> __m128 {
+    _mm_setzero_ps()
+}
+
+/// 16-byte alignment is the caller's contract (as on hardware); the loads are the same.
+#[inline(always)]
+pub unsafe fn _mm_load_pd(mem_addr: *const f64) -> __m128d {
+    vx::vx_load(mem_addr as *const u8)
+}
+#[inline(always)]
+pub unsafe fn _mm_loadu_pd(mem_addr: *const f64) -> __m128d {
+    vx::vx_load(mem_addr as *const u8)
+}
+pub unsafe fn _mm_load_sd(mem_addr: *const f64) -> __m128d {
+    __m128d([crate::ptr::read_unaligned(mem_addr), 0.0])
+}
+pub unsafe fn _mm_load1_pd(mem_addr: *const f64) -> __m128d {
+    _mm_set1_pd(*mem_addr)
+}
+pub unsafe fn _mm_load_pd1(mem_addr: *const f64) -> __m128d {
+    _mm_load1_pd(mem_addr)
+}
+/// [p[1], p[0]]
+pub unsafe fn _mm_loadr_pd(mem_addr: *const f64) -> __m128d {
+    let a = _mm_load_pd(mem_addr);
+    _mm_shuffle_pd::<1>(a, a)
+}
+/// [a0, *p]
+pub unsafe fn _mm_loadh_pd(a: __m128d, mem_addr: *const f64) -> __m128d {
+    __m128d([a.0[0], crate::ptr::read_unaligned(mem_addr)])
+}
+/// [*p, a1]
+pub unsafe fn _mm_loadl_pd(a: __m128d, mem_addr: *const f64) -> __m128d {
+    __m128d([crate::ptr::read_unaligned(mem_addr), a.0[1]])
+}
+
+#[inline(always)]
+pub unsafe fn _mm_store_pd(mem_addr: *mut f64, a: __m128d) {
+    vx::vx_store(mem_addr as *mut u8, a)
+}
+#[inline(always)]
+pub unsafe fn _mm_storeu_pd(mem_addr: *mut f64, a: __m128d) {
+    vx::vx_store(mem_addr as *mut u8, a)
+}
+/// a non-temporal hint on hardware; the same store here
+pub unsafe fn _mm_stream_pd(mem_addr: *mut f64, a: __m128d) {
+    _mm_store_pd(mem_addr, a)
+}
+pub unsafe fn _mm_store_sd(mem_addr: *mut f64, a: __m128d) {
+    crate::ptr::write_unaligned(mem_addr, a.0[0])
+}
+/// [a0, a0]
+pub unsafe fn _mm_store1_pd(mem_addr: *mut f64, a: __m128d) {
+    _mm_store_pd(mem_addr, _mm_unpacklo_pd(a, a))
+}
+pub unsafe fn _mm_store_pd1(mem_addr: *mut f64, a: __m128d) {
+    _mm_store1_pd(mem_addr, a)
+}
+/// [a1, a0]
+pub unsafe fn _mm_storer_pd(mem_addr: *mut f64, a: __m128d) {
+    _mm_store_pd(mem_addr, _mm_shuffle_pd::<1>(a, a))
+}
+pub unsafe fn _mm_storeh_pd(mem_addr: *mut f64, a: __m128d) {
+    crate::ptr::write_unaligned(mem_addr, a.0[1])
+}
+pub unsafe fn _mm_storel_pd(mem_addr: *mut f64, a: __m128d) {
+    crate::ptr::write_unaligned(mem_addr, a.0[0])
+}
+
+// ---- casts (bit reinterpretations)
+#[inline(always)]
+pub unsafe fn _mm_castpd_ps(a: __m128d) -> __m128 {
+    crate::mem::transmute::<__m128d, __m128>(a)
+}
+#[inline(always)]
+pub unsafe fn _mm_castpd_si128(a: __m128d) -> __m128i {
+    crate::mem::transmute::<__m128d, __m128i>(a)
+}
+#[inline(always)]
+pub unsafe fn _mm_castps_pd(a: __m128) -> __m128d {
+    crate::mem::transmute::<__m128, __m128d>(a)
+}
+#[inline(always)]
+pub unsafe fn _mm_castps_si128(a: __m128) -> __m128i {
+    crate::mem::transmute::<__m128, __m128i>(a)
+}
+#[inline(always)]
+pub unsafe fn _mm_castsi128_pd(a: __m128i) -> __m128d {
+    crate::mem::transmute::<__m128i, __m128d>(a)
+}
+#[inline(always)]
+pub unsafe fn _mm_castsi128_ps(a: __m128i) -> __m128 {
+    crate::mem::transmute::<__m128i, __m128>(a)
+}
+
+// ---- conversions
+/// f64 rounded to an integral value by the MXCSR rounding mode `rm` (0 nearest-even, 1 down,
+/// 2 up, 3 toward zero)
+fn round_f64(x: f64, rm: u32) -> f64 {
+    match rm {
+        0 => x.round_ties_even(),
+        1 => x.floor(),
+        2 => x.ceil(),
+        _ => x.trunc(),
+    }
+}
+fn round_f32(x: f32, rm: u32) -> f32 {
+    match rm {
+        0 => x.round_ties_even(),
+        1 => x.floor(),
+        2 => x.ceil(),
+        _ => x.trunc(),
+    }
+}
+/// CVT(T)SD2SI / CVT(T)PD2DQ lane: the rounded value, or the integer indefinite i32::MIN
+fn f64_to_i32(x: f64, rm: u32) -> i32 {
+    let r = round_f64(x, rm);
+    if r >= -2147483648.0 && r < 2147483648.0 { r as i32 } else { i32::MIN }
+}
+fn f64_to_i64(x: f64, rm: u32) -> i64 {
+    let r = round_f64(x, rm);
+    if r >= -9223372036854775808.0 && r < 9223372036854775808.0 { r as i64 } else { i64::MIN }
+}
+fn f32_to_i32(x: f32, rm: u32) -> i32 {
+    let r = round_f32(x, rm);
+    if r >= -2147483648.0 && r < 2147483648.0 { r as i32 } else { i32::MIN }
+}
+/// the MXCSR rounding mode (RC, bits 13..15)
+unsafe fn mxcsr_rm() -> u32 {
+    (_mm_getcsr() >> 13) & 3
+}
+
+/// [a0 as f64, a1 as f64] (exact)
+pub unsafe fn _mm_cvtepi32_pd(a: __m128i) -> __m128d {
+    let a = lanes128_i32(a);
+    __m128d([a[0] as f64, a[1] as f64])
+}
+pub unsafe fn _mm_cvtepi32_ps(a: __m128i) -> __m128 {
+    let a = lanes128_i32(a);
+    __m128([a[0] as f32, a[1] as f32, a[2] as f32, a[3] as f32])
+}
+pub unsafe fn _mm_cvtps_epi32(a: __m128) -> __m128i {
+    let rm = mxcsr_rm();
+    from128_i32([f32_to_i32(a.0[0], rm), f32_to_i32(a.0[1], rm), f32_to_i32(a.0[2], rm), f32_to_i32(a.0[3], rm)])
+}
+pub unsafe fn _mm_cvttps_epi32(a: __m128) -> __m128i {
+    from128_i32([f32_to_i32(a.0[0], 3), f32_to_i32(a.0[1], 3), f32_to_i32(a.0[2], 3), f32_to_i32(a.0[3], 3)])
+}
+/// [a0 as f32, a1 as f32, 0, 0]
+pub unsafe fn _mm_cvtpd_ps(a: __m128d) -> __m128 {
+    __m128([a.0[0] as f32, a.0[1] as f32, 0.0, 0.0])
+}
+/// [a0 as f64, a1 as f64] (exact)
+pub unsafe fn _mm_cvtps_pd(a: __m128) -> __m128d {
+    __m128d([a.0[0] as f64, a.0[1] as f64])
+}
+/// [a0, a1 as i32 by MXCSR, 0, 0]
+pub unsafe fn _mm_cvtpd_epi32(a: __m128d) -> __m128i {
+    let rm = mxcsr_rm();
+    from128_i32([f64_to_i32(a.0[0], rm), f64_to_i32(a.0[1], rm), 0, 0])
+}
+pub unsafe fn _mm_cvttpd_epi32(a: __m128d) -> __m128i {
+    from128_i32([f64_to_i32(a.0[0], 3), f64_to_i32(a.0[1], 3), 0, 0])
+}
+pub unsafe fn _mm_cvtsd_si32(a: __m128d) -> i32 {
+    f64_to_i32(a.0[0], mxcsr_rm())
+}
+pub unsafe fn _mm_cvttsd_si32(a: __m128d) -> i32 {
+    f64_to_i32(a.0[0], 3)
+}
+pub unsafe fn _mm_cvtsd_si64(a: __m128d) -> i64 {
+    f64_to_i64(a.0[0], mxcsr_rm())
+}
+pub unsafe fn _mm_cvtsd_si64x(a: __m128d) -> i64 {
+    _mm_cvtsd_si64(a)
+}
+pub unsafe fn _mm_cvttsd_si64(a: __m128d) -> i64 {
+    f64_to_i64(a.0[0], 3)
+}
+pub unsafe fn _mm_cvttsd_si64x(a: __m128d) -> i64 {
+    _mm_cvttsd_si64(a)
+}
+pub unsafe fn _mm_cvtsd_f64(a: __m128d) -> f64 {
+    a.0[0]
+}
+/// [b0 as f32, a1, a2, a3]
+pub unsafe fn _mm_cvtsd_ss(a: __m128, b: __m128d) -> __m128 {
+    __m128([b.0[0] as f32, a.0[1], a.0[2], a.0[3]])
+}
+/// [b0 as f64, a1]
+pub unsafe fn _mm_cvtss_sd(a: __m128d, b: __m128) -> __m128d {
+    __m128d([b.0[0] as f64, a.0[1]])
+}
+/// [b as f64, a1]
+pub unsafe fn _mm_cvtsi32_sd(a: __m128d, b: i32) -> __m128d {
+    __m128d([b as f64, a.0[1]])
+}
+pub unsafe fn _mm_cvtsi64_sd(a: __m128d, b: i64) -> __m128d {
+    __m128d([b as f64, a.0[1]])
+}
+pub unsafe fn _mm_cvtsi64x_sd(a: __m128d, b: i64) -> __m128d {
+    _mm_cvtsi64_sd(a, b)
+}
+
+// ---- SSE3 / SSE4.1 f64 (stdarch x86/sse3.rs, x86/sse41.rs)
+/// [a0 - b0, a1 + b1]
+pub unsafe fn _mm_addsub_pd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_move_sd(_mm_add_pd(a, b), _mm_sub_pd(a, b))
+}
+/// [a0 + a1, b0 + b1]
+pub unsafe fn _mm_hadd_pd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_add_pd(_mm_unpacklo_pd(a, b), _mm_unpackhi_pd(a, b))
+}
+/// [a0 - a1, b0 - b1]
+pub unsafe fn _mm_hsub_pd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_sub_pd(_mm_unpacklo_pd(a, b), _mm_unpackhi_pd(a, b))
+}
+/// [a0, a0]
+#[inline(always)]
+pub unsafe fn _mm_movedup_pd(a: __m128d) -> __m128d {
+    _mm_unpacklo_pd(a, a)
+}
+pub unsafe fn _mm_loaddup_pd(mem_addr: *const f64) -> __m128d {
+    _mm_set1_pd(crate::ptr::read_unaligned(mem_addr))
+}
+/// lane i = bit i of IMM2 ? b[i] : a[i]
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[inline(always)]
+pub unsafe fn _mm_blend_pd<const IMM2: i32>(a: __m128d, b: __m128d) -> __m128d {
+    blend_pd(a, b, IMM2)
+}
+/// lane i = bit i of k ? b[i] : a[i], for a constant k
+#[inline(always)]
+unsafe fn blend_pd(a: __m128d, b: __m128d, k: i32) -> __m128d {
+    match k & 3 {
+        0 => a,
+        1 => _mm_move_sd(a, b),
+        2 => _mm_move_sd(b, a),
+        _ => b,
+    }
+}
+/// lane i = sign bit of mask[i] ? b[i] : a[i]
+#[inline(always)]
+pub unsafe fn _mm_blendv_pd(a: __m128d, b: __m128d, mask: __m128d) -> __m128d {
+    // the sign bit across the lane (arithmetic shift right by 63)
+    let m: __m128d = vx::vx_unary(mask, 3, 64, 63);
+    _mm_or_pd(_mm_and_pd(m, b), _mm_andnot_pd(m, a))
+}
+/// DPPD: the products of the lanes selected by IMM8 bits 4, 5 (others +0.0), summed lane 0 first,
+/// stored to the lanes selected by bits 0, 1 (others +0.0)
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+pub unsafe fn _mm_dp_pd<const IMM8: i32>(a: __m128d, b: __m128d) -> __m128d {
+    let lane = |bit: i32| if IMM8 & bit != 0 { u64::MAX } else { 0 };
+    let take: __m128d = crate::mem::transmute::<[u64; 2], __m128d>([lane(0x10), lane(0x20)]);
+    let put: __m128d = crate::mem::transmute::<[u64; 2], __m128d>([lane(0x01), lane(0x02)]);
+    let t = _mm_and_pd(_mm_mul_pd(a, b), take);
+    let s = _mm_add_pd(t, _mm_shuffle_pd::<1>(t, t));
+    _mm_and_pd(_mm_unpacklo_pd(s, s), put)
+}
+/// roundpd: ROUNDING & 3 (nearest-even, down, up, toward zero), or MXCSR's mode with bit 2
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[inline(always)]
+pub unsafe fn _mm_round_pd<const ROUNDING: i32>(a: __m128d) -> __m128d {
+    if ROUNDING & 4 != 0 {
+        match mxcsr_rm() {
+            0 => vx::vx_unary(a, 11, 64, 0),
+            1 => vx::vx_unary(a, 11, 64, 1),
+            2 => vx::vx_unary(a, 11, 64, 2),
+            _ => vx::vx_unary(a, 11, 64, 3),
+        }
+    } else {
+        vx::vx_unary(a, 11, 64, ROUNDING & 3)
+    }
+}
+#[inline(always)]
+pub unsafe fn _mm_floor_pd(a: __m128d) -> __m128d {
+    vx::vx_unary(a, 11, 64, 1)
+}
+#[inline(always)]
+pub unsafe fn _mm_ceil_pd(a: __m128d) -> __m128d {
+    vx::vx_unary(a, 11, 64, 2)
+}
+/// [round(b0), a1]
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+pub unsafe fn _mm_round_sd<const ROUNDING: i32>(a: __m128d, b: __m128d) -> __m128d {
+    _mm_move_sd(a, _mm_round_pd::<ROUNDING>(b))
+}
+pub unsafe fn _mm_floor_sd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_move_sd(a, _mm_floor_pd(b))
+}
+pub unsafe fn _mm_ceil_sd(a: __m128d, b: __m128d) -> __m128d {
+    _mm_move_sd(a, _mm_ceil_pd(b))
+}
+
+// ---------------------------------------------------------------- AVX / AVX2 / FMA f64 (_mm256_*_pd, _mm_*_pd)
+// stdarch x86/avx.rs, avx2.rs, fma.rs. A __m256d is two 128-bit halves (as the _ps forms above): each
+// lane-wise op is the 128-bit SSE2 op on both halves, which pair256 turns back into one ymm instruction on
+// AVX hosts (add/sub/mul/div/min/max/compares/logic). Lane order is memory order.
+
+#[inline(always)]
+unsafe fn pd_lo(a: &__m256d) -> __m128d {
+    vx::vx_load(a as *const __m256d as *const u8)
+}
+#[inline(always)]
+unsafe fn pd_hi(a: &__m256d) -> __m128d {
+    vx::vx_load((a as *const __m256d as *const u8).add(16))
+}
+#[inline(always)]
+unsafe fn pd_join(lo: __m128d, hi: __m128d) -> __m256d {
+    crate::mem::transmute::<[__m128d; 2], __m256d>([lo, hi])
+}
+
+macro_rules! pd256_binary {
+    ($($name:ident => $op:ident;)*) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(a: __m256d, b: __m256d) -> __m256d {
+            pd_join($op(pd_lo(&a), pd_lo(&b)), $op(pd_hi(&a), pd_hi(&b)))
+        }
+    )*};
+}
+pd256_binary! {
+    _mm256_add_pd => _mm_add_pd;
+    _mm256_sub_pd => _mm_sub_pd;
+    _mm256_mul_pd => _mm_mul_pd;
+    _mm256_div_pd => _mm_div_pd;
+    _mm256_min_pd => _mm_min_pd;
+    _mm256_max_pd => _mm_max_pd;
+    _mm256_and_pd => _mm_and_pd;
+    _mm256_andnot_pd => _mm_andnot_pd;
+    _mm256_or_pd => _mm_or_pd;
+    _mm256_xor_pd => _mm_xor_pd;
+    _mm256_addsub_pd => _mm_addsub_pd;
+    _mm256_hadd_pd => _mm_hadd_pd;
+    _mm256_hsub_pd => _mm_hsub_pd;
+    _mm256_unpackhi_pd => _mm_unpackhi_pd;
+    _mm256_unpacklo_pd => _mm_unpacklo_pd;
+}
+#[inline(always)]
+pub unsafe fn _mm256_sqrt_pd(a: __m256d) -> __m256d {
+    pd_join(_mm_sqrt_pd(pd_lo(&a)), _mm_sqrt_pd(pd_hi(&a)))
+}
+/// [a0, a0, a2, a2]
+pub unsafe fn _mm256_movedup_pd(a: __m256d) -> __m256d {
+    pd_join(_mm_movedup_pd(pd_lo(&a)), _mm_movedup_pd(pd_hi(&a)))
+}
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+pub unsafe fn _mm256_round_pd<const ROUNDING: i32>(a: __m256d) -> __m256d {
+    pd_join(_mm_round_pd::<ROUNDING>(pd_lo(&a)), _mm_round_pd::<ROUNDING>(pd_hi(&a)))
+}
+pub unsafe fn _mm256_floor_pd(a: __m256d) -> __m256d {
+    pd_join(_mm_floor_pd(pd_lo(&a)), _mm_floor_pd(pd_hi(&a)))
+}
+pub unsafe fn _mm256_ceil_pd(a: __m256d) -> __m256d {
+    pd_join(_mm_ceil_pd(pd_lo(&a)), _mm_ceil_pd(pd_hi(&a)))
+}
+/// per 128-bit half: bits 0, 1 of MASK for the low half, bits 2, 3 for the high half
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+pub unsafe fn _mm256_shuffle_pd<const MASK: i32>(a: __m256d, b: __m256d) -> __m256d {
+    pd_join(shuffle_pd(pd_lo(&a), pd_lo(&b), MASK), shuffle_pd(pd_hi(&a), pd_hi(&b), MASK >> 2))
+}
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+pub unsafe fn _mm256_blend_pd<const IMM4: i32>(a: __m256d, b: __m256d) -> __m256d {
+    pd_join(blend_pd(pd_lo(&a), pd_lo(&b), IMM4), blend_pd(pd_hi(&a), pd_hi(&b), IMM4 >> 2))
+}
+pub unsafe fn _mm256_blendv_pd(a: __m256d, b: __m256d, c: __m256d) -> __m256d {
+    pd_join(_mm_blendv_pd(pd_lo(&a), pd_lo(&b), pd_lo(&c)), _mm_blendv_pd(pd_hi(&a), pd_hi(&b), pd_hi(&c)))
+}
+/// lane i = a[bit i of IMM2] (vpermilpd)
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+pub unsafe fn _mm_permute_pd<const IMM2: i32>(a: __m128d) -> __m128d {
+    shuffle_pd(a, a, IMM2)
+}
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+pub unsafe fn _mm256_permute_pd<const IMM4: i32>(a: __m256d) -> __m256d {
+    let (lo, hi) = (pd_lo(&a), pd_hi(&a));
+    pd_join(shuffle_pd(lo, lo, IMM4), shuffle_pd(hi, hi, IMM4 >> 2))
+}
+/// lane i = the lane of its own 128-bit half named by bit 1 of b[i]
+pub unsafe fn _mm_permutevar_pd(a: __m128d, b: __m128i) -> __m128d {
+    __m128d([a.0[(b.0[0] >> 1 & 1) as usize], a.0[(b.0[1] >> 1 & 1) as usize]])
+}
+pub unsafe fn _mm256_permutevar_pd(a: __m256d, b: __m256i) -> __m256d {
+    __m256d([a.0[(b.0[0] >> 1 & 1) as usize], a.0[(b.0[1] >> 1 & 1) as usize], a.0[2 + (b.0[2] >> 1 & 1) as usize], a.0[2 + (b.0[3] >> 1 & 1) as usize]])
+}
+/// each half from IMM8 (bits 0..2 low half, 4..6 high half): 0 a.lo, 1 a.hi, 2 b.lo, 3 b.hi; bit 3 / 7 zero
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+pub unsafe fn _mm256_permute2f128_pd<const IMM8: i32>(a: __m256d, b: __m256d) -> __m256d {
+    let pick = |c: i32| -> __m128d {
+        if c & 8 != 0 {
+            _mm_setzero_pd()
+        } else {
+            match c & 3 {
+                0 => pd_lo(&a),
+                1 => pd_hi(&a),
+                2 => pd_lo(&b),
+                _ => pd_hi(&b),
+            }
+        }
+    };
+    pd_join(pick(IMM8 & 15), pick((IMM8 >> 4) & 15))
+}
+/// lane i = a[(IMM8 >> 2i) & 3] (AVX2 vpermpd)
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+pub unsafe fn _mm256_permute4x64_pd<const IMM8: i32>(a: __m256d) -> __m256d {
+    let s = |i: i32| a.0[((IMM8 >> (2 * i)) & 3) as usize];
+    __m256d([s(0), s(1), s(2), s(3)])
+}
+
+/// the 32 AVX compare predicates (IMM5 & 15; 16..31 differ only in signaling quiet NaNs)
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[inline(always)]
+pub unsafe fn _mm_cmp_pd<const IMM5: i32>(a: __m128d, b: __m128d) -> __m128d {
+    match IMM5 & 15 {
+        0 => _mm_cmpeq_pd(a, b),
+        1 => _mm_cmplt_pd(a, b),
+        2 => _mm_cmple_pd(a, b),
+        3 => _mm_cmpunord_pd(a, b),
+        4 => _mm_cmpneq_pd(a, b),
+        5 => _mm_cmpnlt_pd(a, b),
+        6 => _mm_cmpnle_pd(a, b),
+        7 => _mm_cmpord_pd(a, b),
+        // EQ_UQ: equal or unordered
+        8 => _mm_or_pd(_mm_cmpeq_pd(a, b), _mm_cmpunord_pd(a, b)),
+        9 => _mm_cmpnge_pd(a, b),
+        10 => _mm_cmpngt_pd(a, b),
+        11 => _mm_setzero_pd(),
+        // NEQ_OQ: ordered and not equal
+        12 => _mm_andnot_pd(_mm_cmpeq_pd(a, b), _mm_cmpord_pd(a, b)),
+        13 => _mm_cmpge_pd(a, b),
+        14 => _mm_cmpgt_pd(a, b),
+        _ => pd_ones(),
+    }
+}
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+pub unsafe fn _mm_cmp_sd<const IMM5: i32>(a: __m128d, b: __m128d) -> __m128d {
+    _mm_move_sd(a, _mm_cmp_pd::<IMM5>(a, b))
+}
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+pub unsafe fn _mm256_cmp_pd<const IMM5: i32>(a: __m256d, b: __m256d) -> __m256d {
+    pd_join(_mm_cmp_pd::<IMM5>(pd_lo(&a), pd_lo(&b)), _mm_cmp_pd::<IMM5>(pd_hi(&a), pd_hi(&b)))
+}
+pub unsafe fn _mm256_movemask_pd(a: __m256d) -> i32 {
+    _mm_movemask_pd(pd_lo(&a)) | _mm_movemask_pd(pd_hi(&a)) << 2
+}
+// vtestpd on the sign bits: ZF = (a & b) signs all clear, CF = (!a & b) signs all clear
+pub unsafe fn _mm_testz_pd(a: __m128d, b: __m128d) -> i32 {
+    (_mm_movemask_pd(_mm_and_pd(a, b)) == 0) as i32
+}
+pub unsafe fn _mm_testc_pd(a: __m128d, b: __m128d) -> i32 {
+    (_mm_movemask_pd(_mm_andnot_pd(a, b)) == 0) as i32
+}
+pub unsafe fn _mm_testnzc_pd(a: __m128d, b: __m128d) -> i32 {
+    (_mm_testz_pd(a, b) == 0 && _mm_testc_pd(a, b) == 0) as i32
+}
+pub unsafe fn _mm256_testz_pd(a: __m256d, b: __m256d) -> i32 {
+    (_mm256_movemask_pd(_mm256_and_pd(a, b)) == 0) as i32
+}
+pub unsafe fn _mm256_testc_pd(a: __m256d, b: __m256d) -> i32 {
+    (_mm256_movemask_pd(_mm256_andnot_pd(a, b)) == 0) as i32
+}
+pub unsafe fn _mm256_testnzc_pd(a: __m256d, b: __m256d) -> i32 {
+    (_mm256_testz_pd(a, b) == 0 && _mm256_testc_pd(a, b) == 0) as i32
+}
+
+// ---- set / load / store / broadcast
+pub unsafe fn _mm256_set1_pd(a: f64) -> __m256d {
+    let v = _mm_set1_pd(a);
+    pd_join(v, v)
+}
+/// [d, c, b, a] (the arguments high to low)
+pub unsafe fn _mm256_set_pd(a: f64, b: f64, c: f64, d: f64) -> __m256d {
+    __m256d([d, c, b, a])
+}
+pub unsafe fn _mm256_setr_pd(a: f64, b: f64, c: f64, d: f64) -> __m256d {
+    __m256d([a, b, c, d])
+}
+pub unsafe fn _mm256_setzero_pd() -> __m256d {
+    let z = _mm_setzero_pd();
+    pd_join(z, z)
+}
+/// stdarch returns zeros
+pub unsafe fn _mm256_undefined_pd() -> __m256d {
+    _mm256_setzero_pd()
+}
+pub unsafe fn _mm256_loadu_pd(mem_addr: *const f64) -> __m256d {
+    pd_join(vx::vx_load(mem_addr as *const u8), vx::vx_load((mem_addr as *const u8).add(16)))
+}
+/// 32-byte alignment is the caller's contract (as on hardware); the loads are the same.
+pub unsafe fn _mm256_load_pd(mem_addr: *const f64) -> __m256d {
+    _mm256_loadu_pd(mem_addr)
+}
+pub unsafe fn _mm256_storeu_pd(mem_addr: *mut f64, a: __m256d) {
+    vx::vx_store(mem_addr as *mut u8, pd_lo(&a));
+    vx::vx_store((mem_addr as *mut u8).add(16), pd_hi(&a));
+}
+pub unsafe fn _mm256_store_pd(mem_addr: *mut f64, a: __m256d) {
+    _mm256_storeu_pd(mem_addr, a)
+}
+pub unsafe fn _mm256_stream_pd(mem_addr: *mut f64, a: __m256d) {
+    _mm256_storeu_pd(mem_addr, a)
+}
+/// lanes whose mask sign bit is set are read, the others are 0.0 and not touched in memory
+pub unsafe fn _mm_maskload_pd(mem_addr: *const f64, mask: __m128i) -> __m128d {
+    let l = |i: usize| if mask.0[i] < 0 { crate::ptr::read_unaligned(mem_addr.add(i)) } else { 0.0 };
+    __m128d([l(0), l(1)])
+}
+pub unsafe fn _mm256_maskload_pd(mem_addr: *const f64, mask: __m256i) -> __m256d {
+    let l = |i: usize| if mask.0[i] < 0 { crate::ptr::read_unaligned(mem_addr.add(i)) } else { 0.0 };
+    __m256d([l(0), l(1), l(2), l(3)])
+}
+pub unsafe fn _mm_maskstore_pd(mem_addr: *mut f64, mask: __m128i, a: __m128d) {
+    let mut i = 0;
+    while i < 2 {
+        if mask.0[i] < 0 {
+            crate::ptr::write_unaligned(mem_addr.add(i), a.0[i]);
+        }
+        i += 1;
+    }
+}
+pub unsafe fn _mm256_maskstore_pd(mem_addr: *mut f64, mask: __m256i, a: __m256d) {
+    let mut i = 0;
+    while i < 4 {
+        if mask.0[i] < 0 {
+            crate::ptr::write_unaligned(mem_addr.add(i), a.0[i]);
+        }
+        i += 1;
+    }
+}
+pub unsafe fn _mm256_broadcast_sd(f: &f64) -> __m256d {
+    _mm256_set1_pd(*f)
+}
+pub unsafe fn _mm256_broadcast_pd(a: &__m128d) -> __m256d {
+    pd_join(*a, *a)
+}
+/// AVX2: lane 0 to every lane
+pub unsafe fn _mm256_broadcastsd_pd(a: __m128d) -> __m256d {
+    let v = _mm_movedup_pd(a);
+    pd_join(v, v)
+}
+pub unsafe fn _mm_broadcastsd_pd(a: __m128d) -> __m128d {
+    _mm_movedup_pd(a)
+}
+
+// ---- casts, 128 <-> 256
+#[inline(always)]
+pub unsafe fn _mm256_castpd_ps(a: __m256d) -> __m256 {
+    crate::mem::transmute::<__m256d, __m256>(a)
+}
+#[inline(always)]
+pub unsafe fn _mm256_castps_pd(a: __m256) -> __m256d {
+    crate::mem::transmute::<__m256, __m256d>(a)
+}
+#[inline(always)]
+pub unsafe fn _mm256_castpd_si256(a: __m256d) -> __m256i {
+    crate::mem::transmute::<__m256d, __m256i>(a)
+}
+#[inline(always)]
+pub unsafe fn _mm256_castsi256_pd(a: __m256i) -> __m256d {
+    crate::mem::transmute::<__m256i, __m256d>(a)
+}
+#[inline(always)]
+pub unsafe fn _mm256_castps_si256(a: __m256) -> __m256i {
+    crate::mem::transmute::<__m256, __m256i>(a)
+}
+#[inline(always)]
+pub unsafe fn _mm256_castsi256_ps(a: __m256i) -> __m256 {
+    crate::mem::transmute::<__m256i, __m256>(a)
+}
+/// [e0, e1, e2, e3] (low to high)
+pub unsafe fn _mm_setr_epi32(e0: i32, e1: i32, e2: i32, e3: i32) -> __m128i {
+    from128_i32([e0, e1, e2, e3])
+}
+/// the upper half is stdarch's _mm_undefined_pd: zeros
+pub unsafe fn _mm256_castpd128_pd256(a: __m128d) -> __m256d {
+    pd_join(a, _mm_setzero_pd())
+}
+pub unsafe fn _mm256_zextpd128_pd256(a: __m128d) -> __m256d {
+    pd_join(a, _mm_setzero_pd())
+}
+pub unsafe fn _mm256_castpd256_pd128(a: __m256d) -> __m128d {
+    pd_lo(&a)
+}
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+pub unsafe fn _mm256_extractf128_pd<const IMM1: i32>(a: __m256d) -> __m128d {
+    if IMM1 & 1 == 0 { pd_lo(&a) } else { pd_hi(&a) }
+}
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+pub unsafe fn _mm256_insertf128_pd<const IMM1: i32>(a: __m256d, b: __m128d) -> __m256d {
+    if IMM1 & 1 == 0 { pd_join(b, pd_hi(&a)) } else { pd_join(pd_lo(&a), b) }
+}
+
+// ---- conversions (rules as the 128-bit forms)
+pub unsafe fn _mm256_cvtepi32_pd(a: __m128i) -> __m256d {
+    let a = lanes128_i32(a);
+    __m256d([a[0] as f64, a[1] as f64, a[2] as f64, a[3] as f64])
+}
+pub unsafe fn _mm256_cvtpd_epi32(a: __m256d) -> __m128i {
+    let rm = mxcsr_rm();
+    from128_i32([f64_to_i32(a.0[0], rm), f64_to_i32(a.0[1], rm), f64_to_i32(a.0[2], rm), f64_to_i32(a.0[3], rm)])
+}
+pub unsafe fn _mm256_cvttpd_epi32(a: __m256d) -> __m128i {
+    from128_i32([f64_to_i32(a.0[0], 3), f64_to_i32(a.0[1], 3), f64_to_i32(a.0[2], 3), f64_to_i32(a.0[3], 3)])
+}
+pub unsafe fn _mm256_cvtpd_ps(a: __m256d) -> __m128 {
+    __m128([a.0[0] as f32, a.0[1] as f32, a.0[2] as f32, a.0[3] as f32])
+}
+pub unsafe fn _mm256_cvtps_pd(a: __m128) -> __m256d {
+    __m256d([a.0[0] as f64, a.0[1] as f64, a.0[2] as f64, a.0[3] as f64])
+}
+
+// ---- AVX2 gathers: lane i from slice + offsets[i] * SCALE bytes; the mask forms read lanes whose mask
+// sign bit is set and keep src elsewhere (no access for those lanes)
+#[inline(always)]
+unsafe fn gather_f64(slice: *const f64, off: i64, scale: i32) -> f64 {
+    crate::ptr::read_unaligned((slice as *const u8).offset((off * scale as i64) as isize) as *const f64)
+}
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+pub unsafe fn _mm_i32gather_pd<const SCALE: i32>(slice: *const f64, offsets: __m128i) -> __m128d {
+    let o = lanes128_i32(offsets);
+    __m128d([gather_f64(slice, o[0] as i64, SCALE), gather_f64(slice, o[1] as i64, SCALE)])
+}
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(4))]
+pub unsafe fn _mm_mask_i32gather_pd<const SCALE: i32>(src: __m128d, slice: *const f64, offsets: __m128i, mask: __m128d) -> __m128d {
+    let o = lanes128_i32(offsets);
+    let l = |i: usize| if mask.0[i].is_sign_negative() { gather_f64(slice, o[i] as i64, SCALE) } else { src.0[i] };
+    __m128d([l(0), l(1)])
+}
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+pub unsafe fn _mm256_i32gather_pd<const SCALE: i32>(slice: *const f64, offsets: __m128i) -> __m256d {
+    let o = lanes128_i32(offsets);
+    let l = |i: usize| gather_f64(slice, o[i] as i64, SCALE);
+    __m256d([l(0), l(1), l(2), l(3)])
+}
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(4))]
+pub unsafe fn _mm256_mask_i32gather_pd<const SCALE: i32>(src: __m256d, slice: *const f64, offsets: __m128i, mask: __m256d) -> __m256d {
+    let o = lanes128_i32(offsets);
+    let l = |i: usize| if mask.0[i].is_sign_negative() { gather_f64(slice, o[i] as i64, SCALE) } else { src.0[i] };
+    __m256d([l(0), l(1), l(2), l(3)])
+}
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+pub unsafe fn _mm_i64gather_pd<const SCALE: i32>(slice: *const f64, offsets: __m128i) -> __m128d {
+    __m128d([gather_f64(slice, offsets.0[0], SCALE), gather_f64(slice, offsets.0[1], SCALE)])
+}
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(4))]
+pub unsafe fn _mm_mask_i64gather_pd<const SCALE: i32>(src: __m128d, slice: *const f64, offsets: __m128i, mask: __m128d) -> __m128d {
+    let l = |i: usize| if mask.0[i].is_sign_negative() { gather_f64(slice, offsets.0[i], SCALE) } else { src.0[i] };
+    __m128d([l(0), l(1)])
+}
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+pub unsafe fn _mm256_i64gather_pd<const SCALE: i32>(slice: *const f64, offsets: __m256i) -> __m256d {
+    let l = |i: usize| gather_f64(slice, offsets.0[i], SCALE);
+    __m256d([l(0), l(1), l(2), l(3)])
+}
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(4))]
+pub unsafe fn _mm256_mask_i64gather_pd<const SCALE: i32>(src: __m256d, slice: *const f64, offsets: __m256i, mask: __m256d) -> __m256d {
+    let l = |i: usize| if mask.0[i].is_sign_negative() { gather_f64(slice, offsets.0[i], SCALE) } else { src.0[i] };
+    __m256d([l(0), l(1), l(2), l(3)])
+}
+
+// ---- FMA f64: one rounding per lane, (neg_prod ? -(a*b) : a*b) + (neg_add ? -c : c), with the x86 NaN rule:
+// the first NaN operand of a, b, c quieted (its sign as given: the negations do not apply to NaNs), else
+// the negative default NaN for an invalid lane (inf * 0, inf - inf). Per lane (no f64 vector fma op yet).
+#[inline(always)]
+fn fma_f64(a: f64, b: f64, c: f64, neg_prod: bool, neg_add: bool) -> f64 {
+    const QUIET: u64 = 1 << 51;
+    if a.is_nan() {
+        return f64::from_bits(a.to_bits() | QUIET);
+    }
+    if b.is_nan() {
+        return f64::from_bits(b.to_bits() | QUIET);
+    }
+    if c.is_nan() {
+        return f64::from_bits(c.to_bits() | QUIET);
+    }
+    let r = (if neg_prod { -a } else { a }).mul_add(b, if neg_add { -c } else { c });
+    if r.is_nan() { f64::from_bits(0xfff8_0000_0000_0000) } else { r }
+}
+#[inline(always)]
+unsafe fn fma_pd(a: __m128d, b: __m128d, c: __m128d, neg_prod: bool, neg_add: [bool; 2]) -> __m128d {
+    __m128d([fma_f64(a.0[0], b.0[0], c.0[0], neg_prod, neg_add[0]), fma_f64(a.0[1], b.0[1], c.0[1], neg_prod, neg_add[1])])
+}
+#[inline(always)]
+unsafe fn fma_pd256(a: __m256d, b: __m256d, c: __m256d, neg_prod: bool, neg_add: [bool; 2]) -> __m256d {
+    pd_join(fma_pd(pd_lo(&a), pd_lo(&b), pd_lo(&c), neg_prod, neg_add), fma_pd(pd_hi(&a), pd_hi(&b), pd_hi(&c), neg_prod, neg_add))
+}
+pub unsafe fn _mm_fmadd_pd(a: __m128d, b: __m128d, c: __m128d) -> __m128d { fma_pd(a, b, c, false, [false; 2]) }
+pub unsafe fn _mm_fmsub_pd(a: __m128d, b: __m128d, c: __m128d) -> __m128d { fma_pd(a, b, c, false, [true; 2]) }
+pub unsafe fn _mm_fnmadd_pd(a: __m128d, b: __m128d, c: __m128d) -> __m128d { fma_pd(a, b, c, true, [false; 2]) }
+pub unsafe fn _mm_fnmsub_pd(a: __m128d, b: __m128d, c: __m128d) -> __m128d { fma_pd(a, b, c, true, [true; 2]) }
+/// even lanes a*b - c, odd lanes a*b + c
+pub unsafe fn _mm_fmaddsub_pd(a: __m128d, b: __m128d, c: __m128d) -> __m128d { fma_pd(a, b, c, false, [true, false]) }
+/// even lanes a*b + c, odd lanes a*b - c
+pub unsafe fn _mm_fmsubadd_pd(a: __m128d, b: __m128d, c: __m128d) -> __m128d { fma_pd(a, b, c, false, [false, true]) }
+pub unsafe fn _mm_fmadd_sd(a: __m128d, b: __m128d, c: __m128d) -> __m128d { _mm_move_sd(a, _mm_fmadd_pd(a, b, c)) }
+pub unsafe fn _mm_fmsub_sd(a: __m128d, b: __m128d, c: __m128d) -> __m128d { _mm_move_sd(a, _mm_fmsub_pd(a, b, c)) }
+pub unsafe fn _mm_fnmadd_sd(a: __m128d, b: __m128d, c: __m128d) -> __m128d { _mm_move_sd(a, _mm_fnmadd_pd(a, b, c)) }
+pub unsafe fn _mm_fnmsub_sd(a: __m128d, b: __m128d, c: __m128d) -> __m128d { _mm_move_sd(a, _mm_fnmsub_pd(a, b, c)) }
+pub unsafe fn _mm256_fmadd_pd(a: __m256d, b: __m256d, c: __m256d) -> __m256d { fma_pd256(a, b, c, false, [false; 2]) }
+pub unsafe fn _mm256_fmsub_pd(a: __m256d, b: __m256d, c: __m256d) -> __m256d { fma_pd256(a, b, c, false, [true; 2]) }
+pub unsafe fn _mm256_fnmadd_pd(a: __m256d, b: __m256d, c: __m256d) -> __m256d { fma_pd256(a, b, c, true, [false; 2]) }
+pub unsafe fn _mm256_fnmsub_pd(a: __m256d, b: __m256d, c: __m256d) -> __m256d { fma_pd256(a, b, c, true, [true; 2]) }
+pub unsafe fn _mm256_fmaddsub_pd(a: __m256d, b: __m256d, c: __m256d) -> __m256d { fma_pd256(a, b, c, false, [true, false]) }
+pub unsafe fn _mm256_fmsubadd_pd(a: __m256d, b: __m256d, c: __m256d) -> __m256d { fma_pd256(a, b, c, false, [false, true]) }
+
 // a vector prints its lanes as a tuple, as stdarch's Debug impls (`uint8x16_t(3, 3, ..)`)
 macro_rules! simd_debug {
     ($($t:ident)*) => {$(

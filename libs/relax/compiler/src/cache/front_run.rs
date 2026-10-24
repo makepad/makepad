@@ -22,69 +22,11 @@ static SINKS: Mutex<Option<HashMap<PathBuf, Arc<FrontSink>>>> = Mutex::new(None)
 static OPEN: Mutex<Option<Open>> = Mutex::new(None);
 type Open = (HashMap<PathBuf, Arc<Store>>, HashSet<(PathBuf, u128)>);
 
-thread_local! {
-    /// OPEN of a restore ahead of the swap's pause (relax_session::phase::ahead): generation g's
-    /// memo names g's stores, so the restore starts its own; a deferred write joins it to OPEN
-    /// after the swap's take (an aborted swap drops it with the deferred writes).
-    static OPEN_AHEAD: std::cell::RefCell<Option<std::rc::Rc<std::cell::RefCell<Open>>>> = const { std::cell::RefCell::new(None) };
-}
-
-/// Ends this thread's restore ahead of a swap's pause: its OPEN lives on only in its deferred write.
-pub(crate) fn ahead_end() {
-    OPEN_AHEAD.with(|a| a.borrow_mut().take());
-}
-
-/// `f` over OPEN, or over the restore's own memo ahead of a swap's pause.
+/// `f` over OPEN.
 fn with_open<R>(f: impl FnOnce(&mut HashMap<PathBuf, Arc<Store>>, &mut HashSet<(PathBuf, u128)>) -> R) -> R {
-    if !relax_session::phase::ahead() {
-        let mut guard = OPEN.lock().unwrap_or_else(|e| e.into_inner());
-        let (open, missing) = guard.get_or_insert_with(Default::default);
-        return f(open, missing);
-    }
-    let memo = OPEN_AHEAD.with(|a| a.borrow_mut().get_or_insert_with(|| {
-        let memo = std::rc::Rc::new(std::cell::RefCell::new(Open::default()));
-        let joined = memo.clone();
-        relax_session::phase::defer(move || {
-            let (o, m) = std::mem::take(&mut *joined.borrow_mut());
-            let mut guard = OPEN.lock().unwrap_or_else(|e| e.into_inner());
-            let (open, missing) = guard.get_or_insert_with(Default::default);
-            open.extend(o);
-            missing.extend(m);
-        });
-        memo
-    }).clone());
-    let mut memo = memo.borrow_mut();
-    let (open, missing) = &mut *memo;
+    let mut guard = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    let (open, missing) = guard.get_or_insert_with(Default::default);
     f(open, missing)
-}
-
-pub(super) struct ZoneTaken {
-    runs: Vec<Arc<RunStore>>,
-    sinks: Option<HashMap<PathBuf, Arc<FrontSink>>>,
-    open: Option<(HashMap<PathBuf, Arc<Store>>, HashSet<(PathBuf, u128)>)>,
-}
-
-pub(super) fn zone_take() -> ZoneTaken {
-    let mut runs = RUNS.lock().unwrap_or_else(|e| e.into_inner());
-    let mut sinks = SINKS.lock().unwrap_or_else(|e| e.into_inner());
-    let mut open = OPEN.lock().unwrap_or_else(|e| e.into_inner());
-    let taken = ZoneTaken {
-        runs: std::mem::take(&mut *runs),
-        sinks: std::mem::take(&mut *sinks),
-        open: std::mem::take(&mut *open),
-    };
-    #[cfg(test)]
-    { assert!(runs.is_empty()); assert!(sinks.is_none()); assert!(open.is_none()); }
-    taken
-}
-
-pub(super) fn zone_put_back(taken: ZoneTaken) {
-    let mut runs = RUNS.lock().unwrap_or_else(|e| e.into_inner());
-    std::mem::forget(std::mem::replace(&mut *runs, taken.runs));
-    let mut sinks = SINKS.lock().unwrap_or_else(|e| e.into_inner());
-    std::mem::forget(std::mem::replace(&mut *sinks, taken.sinks));
-    let mut open = OPEN.lock().unwrap_or_else(|e| e.into_inner());
-    std::mem::forget(std::mem::replace(&mut *open, taken.open));
 }
 
 /// The images written so far, per run store of this process: what references made now can
@@ -121,16 +63,6 @@ pub struct FrontSink {
 impl FrontSink {
     /// The sink of the cache folder `dir` (one per folder and process).
     pub fn for_dir(dir: &Path) -> Arc<FrontSink> {
-        if relax_session::phase::ahead() {
-            // generation g's sink is the running program's: the restored one gets its own, which
-            // the swap registers after its take
-            let sink = Arc::new(FrontSink { dir: dir.to_path_buf(), cur: Mutex::new(None), off: Default::default() });
-            let (dir, registered) = (dir.to_path_buf(), sink.clone());
-            relax_session::phase::defer(move || {
-                SINKS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).entry(dir).or_insert(registered);
-            });
-            return sink;
-        }
         let mut g = SINKS.lock().unwrap_or_else(|e| e.into_inner());
         g.get_or_insert_with(HashMap::new).entry(dir.to_path_buf())
             .or_insert_with(|| Arc::new(FrontSink { dir: dir.to_path_buf(), cur: Mutex::new(None), off: Default::default() })).clone()

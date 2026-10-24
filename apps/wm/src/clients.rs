@@ -32,7 +32,7 @@ use crate::host;
 use makepad_widgets::makepad_platform::thread::{SignalToUI, TaskPool, ThreadSpawner, ThreadOptions};
 
 use makepad_app_host::ClientId;
-use makepad_app_registry::{AppLaunch, BuildPolicy, LaunchEvent, LaunchKind, ProcessOutput};
+use makepad_app_registry::{AppLaunch, BuildPolicy, LaunchEvent, LaunchKind, ProcessOutput, Runner};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaunchPolicy {
@@ -873,13 +873,15 @@ pub fn spawn_client(
     // come up and then idle until it is adopted.
     warm: bool,
     policy: BuildPolicy,
+    // Its release binary, or the JIT (`AppRegistry::runner`: `id: Jit` in apps.splash).
+    runner: Runner,
     // Every output line the child writes is forwarded here.
     lines: Sender<ClientLine>,
 ) -> Result<ClientSlot, String> {
     let entry = makepad_app_registry::find(&app.id).ok_or_else(|| format!("unknown app: {}", app.id))?;
     let extra = app.args.iter().chain(extra_args).cloned().collect();
-    let (launch, child) = AppLaunch::start(entry, repo_root(), extra, policy, false, |cmd, kind| {
-        spawn_for_client(pool, spawner, id, &app.bin, cwd, term_colors, warm, hub_port, cmd, kind, lines.clone())
+    let (launch, child) = AppLaunch::start(entry, runner, repo_root(), extra, policy, false, |cmd, kind| {
+        spawn_for_client(pool, spawner, id, &app.bin, cwd, term_colors, warm, hub_port, runner, cmd, kind, lines.clone())
     })?;
     let mut slot = client_slot(pool, id, app, child, warm);
     slot.status = launch.status().to_string();
@@ -898,12 +900,16 @@ fn spawn_for_client(
     term_colors: Option<&str>,
     warm: bool,
     hub_port: u16,
+    runner: Runner,
     mut cmd: Command,
     kind: LaunchKind,
     lines: Sender<ClientLine>,
 ) -> Result<Child, String> {
     if kind == LaunchKind::Build {
         return spawn_process(pool, spawner, id, client_log(id, true), cmd, bin, lines);
+    }
+    if runner == Runner::Jit {
+        return spawn_jit(pool, spawner, id, bin, cwd, cmd, lines);
     }
     // The app, or `cargo run` of it (cargo's progress on the tile, then the app): the
     // app's environment either way.
@@ -940,6 +946,53 @@ fn spawn_for_client(
     spawn_process(pool, spawner, id, client_log(id, false), cmd, bin, lines)
 }
 
+/// `~/.makepad/wm/jit.env`: `KEY=VALUE` lines (`#` comments) every JIT-run app gets on top of
+/// the WM's environment (a node's `MAKEPAD_RUN_VERBOSE=1`, an on-disk `TMPDIR` for the session
+/// transcript, `MAKEPAD_REMOTE=1`), so how a machine debugs its JIT apps is a file, not a
+/// rebuilt WM.
+pub fn jit_env(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| line.split_once('='))
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .filter(|(k, _)| !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        .collect()
+}
+
+/// A JIT run (`makepad run <package>`, or `cargo run` of the tool first). It is not a
+/// `--stdin-loop` child and gets no hub identity: on Linux its HAL asks the WM's socket for its
+/// window (`MAKEPAD_WM_SOCKET`, which passes), and the socket admits it as THIS client because
+/// its pid is the one recorded here (`adopt::expect`). `cargo run` execs the tool, so the pid
+/// cargo starts with is the tool's.
+fn spawn_jit(
+    pool: &TaskPool,
+    spawner: &ThreadSpawner,
+    id: ClientId,
+    bin: &str,
+    cwd: Option<&PathBuf>,
+    mut cmd: Command,
+    lines: Sender<ClientLine>,
+) -> Result<Child, String> {
+    cmd.env("MAKEPAD_WM_CAPTION_CONTENT", "1");
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
+    let settings = crate::theme::makepad_home().join("wm/jit.env");
+    if let Ok(text) = std::fs::read_to_string(&settings) {
+        for (key, value) in jit_env(&text) {
+            if key == "TMPDIR" {
+                let _ = std::fs::create_dir_all(&value);
+            }
+            cmd.env(key, value);
+        }
+    }
+    let child = spawn_process(pool, spawner, id, client_log(id, false), cmd, bin, lines)?;
+    #[cfg(target_os = "linux")]
+    crate::adopt::expect(child.id(), id);
+    Ok(child)
+}
+
 impl ClientSlot {
     pub fn is_building(&self) -> bool {
         self.launch.as_ref().is_some_and(AppLaunch::is_building)
@@ -958,9 +1011,10 @@ impl ClientSlot {
         let cwd = self.launch_cwd.as_ref();
         let warm = self.warm;
         let pool = self.task_pool.as_ref().ok_or("no task pool for the client")?;
+        let runner = launch.runner();
         launch.poll(&mut self.child, |cmd, kind| {
             let entry = makepad_app_registry::find(app).ok_or_else(|| format!("unknown app: {app}"))?;
-            spawn_for_client(pool, spawner, id, entry.bin, cwd, term_colors, warm, hub_port, cmd, kind, lines.clone())
+            spawn_for_client(pool, spawner, id, entry.bin, cwd, term_colors, warm, hub_port, runner, cmd, kind, lines.clone())
         })
     }
 }

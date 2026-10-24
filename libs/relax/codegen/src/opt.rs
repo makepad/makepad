@@ -87,9 +87,17 @@ pub const ATTR_CHAIN: u8 = 4;
 /// the caller knows this callee is cold (a JIT: it has never run, so its call sits on a path
 /// the program has not taken): it stays a call unless tiny or admitted by the cost model
 pub const ATTR_COLD: u8 = 8;
+/// rustc --release has no copy of this callee where the caller is compiled (a non-generic,
+/// non-#[inline] fn of another crate, no LTO): LLVM only calls it. It inlines only where rustc's
+/// cross_crate_inlinable would have made it available anyway: a body no bigger than the call, or
+/// a small leaf that cannot unwind (rustc_mir_transform/src/cross_crate_inline.rs: no calls, no
+/// landing pads or resumes, <= 100 statements)
+pub const ATTR_XCRATE: u8 = 16;
 /// size limit of rule 4 (fused chains; the callee may call: its callees were inlined bottom-up)
 pub const INLINE_CHAIN_INSTS: usize = 120;
 pub const INLINE_SINGLE_INSTS: usize = 3000;
+/// ATTR_XCRATE: largest leaf (RIR instructions) taken as rustc's 100-statement cross-crate bound
+pub const XCRATE_LEAF_INSTS: usize = 100;
 const HISTORY_DEPTH_LIMIT: usize = 20;
 const TOP_DOWN_DEPTH_LIMIT: usize = 5;
 
@@ -602,6 +610,14 @@ fn site_rule(options: &relax_session::Options, callee: &Func, id: u32, nargs: us
     if callee.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::Call(Callee::Fn(c), _, _) if *c == id)))
         || !callee.blocks.iter().any(|b| matches!(b.term, Term::Ret(_))) {
         return None;
+    }
+    if attrs & ATTR_XCRATE != 0 {
+        let (n, leaf, _) = callee_shape(callee, id);
+        if n <= nargs + nrets + 2 && callee.blocks.len() <= 2 {
+            return Some(RULE_TINY);
+        }
+        let unwinds = callee.blocks.iter().any(|b| matches!(b.term, Term::Resume | Term::Invoke(..)));
+        return (leaf && !unwinds && n <= XCRATE_LEAF_INSTS && callee.blocks.len() <= lim.leaf_blocks).then_some(RULE_SMALL_LEAF);
     }
     if single && single_on(options) && attrs & ATTR_COLD == 0 && inline_inst_count(callee) <= INLINE_SINGLE_INSTS {
         return Some(RULE_SINGLE);
@@ -3964,6 +3980,106 @@ fn slot_derivation(f: &Func) -> Option<(Vec<u32>, Vec<bool>)> {
 /// the loop body). The operands must not be redefined after the definition in its block nor
 /// before the use in the using block, and the defining block's terminator must not read the
 /// result. Returns whether anything moved.
+/// A load whose value only one successor's region reads moves to that successor's start (O3,
+/// after the loop passes): the scan loop `for input in inputs { let offset = input.offset; if
+/// input.id == uniform { .. offset .. } }` loaded `offset` every iteration in the loop header,
+/// where rustc loads it only on the matching path. The successor has the block as its only
+/// predecessor and dominates every use; nothing after the load in its block writes memory or
+/// redefines its operands, so the moved load reads the same value.
+pub fn sink_loads_to_successor(f: &mut Func) -> bool {
+    let nv = f.vregs.len();
+    let nb = f.blocks.len();
+    let mut ndef = vec![0u32; nv];
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    // per vreg: the blocks that read it (u32::MAX: none yet, MANY: in more than a few)
+    let mut uses: Vec<Vec<u32>> = vec![Vec::new(); nv];
+    let mut tu = Vec::new();
+    let mut any_load = false;
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for i in &b.insts {
+            any_load |= matches!(i, Inst::Load(..) | Inst::LoadX(..));
+            for_defs(i, |d| ndef[d.0 as usize] += 1);
+            for_uses(i, |u| {
+                let v = &mut uses[u.0 as usize];
+                if v.last() != Some(&(bi as u32)) { v.push(bi as u32); }
+            });
+        }
+        term_uses(&b.term, &mut tu);
+        for u in &tu {
+            let v = &mut uses[u.0 as usize];
+            if v.last() != Some(&(bi as u32)) { v.push(bi as u32); }
+        }
+    }
+    if !any_load {
+        return false;
+    }
+    let mut npred = vec![0u32; nb];
+    for b in &f.blocks {
+        for s in b.term.succs() {
+            npred[s as usize] += 1;
+        }
+    }
+    let (pre, post, _) = relax_backend::dom::dom_numbers(&relax_backend::dom::idoms(f));
+    let dominates = |a: usize, b: usize| pre[a] != u32::MAX && pre[b] != u32::MAX && pre[a] <= pre[b] && post[b] <= post[a];
+    let mut changed = false;
+    let mut arrivals: Vec<Vec<(Inst, u64)>> = vec![Vec::new(); nb];
+    for bi in 0..nb {
+        let Term::Branch(_, t, e) = f.blocks[bi].term else { continue };
+        if t == e {
+            continue;
+        }
+        let mut k = f.blocks[bi].insts.len();
+        // backwards: a load moves when nothing after it in the block writes memory
+        let mut later_defs: Vec<VReg> = Vec::new();
+        let mut mem_after = false;
+        let mut remove = Vec::new();
+        term_uses(&f.blocks[bi].term, &mut tu);
+        let branch_uses = tu.clone();
+        while k > 0 {
+            k -= 1;
+            let i = &f.blocks[bi].insts[k];
+            let cand = match *i {
+                Inst::Load(_, d, base, _) => Some((d, vec![base])),
+                Inst::LoadX(_, d, base, idx, _, _) => Some((d, vec![base, idx])),
+                _ => None,
+            };
+            if let Some((d, ops)) = cand {
+                let dv = d.0 as usize;
+                let ub = &uses[dv];
+                let target = [t as usize, e as usize].into_iter().find(|&s| s != bi && npred[s] == 1 && !ub.is_empty() && ub.iter().all(|&u| dominates(s, u as usize)));
+                if let Some(s) = target {
+                    if !mem_after && ndef[dv] == 1 && !ops.contains(&d) && !branch_uses.contains(&d)
+                        && !ops.iter().any(|o| later_defs.contains(o)) && !ub.contains(&(bi as u32))
+                    {
+                        remove.push((k, s));
+                        for_defs(i, |x| later_defs.push(x));
+                        continue;
+                    }
+                }
+            }
+            mem_after |= relax_backend::passes::is_mem_effect(i);
+            for_defs(i, |x| later_defs.push(x));
+        }
+        for &(k, s) in &remove {
+            let i = f.blocks[bi].insts.remove(k);
+            let p = f.blocks[bi].pos.remove(k);
+            arrivals[s].push((i, p));
+            changed = true;
+        }
+    }
+    for (b, incoming) in f.blocks.iter_mut().zip(arrivals) {
+        if !incoming.is_empty() {
+            // (collected backwards per source block: reversed back into program order)
+            let (insts, pos): (Vec<_>, Vec<_>) = incoming.into_iter().rev().unzip();
+            b.insts.splice(0..0, insts);
+            b.pos.splice(0..0, pos);
+        }
+    }
+    changed
+}
+
 pub fn sink_single_uses(f: &mut Func) -> bool {
     let nv = f.vregs.len();
     let nb = f.blocks.len();
@@ -7430,8 +7546,16 @@ pub fn dead_slot_stores(f: &mut Func) -> bool {
     true
 }
 
+/// MAKEPAD_RUN_SLOTCOAL_TRACE=1: coalesce_slot_copies' candidates and why copies are none
+fn slotcoal_trace() -> bool {
+    static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *T.get_or_init(|| std::env::var_os("MAKEPAD_RUN_SLOTCOAL_TRACE").is_some())
+}
+
 /// Slot coalescing along whole copies (O3): `Copy(C <- B)` of one slot's bytes into an equal slot
-/// joins B and C into one slot when they do not interfere -- at every write of B the written bytes of
+/// (or of the whole of the smaller one into, or out of, the start of a larger one: an `Option<T>`
+/// payload or a tuple's first field moved to a slot of its own -- the smaller slot becomes the
+/// larger one's prefix) joins B and C into one slot when they do not interfere -- at every write of B the written bytes of
 /// C are dead, and at every write of C those of B are, by backward byte liveness over the CFG (the
 /// copy itself writes C with B's bytes and is exempt). The copy then vanishes. LLVM's SROA and
 /// stack colouring reach this through SSA values; here the slots meet directly, also around
@@ -7440,8 +7564,9 @@ pub fn dead_slot_stores(f: &mut Func) -> bool {
 /// (call result -> peek slot -> current slot -> match scrutinee) on every item.
 /// A slot handed to calls only as the result buffer of an sret callee counts as fully written there
 /// (the callee writes the value; bytes it leaves are padding or an inactive variant's, which Rust
-/// leaves undefined). Returns whether any copy went.
-pub fn coalesce_slot_copies(f: &mut Func) -> bool {
+/// leaves undefined). `prefix`: the smaller-into-larger joins too (MAKEPAD_RUN_OPT=-slotprefix
+/// turns them off). Returns whether any copy went.
+pub fn coalesce_slot_copies(f: &mut Func, prefix: bool) -> bool {
     const NONE: u32 = u32::MAX;
     let mut any = false;
     for _round in 0..8 {
@@ -7469,7 +7594,29 @@ pub fn coalesce_slot_copies(f: &mut Func) -> bool {
             }
         }
         let tracked: Vec<bool> = (0..ns).map(|s2| f.slots[s2].size > 0 && (!sc.esc[s2] || sret_call[s2].is_some())).collect();
-        // candidate copies: whole equal-size slots, both tracked
+        // copies that joined slots made into a slot's bytes onto themselves: gone
+        let mut selfs: Vec<(usize, usize)> = Vec::new();
+        for (bi, b) in f.blocks.iter().enumerate() {
+            for (ii, i) in b.insts.iter().enumerate() {
+                if let Inst::Copy(d, s2, _) = *i {
+                    if sl(d) != NONE && vs[d.0 as usize] == vs[s2.0 as usize] {
+                        selfs.push((bi, ii));
+                    }
+                }
+            }
+        }
+        if !selfs.is_empty() {
+            for &(bi, ii) in selfs.iter().rev() {
+                f.blocks[bi].insts.remove(ii);
+                if ii < f.blocks[bi].pos.len() {
+                    f.blocks[bi].pos.remove(ii);
+                }
+            }
+            any = true;
+            continue;
+        }
+        // candidate copies: the whole of one slot to the start of the other (equal sizes, or the
+        // smaller one's every byte), both tracked
         let mut cands: Vec<(usize, usize, u32, u32)> = Vec::new();
         for (bi, b) in f.blocks.iter().enumerate() {
             for (ii, i) in b.insts.iter().enumerate() {
@@ -7477,8 +7624,39 @@ pub fn coalesce_slot_copies(f: &mut Func) -> bool {
                     let (cs, bs) = (sl(d), sl(s2));
                     if cs != NONE && bs != NONE && cs != bs && vs[d.0 as usize].1 == 0 && vs[s2.0 as usize].1 == 0 && tracked[cs as usize] && tracked[bs as usize] {
                         let (zc, zb) = (f.slots[cs as usize].size, f.slots[bs as usize].size);
-                        if n == zc && n == zb {
+                        if n == zc.min(zb) && (prefix || zc == zb) {
                             cands.push((bi, ii, bs, cs));
+                        }
+                    }
+                }
+            }
+        }
+        if slotcoal_trace() {
+            // every whole-slot copy and why it is no candidate
+            for b in &f.blocks {
+                for i in &b.insts {
+                    if let Inst::Copy(d, s2, n) = *i {
+                        let (cs, bs) = (sl(d), sl(s2));
+                        if cs == NONE || bs == NONE || cands.iter().any(|c| c.2 == bs && c.3 == cs) {
+                            continue;
+                        }
+                        eprintln!("slotcoal {}: copy {}->{} ({} bytes of {}/{}, at {}/{}) not a candidate: tracked {}/{} escapes {}/{}", f.name, bs, cs, n, f.slots[bs as usize].size, f.slots[cs as usize].size,
+                            vs[s2.0 as usize].1, vs[d.0 as usize].1, tracked[bs as usize], tracked[cs as usize], sc.esc[bs as usize], sc.esc[cs as usize]);
+                        // the first use of an escaping slot's address that is no load/store base or copy operand
+                        for e in [bs, cs] {
+                            if !sc.esc[e as usize] {
+                                continue;
+                            }
+                            let hit = f.blocks.iter().enumerate().flat_map(|(bi, b)| b.insts.iter().map(move |i| (bi, i))).find(|(_, i)| {
+                                let mut u = false;
+                                match i {
+                                    Inst::Load(..) | Inst::VLoad(..) | Inst::Copy(..) | Inst::SlotAddr(..) | Inst::Mov(..) | Inst::IBinI(IOp::Add, ..) => {}
+                                    Inst::Store(_, _, _, v) | Inst::VStore(_, _, v) => u = sl(*v) == e,
+                                    _ => for_uses(i, |v| if sl(v) == e { u = true }),
+                                }
+                                u
+                            });
+                            eprintln!("slotcoal {}:   slot {} escapes at {:?}", f.name, e, hit.map(|(bi, i)| format!("b{} {:?}", bi, i)));
                         }
                     }
                 }
@@ -7633,11 +7811,18 @@ pub fn coalesce_slot_copies(f: &mut Func) -> bool {
                             continue;
                         }
                         let other = if s2 == bs { cs } else { bs };
-                        let hit = match bits(other, lo, hi) {
-                            Some((over, _)) => anyb(&cur, over.0, over.1),
-                            None => {
-                                let (x, y) = whole(other);
-                                anyb(&cur, x, y)
+                        // the same bytes of the partner (a smaller partner is the prefix: a
+                        // write past its end meets none of its bytes)
+                        let osize = f.slots[other as usize].size as i64;
+                        let hit = if hi != i64::MAX && lo >= osize {
+                            false
+                        } else {
+                            match bits(other, lo, if hi == i64::MAX { hi } else { hi.min(osize) }) {
+                                Some((over, _)) => anyb(&cur, over.0, over.1),
+                                None => {
+                                    let (x, y) = whole(other);
+                                    anyb(&cur, x, y)
+                                }
                             }
                         };
                         if hit {
@@ -7647,6 +7832,9 @@ pub fn coalesce_slot_copies(f: &mut Func) -> bool {
                 }
                 xfer(&mut cur, rd, wr);
             }
+        }
+        if slotcoal_trace() {
+            eprintln!("slotcoal {}: candidates {}", f.name, cands.iter().zip(&bad).map(|(&(_, _, bs, cs), &b)| format!("{}->{}{}", bs, cs, if b { " interferes" } else { "" })).collect::<Vec<_>>().join(", "));
         }
         // join the first good candidate per slot pair (slots may sit in several candidates)
         let mut used = vec![false; ns];
@@ -7658,9 +7846,11 @@ pub fn coalesce_slot_copies(f: &mut Func) -> bool {
             }
             used[bs as usize] = true;
             used[cs as usize] = true;
-            to[bs as usize] = cs;
+            // (the smaller slot becomes the start of the larger one)
+            let (from, into) = if f.slots[bs as usize].size <= f.slots[cs as usize].size { (bs, cs) } else { (cs, bs) };
+            to[from as usize] = into;
             let al = f.slots[bs as usize].align.max(f.slots[cs as usize].align);
-            f.slots[cs as usize].align = al;
+            f.slots[into as usize].align = al;
             dels.push((cb, ci));
         }
         if dels.is_empty() {

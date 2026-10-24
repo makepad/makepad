@@ -20,9 +20,9 @@ use std::cell::Cell;
 use crate::pm::{Span, TokenStream};
 use crate::program::*;
 
-crate::gen_local! {
+thread_local! {
     /// the last `relax_pm_parse` result of this thread (the macro copies it right away)
-    static PARSE_OUT: std::cell::RefCell<Vec<u8>>;
+    static PARSE_OUT: std::cell::RefCell<Vec<u8>> = Default::default();
 }
 
 /// `"..".parse::<TokenStream>()` inside JIT-run macro code (Relax's std proc_macro FromStr):
@@ -201,7 +201,7 @@ fn world(sess: &std::sync::Arc<crate::Session>) -> Option<std::sync::Arc<Result<
 /// later need (hot reload, a run-time module) rebuilds it without compiling. Compile jobs are
 /// parked while the unit goes (a speculative worker may still hold the world's unit).
 /// free_world drops the macro world when no macro call holds it; true when it went.
-/// Is the proc-macro world alive (an auxiliary unit: the settle swap is refused meanwhile)?
+/// Is the proc-macro world alive (an auxiliary unit)?
 pub fn world_alive() -> bool {
     WORLD.lock().map(|g| g.is_some()).unwrap_or(true)
 }

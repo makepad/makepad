@@ -185,4 +185,5 @@ impl Backend for AndroidBackend {
         state.pending.retain(|(s, _)| *s != sid);
         if state.recipient.is_some_and(|(s, _)| s == sid) { state.recipient = self.host.map(|id| (HOST, id)); }
     }
+    fn before_exit(&mut self) { self.core.before_exit(); }
 }

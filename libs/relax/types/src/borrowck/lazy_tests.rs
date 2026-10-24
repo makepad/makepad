@@ -225,6 +225,30 @@ fn verdict_states() {
 }
 
 #[test]
+fn settle_rebuild_keeps_verdicts_and_queued_checks() {
+    if child("settle_rebuild_keeps_verdicts_and_queued_checks") { return; }
+    // the worker stays gated until the rebuild is done: `clean` is still queued across it
+    let front = TestFront::new(0);
+    let clean = front.enqueue("clean", false);
+    let cached = front.enqueue("b", true);
+    let queued_before = queued();
+    // the settle rebuild: the same program at the next collect epoch, under the write lock
+    {
+        let _w = front.lock.write().unwrap();
+        let from = front.tcx.collect_epoch.fetch_add(1, Ordering::SeqCst);
+        carry_whole(front.identity(), from, from + 1);
+    }
+    assert_eq!(verdict(front.identity(), cached, &[], front.epoch()), FnVerdict::Clean, "a verdict reached before the rebuild");
+    assert_eq!(verdict(front.identity(), clean, &[], front.epoch()), FnVerdict::Pending, "a check queued before the rebuild");
+    // noting the body again at the new epoch queues nothing new
+    front.enqueue("clean", false);
+    assert_eq!(queued(), queued_before);
+    front.ungate();
+    assert_eq!(wait_verdict(&front, clean), FnVerdict::Clean);
+    stop();
+}
+
+#[test]
 fn render_matches_old() {
     if child("render_matches_old") { return; }
     let (prog, _) = fixture("app", "fn clean() {}\n"); let def = named(&prog, "clean");

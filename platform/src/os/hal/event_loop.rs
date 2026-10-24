@@ -81,6 +81,7 @@ impl Cx {
         crate::gpu_info::set_max_gpu_buffer_bytes(info.max_buffer);
         crate::gpu_info::set_gpu_working_set_bytes(info.working_set);
         if info.working_set != 0 { self.gpu_admission.set_device_bytes(info.working_set); }
+        crate::app_main::set_hal_window_manager(info.flags & info_flags::WM_HOSTED != 0);
         self.hal.info = Some(info);
         // `MAKEPAD_PICK_VARIANTS=1`: every shader also compiles its pick variant from the start
         // (backend coverage of the pick emitters without an editor driving picks)

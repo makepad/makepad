@@ -95,8 +95,9 @@ pub fn register_splash_isolate_mod(f: fn(&mut ScriptVm)) {
 }
 
 /// Queue a Splash isolate for reclamation on the next isolate alloc. Called from
-/// `Splash::drop`, which has no `Cx`. Ignores the main VM (id 0), never an isolate.
-pub(crate) fn mark_splash_isolate_dead(vm_id: SplashVmId) {
+/// the `Drop` of an isolate's owner, which has no `Cx` (`Splash`, a game's script
+/// host). Ignores the main VM (id 0), never an isolate.
+pub fn mark_splash_isolate_dead(vm_id: SplashVmId) {
     if vm_id == MAIN_SPLASH_VM_ID {
         return;
     }

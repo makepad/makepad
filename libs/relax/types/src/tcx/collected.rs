@@ -227,7 +227,7 @@ impl Tcx {
         self.const_tys.write_image(&mut image, &mut id);
         self.contracts_waiting.write_image(&mut image, &mut id);
         // The interner last (its section stays the second): other threads may intern while this
-        // runs (the settle swap's encode), and every type, region, list and constant the tables
+        // runs (a mid-run encode), and every type, region, list and constant the tables
         // above name was interned before its count is read, so the image is consistent.
         image.insert_image(1, 1, std::sync::Arc::new(self.tys.collected_writer()?));
         Some(image)

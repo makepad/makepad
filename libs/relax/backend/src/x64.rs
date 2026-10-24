@@ -307,6 +307,24 @@ impl Asm {
         self.byte(0xd3);
         self.modrm_rr(ext, r);
     }
+    /// rol of the low `bits` (8, 16, 32 or 64) of r by cl (k None) or by k: the operand size
+    /// follows the type; upper bits: 32-bit form zero, 8/16-bit forms keep r's (re-extend after)
+    fn rol(&mut self, bits: u8, r: u8, k: Option<i64>) {
+        if bits == 16 {
+            self.byte(0x66);
+        }
+        self.rex(bits == 64, 0, 0, r, bits == 8 && r >= 4);
+        self.byte(match (bits == 8, k.is_some()) {
+            (true, false) => 0xd2,
+            (false, false) => 0xd3,
+            (true, true) => 0xc0,
+            (false, true) => 0xc1,
+        });
+        self.modrm_rr(0, r);
+        if let Some(k) = k {
+            self.byte((k as u64 % bits as u64) as u8);
+        }
+    }
     fn cqo(&mut self) {
         self.byte(0x48);
         self.byte(0x99);
@@ -949,7 +967,12 @@ fn x64_defers(b: &Block, k: usize, uses: &[u32]) -> bool {
             _ => false,
         },
         Inst::IBinI(IOp::And, _, t, x, _) if x != t && once(t) => matches!(*next, Inst::ICmpI(Cond::Eq | Cond::Ne, _, c, t2, 0) if t2 == t && branch_on(c)),
-        Inst::Load(Mem::Int(..), t, base, _) if base != t && once(t) => matches!(*next, Inst::ICmpI(_, _, c, t2, _) if t2 == t && branch_on(c)),
+        // (or against a register: cmp [p + o], r -- a 64-bit load: ICmp compares whole registers)
+        Inst::Load(Mem::Int(sz, _), t, base, _) if base != t && once(t) => match *next {
+            Inst::ICmpI(_, _, c, t2, _) => t2 == t && branch_on(c),
+            Inst::ICmp(_, _, c, x, y) => sz == 8 && (x == t) != (y == t) && branch_on(c),
+            _ => false,
+        },
         Inst::IBin(IOp::Shr, it, s, m, t) if it.bits == 64 && !it.signed && m != s && t != s && once(s) => matches!(*next, Inst::IBinI(IOp::And, _, d, s2, 1) if s2 == s && branch_on(d)),
         _ => false,
     }
@@ -1015,6 +1038,12 @@ struct Gen<'a> {
     /// `t = load [base + off]; c = t cmp K` feeding the branch (t used once): cmp [base + off], K
     /// in the load's width -- (base, off, bytes, K)
     load_fuse: Option<(VReg, i32, u8, i64)>,
+    /// `t = load64 [base + off]; c = t cmp r` (or `r cmp t`) feeding the branch (t used once):
+    /// cmp [base + off], r / cmp r, [base + off] -- (base, off, r, the load is the left operand)
+    load_cmp: Option<(VReg, i32, VReg, bool)>,
+    /// per block: its loop depth (a branch whose targets are both laid out above jumps
+    /// conditionally to the deeper one: the loop's back edge)
+    depth: Vec<u32>,
     /// the last spill store emitted: (rbp displacement, register, position right after it)
     last_spill: Option<(i32, u8, usize)>,
     /// spill windows (Alloc::windows): vreg -> (first use pos, last use pos, register); and the
@@ -1437,6 +1466,7 @@ impl<'a> Gen<'a> {
 
     fn gen(&mut self, options: &relax_session::Options) {
         let reach = regalloc::reachable(self.f);
+        self.depth = regalloc::loop_depths(self.f, &reach);
         // a naked fn is its asm block only
         if self.f.naked {
             self.blocks_and_pool(options, reach);
@@ -1633,6 +1663,14 @@ impl<'a> Gen<'a> {
                     }
                 }
             }
+            self.load_cmp = None;
+            if fused && n >= 2 && self.test_fuse.is_none() && self.load_fuse.is_none() && !crate::stats::opt_off(options, "-loadcmp") {
+                if let (Inst::Load(Mem::Int(8, _), t, base, off), Inst::ICmp(_, _, _, x, y)) = (&b.insts[n - 2], &b.insts[n - 1]) {
+                    if (x == t) != (y == t) && base != t && self.al.uses[t.0 as usize] == 1 && x64_defers(b, n - 2, &self.al.uses) {
+                        self.load_cmp = Some((*base, *off, if x == t { *y } else { *x }, x == t));
+                    }
+                }
+            }
             // a branch on bit t of m: bt m, t (CF = bit t mod 64, as the 64-bit shift reads t)
             self.bt_fuse = None;
             if !fused && n >= 2 {
@@ -1681,7 +1719,7 @@ impl<'a> Gen<'a> {
                 if fused && ii == n - 1 {
                     break;
                 }
-                if (self.test_fuse.is_some() || self.load_fuse.is_some() && !load_branch) && ii == n - 2 {
+                if (self.test_fuse.is_some() || self.load_cmp.is_some() || self.load_fuse.is_some() && !load_branch) && ii == n - 2 {
                     continue;
                 }
                 if load_branch && ii == n - 1 {
@@ -2878,6 +2916,16 @@ impl<'a> Gen<'a> {
                 let next = self.next_block[bi];
                 // integer condition code for `c` true
                 let icond: Option<u8> = match &fused {
+                    Some(Inst::ICmp(cond, signed, _, _, _)) if self.load_cmp.is_some() => {
+                        let (base, off, other, load_lhs) = self.load_cmp.take().unwrap();
+                        let ro = self.use_i(options, other, R10);
+                        let (rb, disp) = self.base_disp(options, base, R11, off);
+                        // REX.W 39 /r: cmp r/m64, r64 (load - r); REX.W 3B /r: cmp r64, r/m64 (r - load)
+                        self.a.rex(true, ro, 0, rb, false);
+                        self.a.byte(if load_lhs { 0x39 } else { 0x3b });
+                        self.a.modrm_mem(ro, rb, disp);
+                        Some(icc(*cond, *signed))
+                    }
                     Some(Inst::ICmp(cond, signed, _, x, y)) => {
                         self.cmp_vregs(options, *x, *y);
                         Some(icc(*cond, *signed))
@@ -2963,7 +3011,10 @@ impl<'a> Gen<'a> {
                 if self.thru(*tt) == self.thru(next) {
                     // fall into the true block: branch on the inverted condition
                     self.jcc_to(cc ^ 1, *ff);
-                } else if self.thru(*ff) != self.thru(next) && back(self, *ff) && (!back(self, *tt) || (self.thru(*ff) == bi as u32 && self.thru(*tt) != bi as u32)) {
+                } else if self.thru(*ff) != self.thru(next) && back(self, *ff) && (!back(self, *tt) || (self.thru(*ff) == bi as u32 && self.thru(*tt) != bi as u32)
+                    // both laid out above (a latch whose exit is a shared epilogue): the jcc takes
+                    // the loop's back edge, the deeper target (cmp; jne loop -- not je exit; jmp loop)
+                    || self.thru(*tt) != bi as u32 && self.depth.get(self.thru(*ff) as usize) > self.depth.get(self.thru(*tt) as usize)) {
                     // neither falls through and the false edge loops: the conditional jump takes the
                     // back edge (one taken branch per iteration instead of a not-taken jcc + jmp)
                     self.jcc_to(cc ^ 1, *ff);
@@ -3793,12 +3844,13 @@ impl<'a> Gen<'a> {
                         self.a.sse_rr(0, if matches!(op, VX::FSqrt(..)) { 0x51 } else { 0x5b }, xd, xa, false);
                         self.fin_f(d, xd);
                     }
-                    VX::FRound(_, RoundTo::Floor | RoundTo::Ceil | RoundTo::Trunc) => {
+                    VX::FRound(_, RoundTo::Floor | RoundTo::Ceil | RoundTo::Trunc | RoundTo::Even) => {
                         let xd = self.def_f(d, XS);
                         self.a.sse_ext(0x66, 0x3a, 0x08, xd, xa); // roundps
                         self.a.byte(match op {
                             VX::FRound(_, RoundTo::Floor) => 9,
                             VX::FRound(_, RoundTo::Ceil) => 10,
+                            VX::FRound(_, RoundTo::Even) => 8,
                             _ => 11,
                         });
                         self.fin_f(d, xd);
@@ -3961,6 +4013,7 @@ impl<'a> Gen<'a> {
                         self.a.byte(match t {
                             RoundTo::Floor => 9,
                             RoundTo::Ceil => 10,
+                            RoundTo::Even => 8,
                             _ => 11,
                         });
                     }
@@ -4612,8 +4665,97 @@ impl<'a> Gen<'a> {
                 self.a.byte(1);
                 self.fin_f(d, xd);
             }
+            Inst::VSel(d, m, a, b) => {
+                if self.byte_masks[m.0 as usize] {
+                    // vpblendvb yd, yb, ya, ym (AVX2): a where the mask is set
+                    let xm = self.use_f(m, 0);
+                    let xa = self.use_f(a, XS);
+                    let xb = self.use_f(b, XS2);
+                    let xd = self.def_f(d, XS);
+                    self.a.vex_l(1, 3, false, true, 0x4c, xd, xb, xa);
+                    self.a.byte(xm << 4);
+                    self.fin_f(d, xd);
+                } else {
+                    // (m & a) | (!m & b)
+                    let xm = self.use_f(m, 1);
+                    let xb = self.use_f(b, XS2);
+                    self.a.vex_l(0, 1, false, true, 0x55, 0, xm, xb); // vandnps ymm0, m, b
+                    let xa = self.use_f(a, XS);
+                    self.a.vex_l(0, 1, false, true, 0x54, 1, xm, xa); // vandps ymm1, m, a
+                    let xd = self.def_f(d, XS);
+                    self.a.vex_l(0, 1, false, true, 0x56, xd, 0, 1); // vorps
+                    self.fin_f(d, xd);
+                }
+            }
+            Inst::VAny(d, v) => {
+                let xv = self.use_f(v, XS);
+                self.a.vex_l(1, 2, false, true, 0x17, xv, 0, xv); // vptest ymm
+                let rd = self.def_i(d, R10);
+                self.a.setcc(CC_NE, rd);
+                self.a.movzx8(rd, rd);
+                self.fin_i(d, rd);
+            }
+            Inst::VX(op, d, a, _) if Self::y_un_op(op) => self.y_un(op, d, a),
+            Inst::VX(VX::ShlI(VW::S, k) | VX::ShrSI(VW::S, k) | VX::ShrUI(VW::S, k), d, a, _) => {
+                // vps{ll,ra,rl}d yd, ya, k: VEX.256.66.0F 72 /6, /4, /2 ib (vvvv = the result)
+                let ext = match op_of(i) {
+                    VX::ShlI(..) => 6,
+                    VX::ShrSI(..) => 4,
+                    _ => 2,
+                };
+                let xa = self.use_f(a, XS);
+                let xd = self.def_f(d, XS);
+                self.a.vex_l(1, 1, false, true, 0x72, ext, xd, xa);
+                self.a.byte(k);
+                self.fin_f(d, xd);
+            }
+            Inst::VX(VX::ICmp(c, VW::S), d, a, b) => {
+                // vpcmp{eq,gt}d, then not (xor all ones) for ne / le / ge
+                let (x, y, gt, not) = match c {
+                    Cond::Eq => (a, b, false, false),
+                    Cond::Ne => (a, b, false, true),
+                    Cond::Gt => (a, b, true, false),
+                    Cond::Lt => (b, a, true, false),
+                    Cond::Le => (a, b, true, true),
+                    Cond::Ge => (b, a, true, true),
+                };
+                let xx = self.use_f(x, XS);
+                let xy = self.use_f(y, XS2);
+                let xd = self.def_f(d, XS);
+                self.a.vex_l(1, 1, false, true, if gt { 0x66 } else { 0x76 }, xd, xx, xy);
+                if not {
+                    self.a.vex_l(1, 1, false, true, 0x76, 1, 1, 1); // vpcmpeqd ymm1: all ones
+                    self.a.vex_l(1, 1, false, true, 0xef, xd, xd, 1);
+                }
+                self.fin_f(d, xd);
+            }
             Inst::VX(op, d, a, b) => {
                 let (pp, opc, x, y, imm) = match op {
+                    // AVX2 32-bit lane forms (pair256 Caps::ints); map 2 (0F38) ones below
+                    VX::Add(VW::S) => (1, 0xfe, a, b, None),
+                    VX::Sub(VW::S) => (1, 0xfa, a, b, None),
+                    VX::ZipLo(VW::S) => (1, 0x62, a, b, None),
+                    VX::ZipHi(VW::S) => (1, 0x6a, a, b, None),
+                    VX::ZipLo(VW::D) => (1, 0x6c, a, b, None),
+                    VX::ZipHi(VW::D) => (1, 0x6d, a, b, None),
+                    VX::MulLo(VW::S) | VX::MinU(VW::S) | VX::MaxU(VW::S) | VX::MinS(VW::S) | VX::MaxS(VW::S) | VX::ShlV(VW::S) | VX::ShrSV(VW::S) | VX::ShrUV(VW::S) => {
+                        let opc = match op {
+                            VX::MulLo(_) => 0x40,
+                            VX::MinU(_) => 0x3b,
+                            VX::MaxU(_) => 0x3f,
+                            VX::MinS(_) => 0x39,
+                            VX::MaxS(_) => 0x3d,
+                            VX::ShlV(_) => 0x47,
+                            VX::ShrSV(_) => 0x46,
+                            _ => 0x45,
+                        };
+                        let xa = self.use_f(a, XS);
+                        let xb = self.use_f(b, XS2);
+                        let xd = self.def_f(d, XS);
+                        self.a.vex_l(1, 2, false, true, opc, xd, xa, xb);
+                        self.fin_f(d, xd);
+                        return;
+                    }
                     VX::FAdd(w, _) => (pd(w), 0x58, a, b, None),
                     VX::FSub(w, _) => (pd(w), 0x5c, a, b, None),
                     VX::FMul(w, _) => (pd(w), 0x59, a, b, None),
@@ -4648,6 +4790,86 @@ impl<'a> Gen<'a> {
                 self.fin_f(d, xd);
             }
             _ => unreachable!("not a 256-bit instruction"),
+        }
+    }
+
+    /// The 256-bit unary lane forms `y_un` emits (pair256 Caps::ints).
+    fn y_un_op(op: VX) -> bool {
+        matches!(op, VX::FNeg(VW::S) | VX::FAbs(VW::S) | VX::FSqrt(VW::S, NanBits::Host | NanBits::Intel) | VX::FRound(VW::S, _) | VX::IToF(VW::S) | VX::FToI(VW::S) | VX::Neg(VW::S))
+    }
+
+    /// ymm `x` = the 32-bit constant `bits` in every lane (vbroadcastss ymm, [rip + entry]).
+    fn ybcast(&mut self, x: u8, bits: u32) {
+        self.a.byte(0xc4);
+        self.a.byte(((!(x >> 3) & 1) << 7) | (1 << 6) | (1 << 5) | 2);
+        self.a.byte((15 << 3) | (1 << 2) | 1);
+        self.a.byte(0x18);
+        self.a.byte(((x & 7) << 3) | 5);
+        let at = self.a.pos();
+        self.a.u32(0);
+        self.vpool.push((at, bits as u128 * 0x0000_0001_0000_0001_0000_0001_0000_0001));
+    }
+
+    /// The unary 32-bit lane ops on ymm, the same sequences as their xmm forms (`vx_lanes`).
+    /// Scratch ymm0/ymm1 and XS2 (a is read through XS).
+    fn y_un(&mut self, op: VX, d: VReg, a: VReg) {
+        let xa = self.use_f(a, XS);
+        match op {
+            VX::FNeg(_) | VX::FAbs(_) => {
+                let neg = op == VX::FNeg(VW::S);
+                self.ybcast(1, if neg { 0x8000_0000 } else { 0x7fff_ffff });
+                let xd = self.def_f(d, XS);
+                self.a.vex_l(0, 1, false, true, if neg { 0x57 } else { 0x54 }, xd, 1, xa);
+                self.fin_f(d, xd);
+            }
+            VX::FSqrt(..) | VX::IToF(_) => {
+                let xd = self.def_f(d, XS);
+                self.a.vex_l(0, 1, false, true, if matches!(op, VX::FSqrt(..)) { 0x51 } else { 0x5b }, xd, 0, xa); // vsqrtps / vcvtdq2ps
+                self.fin_f(d, xd);
+            }
+            VX::FRound(_, RoundTo::Away) => {
+                // trunc(x + copysign(0.5 - ulp/2, x))
+                self.ybcast(1, 0x8000_0000);
+                self.a.vex_l(0, 1, false, true, 0x54, 1, 1, xa); // vandps ymm1, sign, x
+                self.ybcast(0, 0.49999997f32.to_bits());
+                self.a.vex_l(0, 1, false, true, 0x56, 1, 1, 0); // vorps ymm1, ymm1, ymm0
+                self.a.vex_l(0, 1, false, true, 0x58, 0, xa, 1); // vaddps ymm0, x, ymm1
+                let xd = self.def_f(d, XS);
+                self.a.vex_l(1, 3, false, true, 0x08, xd, 0, 0); // vroundps yd, ymm0, trunc
+                self.a.byte(11);
+                self.fin_f(d, xd);
+            }
+            VX::FRound(_, t) => {
+                let xd = self.def_f(d, XS);
+                self.a.vex_l(1, 3, false, true, 0x08, xd, 0, xa); // vroundps
+                self.a.byte(match t {
+                    RoundTo::Floor => 9,
+                    RoundTo::Ceil => 10,
+                    _ => 11,
+                });
+                self.fin_f(d, xd);
+            }
+            VX::FToI(_) => {
+                // vcvttps2dq gives 0x80000000 for NaN and out of range: NaN -> 0,
+                // x >= 2^31 -> 0x7fffffff (0x80000000 ^ all ones)
+                self.a.vex_l(2, 1, false, true, 0x5b, 0, 0, xa); // vcvttps2dq ymm0, x
+                self.a.vex_l(0, 1, false, true, 0xc2, 1, xa, xa); // vcmpps ymm1, x, x, unord
+                self.a.byte(3);
+                self.a.vex_l(1, 1, false, true, 0xdf, 1, 1, 0); // vpandn ymm1, nan, r
+                self.ybcast(XS2, 0x4f00_0000); // 2^31
+                self.a.vex_l(0, 1, false, true, 0xc2, XS2, XS2, xa); // 2^31 <= x
+                self.a.byte(2);
+                let xd = self.def_f(d, XS);
+                self.a.vex_l(1, 1, false, true, 0xef, xd, 1, XS2); // vpxor
+                self.fin_f(d, xd);
+            }
+            VX::Neg(_) => {
+                self.a.vex_l(1, 1, false, true, 0xef, 0, 0, 0); // vpxor ymm0
+                let xd = self.def_f(d, XS);
+                self.a.vex_l(1, 1, false, true, 0xfa, xd, 0, xa); // vpsubd yd, 0, a
+                self.fin_f(d, xd);
+            }
+            _ => unreachable!("not a 256-bit unary op: {op:?}"),
         }
     }
 
@@ -5272,12 +5494,13 @@ impl<'a> Gen<'a> {
                 return;
             }
             IOp::Rotl => {
-                // rol by cl (32-bit form for u32: zero-extends)
+                // rol by cl in the type's width (passes::rotl), then the canonical extension
                 self.a.mov_rr(RCX, rb);
                 self.a.mov_rr(RAX, ra);
-                self.a.rex(it != U32, 0, 0, RAX, false);
-                self.a.byte(0xd3);
-                self.a.modrm_rr(0, RAX);
+                self.a.rol(it.bits, RAX, None);
+                if it.bits < 64 && it != U32 {
+                    self.a.extend(RAX, it.bits, it.signed);
+                }
                 self.a.mov_rr(rd, RAX);
                 self.fin_i(d, rd);
                 return;
@@ -5934,12 +6157,9 @@ impl<'a> Gen<'a> {
                 self.a.u32(k as i32 as u32);
             }
             IOp::Rotl => {
-                // rol r64, imm8
+                // rol by k in the type's width (passes::rotl); narrow results are re-extended below
                 self.a.mov_rr(rd, ra);
-                self.a.rex(true, 0, 0, rd, false);
-                self.a.byte(0xc1);
-                self.a.modrm_rr(0, rd);
-                self.a.byte((k & 63) as u8);
+                self.a.rol(it.bits, rd, Some(k));
             }
             IOp::Shl | IOp::Shr => {
                 self.a.mov_rr(rd, ra);
@@ -6044,6 +6264,14 @@ fn scalar_minmax(i: &Inst, a: VReg, b: VReg) -> Option<(bool, u8)> {
 }
 
 /// VEX pp of a float op's lane width: none (ps) or 66 (pd)
+/// The lane op of a `VX` instruction.
+fn op_of(i: &Inst) -> VX {
+    match i {
+        Inst::VX(op, ..) => *op,
+        _ => unreachable!("a VX instruction"),
+    }
+}
+
 fn pd(w: VW) -> u8 {
     if w == VW::D { 1 } else { 0 }
 }
@@ -6053,8 +6281,8 @@ fn y_inst(f: &Func, i: &Inst) -> bool {
     let y = |v: &VReg| f.vregs[v.0 as usize] == Cls::V256;
     match i {
         Inst::VX(VX::Half(_), ..) => true,
-        Inst::VX(_, d, ..) | Inst::VLoad(d, ..) | Inst::VFma(_, _, d, ..) | Inst::VSplat(d, _) | Inst::VConst(d, _) | Inst::Mov(d, _) => y(d),
-        Inst::VStore(_, _, v) => y(v),
+        Inst::VX(_, d, ..) | Inst::VLoad(d, ..) | Inst::VFma(_, _, d, ..) | Inst::VSplat(d, _) | Inst::VConst(d, _) | Inst::Mov(d, _) | Inst::VSel(d, ..) => y(d),
+        Inst::VStore(_, _, v) | Inst::VAny(_, v) => y(v),
         _ => false,
     }
 }
@@ -6166,7 +6394,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     let paired;
     let f = if host_avx(options) && (env.opt_regs || f.full) && f.vregs.contains(&Cls::V128) && !crate::stats::opt_off(options, "-pair256") {
         let mut g = f.clone();
-        if crate::pair256::pair256(&mut g, crate::pair256::Caps { avx2: options.cpu.avx2, fma: options.cpu.fma }) {
+        if crate::pair256::pair256(&mut g, crate::pair256::Caps { avx2: options.cpu.avx2, fma: options.cpu.fma, ints: false }) {
             paired = g;
             &paired
         } else {
@@ -6216,10 +6444,10 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     crate::stats::pass_time(11, t_ra);
     drop(_cost_ra);
     let alloc_sig = regalloc::alloc_sig(&al);
-    if crate::stats::opt_env_off("+checkra") {
-        for l in regalloc::check_alloc(options, f, &cfg, &al) {
-            eprintln!("{}", l);
-        }
+    regalloc::trace_alloc(f, &al);
+    // the allocation checker (MAKEPAD_RUN_OPT=+checkra; gates, fuzzer): a finding fails the compile
+    if regalloc::check_on(options) {
+        regalloc::check_or_fail(options, f, &cfg, &al, env.opt_regs || f.full)?;
     }
     let _cost_emit = crate::probe::phase(10);
     let t_emit = crate::stats::pass_clock();
@@ -6263,6 +6491,8 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         test_fuse: None,
         bt_fuse: None,
         load_fuse: None,
+        load_cmp: None,
+        depth: Vec::new(),
         jt_fix: Vec::new(),
         last_spill: None,
         win,
@@ -6552,19 +6782,20 @@ pub fn veneer(target: u64) -> Vec<u8> {
 /// Bytes per count stub (`count_stub`; the stubs of a block are this far apart).
 pub const COUNT_STUB_SIZE: usize = 64;
 
-/// Per-slot call counter (tier-up) at `at` (0: not known yet): while a function runs at O1 its
-/// table slot points here. `*counter -= 1`; on reaching 0 jumps to `hot` (lazy_entry-style glue:
-/// rax = slot, returns the address to continue at), else to the O1 code: `jmp rel32` when in
-/// reach, else through r11. Uses rax and r11 only.
-pub fn count_stub(at: u64, counter: u64, slot: u32, code: u64, hot: u64) -> Vec<u8> {
+/// Per-slot cost budget (tier-up) at `at` (0: not known yet): while a function runs below O3 its
+/// table slot points here. `*budget -= weight` (the call's estimated cost); at or below 0 (signed)
+/// jumps to `hot` (lazy_entry-style glue: rax = slot, returns the address to continue at), else to
+/// the code: `jmp rel32` when in reach, else through r11. Uses rax and r11 only.
+pub fn count_stub(at: u64, counter: u64, slot: u32, code: u64, hot: u64, weight: u32) -> Vec<u8> {
     let mut a = Asm { b: Vec::with_capacity(COUNT_STUB_SIZE), sib: None };
     a.mov_ri(RAX, counter as i64);
-    // sub qword [rax], 1
-    for x in [0x48u8, 0x83, 0x28, 0x01] {
+    // sub qword [rax], imm32
+    for x in [0x48u8, 0x81, 0x28] {
         a.byte(x);
     }
-    // je hot (rel8, patched below)
-    a.byte(0x74);
+    a.u32(weight.min(i32::MAX as u32));
+    // jle hot (rel8, patched below)
+    a.byte(0x7e);
     a.byte(0);
     let je = a.b.len();
     let d = code.wrapping_sub(at + je as u64 + 5) as i64;

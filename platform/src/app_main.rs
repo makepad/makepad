@@ -112,12 +112,16 @@ pub fn run_app(app: fn()) {
         if std::env::var_os("MAKEPAD_HAL_LOG").is_some() {
             eprintln!("[hal-linux] main loop returned; joining app thread");
         }
-        if thread.join().is_err() {
+        let panicked = thread.join().is_err();
+        // the process exits next (main returns): the HAL's driver threads stop and are joined
+        // before exit() runs the driver's exit handlers, which fault a thread still inside it
+        makepad_hal::Hal::global().before_exit();
+        if panicked {
             std::process::exit(101);
         }
         #[cfg(target_os = "linux")]
         if std::env::var_os("MAKEPAD_HAL_LOG").is_some() {
-            eprintln!("[hal-linux] app thread joined; run_app returning");
+            eprintln!("[hal-linux] app thread joined, HAL stopped; run_app returning");
         }
         return;
     }
@@ -153,6 +157,25 @@ pub fn set_window_manager(window_manager: bool) {
 /// This process is a window manager: it never becomes a client of another one.
 pub fn is_window_manager() -> bool {
     WINDOW_MANAGER.load(std::sync::atomic::Ordering::Acquire)
+}
+
+static HAL_WINDOW_MANAGER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The HAL session says its shell is a makepad window manager's client (`info_flags::WM_HOSTED`:
+/// `makepad run` on the WM, whose HAL shell is the WM tile this app draws into).
+pub(crate) fn set_hal_window_manager(on: bool) {
+    HAL_WINDOW_MANAGER.store(on, std::sync::atomic::Ordering::Release);
+}
+
+/// A makepad window manager hosts this app's windows, however it got there: the WM launched it
+/// (`MAKEPAD_WM_CAPTION_CONTENT=1`), it adopted the process at startup (native Linux), or the HAL
+/// shell the app runs on is the WM's client (`makepad run`). Its windows then draw their own caption
+/// with the WM's window controls.
+pub fn hosted_by_window_manager() -> bool {
+    static LAUNCHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LAUNCHED.get_or_init(|| std::env::var("MAKEPAD_WM_CAPTION_CONTENT").is_ok_and(|value| value == "1"))
+        || admitted_by_window_manager().is_some()
+        || HAL_WINDOW_MANAGER.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// Where a running makepad window manager admitted this process (Linux, native builds).

@@ -85,6 +85,11 @@
 //!   reads each once at start-up (`input_settings_loaded` says the read
 //!   happened; a slot is `Some` only for a valid in-range value). The UI
 //!   applies the platform's process-wide speed; this only persists it.
+//! * BlackShark V3 Pro headset: the receiver's hidraw settings interface
+//!   is one more descriptor in the worker's `poll`, with its own request
+//!   deadlines ([`super::blackshark::device_linux`]). Its edits do not use
+//!   the command queue: the controller writes them into one shared record
+//!   (newest value per setting) and wakes the worker.
 //!
 //! Compiled for Linux only (the inner `cfg` below makes the module empty
 //! elsewhere), so no other platform's behaviour changes.
@@ -92,6 +97,10 @@
 #![cfg(target_os = "linux")]
 
 use {
+    super::blackshark::{
+        device_linux::{HeadsetLink, HeadsetShared},
+        HeadsetEdit, HeadsetEdits, HeadsetSnapshot,
+    },
     super::display_layout::DisplayLayout,
     makepad_strict_json::{parse as parse_json, Value},
     makepad_widgets::{
@@ -524,6 +533,8 @@ pub struct CommandOutcome {
 pub struct SystemSnapshot {
     pub invert_scroll: bool,
     pub game_controllers: super::game_controllers::Inventory,
+    /// The BlackShark V3 Pro receiver and headset, as last observed.
+    pub headset: HeadsetSnapshot,
     /// Increments per publish.
     pub serial: u64,
     /// The newest command sequence the worker has finished; a command is
@@ -588,6 +599,7 @@ impl Default for SystemSnapshot {
     fn default() -> Self {
         Self {
             game_controllers: Default::default(),
+            headset: HeadsetSnapshot::default(),
             invert_scroll: false,
             serial: 0,
             applied_seq: 0,
@@ -682,6 +694,7 @@ fn take_slot(slot: &AtomicU64) -> Option<(Seq, u32)> {
 pub struct SystemController {
     commands: SyncSender<Envelope>,
     slots: Arc<Slots>,
+    headset: Arc<HeadsetShared>,
     stop: Arc<AtomicBool>,
     wake: Arc<File>,
     snapshots: ToUIReceiver<Arc<SystemSnapshot>>,
@@ -699,8 +712,9 @@ impl SystemController {
         let queue = NonZeroUsize::new(SNAPSHOT_QUEUE).unwrap_or(NonZeroUsize::MIN);
         let (publish, snapshots) = to_ui_bounded(queue);
         let slots = Arc::new(Slots::new());
+        let headset = Arc::new(HeadsetShared::default());
         let stop = Arc::new(AtomicBool::new(false));
-        let worker = Worker::new(stop.clone(), wake.clone(), command_rx, slots.clone(), publish);
+        let worker = Worker::new(stop.clone(), wake.clone(), command_rx, slots.clone(), headset.clone(), publish);
         let handle = spawner
             .spawn_worker(
                 ThreadOptions {
@@ -713,6 +727,7 @@ impl SystemController {
         Ok(Self {
             commands,
             slots,
+            headset,
             stop,
             wake,
             snapshots,
@@ -765,6 +780,18 @@ impl SystemController {
                 Err(envelope.command)
             }
         }
+    }
+
+    /// A headset edit: it replaces any earlier value of the same setting
+    /// that the headset has not confirmed yet, and is never dropped.
+    pub fn headset_edit(&mut self, edit: HeadsetEdit) {
+        self.headset.edit(edit);
+        self.wake();
+    }
+
+    /// The headset edits still waiting for the headset's confirmation.
+    pub fn headset_pending(&self) -> HeadsetEdits {
+        self.headset.pending()
     }
 
     /// True until a snapshot whose `applied_seq` covers `seq` has arrived.
@@ -1624,6 +1651,9 @@ struct Worker {
     snapshot: SystemSnapshot,
     outcomes: VecDeque<CommandOutcome>,
     subscription: Option<Subscription>,
+    headset: HeadsetLink,
+    /// What `poll` reported for the headset receiver's descriptor.
+    headset_revents: c_short,
     subscribe_retry_at: f64,
     subscribe_backoff: f64,
     audio_dirty_since: Option<f64>,
@@ -1645,6 +1675,7 @@ impl Worker {
         wake: Arc<File>,
         commands: Receiver<Envelope>,
         slots: Arc<Slots>,
+        headset: Arc<HeadsetShared>,
         publish: ToUISender<Arc<SystemSnapshot>>,
     ) -> Self {
         Self {
@@ -1657,6 +1688,8 @@ impl Worker {
             snapshot: SystemSnapshot::default(),
             outcomes: VecDeque::new(),
             subscription: None,
+            headset: HeadsetLink::new(headset),
+            headset_revents: 0,
             subscribe_retry_at: 0.0,
             subscribe_backoff: SUBSCRIBE_BACKOFF_MIN,
             audio_dirty_since: None,
@@ -1703,6 +1736,7 @@ impl Worker {
             }
             let now = now();
             let mut changed = self.pump_subscription(event, now);
+            changed |= self.service_headset(now);
             // Sliders first (the user's latest intent), then a bounded
             // slice of the discrete queue. Nothing is applied once a
             // shutdown was asked for: queued work is dropped, not done
@@ -1714,6 +1748,9 @@ impl Worker {
             if self.stopping() {
                 break;
             }
+            // A pactl call above can take a while: answers that arrived
+            // meanwhile are taken before any request is timed out.
+            changed |= self.service_headset(Cx::monotonic_now());
             if audio_touched || slots_touched || self.audio_due(now) {
                 changed |= self.sample_audio(now);
             }
@@ -1757,12 +1794,17 @@ impl Worker {
         if self.pending_publish.is_some() {
             deadline = deadline.min(now + 0.05);
         }
+        if let Some(due) = self.headset.deadline(now) {
+            deadline = deadline.min(due);
+        }
         ((deadline - now).max(0.0) * 1000.0).ceil().min(MAX_POLL_MS) as c_int
     }
 
     /// Sleep until the controller wakes us, the event stream has something,
     /// or the next deadline.
     fn wait(&mut self, timeout_ms: c_int) -> PipeEvent {
+        // A negative descriptor is ignored by `poll`, so the subscription
+        // and the headset receiver keep fixed slots whether open or not.
         let mut fds = [
             PollFd {
                 fd: self.wake.as_raw_fd(),
@@ -1774,8 +1816,14 @@ impl Worker {
                 events: POLLIN,
                 revents: 0,
             },
+            PollFd {
+                fd: self.headset.poll_fd().unwrap_or(-1),
+                events: POLLIN,
+                revents: 0,
+            },
         ];
-        let count = if self.subscription.is_some() { 2 } else { 1 };
+        let count = fds.len() as c_ulong;
+        self.headset_revents = 0;
         // SAFETY: `fds` is a live array of `count` pollfd structs.
         let ready = unsafe { poll(fds.as_mut_ptr(), count, timeout_ms) };
         if ready < 0 {
@@ -1788,10 +1836,12 @@ impl Worker {
         if fds[0].revents & POLLIN != 0 {
             self.drain_wake();
         }
+        self.headset_revents = fds[2].revents;
         let revents = fds[1].revents;
-        if count == 2 && revents & POLLIN != 0 {
+        let subscribed = self.subscription.is_some();
+        if subscribed && revents & POLLIN != 0 {
             PipeEvent::Readable
-        } else if count == 2 && revents & (POLLHUP | POLLERR | POLLNVAL) != 0 {
+        } else if subscribed && revents & (POLLHUP | POLLERR | POLLNVAL) != 0 {
             PipeEvent::HungUp
         } else {
             PipeEvent::Nothing
@@ -1885,6 +1935,18 @@ impl Worker {
             false
         } else {
             self.drop_subscription(now)
+        }
+    }
+
+    /// The headset receiver's answers, timeouts and next request. Its
+    /// revents are consumed by the first call after a `wait`.
+    fn service_headset(&mut self, now: f64) -> bool {
+        let revents = std::mem::take(&mut self.headset_revents);
+        if self.headset.service(now, revents) {
+            self.snapshot.headset = self.headset.snapshot().clone();
+            true
+        } else {
+            false
         }
     }
 
@@ -2258,6 +2320,10 @@ impl Worker {
         let controllers = super::game_controllers::sample();
         let mut changed = controllers != self.snapshot.game_controllers;
         self.snapshot.game_controllers = controllers;
+        if self.headset.scan(now) {
+            self.snapshot.headset = self.headset.snapshot().clone();
+            changed = true;
+        }
         if power != self.snapshot.power {
             self.snapshot.power = power;
             changed = true;

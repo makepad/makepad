@@ -213,6 +213,149 @@ extern "C" {
     fn gettid() -> i32;
     fn getrandom(buf: *mut c_void, len: usize, flags: u32) -> isize;
     fn readlink(path: *const c_char, buf: *mut c_char, size: usize) -> isize;
+    fn sched_getaffinity(pid: i32, size: usize, mask: *mut u8) -> c_int;
+}
+
+/// CPUs in the calling thread's affinity mask (sched_getaffinity on glibc's / bionic's 1024-bit
+/// cpu_set_t, CPU_COUNT); 0 when the call fails or the mask is empty (std: sysconf fallback).
+pub fn affinity_cpus() -> usize {
+    let mut set = [0u64; 16];
+    if unsafe { sched_getaffinity(0, core::mem::size_of_val(&set), set.as_mut_ptr() as *mut u8) } != 0 {
+        return 0;
+    }
+    set.iter().map(|w| w.count_ones() as usize).sum()
+}
+
+/// The cgroup CPU quota in whole CPUs, rounded down; usize::MAX when none is set or it cannot be
+/// read. Real std's `sys::thread::unix::cgroups` (v2 `cpu.max` up the hierarchy under
+/// /sys/fs/cgroup; v1 `cpu.cfs_quota_us / cpu.cfs_period_us` at the usual mounts, else the
+/// mountinfo cpu-controller mount), with the same limits: no non-standard v2 mounts, no
+/// escaped paths.
+pub fn cgroup_quota() -> usize {
+    cgroups::quota()
+}
+
+mod cgroups {
+    use crate::ffi::OsString;
+    use crate::fs;
+    use crate::os::unix::ffi::OsStringExt;
+    use crate::path::{Path, PathBuf};
+    use alloc::borrow::Cow;
+    use alloc::borrow::ToOwned;
+    use alloc::string::String;
+    use core::str::from_utf8;
+
+    #[derive(PartialEq)]
+    enum Cgroup {
+        V1,
+        V2,
+    }
+
+    pub(super) fn quota() -> usize {
+        let Ok(buf) = fs::read("/proc/self/cgroup") else { return usize::MAX };
+        // our place in the cgroup hierarchy; a v1 line naming the cpu controller trumps v2's
+        let found = buf.split(|&c| c == b'\n').fold(None, |previous: Option<(alloc::vec::Vec<u8>, Cgroup)>, line| {
+            let mut fields = line.splitn(3, |&c| c == b':');
+            let version = match fields.nth(1) {
+                Some(b"") => Cgroup::V2,
+                Some(controllers) if from_utf8(controllers).is_ok_and(|c| c.split(',').any(|c| c == "cpu")) => Cgroup::V1,
+                _ => return previous,
+            };
+            if previous.is_some() && version == Cgroup::V2 {
+                return previous;
+            }
+            let Some(path) = fields.last() else { return previous };
+            // skip the leading slash
+            Some((path.get(1..).unwrap_or(&[]).to_owned(), version))
+        });
+        let Some((path, version)) = found else { return usize::MAX };
+        let group = PathBuf::from(OsString::from_vec(path));
+        match version {
+            Cgroup::V1 => quota_v1(group),
+            Cgroup::V2 => quota_v2(group),
+        }
+    }
+
+    fn quota_v2(group: PathBuf) -> usize {
+        let mut quota = usize::MAX;
+        // the standard mount (file-hierarchy(7))
+        let mount = "/sys/fs/cgroup";
+        let mut path = PathBuf::from(mount);
+        path.push(&group);
+        path.push("cgroup.controllers");
+        // not cgroup2
+        if !matches!(fs::exists(&path), Ok(true)) {
+            return usize::MAX;
+        }
+        path.pop();
+        while path.starts_with(mount) {
+            path.push("cpu.max");
+            if let Ok(text) = fs::read_to_string(&path) {
+                let Some(line) = text.lines().next() else { return quota };
+                let mut it = line.split(' ');
+                let (Some(limit), Some(period)) = (it.next(), it.next()) else { return quota };
+                if let (Ok(limit), Ok(period)) = (limit.parse::<usize>(), period.parse::<usize>()) {
+                    if period > 0 {
+                        quota = quota.min(limit / period);
+                    }
+                }
+            }
+            path.pop();
+            path.pop();
+        }
+        quota
+    }
+
+    fn quota_v1(group: PathBuf) -> usize {
+        let mut quota = usize::MAX;
+        // the usual locations (cgroups(7)), else the cpu-controller mount from mountinfo
+        let mounts: &[fn(&Path) -> Option<(Cow<'static, str>, &Path)>] =
+            &[|p| Some((Cow::Borrowed("/sys/fs/cgroup/cpu"), p)), |p| Some((Cow::Borrowed("/sys/fs/cgroup/cpu,cpuacct"), p)), find_mountpoint];
+        for mount in mounts {
+            let Some((mount, group)) = mount(&group) else { continue };
+            let mut path = PathBuf::from(mount.as_ref());
+            path.push(group);
+            // a wrong guess of the mount
+            if !matches!(fs::exists(&path), Ok(true)) {
+                continue;
+            }
+            while path.starts_with(mount.as_ref()) {
+                let read = |path: &PathBuf, name: &str| -> Option<usize> { fs::read_to_string(path.join(name)).ok()?.trim().parse::<usize>().ok() };
+                if let (Some(limit), Some(period)) = (read(&path, "cpu.cfs_quota_us"), read(&path, "cpu.cfs_period_us")) {
+                    if period > 0 {
+                        quota = quota.min(limit / period);
+                    }
+                }
+                path.pop();
+            }
+            // the right hierarchy was walked
+            break;
+        }
+        quota
+    }
+
+    /// The cgroup v1 mount with a cpu controller (mountinfo); a bind mount's root is cut off the
+    /// group path.
+    fn find_mountpoint(group: &Path) -> Option<(Cow<'static, str>, &Path)> {
+        let text = fs::read_to_string("/proc/self/mountinfo").ok()?;
+        for line in text.lines() {
+            let mut items = line.trim().split(' ');
+            let sub = items.nth(3)?;
+            let mount_point = items.next()?;
+            let opts = items.next_back()?;
+            let fstype = items.nth_back(1)?;
+            if fstype != "cgroup" || !opts.split(',').any(|o| o == "cpu") {
+                continue;
+            }
+            let sub = Path::new(sub).strip_prefix("/").ok()?;
+            if !group.starts_with(sub) {
+                continue;
+            }
+            let rest = group.strip_prefix(sub).ok()?;
+            return Some((Cow::Owned(String::from(mount_point)), rest));
+        }
+        None
+    }
 }
 
 #[cfg(target_arch = "x86_64")]

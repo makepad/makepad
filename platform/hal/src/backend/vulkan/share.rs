@@ -187,6 +187,13 @@ impl Image {
     pub(crate) fn hosted_writable(&self) -> bool {
         self.timeline.as_ref().is_some_and(|t| t.producer && t.available().unwrap_or(false))
     }
+    /// The hosted timeline's value now and the value at which the host has released the image
+    /// (it is writable from then on): what a stalled ring reports.
+    pub(crate) fn hosted_state(&self) -> Option<(u64, u64)> {
+        let t = self.timeline.as_ref().filter(|t| t.producer)?;
+        let value = unsafe { t.semaphore.dev.raw.get_semaphore_counter_value(t.semaphore.raw) }.ok()?;
+        Some((value, t.sequence() + 1))
+    }
     /// The timeline value that publishes the newest frame rendered into this hosted image.
     pub(crate) fn hosted_sequence(&self) -> Option<u64> {
         self.timeline.as_ref().filter(|t| t.producer).map(|t| t.sequence())

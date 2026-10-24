@@ -315,6 +315,8 @@ impl Cx {
                 live_id!(ToWasmAnimationFrame) => {
                     let tw = ToWasmAnimationFrame::read_to_wasm(&mut to_wasm);
                     is_animation_frame = Some(tw.time);
+                    // A page without threads: this frame may run one deferred job.
+                    crate::thread::frame_jobs_new_frame();
                     if self.new_next_frames.len() != 0 {
                         self.call_next_frame_event(tw.time);
                     }
@@ -1681,6 +1683,7 @@ impl CxOsApi for Cx {
             FromWasmQueryAudioDevices::to_js_code(),
             FromWasmStartAudioOutput::to_js_code(),
             FromWasmStopAudioOutput::to_js_code(),
+            FromWasmTestClock::to_js_code(),
             FromWasmQueryMidiPorts::to_js_code(),
             FromWasmPrepareVideoPlayback::to_js_code(),
             FromWasmBeginVideoPlayback::to_js_code(),
@@ -1759,6 +1762,16 @@ impl Cx {
 
     pub fn monotonic_now() -> f64 {
         unsafe { js_monotonic_now() }
+    }
+
+    /// A page opened with `?test=1` hands a test harness the app's media clock
+    /// (`FromWasmTestClock`: `globalThis.makepad_test_clock`); otherwise nothing.
+    pub fn web_test_clock(&mut self, film: f64, rendered: f64, speed: f64) {
+        let OsType::Web(params) = &self.os_type else { return };
+        if !params.search.trim_start_matches('?').split('&').any(|p| p == "test=1") {
+            return;
+        }
+        self.os.from_wasm(FromWasmTestClock { film, rendered, speed });
     }
 }
 

@@ -25,13 +25,13 @@ fn compile(options: &relax_session::Options, f: &Func) -> Code {
 
 fn caps() -> Option<relax_backend::pair256::Caps> {
     let o = options(true);
-    o.cpu.avx.then_some(relax_backend::pair256::Caps { avx2: o.cpu.avx2, fma: o.cpu.fma })
+    o.cpu.avx.then_some(relax_backend::pair256::Caps { avx2: o.cpu.avx2, fma: o.cpu.fma, ints: false })
 }
 
 /// the pass fuses `f` (on any host: a CPU with AVX2 and FMA assumed)
 fn fires(f: &Func) -> bool {
     let mut g = f.clone();
-    relax_backend::pair256::pair256(&mut g, relax_backend::pair256::Caps { avx2: true, fma: true }) && g.vregs.contains(&Cls::V256)
+    relax_backend::pair256::pair256(&mut g, relax_backend::pair256::Caps { avx2: true, fma: true, ints: false }) && g.vregs.contains(&Cls::V256)
 }
 
 #[test]
@@ -293,4 +293,112 @@ fn kernel_matches_halves() {
             assert_eq!(acc, acc2, "acc, n={n} fma={fma}");
         }
     }
+}
+
+/// fn(a, b, d) for the `Caps::ints` forms: the unfused halves (`-pair256`) against the halves
+/// fused by `pair256` with `ints` (seeded by `Func::halves`, as compute's eight-lane kernels).
+fn int_forms() -> Vec<(String, Func, bool)> {
+    let mut v = Vec::new();
+    let mut ops = vec![VX::Add(VW::S), VX::Sub(VW::S), VX::MulLo(VW::S), VX::MinU(VW::S), VX::MaxU(VW::S), VX::MinS(VW::S), VX::MaxS(VW::S), VX::Neg(VW::S)];
+    ops.extend([VX::ShlV(VW::S), VX::ShrSV(VW::S), VX::ShrUV(VW::S), VX::ZipLo(VW::S), VX::ZipHi(VW::S), VX::ZipLo(VW::D), VX::ZipHi(VW::D)]);
+    for c in [Cond::Lt, Cond::Le, Cond::Gt, Cond::Ge, Cond::Eq, Cond::Ne] {
+        ops.push(VX::ICmp(c, VW::S));
+    }
+    for k in [0u8, 1, 7, 22, 31] {
+        ops.extend([VX::ShlI(VW::S, k), VX::ShrSI(VW::S, k), VX::ShrUI(VW::S, k)]);
+    }
+    let fl = [VX::FNeg(VW::S), VX::FAbs(VW::S), VX::FSqrt(VW::S, NanBits::Host), VX::IToF(VW::S), VX::FToI(VW::S), VX::FRound(VW::S, RoundTo::Floor), VX::FRound(VW::S, RoundTo::Ceil), VX::FRound(VW::S, RoundTo::Trunc), VX::FRound(VW::S, RoundTo::Away)];
+    for op in ops {
+        v.push((format!("{op:?}"), binop(op), false));
+    }
+    for op in fl {
+        v.push((format!("{op:?}"), binop(op), true));
+    }
+    // selects by a compare's mask (a byte mask: vpblendvb) and by loaded bits (and / andn / or)
+    for by_cmp in [true, false] {
+        let mut f = Func::new("pair_sel".into(), 0);
+        let (pa, pb, pd) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
+        f.params = vec![pa, pb, pd];
+        f.block();
+        let r: Vec<VReg> = (0..8).map(|_| f.vreg(Cls::V128)).collect();
+        push(&mut f, 0, Inst::VLoad(r[0], pa, 0));
+        push(&mut f, 0, Inst::VLoad(r[1], pa, 16));
+        push(&mut f, 0, Inst::VLoad(r[2], pb, 0));
+        push(&mut f, 0, Inst::VLoad(r[3], pb, 16));
+        if by_cmp {
+            push(&mut f, 0, Inst::VX(VX::ICmp(Cond::Gt, VW::S), r[4], r[0], r[2]));
+            push(&mut f, 0, Inst::VX(VX::ICmp(Cond::Gt, VW::S), r[5], r[1], r[3]));
+        } else {
+            push(&mut f, 0, Inst::VX(VX::Xor, r[4], r[0], r[2]));
+            push(&mut f, 0, Inst::VX(VX::Xor, r[5], r[1], r[3]));
+        }
+        push(&mut f, 0, Inst::VSel(r[6], r[4], r[0], r[2]));
+        push(&mut f, 0, Inst::VSel(r[7], r[5], r[1], r[3]));
+        push(&mut f, 0, Inst::VStore(pd, 0, r[6]));
+        push(&mut f, 0, Inst::VStore(pd, 16, r[7]));
+        f.blocks[0].term = Term::Ret(vec![]);
+        v.push((format!("VSel by_cmp={by_cmp}"), f, false));
+    }
+    // a splat pair (the halves of one broadcast, seeded) added to loaded halves, and a VAny of
+    // the halves' or
+    {
+        let mut f = Func::new("pair_splat".into(), 0);
+        let (pa, pb, pd) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
+        f.params = vec![pa, pb, pd];
+        f.block();
+        let s = f.vreg(Cls::I);
+        let r: Vec<VReg> = (0..7).map(|_| f.vreg(Cls::V128)).collect();
+        let any = f.vreg(Cls::I);
+        push(&mut f, 0, Inst::Load(Mem::Int(4, true), s, pb, 0));
+        push(&mut f, 0, Inst::VSplat(r[0], s));
+        push(&mut f, 0, Inst::VSplat(r[1], s));
+        push(&mut f, 0, Inst::VLoad(r[2], pa, 0));
+        push(&mut f, 0, Inst::VLoad(r[3], pa, 16));
+        push(&mut f, 0, Inst::VX(VX::Add(VW::S), r[4], r[2], r[0]));
+        push(&mut f, 0, Inst::VX(VX::Add(VW::S), r[5], r[3], r[1]));
+        push(&mut f, 0, Inst::VStore(pd, 0, r[4]));
+        push(&mut f, 0, Inst::VStore(pd, 16, r[5]));
+        push(&mut f, 0, Inst::VX(VX::Or, r[6], r[4], r[5]));
+        push(&mut f, 0, Inst::VAny(any, r[6]));
+        push(&mut f, 0, Inst::Store(Mem::Int(4, true), pd, 32, any));
+        f.blocks[0].term = Term::Ret(vec![]);
+        f.halves = vec![(r[0], r[1]), (r[4], r[5])];
+        v.push(("VSplat + VAny".into(), f, false));
+    }
+    v
+}
+
+#[test]
+fn int_forms_match_halves() {
+    let o = options(true);
+    if !(o.cpu.avx2 && o.cpu.fma) {
+        return;
+    }
+    let off = options(false);
+    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+    let forms = int_forms();
+    let n = forms.len();
+    for (name, f, float) in forms {
+        f.verify().unwrap();
+        let mut g = f.clone();
+        assert!(relax_backend::pair256::pair256(&mut g, relax_backend::pair256::Caps { avx2: true, fma: true, ints: true }) && g.vregs.contains(&Cls::V256), "{name}: not fused");
+        let (c1, c2) = (compile(&off, &g), compile(&off, &f));
+        let (e1, e2): (Entry3, Entry3) = unsafe { (std::mem::transmute(c1.ptr()), std::mem::transmute(c2.ptr())) };
+        for k in 0..400 {
+            let (mut a, mut b) = ([0u8; 32], [0u8; 32]);
+            if float || k % 3 == 0 {
+                rng.bytes(false, &mut a);
+                rng.bytes(false, &mut b);
+            } else {
+                for c in a.chunks_mut(8).chain(b.chunks_mut(8)) {
+                    c.copy_from_slice(&rng.next().to_le_bytes());
+                }
+            }
+            let (mut r1, mut r2) = ([0u8; 36], [0u8; 36]);
+            e1(a.as_ptr(), b.as_ptr(), r1.as_mut_ptr());
+            e2(a.as_ptr(), b.as_ptr(), r2.as_mut_ptr());
+            assert_eq!(r1, r2, "{name} a={a:?} b={b:?}");
+        }
+    }
+    eprintln!("{n} int forms fused and equal to their halves");
 }

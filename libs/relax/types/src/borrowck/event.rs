@@ -107,7 +107,7 @@ pub fn user_types_wanted(prog: &Program, krate: u32) -> bool {
     if let Some(forced) = FORCE_USER_TYPES.with(|f| f.get()) { return forced; }
     let mut cache = USER_TYPES.lock().unwrap_or_else(|e| e.into_inner());
     if cache.len() <= krate as usize {
-        // the decisions are per crate id, which a settle swap keeps: the buffer is not a generation's
+        // the decisions are per crate id, process state: kept heap
         let _k = crate::zone_alloc::kept();
         cache.resize(krate as usize + 1, 0);
     }

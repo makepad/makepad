@@ -11,8 +11,10 @@ fn std_allocations_escape_and_free_on_another_thread() {
     let before = zone_alloc::burst_stats();
     let mut heap = vec![37_u8; 8192];
     let (escaped, committed) = {
-        let _scope = zone_alloc::scratch(&runtime);
-        heap.reserve_exact(1 << 20); // heap -> arena
+        // the job arena takes compiler-phase blocks; a system block grown in it stays in the heap
+        let _phase = zone_alloc::compiler();
+        let _scope = zone_alloc::job("test", runtime.burst_arena);
+        heap.reserve_exact(1 << 20);
         let mut values = vec![0_u64; 4096];
         for (i, v) in values.iter_mut().enumerate() {
             *v = i as u64;

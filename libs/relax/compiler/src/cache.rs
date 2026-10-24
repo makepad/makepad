@@ -46,7 +46,6 @@ mod items;
 mod demand;
 mod front_run;
 pub use front_run::FrontSink;
-pub(crate) use front_run::ahead_end;
 #[cfg(test)]
 use front_run::commit_runs;
 
@@ -155,54 +154,16 @@ static FRONT_STORES: relax_session::sync::Mutex<Vec<std::sync::Arc<Store>>> = re
 static FRONT_USED: relax_session::sync::Mutex<Vec<(std::sync::Arc<Store>, usize)>> = relax_session::sync::Mutex::new(Vec::new());
 
 /// Pins a store a front image or collected image was mapped from (FRONT_STORES), and with `used`
-/// queues that entry's background checksum (FRONT_USED). A restore ahead of the swap's pause
-/// defers it to after the swap's take (relax_session::phase::defer).
+/// queues that entry's background checksum (FRONT_USED).
 fn pin_front(st: &std::sync::Arc<Store>, used: Option<usize>) {
-    let st = st.clone();
-    relax_session::phase::defer(move || {
-        let mut keep = FRONT_STORES.lock().unwrap_or_else(|x| x.into_inner());
-        if !keep.iter().any(|k| std::sync::Arc::ptr_eq(k, &st)) {
-            keep.push(st.clone());
-        }
-        drop(keep);
-        if let Some(i) = used {
-            FRONT_USED.lock().unwrap_or_else(|x| x.into_inner()).push((st, i));
-        }
-    });
-}
-
-pub(crate) struct ZoneTaken {
-    front_run: front_run::ZoneTaken,
-    stores: Vec<std::sync::Arc<Store>>,
-    used: Vec<(std::sync::Arc<Store>, usize)>,
-    paths: Option<HashMap<PathBuf, std::sync::Weak<relax_session::sync::Mutex<()>>>>,
-}
-
-pub(crate) fn zone_take() -> ZoneTaken {
-    let front_run = front_run::zone_take();
-    // Retain the Arc owners too: their mappings may still back kept image views.
-    let mut stores = FRONT_STORES.lock().unwrap_or_else(|e| e.into_inner());
-    let mut used = FRONT_USED.lock().unwrap_or_else(|e| e.into_inner());
-    let mut paths = PATHS.lock().unwrap_or_else(|e| e.into_inner());
-    let taken = ZoneTaken {
-        front_run,
-        stores: std::mem::take(&mut *stores),
-        used: std::mem::take(&mut *used),
-        paths: std::mem::take(&mut *paths),
-    };
-    #[cfg(test)]
-    { assert!(stores.is_empty()); assert!(used.is_empty()); assert!(paths.is_none()); }
-    taken
-}
-
-pub(crate) fn zone_put_back(taken: ZoneTaken) {
-    front_run::zone_put_back(taken.front_run);
-    let mut stores = FRONT_STORES.lock().unwrap_or_else(|e| e.into_inner());
-    std::mem::forget(std::mem::replace(&mut *stores, taken.stores));
-    let mut used = FRONT_USED.lock().unwrap_or_else(|e| e.into_inner());
-    std::mem::forget(std::mem::replace(&mut *used, taken.used));
-    let mut paths = PATHS.lock().unwrap_or_else(|e| e.into_inner());
-    std::mem::forget(std::mem::replace(&mut *paths, taken.paths));
+    let mut keep = FRONT_STORES.lock().unwrap_or_else(|x| x.into_inner());
+    if !keep.iter().any(|k| std::sync::Arc::ptr_eq(k, st)) {
+        keep.push(st.clone());
+    }
+    drop(keep);
+    if let Some(i) = used {
+        FRONT_USED.lock().unwrap_or_else(|x| x.into_inner()).push((st.clone(), i));
+    }
 }
 
 /// Checksums the front images this run mapped, on a low-priority background thread (after the
@@ -2870,14 +2831,12 @@ impl Cache {
         h.finish128()
     }
 
-    /// Reads the newest startup manifest of the program rooted at crate `root` (and its
-    /// prelinked startup image, if it has one).
-    /// The settle swap's new cache (opened as a warm start opens it, from the same stores) takes
+    /// The settle rebuild's new cache (opened as a warm start opens it, from the same stores) takes
     /// over what the old one learned about this process: which data objects and slots were
     /// linked from which entries (a second link of the same data object must find its address,
     /// not place a copy), the entries it rejected, the counters, and that the collected program
-    /// was committed (the exit does not encode it again). The old cache had nothing pending
-    /// (the swap spilled it).
+    /// was committed (the exit does not encode it again). The old cache's recorded entries were
+    /// written to the stores before this one opened them (`spill_take`).
     pub(crate) fn inherit_run_state(&mut self, old: &Cache) {
         self.data_addr = old.data_addr.clone();
         self.const_copy = old.const_copy.clone();
@@ -2893,11 +2852,8 @@ impl Cache {
         self.stats = old.stats.clone();
     }
 
-    /// Pending entries and verdicts: the swap leaves none behind.
-    pub(crate) fn swap_pending(&self) -> (usize, usize) {
-        (self.pending.len(), 0)
-    }
-
+    /// Reads the newest startup manifest of the program rooted at crate `root` (and its
+    /// prelinked startup image, if it has one).
     pub fn load_manifest(&mut self, root: u32) {
         self.manifest_root = Some(root);
         let Some(key) = self.manifest_key(root) else { return };
@@ -3191,7 +3147,7 @@ impl Spill {
             entries.insert(0, NewEntry { key: LEDGER_KEY, kind: KIND_LEDGER, payload: e.0 }.into());
             append_store(&path, entries, stale, &self.marks)?;
             if !code.is_empty() {
-                // the list outlives the compiler zone (a settle swap destroys it): kept heap
+                // process state: kept heap
                 let mut w = WRITTEN.lock().unwrap_or_else(|e| e.into_inner());
                 crate::zone_alloc::kept_with(|| w.push((self.dir.clone(), path.clone(), code.clone())));
             }
@@ -5469,7 +5425,7 @@ mod cold_tests {
         assert!(matches!(cache.encode_collected(&unit.prog, &unit.tcx, &|| false), CollectedRecord::Current));
 
         let images = FrontImages { dir: store.clone(), ..Default::default() };
-        let (saved, saved_tcx, proof) = images.restore_collected(sess, &pre, None).expect("restore only the boot");
+        let (saved, saved_tcx, proof) = images.restore_collected(sess, &pre).expect("restore only the boot");
         assert_eq!(saved.crates.len(), pre.len());
         assert_eq!(saved.defs.len(), boot_defs);
         assert_eq!(saved.file_paths, boot_files);
@@ -5561,21 +5517,21 @@ mod cold_tests {
             cache.record_collected(&unit.prog, &unit.tcx).expect("record collected graph");
         };
         record(&images);
-        let (whole, _, proof) = images.restore_collected(sess, &pre, None).expect("unchanged sources restore");
+        let (whole, _, proof) = images.restore_collected(sess, &pre).expect("unchanged sources restore");
         assert_eq!(whole.crates.len(), names.len());
         assert!(proof.is_some());
         // a body edit of the top crate: everything below it stays, `top` and the clean `late`
         // after it are collected again
         std::fs::write(&pre[5].root, "pub fn top() -> u32 { mid::mid() + 2 }").unwrap();
-        let (kept, _, proof) = images.restore_collected(sess, &pre, None).expect("prefix restore");
+        let (kept, _, proof) = images.restore_collected(sess, &pre).expect("prefix restore");
         assert_eq!(kept.crates.len(), 5, "crates below the edited one");
         assert!(proof.is_none(), "a partial restore has no whole-graph proof");
         // the next run after recording the edited sources restores everything again
         record(&images);
-        assert_eq!(images.restore_collected(sess, &pre, None).unwrap().0.crates.len(), names.len());
+        assert_eq!(images.restore_collected(sess, &pre).unwrap().0.crates.len(), names.len());
         // a signature change in a lower crate: it and everything above it are collected again
         std::fs::write(&pre[3].root, "pub fn value() -> u64 { 7 }").unwrap();
-        let (kept, _, _) = images.restore_collected(sess, &pre, None).expect("prefix restore");
+        let (kept, _, _) = images.restore_collected(sess, &pre).expect("prefix restore");
         assert_eq!(kept.crates.len(), 3, "only the crates below the changed one");
         std::fs::remove_dir_all(dir).unwrap();
     }

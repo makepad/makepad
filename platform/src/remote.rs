@@ -148,6 +148,7 @@ mod imp {
         match r.key {
             "status" => route_status(p),
             "gamepads" => reply_to_answer(ask(Cmd::Gamepads, ACTIVITY_WAIT_SECS)),
+            "focus" => reply_to_answer(ask(Cmd::Focus, 4)),
             "activity" => reply_to_answer(ask(Cmd::Activity, ACTIVITY_WAIT_SECS)),
             "mouse" => route_mouse(p, None),
             "click" => route_mouse(p, Some("click")),
@@ -1886,6 +1887,34 @@ mod imp {
         let user_seq = cx.remote_activity.user_seq();
         let _origin = super::remote_input_scope(cx);
         match request.cmd {
+            Cmd::Focus(tx) => {
+                // The key focus as `snap` reports rects (window-local) plus the innermost widget
+                // whose rect holds it, and the window the platform last saw focused.
+                let area = cx.key_focus();
+                let key = if area.is_empty() { "null".to_string() } else {
+                    // area rects are window-local; snapshot rows have the window position folded in
+                    let rect = area.rect(cx);
+                    let window = cx.get_window_id_of(&area);
+                    let index = window.map(|id| id.id()).unwrap_or(0);
+                    let origin = window.map(|id| cx.windows[id].window_geom.position).unwrap_or_default();
+                    let center = rect.center();
+                    let path = snapshot_rows(cx).into_iter()
+                        .filter(|(w, _)| w.visible && w.window_index == index && w.width > 0 && w.height > 0)
+                        .filter(|(w, _)| {
+                            let (x, y) = (w.x as f64 - origin.x, w.y as f64 - origin.y);
+                            center.x >= x && center.y >= y && center.x <= x + w.width as f64 && center.y <= y + w.height as f64
+                        })
+                        .min_by_key(|(w, _)| w.width * w.height)
+                        .and_then(|(_, p)| p);
+                    format!("{{\"r\":[{},{},{},{}],\"w\":{index},\"p\":{}}}", num(rect.pos.x), num(rect.pos.y),
+                        num(rect.size.x), num(rect.size.y), path.map(|p| json_str(&p)).unwrap_or_else(|| "null".into()))
+                };
+                #[cfg(not(target_arch = "wasm32"))]
+                let window = cx.hal.focused.map(|w| w.id().to_string()).unwrap_or_else(|| "null".into());
+                #[cfg(target_arch = "wasm32")]
+                let window = "null";
+                let _ = tx.send(Reply::Text(format!("{{\"key\":{key},\"window\":{window}}}")));
+            }
             Cmd::Gamepads(tx) => {
                 use crate::game_input::CxGameInputApi;
                 use crate::makepad_micro_serde::SerJson;

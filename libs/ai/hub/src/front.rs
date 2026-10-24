@@ -32,6 +32,9 @@ const HEAD_DEADLINE: Duration = Duration::from_secs(15);
 const TLS_TIMEOUT: Duration = Duration::from_secs(10);
 const IDLE: Duration = Duration::from_secs(10 * 60);
 const POLL: Duration = Duration::from_millis(5);
+/// The poll while bytes moved within [`BUSY`].
+const BUSY_POLL: Duration = Duration::from_millis(1);
+const BUSY: Duration = Duration::from_millis(250);
 const MAX_FAILURES: usize = 5;
 const FAILURE_WINDOW: Duration = Duration::from_secs(10 * 60);
 const BAN: Duration = Duration::from_secs(15 * 60);
@@ -301,6 +304,9 @@ impl ParsedHead {
 }
 
 fn serve(config: &FrontConfig, tcp: TcpStream, peer: SocketAddr) -> Result<(), Refusal> {
+    // Responses go out as the inner server writes them (a websocket frame's
+    // header and payload are separate writes): no Nagle wait between them.
+    let _ = tcp.set_nodelay(true);
     let _ = tcp.set_read_timeout(Some(TLS_TIMEOUT));
     let _ = tcp.set_write_timeout(Some(TLS_TIMEOUT));
     // A connect-and-close probe is not a credential guess.
@@ -363,8 +369,12 @@ fn serve(config: &FrontConfig, tcp: TcpStream, peer: SocketAddr) -> Result<(), R
 /// nothing moves for [`IDLE`]. One thread: the TLS object cannot be split,
 /// so both directions are polled with short timeouts.
 fn pump(tls: &mut TlsStream, inner: &mut TcpStream) {
-    let _ = tls.set_read_timeout(Some(POLL));
-    let _ = inner.set_read_timeout(Some(POLL));
+    // Both sides are polled with timed reads, so a byte waits up to one poll
+    // on each side: 1 ms while the connection is busy (a kernel stream
+    // pushing tiles, a submit), POLL once it has been quiet for a moment.
+    let mut poll = POLL;
+    let _ = tls.set_read_timeout(Some(poll));
+    let _ = inner.set_read_timeout(Some(poll));
     let mut a = vec![0u8; 64 * 1024];
     let mut b = vec![0u8; 64 * 1024];
     let mut last = Instant::now();
@@ -402,6 +412,12 @@ fn pump(tls: &mut TlsStream, inner: &mut TcpStream) {
             last = Instant::now();
         } else if last.elapsed() > IDLE {
             return;
+        }
+        let want = if last.elapsed() < BUSY { BUSY_POLL } else { POLL };
+        if want != poll {
+            poll = want;
+            let _ = tls.set_read_timeout(Some(poll));
+            let _ = inner.set_read_timeout(Some(poll));
         }
     }
 }

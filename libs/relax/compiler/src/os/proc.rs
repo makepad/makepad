@@ -26,7 +26,7 @@ static ARGS: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
 /// host library started from a loader (Android: bionic hands a cdylib's std no argv, the APK's
 /// executable passes its own).
 pub fn set_args(args: Vec<Vec<u8>>) {
-    // process state: rebuilt in the kept heap (the settle swap destroys the compiler arena's generation)
+    // process state: rebuilt in the kept heap
     let args = crate::zone_alloc::kept_with(|| args.clone());
     let _ = ARGS.set(args);
 }
@@ -61,6 +61,39 @@ impl Drop for KeepLastError {
 /// what dladdr reports for a shared object (exported names only).
 pub fn symbol_at(pc: u64) -> Option<(String, u64, String)> {
     symbol_at_imp(pc)
+}
+
+/// From a fault handler (no allocation): the image holding `a` (its file name's last part and
+/// load base) and the nearest symbol dladdr knows (empty when none, with its address). Unix:
+/// dladdr, which the handler calls only on the way to the end of the process. Windows: None.
+pub fn image_at_raw(a: u64) -> Option<(&'static [u8], u64, &'static [u8], u64)> {
+    #[cfg(unix)]
+    {
+        #[repr(C)]
+        struct DlInfo {
+            fname: *const std::ffi::c_char,
+            fbase: *mut u8,
+            sname: *const std::ffi::c_char,
+            saddr: *mut u8,
+        }
+        extern "C" {
+            fn dladdr(addr: *const u8, info: *mut DlInfo) -> i32;
+        }
+        let mut info = DlInfo { fname: std::ptr::null(), fbase: std::ptr::null_mut(), sname: std::ptr::null(), saddr: std::ptr::null_mut() };
+        if unsafe { dladdr(a as *const u8, &mut info) } == 0 || info.fname.is_null() {
+            return None;
+        }
+        // SAFETY: dladdr's strings belong to the loaded image (they live as long as it stays loaded)
+        let file: &'static [u8] = unsafe { std::ffi::CStr::from_ptr(info.fname) }.to_bytes();
+        let base = file.iter().rposition(|&c| c == b'/').map_or(file, |k| &file[k + 1..]);
+        let sym: &'static [u8] = if info.sname.is_null() { b"" } else { unsafe { std::ffi::CStr::from_ptr(info.sname) }.to_bytes() };
+        Some((base, info.fbase as u64, sym, info.saddr as u64))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = a;
+        None
+    }
 }
 
 #[cfg(unix)]
@@ -353,7 +386,7 @@ mod imp {
     static POOL: relax_session::sync::Mutex<Option<Pool>> = relax_session::sync::Mutex::new(None);
 
     pub fn set_trampolines(base: u64, table: *mut u64, count: usize) {
-        // process state: kept heap (the settle swap destroys the compiler zone)
+        // process state: kept heap
         let _k = crate::zone_alloc::kept();
         *POOL.lock().unwrap_or_else(|e| e.into_inner()) = Some(Pool { base, table, count, used: std::collections::HashMap::new() });
     }
@@ -368,8 +401,7 @@ mod imp {
             return a;
         }
         // called while compiling (c_callable_hook): the map is process state, so its growth goes
-        // to the kept heap -- in the compiler zone it was gone after the settle swap and the
-        // first new C callback (a touch handler on the phone) faulted
+        // to the kept heap
         let _k = crate::zone_alloc::kept();
         let i = pool.used.len();
         assert!(i < pool.count, "the host library's {} C-callable stubs are all in use", pool.count);

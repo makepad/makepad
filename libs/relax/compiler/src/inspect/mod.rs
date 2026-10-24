@@ -52,16 +52,6 @@ pub mod cfi {
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use relax_session::sync::Mutex;
 
-/// The kept-state scan (zone_scan.rs, MAKEPAD_RUN_ZONE_CHECK=1) of inspect's records that
-/// outlive the compiler arena: instrumented and probed code calls into them after a settle swap.
-pub(crate) fn scan_kept(a: &mut crate::jit::zone_scan::Acc) {
-    instrument::scan_kept(a);
-    patches::scan_kept(a);
-    probes::scan_kept(a);
-    codever::scan_kept(a);
-    remarks::scan_kept(a);
-    watch::scan_kept(a);
-}
 
 /// The inspect thread runs (a socket is listening).
 static STARTED: AtomicBool = AtomicBool::new(false);
@@ -155,7 +145,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("cache", "", "where this session's code came from: the warm cache's lookups (hits; misses by reason: no entry for the key, invalidated, did not link, not storable), the startup image (placed / stale / failed), stores opened, entries recorded, and the installed code by tier and origin (fresh / warm-cache / warm-image / live-patch / inspect)"),
     ("code", "[n=<top>]", "JIT code growth (code is append-only, never freed): bytes and installs by source (first, tier-up, re-optimize, patch, module) and the fns with the most versions"),
     ("versions", "<fn|file:line>", "every code version of the fn: per slot its installed, replaced and retired code (tier baseline/O1/O2/O3/O3-guarded/instrumented, origin fresh/warm-cache/warm-image/live-patch/inspect, address, patch generation, cache key and build), which threads run in which, and the slots whose code holds an inlined copy of it"),
-    ("why-tier", "<fn|file:line|@slot>", "why a fn is (not) at O3, answer first: per slot its count stub (armed / retired after slow windows, re-arms), calls left in the count window, the loop counter, count windows by code version, the O3 queue (position, reason, age), the counted (PGO) window, the verdict, O3 builds installed / dropped / refused with reasons, retiers left, pins, and its last tier-up decisions"),
+    ("why-tier", "<fn|file:line|@slot>", "why a fn is (not) at O3, answer first: per slot its count stub (armed, call weight, re-arms), its decayed cost against the threshold, the loop counter, cost checks by code version, the O3 queue (position, reason, age), the counted (PGO) window, the verdict, O3 builds installed / dropped / refused with reasons, retiers left, pins, and its last tier-up decisions"),
     ("tier", "<fn|file:line> o1|o3|auto [fresh=1] | (none: the pins)", "pins the fn and every slot that inlined it to a tier in the live process (A/B a suspected miscompile): o1 = O1 code generation, kept until `tier <fn> auto`; o3 = the o1 pin goes and they get O3 builds now (fresh=1: rebuild O3 code even where it runs, e.g. warm-cache code)"),
     ("break", "<fn>|<file>:<line> [tier=o1]", "breakpoint: a hit parks the thread at the call (stack intact) and raises a `break` event K<n>"),
     ("restartable", "<fn>", "a panic through the fn can be resumed with `restart` (the fn runs again from its entry with its original arguments) or `return <value>` (the call returns the value; integer-class returns)"),
@@ -888,17 +878,25 @@ pub fn wait_text(w: &crate::waits::Wait, list: &[threads::Thread]) -> String {
     }
 }
 
+/// The program's main lane: the thread running the program's `main` (`MAIN_TID`). Under a
+/// domain that is not the process's first thread, which then only runs makepad run's / the HAL's
+/// event pump; the process thread counts as main only while no program main is known.
+pub(crate) fn is_program_main(t: &threads::Thread) -> bool {
+    let main = crate::jit::MAIN_TID.load(Relaxed);
+    if main != 0 { t.handle == main } else { t.os_id == std::process::id() as u64 }
+}
+
 pub(crate) fn pick_threads(sel: &str) -> Box<dyn Fn(&threads::Thread) -> bool> {
     let sel = sel.to_string();
     Box::new(move |t: &threads::Thread| match sel.as_str() {
         "all" | "" => true,
-        "main" => t.handle != 0 && t.handle == crate::jit::MAIN_TID.load(Relaxed) || t.os_id == std::process::id() as u64,
+        "main" => is_program_main(t),
         "owner" => t.handle != 0 && t.handle == crate::owner::owner_tid(),
         s => tid_of(s).is_some_and(|id| id == t.os_id) || t.name.starts_with(s),
     })
 }
 
-fn cmd_stacks(req: &Req, out: &mut Out) {
+pub(crate) fn cmd_stacks(req: &Req, out: &mut Out) {
     let sel = req.get("thread").or(req.pos.first().map(String::as_str)).unwrap_or("all");
     let depth = req.num("depth", 12) as usize;
     let caps = match capture_all(&*pick_threads(sel)) {

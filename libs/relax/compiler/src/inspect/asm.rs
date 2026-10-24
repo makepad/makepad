@@ -369,6 +369,10 @@ fn our_sides(q: &str, max: usize) -> Result<(Vec<(u32, Side)>, Vec<String>), Str
                 if holder && b.state != "installed" {
                     continue;
                 }
+                // invalidated code is inaccessible (invalid.rs): not read
+                if crate::stale::overlaps(b.start, b.start + b.len as u64) {
+                    continue;
+                }
                 let label = format!("ours {} {}{}{}", kind.tier_name(), kind.origin_name(), if b.state == "installed" { String::new() } else { format!(" ({})", b.state) }, if holder { " (holds it inlined)" } else { "" });
                 let code = unsafe { std::slice::from_raw_parts(b.start as *const u8, b.len as usize) };
                 let mut insns = dis::decode(Arch::host(), code, b.start);
@@ -485,7 +489,7 @@ fn our_sides(q: &str, max: usize) -> Result<(Vec<(u32, Side)>, Vec<String>), Str
 /// Where a small jump stub at `t` (JIT code: a veneer, a far-call stub) goes: an indirect jump
 /// through a literal the stub loads. None: not such a stub.
 fn follow_stub(t: u64) -> Option<u64> {
-    if !crate::jit::in_jit_code(t) || !crate::jit::in_jit_code(t + 16) {
+    if !crate::jit::in_jit_code(t) || !crate::jit::in_jit_code(t + 16) || crate::stale::overlaps(t, t + 16) {
         return None;
     }
     let code = unsafe { std::slice::from_raw_parts(t as *const u8, 16) };
@@ -1421,7 +1425,7 @@ fn cmd_top(req: &Req, out: &mut Out) {
     };
     let instr_of = |id: u32| -> usize {
         let (_, _, st, len) = &slots[&id];
-        if *len == 0 {
+        if *len == 0 || crate::stale::overlaps(*st, *st + *len as u64) {
             return 0;
         }
         let code = unsafe { std::slice::from_raw_parts(*st as *const u8, *len as usize) };

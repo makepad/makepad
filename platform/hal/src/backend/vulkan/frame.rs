@@ -222,7 +222,10 @@ impl Vulkan {
                         // before the shell's host has released it.
                         let scanout = if self.windows.source.is_target(&image) { Ok(image.clone()) } else { self.scanout_image(key, &image, &mut batch) };
                         match scanout {
-                            Ok(image) => batch.scanout = Some((presenter, image, Self::token(s), target, key.1, key.0, packet.frame)),
+                            Ok(image) => {
+                                presenter.scheduled(key.0, key.1);
+                                batch.scanout = Some((presenter, image, Self::token(s), target, key.1, key.0, packet.frame));
+                            }
                             Err(e) => { eprintln!("[hal-vulkan] scanout target: {e}"); s.bad(); }
                         }
                     } else { match self.windows.swapchain(&self.dev, key, [image.desc.w, image.desc.h], self.queue.as_ref().unwrap()) {

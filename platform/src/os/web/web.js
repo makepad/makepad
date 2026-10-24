@@ -788,6 +788,221 @@ if (typeof window !== "undefined") {
     window.addEventListener("pageshow", () => makepad_crash_reporter.set_page_hiding(false));
 }
 
+// ---- audio output without threads
+// A module whose memory is not shared runs no wasm on the audio thread. The UI thread renders
+// the app's audio ahead of the device instead (MakepadAudioFifoOutput.pump, from a timer and
+// from every animation frame, never inside another wasm call) into a FIFO that a worklet
+// without wasm plays (makepad_audio_fifo_worklet). Each block carries when it will be heard,
+// so the app can show what is heard rather than what it rendered last. The export's trace
+// host (wasm-export trace/src/audio.rs) runs the same pump with these constants.
+
+// Frames per render call: the worklet's render quantum.
+export const MAKEPAD_AUDIO_BLOCK_FRAMES = 128;
+// How far ahead of the worklet the UI thread keeps the FIFO (seconds): longer than the
+// main thread's usual stalls between pumps, short enough that a scratch answers the hand.
+export const MAKEPAD_AUDIO_FIFO_LEAD_S = 0.040;
+// The pump's timer (seconds); every animation frame pumps as well.
+export const MAKEPAD_AUDIO_PUMP_INTERVAL_S = 0.010;
+
+// The worklet, run in the AudioWorkletGlobalScope from this function's own source text
+// (makepad_audio_fifo_worklet_url): it uses nothing from outside the function. It plays the
+// stereo blocks the port sends, in order; with too few queued it plays silence for the rest
+// and counts an underrun (once the first block came). It reports what it has played:
+// `consumed` stream frames, of which the next plays at context frame `frame`.
+export function makepad_audio_fifo_worklet() {
+    // Once fed, a report every 8 render quanta, and when a run of underruns starts.
+    const REPORT_QUANTA = 8;
+    class MakepadAudioFifo extends AudioWorkletProcessor {
+        constructor() {
+            super();
+            this.chunks = [];
+            this.read = 0;
+            this.consumed = 0;
+            this.fed = false;
+            this.starved = false;
+            this.underruns = 0;
+            this.underrun_frames = 0;
+            this.quanta = 0;
+            this.stopped = false;
+            this.port.onmessage = e => {
+                const message = e.data;
+                if (message.stop) {
+                    this.stopped = true;
+                    return;
+                }
+                this.chunks.push(message);
+                this.fed = true;
+            };
+        }
+
+        process(_inputs, outputs) {
+            const out = outputs[0];
+            const frames = out[0].length;
+            let at = 0;
+            while (at < frames && this.chunks.length > 0) {
+                const chunk = this.chunks[0];
+                const take = Math.min(frames - at, chunk.left.length - this.read);
+                for (let c = 0; c < out.length; c++) {
+                    if (c < 2) {
+                        const from = c === 0 ? chunk.left : chunk.right;
+                        out[c].set(from.subarray(this.read, this.read + take), at);
+                    } else {
+                        out[c].fill(0, at, at + take);
+                    }
+                }
+                at += take;
+                this.read += take;
+                if (this.read === chunk.left.length) {
+                    this.chunks.shift();
+                    this.read = 0;
+                }
+            }
+            this.consumed += at;
+            const short = frames - at;
+            let starts_starving = false;
+            if (short > 0) {
+                for (let c = 0; c < out.length; c++) {
+                    out[c].fill(0, at);
+                }
+                if (this.fed) {
+                    starts_starving = !this.starved;
+                    this.underruns += 1;
+                    this.underrun_frames += short;
+                }
+            }
+            this.starved = short > 0 && this.fed;
+            this.quanta += 1;
+            if (this.fed && (starts_starving || this.quanta % REPORT_QUANTA === 0)) {
+                this.port.postMessage({
+                    consumed: this.consumed,
+                    frame: currentFrame + frames,
+                    underruns: this.underruns,
+                    underrun_frames: this.underrun_frames,
+                });
+            }
+            return !this.stopped;
+        }
+    }
+    registerProcessor("makepad-audio-fifo", MakepadAudioFifo);
+}
+
+let makepad_audio_fifo_worklet_blob_url = null;
+
+function makepad_audio_fifo_worklet_url() {
+    if (makepad_audio_fifo_worklet_blob_url === null) {
+        const source = `(${makepad_audio_fifo_worklet.toString()})();\n`;
+        makepad_audio_fifo_worklet_blob_url = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
+    }
+    return makepad_audio_fifo_worklet_blob_url;
+}
+
+// The UI thread's side of the FIFO. `render(frames, stream_frame, heard_at)` renders one
+// block of the app's audio and returns its planar stereo samples (2 * frames floats, valid
+// until the next call): `stream_frame` is the block's first frame on this output's stream,
+// `heard_at` when that frame will be heard (seconds of performance.now()).
+export class MakepadAudioFifoOutput {
+    constructor(context, port, render) {
+        this.context = context;
+        this.port = port;
+        this.render = render;
+        this.sample_rate = context.sampleRate;
+        this.lead_frames = Math.ceil(MAKEPAD_AUDIO_FIFO_LEAD_S * this.sample_rate / MAKEPAD_AUDIO_BLOCK_FRAMES) * MAKEPAD_AUDIO_BLOCK_FRAMES;
+        this.written = 0;
+        this.blocks = 0;
+        this.report = { consumed: 0, frame: 0, underruns: 0, underrun_frames: 0 };
+        port.onmessage = e => {
+            const report = e.data;
+            if (report && typeof report.consumed === "number") {
+                this.report = report;
+            }
+        };
+    }
+
+    // The stream frames the worklet has played by now: its last report moved on by the
+    // context's clock since, never past what was sent (a FIFO run dry stops there).
+    consumed() {
+        const report = this.report;
+        const now_frame = this.context.currentTime * this.sample_rate;
+        return Math.min(this.written, Math.max(report.consumed, report.consumed + now_frame - report.frame));
+    }
+
+    // The output's clock: the context's time `context_time` is heard at this performance.now()
+    // (milliseconds). The context's own output timestamp when it has one, else its latencies.
+    heard_ms(context_time) {
+        const context = this.context;
+        const stamp = typeof context.getOutputTimestamp === "function" ? context.getOutputTimestamp() : null;
+        if (stamp && stamp.performanceTime > 0) {
+            return stamp.performanceTime + (context_time - stamp.contextTime) * 1000;
+        }
+        const latency = (context.baseLatency || 0) + (context.outputLatency || 0);
+        return performance.now() + (context_time - context.currentTime + latency) * 1000;
+    }
+
+    // The FIFO topped up to the lead with whole blocks, sent in one message. The number of
+    // blocks rendered; none while the context does not run (it would only grow stale).
+    pump() {
+        if (this.context.state !== "running") {
+            return 0;
+        }
+        if (this.written === 0) {
+            // The stream starts with its first block: the worklet plays it from the quantum
+            // after the one it renders now (the quanta before played silence, unfed).
+            this.report = { consumed: 0, frame: this.context.currentTime * this.sample_rate, underruns: 0, underrun_frames: 0 };
+        }
+        const consumed = this.consumed();
+        const need = this.lead_frames - (this.written - consumed);
+        if (need <= 0) {
+            return 0;
+        }
+        const block = MAKEPAD_AUDIO_BLOCK_FRAMES;
+        const blocks = Math.ceil(need / block);
+        const left = new Float32Array(blocks * block);
+        const right = new Float32Array(blocks * block);
+        // Stream frame `written` plays once what is queued before it has played.
+        const now_time = this.context.currentTime;
+        const heard_ms = this.heard_ms(now_time + (this.written - consumed) / this.sample_rate);
+        for (let b = 0; b < blocks; b++) {
+            const at = b * block;
+            const planes = this.render(block, this.written, (heard_ms + at / this.sample_rate * 1000) / 1000);
+            left.set(planes.subarray(0, block), at);
+            right.set(planes.subarray(block, 2 * block), at);
+            this.written += block;
+        }
+        this.blocks += blocks;
+        this.port.postMessage({ left, right }, [left.buffer, right.buffer]);
+        return blocks;
+    }
+
+    // The stream frame heard now (fractional; negative before the first is heard).
+    heard_frame() {
+        const now_time = this.context.currentTime;
+        const ahead_s = (this.heard_ms(now_time) - performance.now()) / 1000;
+        return this.consumed() - ahead_s * this.sample_rate;
+    }
+
+    stats() {
+        const consumed = this.consumed();
+        return {
+            sample_rate: this.sample_rate,
+            written: this.written,
+            consumed,
+            heard_frame: this.heard_frame(),
+            lead_frames: this.written - consumed,
+            blocks: this.blocks,
+            underruns: this.report.underruns,
+            underrun_frames: this.report.underrun_frames,
+        };
+    }
+
+    stop() {
+        this.port.onmessage = null;
+        try {
+            this.port.postMessage({ stop: true });
+        } catch (_error) {
+        }
+    }
+}
+
 export class WasmWebBrowser extends WasmBridge {
     constructor(wasm, dispatch, canvas) {
         super(wasm, dispatch);
@@ -867,6 +1082,8 @@ export class WasmWebBrowser extends WasmBridge {
         // @end midi
         this.audio_context = null;
         this.audio_worklet = null;
+        this.audio_fifo = null;
+        this.audio_pump_timer = null;
         this.audio_callback_started = false;
         this.audio_callback_watchdog = null;
         this.audio_startup_cancel = null;
@@ -927,6 +1144,7 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     shutdown_thread_runtime() {
+        // @section threads
         for (const [request_id, record] of this.workers) {
             record.closed = true;
             record.worker.terminate();
@@ -947,6 +1165,7 @@ export class WasmWebBrowser extends WasmBridge {
             this.exports.wasm_thread_dealloc_tls_and_stack(block.ptr, block.words);
         }
         this.thread_stack_arena.length = 0;
+        // @end threads
     }
 
     emit_app_lifecycle(state) {
@@ -1368,6 +1587,8 @@ export class WasmWebBrowser extends WasmBridge {
             if (this.xr !== undefined) {
                 return
             }
+            // Without threads the audio FIFO is topped up first: the frame's work may take long.
+            this.pump_audio();
             this.first_draw_this_frame = false;
             if (this.gpu_watchdog_hold()) {
                 // The GPU is still on earlier frames: no new work until it
@@ -1948,6 +2169,14 @@ export class WasmWebBrowser extends WasmBridge {
             this.audio_startup_cancel();
             this.audio_startup_cancel = null;
         }
+        if (this.audio_pump_timer !== null) {
+            clearInterval(this.audio_pump_timer);
+            this.audio_pump_timer = null;
+        }
+        if (this.audio_fifo) {
+            this.audio_fifo.stop();
+            this.audio_fifo = null;
+        }
         if (this.audio_worklet) {
             this.dispose_audio_worklet(this.audio_worklet);
             this.audio_worklet = null;
@@ -1970,6 +2199,46 @@ export class WasmWebBrowser extends WasmBridge {
 
     FromWasmStopAudioOutput(_args) {
         this.stop_audio_output();
+    }
+
+    // Without threads: the FIFO topped up (a timer and every animation frame call this,
+    // outside any other wasm call).
+    pump_audio() {
+        const fifo = this.audio_fifo;
+        if (!fifo || makepad_crash_reporter.is_wasm_dead()) {
+            return;
+        }
+        if (fifo.pump() > 0 && !this.audio_callback_started) {
+            this.audio_callback_started = true;
+            if (this.audio_callback_watchdog !== null) {
+                clearTimeout(this.audio_callback_watchdog);
+                this.audio_callback_watchdog = null;
+            }
+            console.log(
+                `web audio: fifo running state=${this.audio_context.state} sample_rate=${fifo.sample_rate} lead=${fifo.lead_frames} frames`,
+            );
+        }
+    }
+
+    // A page opened with ?test=1: the app's media clock and the output's state, for a
+    // test harness: `makepad_test_clock`, and the harness's own hooks where it defined
+    // them (`__bt_film_time`, `__bt_heard_time`, `__bt_audio`). Nothing is logged.
+    FromWasmTestClock(args) {
+        const audio = this.audio_fifo ? this.audio_fifo.stats() : null;
+        const clock = {
+            at: performance.now(),
+            film: args.film,
+            rendered: args.rendered,
+            speed: args.speed,
+            audio,
+            // The media time heard now: the rendered end, moved back by what is still
+            // between it and the ear.
+            heard: audio ? args.rendered - args.speed * (audio.written - audio.heard_frame) / audio.sample_rate : null,
+        };
+        globalThis.makepad_test_clock = clock;
+        globalThis.__bt_film_time?.(clock.film);
+        globalThis.__bt_heard_time?.(clock.heard);
+        globalThis.__bt_audio?.(clock.audio);
     }
 
     watch_audio_callback(audio_context) {
@@ -2077,16 +2346,22 @@ export class WasmWebBrowser extends WasmBridge {
             if (this.audio_context !== audio_context) {
                 throw new Error("audio startup cancelled");
             }
-            if (!this.wasm._has_thread_support) {
-                throw new Error("wasm threading support is unavailable");
+            // Shared memory: the wasm renders on the audio thread (audio_worklet.js). Else the
+            // UI thread renders ahead into a FIFO the worklet plays (makepad_audio_fifo_worklet).
+            const threaded = this.wasm._has_thread_support;
+            let thread_info = null;
+            if (threaded) {
+                // alloc_thread_stack(request_id, context_ptr, stack_size): the audio thread has no
+                // spawn request, and its context pointer is the wasm audio access — passing it as
+                // the request id left the worklet reading its audio state from address zero.
+                thread_info = this.alloc_thread_stack(0, args.context_ptr);
+                if (!thread_info) {
+                    throw new Error("thread stack allocation prerequisites are unavailable");
+                }
             }
-            // alloc_thread_stack(request_id, context_ptr, stack_size): the audio thread has no
-            // spawn request, and its context pointer is the wasm audio access — passing it as
-            // the request id left the worklet reading its audio state from address zero.
-            const thread_info = this.alloc_thread_stack(0, args.context_ptr);
-            if (!thread_info) {
-                throw new Error("thread stack allocation prerequisites are unavailable");
-            }
+            const module_url = threaded
+                ? (globalThis.makepad_audio_worklet_url || "./makepad_platform/audio_worklet.js")
+                : makepad_audio_fifo_worklet_url();
 
             // A stalled module load (seen: it never settles until a second context exists)
             // is not waited on forever — the deadline fails this attempt, and the retry below
@@ -2094,7 +2369,7 @@ export class WasmWebBrowser extends WasmBridge {
             let load_timeout = null;
             try {
                 await Promise.race([
-                    audio_context.audioWorklet.addModule(globalThis.makepad_audio_worklet_url || "./makepad_platform/audio_worklet.js", { credentials: 'omit' }),
+                    audio_context.audioWorklet.addModule(module_url, { credentials: 'omit' }),
                     new Promise((_, reject) => {
                         load_timeout = setTimeout(() => reject(new Error("worklet module load stalled")), 4000);
                     }),
@@ -2110,6 +2385,25 @@ export class WasmWebBrowser extends WasmBridge {
             }
             if (this.audio_context !== audio_context) {
                 throw new Error("audio startup cancelled");
+            }
+
+            if (!threaded) {
+                const audio_worklet = new AudioWorkletNode(audio_context, "makepad-audio-fifo", {
+                    numberOfInputs: 0,
+                    numberOfOutputs: 1,
+                    outputChannelCount: [2],
+                });
+                const fifo = new MakepadAudioFifoOutput(audio_context, audio_worklet.port, (frames, stream_frame, heard_at) => {
+                    const ptr = this.exports.wasm_audio_output_entrypoint(
+                        args.context_ptr, frames, 2, audio_context.sampleRate, stream_frame, heard_at,
+                    );
+                    return new Float32Array(this.memory.buffer, ptr, frames * 2);
+                });
+                audio_worklet.onprocessorerror = (err) => {
+                    console.error(`web audio: processor failed: ${err}`);
+                };
+                audio_worklet.connect(audio_context.destination);
+                return { audio_worklet, fifo };
             }
 
             const audio_worklet = new AudioWorkletNode(audio_context, 'audio-worklet', {
@@ -2156,15 +2450,23 @@ export class WasmWebBrowser extends WasmBridge {
             }
             audio_worklet.connect(audio_context.destination);
 
-            return audio_worklet;
+            return { audio_worklet, fifo: null };
         };
 
-        start_worklet().then(audio_worklet => {
+        start_worklet().then(({ audio_worklet, fifo }) => {
             if (this.audio_context !== audio_context) {
+                if (fifo) {
+                    fifo.stop();
+                }
                 this.dispose_audio_worklet(audio_worklet);
                 return;
             }
             this.audio_worklet = audio_worklet;
+            if (fifo) {
+                this.audio_fifo = fifo;
+                this.audio_pump_timer = setInterval(() => this.pump_audio(), MAKEPAD_AUDIO_PUMP_INTERVAL_S * 1000);
+                this.pump_audio();
+            }
             if (audio_context.state === "running") {
                 this.watch_audio_callback(audio_context);
             }
@@ -2300,6 +2602,7 @@ export class WasmWebBrowser extends WasmBridge {
     }
     // @end xr
 
+    // @section threads
     alloc_thread_stack(request_id, context_ptr, requested_stack_size) {
         if (!this.wasm._has_thread_support) {
             console.warn("alloc_thread_stack unavailable: wasm threading support is disabled");
@@ -2524,6 +2827,8 @@ export class WasmWebBrowser extends WasmBridge {
             this.exports.wasm_thread_failed_to_start(args.request_id);
         });
     }
+
+    // @end threads
 
     start_signal_poll() {
         this.poll_timer = window.setInterval(e => {
@@ -3692,8 +3997,9 @@ export class WasmWebBrowser extends WasmBridge {
 
         canvas.addEventListener('contextmenu', e => this.handlers.on_contextmenu(e))
 
-        function touch_to_wasm_wtouch(t, state) {
+        function touch_to_wasm_wtouch(t, state, time) {
             return {
+                time,
                 state,
                 x: t.pageX,
                 y: t.pageY,
@@ -3709,7 +4015,7 @@ export class WasmWebBrowser extends WasmBridge {
             let f = [];
 
             for (let i = 0; i < e.changedTouches.length; i++) {
-                f.push(touch_to_wasm_wtouch(e.changedTouches[i], state));
+                f.push(touch_to_wasm_wtouch(e.changedTouches[i], state, e.timeStamp / 1000.0));
             }
 
             touch_loop:
@@ -3720,7 +4026,7 @@ export class WasmWebBrowser extends WasmBridge {
                         continue touch_loop;
                     }
                 }
-                f.push(touch_to_wasm_wtouch(t, 0));
+                f.push(touch_to_wasm_wtouch(t, 0, e.timeStamp / 1000.0));
             }
             /*
             let dump = "";

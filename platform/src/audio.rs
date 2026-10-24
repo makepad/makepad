@@ -275,11 +275,32 @@ pub fn resume_step(result: i32) -> ResumeStep {
     }
 }
 
+/// When a block meets the device: for an output, when its first frame is heard.
 #[derive(Copy, Clone, Debug)]
 pub struct AudioTime {
+    /// The block's first frame on the device's sample counter.
     pub sample_time: f64,
+    /// When that frame is presented, on the backend's host clock: Apple's is the host
+    /// time base (`mach_absolute_time` ticks); the web's is nanoseconds of the page's
+    /// monotonic clock (`Cx::monotonic_now`, performance.now()).
     pub host_time: u64,
     pub rate_scalar: f64,
+}
+
+impl AudioTime {
+    /// Seconds from now until the block's first frame is presented, where this
+    /// build can read the backend's host clock (the web); `None` elsewhere. An
+    /// output's latency: what it renders now is heard this much later.
+    pub fn presented_in(&self) -> Option<f64> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            Some(self.host_time as f64 * 1e-9 - crate::Cx::monotonic_now())
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]

@@ -17,6 +17,11 @@ mod regions;
 pub mod arg_count;
 pub(crate) mod lifetime_resolve;
 pub(crate) mod resolve_bound_vars;
+
+/// Process-wide memos of the type layer, dropped by value (a settle rebuild: made again on demand).
+pub fn drop_process_memos() {
+    resolve_bound_vars::drop_trivial();
+}
 mod discriminant;
 pub use discriminant::{Discr, VariantDiscr};
 pub mod outlives;

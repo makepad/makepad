@@ -572,6 +572,17 @@ pub struct FromWasmStartAudioOutput {
 #[derive(FromWasm)]
 pub struct FromWasmStopAudioOutput {}
 
+/// A page opened with `?test=1`: an app's media clock for a test harness
+/// (`Cx::web_test_clock`). `film`: the time the picture shows; `rendered`:
+/// the media time at the end of the audio rendered so far; `speed`: media
+/// seconds per second there.
+#[derive(FromWasm)]
+pub struct FromWasmTestClock {
+    pub film: f64,
+    pub rendered: f64,
+    pub speed: f64,
+}
+
 // Video Playback API
 
 #[derive(FromWasm)]

@@ -578,8 +578,8 @@ fn add(hook: &str, src: Vec<u8>, mutate: bool, low: bool) -> Result<(Arc<Probe>,
                 },
             }
         }
-        // the probe's record and the edits that name it are kept state: they outlive the
-        // compiler arena (a settle swap destroys it; the probe code keeps calling in)
+        // the probe's record and the edits that name it are kept state (the program heap: the
+        // probe code keeps calling in)
         let _kept = crate::zone_alloc::kept();
         let (p, idx) = register_probe(id, &hook, emit_exprs(&src_text));
         super::patches::with_low_tier(low, || {
@@ -620,43 +620,6 @@ fn add(hook: &str, src: Vec<u8>, mutate: bool, low: bool) -> Result<(Arc<Probe>,
     r.unwrap_or_else(|| Err(format!("the owner did not take the request in 30 s ({})", crate::owner::serving_note())))
 }
 
-pub(crate) fn scan_kept(a: &mut crate::jit::zone_scan::Acc) {
-    let Ok(ps) = PROBES.try_lock() else { return };
-    a.field("inspect.probes");
-    a.vec(&ps);
-    for p in ps.iter() {
-        a.arc(p);
-        a.string(&p.hook);
-        if let Ok(s) = p.slots.try_lock() {
-            a.vec(&s);
-        }
-        a.vec(&p.emits);
-        for (_, names) in &p.emits {
-            a.vec(names);
-            for n in names {
-                a.string(n);
-            }
-        }
-        if let Ok(g) = p.agg.try_lock() {
-            let (x, y) = g.recent.as_slices();
-            if g.recent.capacity() > 0 {
-                a.ptr(if x.is_empty() { y.as_ptr() } else { x.as_ptr() });
-            }
-            for (_, _, v) in g.recent.iter() {
-                a.string(v);
-            }
-            a.map(&g.counts, |a, k, _| a.string(k));
-            a.map(&g.hists, |a, k, _| a.string(k));
-            a.map(&g.samples, |a, k, v| {
-                a.string(k);
-                a.vec(&v.1);
-                for x in &v.1 {
-                    a.string(x);
-                }
-            });
-        }
-    }
-}
 
 /// A new probe's record (its index): kept state whatever the caller's phase.
 fn register_probe(id: u32, hook: &str, emits: Vec<(u32, Vec<String>)>) -> (Arc<Probe>, u64) {

@@ -1057,6 +1057,7 @@ impl App {
         let id = self.next_id;
         self.next_id += 1;
         let cwd = self.launch_cwd(app_id, true);
+        let runner = self.apps.runner(app_id);
         let state = self.state_mut();
         let term_env = state.term_env.clone();
         let lines = self.line_sender();
@@ -1067,7 +1068,7 @@ impl App {
         let policy = if app.is_current() { BuildPolicy::IfMissing } else { BuildPolicy::Rebuild };
         let spawned = spawn_client(
             &pool, &cx.thread_spawner(), app, id, hub_port, cwd.as_ref(),
-            (app.id == "terminal").then_some(term_env.as_str()), &[], false, policy, lines,
+            (app.id == "terminal").then_some(term_env.as_str()), &[], false, policy, runner, lines,
         );
         match spawned {
             Ok(slot) => {
@@ -1246,6 +1247,7 @@ impl App {
         let id = self.next_id;
         self.next_id += 1;
         let cwd = self.launch_cwd(app_id, false);
+        let runner = self.apps.runner(app_id);
         let term_env = self.state_mut().term_env.clone();
         let lines = self.line_sender();
         let pool = cx.task_pool();
@@ -1260,6 +1262,7 @@ impl App {
             &[],
             true,
             BuildPolicy::IfMissing,
+            runner,
             lines,
         ) {
             Ok(slot) => {
@@ -2540,7 +2543,8 @@ impl App {
         // Like every app: from a checkout `cargo run` compiles what changed (the pane shows
         // cargo's progress); installed, a binary out of date is built first.
         let policy = if app.is_current() { BuildPolicy::IfMissing } else { BuildPolicy::Rebuild };
-        let spawned = spawn_client(&pool, &cx.thread_spawner(), &app, id, hub_port, None, None, &[], false, policy, lines);
+        let runner = self.apps.runner(&app.id);
+        let spawned = spawn_client(&pool, &cx.thread_spawner(), &app, id, hub_port, None, None, &[], false, policy, runner, lines);
         match spawned {
             Ok(mut slot) => {
                 slot.pane = true;
@@ -2716,8 +2720,19 @@ impl App {
                         Err(e) => ToolResult::refused(&call.call_id, format!("motion_trace: {}: {e}", path.display())),
                     }
                 }
+                "headset_status" => {
+                    #[cfg(target_os = "linux")]
+                    let text = self.headset_status_text();
+                    #[cfg(not(target_os = "linux"))]
+                    let text: Option<String> = None;
+                    match text {
+                        Some(text) => ToolResult::ok(&call.call_id, text, "headset"),
+                        None => ToolResult::refused(&call.call_id, "headset_status: no system controls here".to_string()),
+                    }
+                }
                 other => ToolResult::refused(&call.call_id, format!("wm has no tool `{other}`")),
             };
+            let Some(port) = self.wm_port.as_mut() else { return };
             port.reply(result);
         }
     }
@@ -5755,6 +5770,12 @@ fn wm_test_manifest() -> makepad_ai_services::wire::ServiceManifest {
             "motion_trace",
             "Write the motion recorder's last ~10 s of desk frames (every window's drawn and shown rect, source, tween, configured and presented size, slides, shelves) as JSONL; answers the path. For apps/wm/tools/frametrace/analyze.py.",
             r#"{"type":"object","properties":{"path":{"type":"string","description":"absolute .jsonl path; default a new file in the temp dir"}}}"#,
+            Risk::Read,
+        ))
+        .with_tool(ToolDef::new(
+            "headset_status",
+            "The BlackShark V3 Pro receiver and headset as the system worker last read them: link state, battery, settings, microphone gain, edits still waiting for the headset and problems. Linux only.",
+            r#"{"type":"object","properties":{}}"#,
             Risk::Read,
         ))
 }

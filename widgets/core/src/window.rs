@@ -40,10 +40,10 @@ pub enum WindowChrome {
     None = 4,
 }
 
-/// Hosted by the window manager (it starts its apps with `MAKEPAD_WM_CAPTION_CONTENT=1`).
+/// Hosted by the window manager: launched or adopted by it, or on a HAL shell that is its client
+/// (`makepad run`), see `hosted_by_window_manager`.
 fn under_wm() -> bool {
-    static WM: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *WM.get_or_init(|| std::env::var("MAKEPAD_WM_CAPTION_CONTENT").is_ok_and(|value| value == "1"))
+    makepad_platform::hosted_by_window_manager()
 }
 
 /// Where a window can be dragged from (`drag` on `Window`).
@@ -1156,7 +1156,7 @@ impl Window {
 
     fn sync_caption_bar_state(&mut self, cx: &mut Cx) {
         let has_content = self.caption_contains_app_content(cx);
-        if cx.in_makepad_studio() {
+        if cx.in_makepad_studio() || under_wm() {
             // Under the WM a makepad app draws its own caption, as on macOS: the WM draws
             // no title bar for it (`HostedChrome`), the app's caption carries the window
             // controls in the WM's style (traffic lights at the left in a macOS-like

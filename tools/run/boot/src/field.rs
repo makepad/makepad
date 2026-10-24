@@ -391,7 +391,7 @@ impl Field {
             }
         };
         let main_age = age(stats::MAIN_AT_MS.load(Relaxed), self.began_ms);
-        let swap_age = age(stats::SWAP_END_MS.load(Relaxed), self.began_ms);
+        let swap_age = age(stats::SETTLE_END_MS.load(Relaxed), self.began_ms);
         self.hud.main = main_age >= 0.0;
         self.hud.swapped = swap_age >= 0.0;
 
@@ -567,14 +567,13 @@ impl Field {
             let name = state.app.to_uppercase();
             fixed.push(line(text, &name, 10.0, margin, 30.0, 0.0, dim));
         }
-        // the item line: the swap's own numbers, then the parse, then the item being compiled
+        // the item line: the settle's own numbers, then the parse, then the item being compiled
         if !tiny {
             let s = if self.hud.swapped {
                 format!(
-                    "zone swap · {} chunks freed · rss {} → {} MB",
-                    stats::SWAP_CHUNKS.load(std::sync::atomic::Ordering::Relaxed),
-                    stats::SWAP_RSS_BEFORE_MB.load(std::sync::atomic::Ordering::Relaxed),
-                    stats::SWAP_RSS_AFTER_MB.load(std::sync::atomic::Ordering::Relaxed),
+                    "settled · rss {} → {} MB",
+                    stats::SETTLE_RSS_BEFORE_MB.load(std::sync::atomic::Ordering::Relaxed),
+                    stats::SETTLE_RSS_AFTER_MB.load(std::sync::atomic::Ordering::Relaxed),
                 )
             } else if !self.hud.main && matches!(state.phase, Phase::Resolve | Phase::Parse) {
                 format!(

@@ -114,6 +114,44 @@ pub fn unit_sizes(u: &crate::jit::Unit) -> Vec<(String, u64)> {
             spec += std::mem::size_of::<crate::jit::SpecCode>() as u64 + vbytes(&s.code) + vbytes(&s.map) + vbytes(&s.relocs);
         }
     }
+    // where the per-slot blocks live (compiler arena old / new chunks, burst, other heaps): a
+    // settle rebuild keeps the slots, so their cold-start blocks pin the cold chunks
+    {
+        let mut pl = [[0u64; 4]; 6];
+        let mut put = |k: usize, p: *const u8, n: usize| {
+            if n != 0 {
+                pl[k][crate::zone_alloc::placement(p)] += n as u64;
+            }
+        };
+        for f in u.fns.iter() {
+            put(0, f.name.as_ptr(), f.name.len());
+            if let Some(p) = f.pc_map.own_ptr() {
+                put(1, p, f.pc_map.bytes());
+            }
+            if let Some(h) = &f.history {
+                put(2, (&**h as *const crate::jit::SlotHistory).cast(), std::mem::size_of::<crate::jit::SlotHistory>());
+                for x in h.prev.iter() {
+                    if let Some(p) = x.2.own_ptr() { put(1, p, x.2.bytes()); }
+                }
+                for x in h.retired.iter() {
+                    if let Some(p) = x.2.own_ptr() { put(1, p, x.2.bytes()); }
+                }
+            }
+            if let Some(r) = &f.rir {
+                put(3, std::sync::Arc::as_ptr(r).cast(), rir_bytes(r) as usize);
+            }
+            if let Some(sc) = &f.spec {
+                put(4, sc.code.as_ptr(), sc.code.capacity());
+            }
+            if let crate::jit::FnKey::Inst(_, v) = &f.key {
+                put(5, v.as_ptr().cast(), v.capacity() * std::mem::size_of::<relax_types::types::TyId>());
+            }
+        }
+        for (k, name) in ["names", "pc maps", "histories", "RIR kept", "spec code", "keys (type args)"].iter().enumerate() {
+            let mb = |b: u64| b as f64 / 1048576.0;
+            out.push((format!("placement of slot {name}: compiler old {:.1} / compiler new {:.1} / burst {:.1} / other {:.1} MB", mb(pl[k][0]), mb(pl[k][1]), mb(pl[k][2]), mb(pl[k][3])), pl[k][0] + pl[k][1]));
+        }
+    }
     out.push((format!("slots ({}; FnEntry)", n_fns), n_fns * std::mem::size_of::<crate::jit::FnEntry>() as u64));
     out.push(("slot names".to_string(), names));
     out.push(("slot histories".to_string(), history));

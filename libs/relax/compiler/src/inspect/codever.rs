@@ -464,6 +464,11 @@ pub(crate) fn frame_fields(u: &Unit, c: &PcCode) -> (String, String, String, Str
     if super::patches::active(c.slot) {
         code.push_str(",\"inspect\":\"instrumented or pinned by makepad inspect (probes)\"");
     }
+    // code made inaccessible for good (invalid.rs): a frame in it parks at its next instruction
+    if let Some(r) = crate::stale::lookup(c.start) {
+        module.push_str(" INVALIDATED");
+        code.push_str(&format!(",\"invalidated\":{}", json_str(&r.reason)));
+    }
     let name = match &c.inlined {
         Some(i) => {
             code.push_str(&format!(",\"inlined_into\":{}", json_str(&short(&slot_name, 140))));
@@ -603,6 +608,7 @@ pub fn cmd_code(req: &Req, out: &mut Out) {
         by.push(format!("{} {:.2} MB / {} installs", crate::jit::GROW_NAMES[k], crate::jit::CODE_GROWTH[k].load(Ordering::Relaxed) as f64 / 1048576.0, crate::jit::CODE_INSTALLS[k].load(Ordering::Relaxed)));
     }
     out.line(&format!("code installed {:.2} MB (append-only, never freed): {}", total as f64 / 1048576.0, by.join(", ")));
+    out.line(&crate::invalid::stats_line());
     let up = crate::jit::current_unit();
     if up.is_null() {
         return;
@@ -762,16 +768,6 @@ pub fn cmd_versions(req: &Req, out: &mut Out) {
 static PINS: relax_session::sync::Mutex<Vec<(u32, String, &'static str, Vec<u32>)>> = relax_session::sync::Mutex::new(Vec::new());
 static NEXT_PIN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
-pub(crate) fn scan_kept(a: &mut crate::jit::zone_scan::Acc) {
-    if let Ok(p) = PINS.try_lock() {
-        a.field("inspect.pins");
-        a.vec(&p);
-        for x in p.iter() {
-            a.string(&x.1);
-            a.vec(&x.3);
-        }
-    }
-}
 
 /// The pin a slot is under: "o1 (pin<n>)" / "o3 (pin<n>)".
 pub(crate) fn pin_of(id: u32) -> Option<String> {

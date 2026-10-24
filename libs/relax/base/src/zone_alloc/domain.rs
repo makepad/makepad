@@ -66,6 +66,10 @@ impl DomainHeap {
     pub fn detail(&self) -> (usize, usize, usize, usize) {
         self.inner.arena.detail()
     }
+    /// Chunk states with resident bytes (arena.rs `states`).
+    pub fn states(&self) -> [usize; 24] {
+        self.inner.arena.states()
+    }
     pub fn range(&self) -> (usize, usize) {
         self.inner.arena.range()
     }
@@ -170,6 +174,19 @@ unsafe fn owner(p: *mut u8) -> Option<Arc<Heap>> {
 /// chunks; memstat::trim): a program heap is trimmed like the compiler's (Scope: 100 MB in use,
 /// 226 MB resident). The heaps are leased under the registry lock and trimmed outside it.
 pub fn trim_all() {
+    for h in lease().iter().flatten() {
+        h.arena.trim();
+    }
+}
+
+/// Every live domain heap gives its dense chunks huge pages and takes them from sparse ones
+/// (arena.rs `densify`); at most `budget` collapses per heap. Returns the collapses done.
+pub fn densify_all(budget: usize) -> usize {
+    lease().iter().flatten().map(|h| h.arena.densify(budget)).sum()
+}
+
+/// The live domain heaps, leased (at most 64; the rest wait for the next call).
+fn lease() -> [Option<Arc<Heap>>; 64] {
     // no allocation under the registry lock (a free taken there would wait for it): a fixed
     // lease table, the heaps past it wait for the next trim
     const MAX: usize = 64;
@@ -190,9 +207,7 @@ pub fn trim_all() {
             }
         }
     }
-    for h in heaps.iter().flatten() {
-        h.arena.trim();
-    }
+    heaps
 }
 
 /// Also used by the native global allocator: a provided crate may drop a JIT-owned buffer.
@@ -396,7 +411,7 @@ pub unsafe extern "C" fn program_aligned_free(p: *mut u8) {
 
 /// The program asks its allocator for its free pages back (glibc `malloc_trim`, macOS
 /// `malloc_zone_pressure_relief`): the heap of the domain the calling thread is in gives back its
-/// warm chunks and the free pages of its chunks (what the settle swap's trim does for the compiler
+/// warm chunks and the free pages of its chunks (what the settle's trim does for the compiler
 /// arena), then the system heap does its own.
 #[cfg(target_os = "linux")]
 pub unsafe extern "C" fn program_malloc_trim(pad: usize) -> i32 {
@@ -552,6 +567,37 @@ mod tests {
             let trim: unsafe extern "C" fn(usize) -> i32 = std::mem::transmute(trim);
             trim(0);
             assert!(heap.stats().1 < committed, "the program's malloc_trim decommits the warm run");
+            enter(std::ptr::null());
+        }
+    }
+
+    /// Only dense chunks of a program heap get huge pages (`densify`): a chunk half full of live
+    /// blocks is marked once, a sparse one never, and one that turned sparse loses its mark.
+    #[test]
+    fn densify_marks_dense_chunks_only() {
+        symbol(b"relax_alloc");
+        let heap = DomainHeap::new().unwrap();
+        unsafe {
+            enter(&*heap);
+            // a sparse class: one block of 48 bytes; a dense one: 1.5 MB of 1000-byte blocks
+            let sparse = program_alloc(48, 8);
+            let dense: Vec<*mut u8> = (0..1500).map(|_| program_alloc(1000, 8)).collect();
+            for &p in &dense {
+                std::ptr::write_bytes(p, 1, 1000);
+            }
+            let first = heap.inner.arena.densify(64);
+            let again = heap.inner.arena.densify(64);
+            if cfg!(any(target_os = "linux", target_os = "android")) {
+                assert!(first >= 1, "the dense chunk is marked");
+            } else {
+                assert_eq!(first, 0);
+            }
+            assert_eq!(again, 0, "a marked chunk is not collapsed twice");
+            for p in dense {
+                program_dealloc(p, 1000, 8);
+            }
+            program_dealloc(sparse, 48, 8);
+            assert_eq!(heap.inner.arena.densify(64), 0);
             enter(std::ptr::null());
         }
     }

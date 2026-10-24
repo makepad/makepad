@@ -406,7 +406,7 @@ fn vx_of(v: u64) -> Option<VX> {
         77 => VX::FNeg(w),
         78 => VX::FAbs(w),
         79 => VX::FSqrt(w, nan_of(k)?),
-        80 => VX::FRound(w, [RoundTo::Floor, RoundTo::Ceil, RoundTo::Trunc, RoundTo::Away].get(k as usize).copied()?),
+        80 => VX::FRound(w, [RoundTo::Floor, RoundTo::Ceil, RoundTo::Trunc, RoundTo::Away, RoundTo::Even].get(k as usize).copied()?),
         81 => VX::FToI(w),
         82 => VX::IToF(w),
         83 => VX::Neg(w),

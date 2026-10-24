@@ -179,12 +179,24 @@ pub fn thread_yield() {
     }
 }
 
+/// Real std's (sys/thread/unix.rs): on Linux and Android the CPUs of the affinity mask, capped by
+/// the cgroup CPU quota; on Apple targets (no affinity masks) the online CPUs. 0: unknown.
 pub fn available_parallelism() -> usize {
+    #[allow(unused_mut)]
+    let mut quota = usize::MAX;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        quota = super::os::cgroup_quota().max(1);
+        let n = super::os::affinity_cpus();
+        if n > 0 {
+            return n.min(quota);
+        }
+    }
     let n = unsafe { sysconf(super::os::SC_NPROCESSORS_ONLN) };
     if n < 1 {
-        1
+        0
     } else {
-        n as usize
+        (n as usize).min(quota)
     }
 }
 

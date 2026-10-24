@@ -41,8 +41,8 @@ impl Drop for WriterWaiting {
     }
 }
 
-/// Whether a front-end writer waits now: work that polls instead of unwinding (the settle swap's
-/// encode under a front read) stops at its next check.
+/// Whether a front-end writer waits now: work that polls instead of unwinding (an encode under a
+/// front read) stops at its next check.
 pub fn writer_waiting() -> bool { WRITERS.load(Ordering::Relaxed) != 0 }
 
 /// The calling thread's work in this scope may be preempted.

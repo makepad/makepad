@@ -73,6 +73,10 @@ pub(super) fn lost_error(e: &str) -> bool { e.contains("ERROR_DEVICE_LOST") }
 /// (about one second) before it completes unshown.
 const SHOW_RETRY: std::time::Duration = std::time::Duration::from_millis(8);
 const SHOW_TRIES: u32 = 125;
+/// The completion worker waits for a batch's fence in slices of this long, and says once what a
+/// batch still unfinished after FENCE_STALL_SAY waits on (the wait itself never gives up).
+const FENCE_SLICE_NS: u64 = 250_000_000;
+const FENCE_STALL_SAY: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The Vulkan objects of a finished batch, reset for the next one. A command pool, fence,
 /// timestamp pool and descriptor pools made and destroyed per batch cost about a millisecond
@@ -219,6 +223,26 @@ pub(super) struct Batch {
 }
 
 impl Batch {
+    /// What an unfinished batch waits on, for the GPU-stall message: the host timelines it
+    /// waits for (value wanted against the semaphore's value now) and what it carries.
+    fn stall_report(&self) -> String {
+        let mut out = String::new();
+        #[cfg(target_os = "linux")]
+        {
+            for (sem, want) in &self.external_waits {
+                let now = unsafe { self.dev.raw.get_semaphore_counter_value(sem.raw) };
+                let now = now.map_or_else(|e| format!("{e:?}"), |v| v.to_string());
+                out.push_str(&format!("waits for external timeline {:?} to reach {want} (now {now}); ", sem.raw));
+            }
+            if !self.hosted_frames.is_empty() { out.push_str(&format!("renders {} hosted frame(s); ", self.hosted_frames.len())); }
+            if self.release_fence.is_some() { out.push_str("exports a release fence; "); }
+        }
+        if out.is_empty() { out.push_str("no external waits (the GPU itself is behind or hung); "); }
+        let frames = self.tickets.iter().filter(|t| matches!(t, Ticket::Frame { .. })).count();
+        out.push_str(&format!("{frames} frame(s), {} image(s); later batches queue behind it", self.images.len()));
+        out
+    }
+
     /// Makes the pumps of the sessions this batch reports to look (an out-of-memory retry asks
     /// for room: their pumps answer with GpuPressure).
     fn notify_sessions(&self, mailbox: &Mailbox) {
@@ -518,9 +542,21 @@ impl Batch {
         complete.push(move || {
             let mut outcome = outcome;
             let mut tries = 0u64;
+            let waited = std::time::Instant::now();
+            let mut stall_said = false;
             while outcome == Outcome::Ran {
-                match unsafe { self.dev.raw.wait_for_fences(&[self.fence], true, u64::MAX) } {
+                match unsafe { self.dev.raw.wait_for_fences(&[self.fence], true, FENCE_SLICE_NS) } {
                     Ok(()) => break,
+                    // Not an abort: the wait goes on. A batch the GPU has not finished long after
+                    // its submit says why, once, instead of a silent wait behind which every later
+                    // batch queues (the driver then spins in vkQueueSubmit).
+                    Err(vk::Result::TIMEOUT) => {
+                        if !stall_said && waited.elapsed() >= FENCE_STALL_SAY {
+                            stall_said = true;
+                            eprintln!("[hal-vulkan] GPU stall: a batch submitted {:.1} s ago has not finished; {}",
+                                waited.elapsed().as_secs_f64(), self.stall_report());
+                        }
+                    }
                     Err(e) if out_of_memory(e) && !self.dev.lost.load(Ordering::Acquire) => {
                         if tries == 0 { eprintln!("[hal-vulkan] fence: {e:?}; asking for room and waiting again"); }
                         tries += 1;
@@ -531,6 +567,7 @@ impl Batch {
                     Err(e) => { eprintln!("[hal-vulkan] fence: {e:?}"); outcome = Outcome::Lost; }
                 }
             }
+            if stall_said { eprintln!("[hal-vulkan] GPU stall over: the batch finished {:.1} s after its submit", waited.elapsed().as_secs_f64()); }
             if outcome == Outcome::Lost { self.dev.lost.store(true, Ordering::Release); }
             self.complete(outcome != Outcome::Ran, mailbox);
         });
@@ -626,8 +663,10 @@ impl Batch {
         self.reusable = !failed;
         drop(self);
         for (token, event) in out { mailbox.push(token, event); }
-        if !failed {
-            if let Some((presenter, image, token, target, native, owner, frame)) = scanout {
+        if let Some((presenter, image, token, target, native, owner, frame)) = scanout {
+            if failed {
+                presenter.dropped(owner, native);
+            } else {
                 presenter.submit(owner, native, image, Box::new(move |time| {
                     let sid = token.sid;
                     lock(&mailbox.events).push(Done { token, time, event: Event::Presented { target, frame } });

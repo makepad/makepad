@@ -26,7 +26,7 @@ use crate::jit::{self, FnKey, Unit};
 use crate::program::{DefId, DefKind, Program};
 use crate::types::TyId;
 use std::time::Instant;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 #[path = "reload_watch.rs"]
 mod watch_events;
 
@@ -441,12 +441,26 @@ fn publish_reload(u: &mut Unit, versions: &[(u32, u32)], full: bool, scope: Opti
 /// Rolls back an installed patch group (a panic or fault in its code, M7): the slots return
 /// to their previous code, the files to their previous versions, the consts to their previous
 /// values. Returns the rolled-back functions' names. The caller makes a unit call.
-pub unsafe fn rollback(up: *mut Unit, undo: Undo) -> Vec<String> {
+/// The group's code is invalidated (`why`: what rejected it): it never runs again (invalid.rs), its
+/// O3 code and unverified-mode twins included; a thread still in it parks at its next instruction.
+pub unsafe fn rollback(up: *mut Unit, undo: Undo, why: &str) -> Vec<String> {
     crate::owner::call(crate::owner::Class::Program, || {
         let u = &mut *up;
         u.flush_cache_records();
         jit::bump_patch_epoch();
         let ids = u.rollback_gen(undo.group);
+        let group = undo.group;
+        // code built after the patch that inlined its bodies is in its group (invalid::group_of);
+        // RIR built meanwhile that took them in and has no code yet is dropped (built anew from
+        // the restored source)
+        for &id in &ids {
+            for d in u.fns[id as usize].history().inlined_into.clone() {
+                if !u.fns[d as usize].compiled {
+                    u.fns[d as usize].rir = None;
+                }
+            }
+        }
+        crate::invalid::invalidate(u, |g| g.gen() == group, group, "invalidated code", None, &format!("patch gen {} rolled back: {}", group, why));
         let names = ids.iter().map(|id| u.fns[*id as usize].name.to_string()).collect();
         {
             let fw = jit::front_write();
@@ -950,8 +964,8 @@ fn item_keys_memo(pf: &crate::parser::ParsedFile) -> std::rc::Rc<Vec<String>> {
     pf.ast.items.len().hash(&mut h);
     for it in &pf.ast.items { (it.lo, it.hi).hash(&mut h); }
     let id = h.finish();
-    crate::gen_local! {
-        static LAST: std::cell::RefCell<Vec<(u64, std::rc::Rc<Vec<String>>)>>;
+    thread_local! {
+        static LAST: std::cell::RefCell<Vec<(u64, std::rc::Rc<Vec<String>>)>> = Default::default();
     }
     if let Some(keys) = LAST.with(|last| last.borrow().iter().find(|(k, _)| *k == id).map(|(_, keys)| keys.clone())) { return keys; }
     let keys = std::rc::Rc::new(item_keys(pf));
@@ -1460,7 +1474,7 @@ pub(crate) fn crates_seeing_edit(prog: &crate::program::Program, files: impl Ite
 /// instead of re-checking the whole program (borrowck::lazy::carry_epoch). Front-end write
 /// lock held (on the owner thread).
 fn carry_gandalf(u: &Unit, from: u64, visible: &[bool], files: Option<&[u32]>) {
-    let src = std::sync::Arc::as_ptr(&u.front) as usize;
+    let src = u.front.checker_id;
     let prog = &u.prog;
     crate::borrowck::lazy::carry_epoch(src, from, u.tcx.collect_epoch.load(std::sync::atomic::Ordering::SeqCst), &|d: DefId| {
         if let Some(files) = files { !files.contains(&prog.def(d).file) }
@@ -2051,10 +2065,10 @@ unsafe fn apply_mode(up: *mut Unit, edits: Vec<Edit>, partial: u8, module: bool)
 /// Live edit transactions so far: a field-view summary context kept by one transaction is
 /// used by the next only when no other transaction ran in between.
 static TRANSACTIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-crate::gen_local! {
+thread_local! {
     /// The field-view summaries of the program as the last patched edit left it (the
     /// transaction number it was kept by).
-    static FV_SESSION: std::cell::RefCell<Option<(u64, std::rc::Rc<crate::borrowck::field_views::SummaryCx>)>>;
+    static FV_SESSION: std::cell::RefCell<Option<(u64, std::rc::Rc<crate::borrowck::field_views::SummaryCx>)>> = Default::default();
 }
 fn fv_session_take(transaction: u64) -> std::rc::Rc<crate::borrowck::field_views::SummaryCx> {
     match FV_SESSION.with(|s| s.borrow_mut().take()) {
@@ -2068,7 +2082,7 @@ fn fv_session_keep(transaction: u64, cx: std::rc::Rc<crate::borrowck::field_view
 
 unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Result<crate::program::FileVersion, String>>>, t0: Instant, partial: u8, retries: usize, module: bool) -> Outcome {
     let transaction = TRANSACTIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-    let session = unsafe { (*std::ptr::addr_of!((*up).prog.session)).clone() };
+    let session = unsafe { crate::jit::unit_session(up) };
     let options = &session.options;
     let u = &mut *up;
     let olds: Vec<u32> = edits.iter().map(|e| e.file).collect();
@@ -3272,6 +3286,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     let u = &mut *up;
     let gen = u.begin_patch();
     out.group = gen;
+    crate::zone_alloc::kept_with(|| for &(_, n) in &news { u.file_gen.insert(n, gen); });
     let mut rebind_code: Vec<(u32, Code)> = Vec::new();
     for (o, n) in &rebind {
         let c = pre.iter().find(|(id, _)| id == n).and_then(|(_, r)| r.as_ref().ok()).or_else(|| staged.iter().find(|(id, _)| id == n).map(|(_, c)| c));
@@ -3279,6 +3294,9 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             rebind_code.push((*o, c.clone()));
         }
     }
+    // a layout-changing patch: the program threads stand still while it installs, so their stacks
+    // show every frame in code it replaces (invalid::hold_old_frames, after the install)
+    let paused = !saved_adts.is_empty() && crate::inspect::instrument::pause_for_patch();
     for (id, r) in pre {
         match r {
             Ok(c) => {
@@ -3305,6 +3323,27 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
                 out.names.push((&*up).fns[id as usize].name.to_string());
             }
             Err(e) => out.lines.push(format!("link error in {}: {}", (&*up).fns[id as usize].name, e)),
+        }
+    }
+    let u = &mut *up;
+    // the patch event (flight recorder `reload.patch`; inspect `stale` names it)
+    let layout_names: Vec<String> = saved_adts.iter().map(|(d, _)| def_name(&u.prog, *d)).collect();
+    {
+        let mut shown: Vec<&str> = out.names.iter().take(4).map(String::as_str).collect();
+        if out.names.len() > 4 { shown.push(".."); }
+        crate::invalid::patch_event(gen, format!("gen {}: {} fn(s) [{}]{}", gen, out.names.len(), shown.join(", "), if layout_names.is_empty() { String::new() } else { format!("; layout of {}", layout_names.join(", ")) }));
+    }
+    // a layout-changing patch: the earlier patch versions of the slots it rebuilt were built for the
+    // old fields or variants and never run again (invalid.rs; a slot's first code shares pages with
+    // other code and is not invalidated: only frames live at the patch can still reach it, and their
+    // threads are held for good, found in the stacks captured while the program is paused)
+    if !layout_names.is_empty() {
+        let rebuilt: std::collections::HashSet<u32> = u.patch_log.iter().filter(|(_, g)| *g == gen).map(|(id, _)| *id).collect();
+        let why = format!("layout-changing patch gen {} (fields or variants of {}) replaced it: code built for the old layout never runs again", gen, layout_names.join(", "));
+        crate::invalid::invalidate(u, |g| matches!(g, crate::invalid::Group::Patch { slot, gen: g0 } if g0 < gen && rebuilt.contains(&slot)), gen, "invalidated code", None, &why);
+        let held = crate::invalid::hold_old_frames(u, gen, &layout_names.join(", "), paused);
+        if held > 0 {
+            out.lines.push(format!("held: {} thread(s) with a frame in the first-version code of a rebuilt fn (makepad inspect {} stale; resume restart | stop)", held, std::process::id()));
         }
     }
     let u = &mut *up;
@@ -3387,8 +3426,7 @@ pub fn domain_stopping(id: u32) {
 
 pub(crate) fn domain_loaded(inputs: Option<Inputs>) {
     *DOMAIN_RESTORED.lock().unwrap_or_else(|e| e.into_inner()) = DOMAIN_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()).take();
-    // the swap (zone_swap) may destroy the compiler generation this was built in before the watcher takes it
-    *DOMAIN_INPUTS.lock().unwrap_or_else(|e| e.into_inner()) = inputs.as_ref().map(crate::zone_alloc::kept_clone);
+    *DOMAIN_INPUTS.lock().unwrap_or_else(|e| e.into_inner()) = inputs;
     DOMAIN_REVISION.fetch_add(1, std::sync::atomic::Ordering::Release);
     DOMAIN_LOADING.store(false, std::sync::atomic::Ordering::Release);
 }
@@ -3453,7 +3491,7 @@ pub extern "C" fn __relax_restored_state(buf: *mut u8, cap: usize) -> usize {
     }
     let up = jit::current_unit();
     if up.is_null() { return usize::MAX; }
-    let session = unsafe { (*std::ptr::addr_of!((*up).prog.session)).clone() };
+    let session = unsafe { crate::jit::unit_session(up) };
     let runtime = &session.runtime;
     static STATE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     let s = STATE.get_or_init(|| {
@@ -3581,7 +3619,7 @@ pub(crate) fn settle_verdicts(up: *mut Unit, pending: &mut Vec<PendingPatch>, un
                 while let Some(undo) = undos.pop() {
                     let g = undo.group;
                     let versions = undo.versions.clone();
-                    let rolled = unsafe { rollback(up, undo) };
+                    let rolled = unsafe { rollback(up, undo, "the borrow checker rejected it after it ran (SPEC-V)") };
                     names.extend(rolled);
                     back.extend(versions);
                     reverted.push(g);
@@ -4022,25 +4060,12 @@ pub extern "C" fn __relax_live_stream(p: *const u8, n: usize, t: *const u8, len:
 mod inputs;
 pub use inputs::Inputs;
 
-/// The inputs the watcher started with (kept: the settle swap restarts the watcher with them),
-/// whether the watcher thread runs, and the swap's request that it ends.
-static WATCH_INPUTS: relax_session::sync::Mutex<Option<Inputs>> = relax_session::sync::Mutex::new(None);
-static WATCH_RUNNING: AtomicBool = AtomicBool::new(false);
-static WATCH_STOP: AtomicBool = AtomicBool::new(false);
-
 pub fn start_watcher(up: *mut Unit, inputs: Inputs) {
-    *WATCH_INPUTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(crate::zone_alloc::kept_clone(&inputs));
-    spawn_watcher(up, inputs, false);
-}
-
-fn spawn_watcher(up: *mut Unit, inputs: Inputs, quiet: bool) {
-    let session = unsafe { (*std::ptr::addr_of!((*up).prog.session)).clone() };
+    let session = unsafe { crate::jit::unit_session(up) };
     struct P(*mut Unit);
     unsafe impl Send for P {}
     let p = P(up);
-    WATCH_STOP.store(false, Ordering::SeqCst);
-    WATCH_RUNNING.store(true, Ordering::SeqCst);
-    let spawned = std::thread::Builder::new()
+    let _ = std::thread::Builder::new()
         .name("run-live".to_string())
         .spawn(move || { let _z = crate::zone_alloc::compiler_thread();
             let runtime = &session.runtime;
@@ -4048,38 +4073,12 @@ fn spawn_watcher(up: *mut Unit, inputs: Inputs, quiet: bool) {
             jit::lower_this_thread_priority(runtime);
             // a panic here (the ICE hook is silent on the compiler's owner thread) would end
             // live editing without a word: say so
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { watch(p.0, inputs, quiet) }));
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { watch(p.0, inputs) }));
             if let Err(e) = r {
                 let why = e.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| e.downcast_ref::<String>().cloned()).unwrap_or_default();
                 eprintln!("makepad live: the watcher stopped: {why}{}; saves are no longer applied -- restart `makepad run`", jit::take_ice_location());
             }
-            WATCH_RUNNING.store(false, Ordering::SeqCst);
         });
-    if spawned.is_err() { WATCH_RUNNING.store(false, Ordering::SeqCst); }
-}
-
-/// The settle swap (jit zone_swap): ends the watcher thread, which holds compiler-generation
-/// state for its whole life, and waits for it (its locals are freed on the way out). Some(true):
-/// it ran and has ended, so `swap_restart_watcher` starts it again; Some(false): there was none;
-/// None: it did not end within `ms` (it is running again).
-pub fn swap_stop_watcher(ms: u64) -> Option<bool> {
-    if !WATCH_RUNNING.load(Ordering::SeqCst) { return Some(false); }
-    WATCH_STOP.store(true, Ordering::SeqCst);
-    let t = Instant::now();
-    while WATCH_RUNNING.load(Ordering::SeqCst) {
-        if t.elapsed().as_millis() as u64 > ms {
-            WATCH_STOP.store(false, Ordering::SeqCst);
-            return None;
-        }
-        std::thread::sleep(std::time::Duration::from_micros(500));
-    }
-    Some(true)
-}
-
-/// Starts the watcher again with the inputs it started with, after `swap_stop_watcher` ended it.
-pub fn swap_restart_watcher(up: *mut Unit) {
-    let inputs = WATCH_INPUTS.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    if let Some(inputs) = inputs { spawn_watcher(up, inputs, true); }
 }
 
 pub(crate) fn stamp(path: &str) -> Option<(std::time::SystemTime, u64)> {
@@ -4094,7 +4093,7 @@ fn gate_note(g: u8) {
     }
 }
 
-unsafe fn watch(up: *mut Unit, mut inputs: Inputs, quiet: bool) {
+unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
     let std_dir = std::env::var("MAKEPAD_RUN_STD").unwrap_or_default();
     // (path, running file index, last stamp)
     // the program's own source files (not std, registry or git dependencies), loaded so far
@@ -4124,7 +4123,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs, quiet: bool) {
     // edit made before it is simply what the load read)
     let mut loads_seen = jit::DEFERRED_LOADS.load(std::sync::atomic::Ordering::Relaxed);
     let mut events = watch_events::Watch::new(files.iter().map(|f| f.0.as_str()));
-    if !quiet && crate::run::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) { eprintln!("makepad live: watching {} source files; session log {}", files.len(), live_log_path()); }
+    if crate::run::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) { eprintln!("makepad live: watching {} source files; session log {}", files.len(), live_log_path()); }
     let mut undos: Vec<Undo> = Vec::new();
     // SPEC-V: patches that ran before their verdict
     let mut pending: Vec<PendingPatch> = Vec::new();
@@ -4154,13 +4153,11 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs, quiet: bool) {
     let mut revision = 0;
     loop {
         std::thread::sleep(std::time::Duration::from_millis(5));
-        if WATCH_STOP.load(Ordering::SeqCst) { return; }
         if DOMAIN_LOADING.load(std::sync::atomic::Ordering::Acquire) { gate_note(1); continue; }
         let latest = DOMAIN_REVISION.load(std::sync::atomic::Ordering::Acquire);
         if latest != revision {
             revision = latest;
             if let Some(next) = DOMAIN_INPUTS.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                *WATCH_INPUTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(crate::zone_alloc::kept_clone(&next));
                 inputs = next;
             }
             let loaded = crate::owner::call_quick(crate::owner::Class::Program, || own_files(&*up));
@@ -4546,7 +4543,7 @@ mod round32_tests {
         assert_eq!(unit.stats.ctfe_code, runs, "{case}: the transaction must not run an initializer");
         if accept {
             assert_eq!(&values(&unit)[..2], before);
-            unsafe { rollback(up, outcome.undo.unwrap()); }
+            unsafe { rollback(up, outcome.undo.unwrap(), "test"); }
         }
         assert_eq!(values(&unit), before, "running values restored");
         assert_eq!(unit.layout_of(ty).size, layout.size);

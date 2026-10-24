@@ -48,38 +48,6 @@ static SITES: Mutex<Vec<std::sync::Arc<Site>>> = Mutex::new(Vec::new());
 static GROUPS: Mutex<Vec<(u32, u32, Vec<u32>, String)>> = Mutex::new(Vec::new());
 static NEXT_GROUP: AtomicU64 = AtomicU64::new(1);
 
-pub(crate) fn scan_kept(a: &mut crate::jit::zone_scan::Acc) {
-    if let Ok(sites) = SITES.try_lock() {
-        a.field("inspect.sites");
-        a.vec(&sites);
-        for s in sites.iter() {
-            a.arc(s);
-            a.string(&s.label);
-            if let Some(p) = s.args.get() {
-                a.vec(&p.params);
-                for x in &p.params {
-                    a.string(&x.0);
-                    a.string(&x.1);
-                }
-            }
-        }
-    }
-    if let Ok(g) = GROUPS.try_lock() {
-        a.field("inspect.groups");
-        a.vec(&g);
-        for x in g.iter() {
-            a.vec(&x.2);
-            a.string(&x.3);
-        }
-    }
-    if let Ok(p) = PARKED.try_lock() {
-        a.field("inspect.parked");
-        a.vec(&p);
-        for x in p.iter() {
-            a.arc(x);
-        }
-    }
-}
 
 /// Are any counters installed (count groups or injected probes)? Cheap: a frame log asks it
 /// at each frame's start.
@@ -992,7 +960,7 @@ pub(super) fn edit_restart_site(f: &mut relax_backend::rir::Func, u: &crate::jit
 }
 
 /// A new site (its index): kept state whatever the caller's phase (the owner compiles in the
-/// compiler arena; the instrumented code reads the site after a settle swap destroyed it).
+/// compiler arena; the instrumented code reads the site for the rest of the run).
 fn register_site(kind: Kind, slot: u32, label: String, group: u32) -> u64 {
     let _k = crate::zone_alloc::kept();
     let label = label.as_str().to_string();
@@ -1030,8 +998,7 @@ fn add_to(kind: Kind, target: Target, time: bool, low: bool) -> Result<(u32, Vec
     let group = NEXT_GROUP.fetch_add(1, SeqCst) as u32;
     let r = crate::owner::call_within(crate::owner::Class::Program, 10_000, move || -> Result<(u32, Vec<(u64, String, u32, String)>, Vec<String>), String> {
         // the sites, groups and patch edits are kept state (the instrumented code calls into them
-        // after a settle swap destroyed the compiler arena); patches::rebuild compiles in the
-        // compiler phase
+        // for the rest of the run); patches::rebuild compiles in the compiler phase
         let _kept = crate::zone_alloc::kept();
         super::patches::with_low_tier(low, || {
         let u = unsafe { &mut *up };
@@ -1184,6 +1151,25 @@ pub fn pause_program() -> usize {
     n
 }
 
+/// A layout-changing patch's pause (reload.rs step 6, invalid.rs `hold_old_frames`): the program
+/// threads are held while the patch installs and their stacks are read. True: this call paused
+/// them (`resume_program` ends it); false: they were paused already (by `pause` or a stale
+/// access), and stay so.
+pub fn pause_for_patch() -> bool {
+    if PAUSED.swap(true, SeqCst) {
+        return false;
+    }
+    pause_imp::pause(&program_thread);
+    true
+}
+
+/// Thread `t` (a program thread) stays held for good, past any `resume`: it has a frame in code
+/// that never runs again (stale.rs `park_held`). A thread the pause did not hold (blocked in a
+/// system call) is held now. False: it could not be held (it ended, or this platform cannot).
+pub fn hold_for_good(t: &super::threads::Thread) -> bool {
+    pause_imp::keep(t)
+}
+
 /// Ends a pause (as `resume`).
 pub fn resume_program() -> usize {
     PAUSED.store(false, SeqCst);
@@ -1202,7 +1188,7 @@ pub fn stopped(t: &super::threads::Thread) -> bool {
 }
 
 /// Program threads (main and the threads the program started; not Relax's own, not inspect's).
-fn program_thread(t: &super::threads::Thread) -> bool {
+pub(crate) fn program_thread(t: &super::threads::Thread) -> bool {
     let main = crate::jit::MAIN_TID.load(Relaxed);
     if (t.handle != 0 && t.handle == main) || t.os_id == std::process::id() as u64 {
         return true;
@@ -1283,6 +1269,28 @@ mod pause_imp {
         }
         n
     }
+    /// Out of the pause's set: never resumed (its Mach suspension stays); suspended now when the
+    /// pause did not hold it.
+    pub fn keep(t: &crate::inspect::threads::Thread) -> bool {
+        let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(k) = held.iter().position(|h| h.os_id == t.os_id) {
+            // (its port stays with this never-dropped entry)
+            std::mem::forget(held.remove(k));
+            return true;
+        }
+        drop(held);
+        let list = crate::inspect::threads::list();
+        let ok = list.iter().find(|x| x.os_id == t.os_id).is_some_and(|x| crate::inspect::threads::suspend(x));
+        if ok {
+            // (the listed original owns the port: kept, never released)
+            for x in list {
+                if x.os_id == t.os_id {
+                    std::mem::forget(x);
+                }
+            }
+        }
+        ok
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1310,7 +1318,7 @@ mod pause_imp {
         let mut list = crate::inspect::threads::list();
         crate::inspect::name_handles(&mut list);
         for t in list {
-            if skip.contains(&t.os_id) || t.name.starts_with("run-inspect") || t.name.starts_with("makepad-remote") || !want(&t) || held.iter().any(|h| h.0 == t.os_id) || t.state != "running" {
+            if skip.contains(&t.os_id) || t.name.starts_with("run-inspect") || t.name.starts_with("makepad-remote") || !want(&t) || held.iter().any(|h| h.0 == t.os_id) || !holdable(&t) || crate::inspect::threads::is_held(t.os_id) {
                 continue;
             }
             if let Ok(slot) = crate::inspect::threads::hold_paused(t.os_id) {
@@ -1319,6 +1327,16 @@ mod pause_imp {
         }
         held.len()
     }
+    /// A thread the sweep holds: one that runs, or one that waits in a futex or sleeps (their
+    /// callers retry an interrupted wait: std's locks, condvars, parking and sleep, glibc's).
+    /// Threads blocked in other system calls (reads, polls: third-party code may not retry an
+    /// EINTR) are held once they run. Holding only running threads held none of a program that
+    /// mostly sleeps between short bursts (a 5 ms sweep rarely sees it running): SAFE2's
+    /// "0 threads held" under `makepad run`, the program ran on.
+    fn holdable(t: &crate::inspect::threads::Thread) -> bool {
+        // x86_64: nanosleep 35, futex 202, clock_nanosleep 230
+        t.state == "running" || (t.state == "waiting" && t.syscall.is_some_and(|s| matches!(s.0, 35 | 202 | 230)))
+    }
     pub fn resume() -> usize {
         let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
         let n = held.len();
@@ -1326,6 +1344,17 @@ mod pause_imp {
             crate::inspect::threads::release_hold(s);
         }
         n
+    }
+    /// Out of the pause's set, held for good (signalled now when the pause did not hold it).
+    pub fn keep(t: &crate::inspect::threads::Thread) -> bool {
+        let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(k) = held.iter().position(|h| h.0 == t.os_id) {
+            let (_, s) = held.remove(k);
+            crate::inspect::threads::keep_held(s);
+            return true;
+        }
+        drop(held);
+        crate::inspect::threads::hold_for_good(t.os_id).is_ok()
     }
 }
 
@@ -1336,6 +1365,9 @@ mod pause_imp {
     }
     pub fn resume() -> usize {
         0
+    }
+    pub fn keep(_t: &crate::inspect::threads::Thread) -> bool {
+        false
     }
 }
 
@@ -1477,53 +1509,6 @@ pub fn cmd(req: &Req, out: &mut Out) {
     }
 }
 
-#[cfg(test)]
-mod zone_tests {
-    /// The P0 of 2026-10-20 (Stage: count / rm / count, then the settle swap: "use after
-    /// compiler-zone destroy" in the counted fn): inspect's records were allocated in the owner's
-    /// compiler phase. Registering, removing and registering again from the compiler phase -- as
-    /// the owner does -- leaves nothing of inspect's state in the compiler arena (the kept scan
-    /// that MAKEPAD_RUN_ZONE_CHECK=1 runs at every settle reports 0 for it).
-    #[test]
-    fn probe_records_outlive_the_compiler_arena() {
-        assert!(crate::zone_alloc::compiler_arena_enabled());
-        let count = || {
-            let mut a = crate::jit::zone_scan::Acc::new_for_test();
-            super::super::scan_kept(&mut a);
-            a.total()
-        };
-        // the control: the scan sees an inspect-like record built in the compiler phase
-        {
-            let _c = crate::zone_alloc::compiler();
-            let mut a = crate::jit::zone_scan::Acc::new_for_test();
-            a.field("control");
-            let v: Vec<String> = vec!["x".repeat(40)];
-            a.vec(&v);
-            a.string(&v[0]);
-            assert_eq!(a.total(), 2, "the compiler arena is not in use: the fixture would prove nothing");
-        }
-        for round in 0..3 {
-            {
-                let _c = crate::zone_alloc::compiler();
-                let label = format!("fixture::counted_fn round {}", round);
-                let g = 9000 + round;
-                let si = super::register_site(super::Kind::Count, 1, label, g);
-                super::register_group(g, vec![1, 2, 3], "fixture::counted_fn");
-                let (p, _) = super::super::probes::register_probe_for_test(g, "fixture::probed_fn");
-                assert!(si < u64::MAX && p.id == g);
-            }
-            assert_eq!(count(), 0, "round {}: inspect state in the compiler arena", round);
-            // rm: the groups go, the sites stay (off), as `rm all` does
-            {
-                let _c = crate::zone_alloc::compiler();
-                let mut g = super::GROUPS.lock().unwrap_or_else(|e| e.into_inner());
-                let _k = crate::zone_alloc::kept();
-                g.retain(|x| x.0 < 9000);
-            }
-            assert_eq!(count(), 0, "round {} after rm", round);
-        }
-    }
-}
 
 #[cfg(test)]
 mod name_tests {

@@ -479,10 +479,9 @@ static CHANGED: relax_session::sync::Condvar = relax_session::sync::Condvar::new
 type Observer = std::sync::Arc<dyn Fn(DomainId, &DomainState) + Send + Sync>;
 static OBSERVER: Mutex<Option<Observer>> = Mutex::new(None);
 
-/// The registry lock, held in the kept phase: the registry is process state that outlives the
-/// settle swap (zone_swap destroys the compiler arena generation), so whatever a mutator
-/// allocates while holding it (records, names, strings) lands in the kept heap, whichever
-/// phase the calling thread is in. Values built before the lock is taken are copied in with
+/// The registry lock, held in the kept phase: the registry is process state, so whatever a
+/// mutator allocates while holding it (records, names, strings) lands in the kept heap (the
+/// program's), whichever phase the calling thread is in. Values built before the lock is taken are copied in with
 /// `kept_clone`.
 struct Registry {
     guard: relax_session::sync::MutexGuard<'static, Vec<Domain>>,
@@ -567,6 +566,11 @@ fn with_block_memory(mut i: DomainInfo) -> DomainInfo {
     i.static_committed = if i.base == 0 { 0 } else { block_committed(i.base) };
     i
 }
+/// Each domain heap's chunk states with resident bytes (`memory`; walks every chunk header).
+pub fn heap_states() -> Vec<(DomainId, [usize; 24])> {
+    domains().iter().filter_map(|d| Some((d.info.id, d.heap.as_ref()?.states()))).collect()
+}
+
 pub fn list() -> Vec<DomainInfo> {
     let snapshots: Vec<_> = domains().iter().map(snapshot).collect();
     snapshots.into_iter().map(with_block_memory).collect()
@@ -1013,20 +1017,19 @@ impl Drop for Loading {
 }
 
 fn start_prepared(up: *mut Unit, spec: AppSpec, id: DomainId) -> Result<DomainId, Vec<String>> {
-    // New loaders wait outside the compiler phase while a swap has the gate shut. Every
-    // entry path registers active loaders so the swap waits for their compile state.
+    // a loader is a compile job: it waits outside the compiler phase while an allocator swap or
+    // a fork holds the job gate
     let _job = crate::jit::compile_job();
     let _z = crate::zone_alloc::compiler_thread();
     if crate::preload::trace() { eprintln!("boot-trace: domain {id} start_prepared at t={:.1} ms", crate::clock::ms_since_start()); }
     let _loading = Loading(id);
     let t0 = std::time::Instant::now();
     // The app's first start takes the boot's resolved package (same process, same instant). Taken
-    // before anything can end this start: the slot never outlives it (its memory is the compiler
-    // generation's, which the settle swap destroys), so a relaunch always resolves its own.
+    // before anything can end this start, so a relaunch always resolves its own.
     let boot_resolved = if crate::run::app_domain() == Some(id) { crate::run::take_boot_resolved() } else { None };
     if cancelled(id) { return Ok(id); }
     set_state(id, DomainState::Compiling("package graph".into()));
-    let sess = unsafe { (*std::ptr::addr_of!((*up).prog.session)).clone() };
+    let sess = unsafe { crate::jit::unit_session(up) };
     let workspace = crate::run::workspace_dir();
     let target_dir = crate::dirs::relax_dir().display().to_string();
     let std_dir = crate::std_dir();
@@ -1081,8 +1084,7 @@ fn start_prepared(up: *mut Unit, spec: AppSpec, id: DomainId) -> Result<DomainId
         Ok(x) => x,
         Err(e) => return fail(id, vec![e]),
     };
-    // the domain's arena is program memory: the kept heap (the compiler arena's generation is
-    // destroyed by the settle swap; a domain heap is never touched by it)
+    // the domain's arena is program memory: the kept heap
     let heap = match crate::zone_alloc::kept_with(crate::zone_alloc::domain::DomainHeap::new) {
         Some(h) => h,
         None => { destroy(base); return fail(id, vec!["reserving domain heap".into()]); }
@@ -1105,7 +1107,7 @@ fn start_prepared(up: *mut Unit, spec: AppSpec, id: DomainId) -> Result<DomainId
     if crate::run::app_domain() == Some(id) {
         crate::reload::domain_loaded(live_inputs);
     }
-    // the domain's main thread (its name, its handle) outlives any compiler generation
+    // the domain's main thread (its name, its handle) is process state
     if crate::preload::trace() { eprintln!("boot-trace: domain {id} launching at t={:.1} ms", crate::clock::ms_since_start()); }
     let launched = crate::zone_alloc::kept_with(|| launch_main(upn, id, base, target, arg, &spec.package, spec.around.clone()));
     if let Err(e) = launched {
@@ -1353,8 +1355,8 @@ unsafe fn load_graph(up: *mut Unit, g: &crate::unitgraph::Graph, order: &[usize]
 /// later, and what its static block holds.
 pub(crate) fn run_vehicle(up: *mut Unit, packages: Vec<String>) {
     let upn = up as usize;
-    // The vehicle outlives the settle swap: its package names, its thread (name) and what it
-    // prints are kept state, not the compiler generation the caller is in.
+    // The vehicle's package names, its thread (name) and what it prints are process state (kept
+    // heap), whatever phase the caller is in.
     let _k = crate::zone_alloc::kept();
     let packages = packages.clone();
     let _ = std::thread::Builder::new().name("run-domains".to_string()).spawn(move || {

@@ -97,9 +97,11 @@ pub trait Backend: Send {
     /// after this call). Device-level state (device, queues, swapchains) and objects lent from
     /// the host stay.
     fn session_closed(&mut self, _world: &mut World, _session: u32) {}
-    /// The host is about to end the process ([`crate::Hal::before_exit`]): driver work still
-    /// running on the backend's own threads (pipeline compiles, fence waits) runs out first;
-    /// exit() unloads the driver under it.
+    /// The host ends the process next ([`crate::Hal::before_exit`]; the backend already left the
+    /// Hal): every thread of the backend's own that calls the driver (submits, presents, fence
+    /// waits, pipeline compiles) is stopped and joined before this returns -- exit() runs the
+    /// driver's exit handlers, which fault a thread still inside it. The last call a backend
+    /// gets; no wait with a time limit (a thread that is gone is the only proof).
     fn before_exit(&mut self) {}
     /// Tests and automation: the next step handles the device as lost (removed by the OS) and
     /// replaces it as a real loss does (`exec::device_reset`). Backends without a device reset

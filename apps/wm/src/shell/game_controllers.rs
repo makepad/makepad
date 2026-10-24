@@ -86,22 +86,9 @@ pub fn sample() -> Inventory {
             } else { DeviceKind::Other }) };
         out.batteries.push(DeviceBattery { name, kind, detail: battery_detail(supply) });
     }
-    // This receiver does not currently expose Linux power_supply telemetry.
-    // Show that honestly rather than interpreting receiver presence as a charged headset.
-    if let Ok(entries) = fs::read_dir("/sys/bus/usb/devices") {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if read(p.join("idVendor")).as_deref() != Some("1532")
-                || read(p.join("idProduct")).as_deref() != Some("0577") { continue; }
-            let usb = fs::canonicalize(&p).ok();
-            if supplies.iter().any(|(_, owner)| owner.as_ref().zip(usb.as_ref()).is_some_and(|(owner, usb)| owner.starts_with(usb))) { continue; }
-            out.batteries.push(DeviceBattery {
-                name: read(p.join("product")).unwrap_or_else(|| "BlackShark V3 Pro".into()),
-                kind: DeviceKind::Headset,
-                detail: "Battery unavailable · Receiver connected".into(),
-            });
-        }
-    }
+    // The BlackShark V3 Pro receiver (1532:0577) exposes no power_supply;
+    // its battery comes from the headset's own reports (`blackshark`) and
+    // the panel lists it from that snapshot, not from here.
     let root = Path::new("/sys/bus/usb/drivers/xone-dongle");
     if let Ok(entries) = fs::read_dir(root) {
         for entry in entries.flatten() {

@@ -86,7 +86,7 @@ mod table;
 mod launch;
 pub mod child_env;
 
-pub use launch::{cargo_progress, launch_argv, read_output, AppLaunch, BuildPolicy, LaunchEvent, LaunchKind, ProcessOutput};
+pub use launch::{cargo_progress, launch_argv, read_output, AppLaunch, BuildPolicy, LaunchEvent, LaunchKind, ProcessOutput, Runner};
 
 impl AppEntry {
     /// What the checkout helpers need to know about it.
@@ -222,7 +222,7 @@ pub fn builder_install() -> Option<BuilderInstall> {
 
 /// The nearest directory at or above `start` that is a makepad checkout: the
 /// workspace `Cargo.toml` with the WM's crate in it. Every ancestor is
-/// checked (crates sit as deep as apps/commercial/stage/libs/app_run). A
+/// checked (crates sit as deep as apps/commercial/story/libs/app_run). A
 /// developer's clone and the source a Makepad Builder downloaded (which
 /// starts its apps in it, with its compiler environment) both are; the
 /// Builder's has no `local/`.
@@ -556,7 +556,7 @@ mod tests {
         assert!(amp.menu_visible && amp.wm_launchable);
         assert_eq!(find_by_bin("makepad-app-amp").unwrap().id, "amp");
         // The commercial repository's apps sit in its checkout inside Makepad.
-        for id in ["scope", "stage", "sandbox"] {
+        for id in ["scope", "stage", "story", "sandbox"] {
             assert!(find(id).unwrap().target().dir.starts_with("apps/commercial/"), "{id}");
         }
     }

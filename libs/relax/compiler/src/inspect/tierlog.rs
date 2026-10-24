@@ -1,11 +1,11 @@
 //! The tier-up decision log: what the JIT decided about each slot's way to O3, so `why-tier <fn>`
-//! can say why a hot fn is not at O3 (a count stub retired after slow windows, a dropped build with
+//! can say why a hot fn is not at O3 (its decayed cost stays under the threshold, a dropped build with
 //! no retier budget left, a queue entry counted again, a refused build, ...).
 //!
 //! Decision points (jit.rs: count stubs, the O3 queue, counted builds, O3 builds) record an event:
 //! program threads (rt_hot, rt_loop_hot: rule I-CALL, atomics only) push into a lock-free ring;
 //! the O3 workers and `why-tier` fold the ring into per-slot histories (counts per kind, the
-//! windows per code version, the last events). Only slots with a decision beyond being armed get
+//! cost checks per code version, the last events). Only slots with a decision beyond being armed get
 //! a history; a count stub being armed (every O1 install) only updates an existing one.
 
 use super::flightrec::Slots;
@@ -16,43 +16,40 @@ use std::collections::HashMap;
 pub mod ev {
     /// a count stub went into the slot: `why` = ARM_* , `b` = the code it counts
     pub const ARM: u8 = 1;
-    /// a count window timed out (TIER1_CALLS calls took longer than the window): `a` = ns they
-    /// took, `b` = the code counted, `why` = slow windows in a row
-    pub const SLOW: u8 = 2;
-    /// the count stub was taken out after SLOW_RETIRE slow windows: calls are not counted any
-    /// more (`b` = the code)
-    pub const RETIRE: u8 = 3;
+    /// a cost check stayed under the threshold (the budget ran out, the decayed cost is short of
+    /// it): `a` = the decayed cost, `b` = the code counted
+    pub const CHECK: u8 = 2;
     /// queued for O3: `why` = the queue reason (Q_*), `a` = rate (calls/s), `b` = the code
-    pub const QUEUE: u8 = 4;
+    pub const QUEUE: u8 = 3;
     /// an O3 queue entry that waited past REVALIDATE_NS went back to counting: `a` = its age
-    pub const REVALIDATE: u8 = 5;
+    pub const REVALIDATE: u8 = 4;
     /// ... but other code was installed meanwhile: it stays queued (built)
-    pub const KEPT: u8 = 6;
+    pub const KEPT: u8 = 5;
     /// a worker took it from the queue: `why` = queue reason, `a` = ns it waited
-    pub const POP: u8 = 7;
+    pub const POP: u8 = 6;
     /// its counted (PGO) build was installed: `why` = 1 lukewarm
-    pub const COUNTED: u8 = 8;
+    pub const COUNTED: u8 = 7;
     /// its counted window ended: `why` = WIN_*, `a` = entries per second
-    pub const WINDOW_END: u8 = 9;
+    pub const WINDOW_END: u8 = 8;
     /// a lukewarm counted slot showed too little work: parked in counted code
-    pub const PARKED: u8 = 10;
+    pub const PARKED: u8 = 9;
     /// O3 code installed: `a` = build ns (cpu)
-    pub const O3_INSTALLED: u8 = 11;
+    pub const O3_INSTALLED: u8 = 10;
     /// an O3 build was dropped: `why` = DROP_*
-    pub const O3_DROPPED: u8 = 12;
+    pub const O3_DROPPED: u8 = 11;
     /// an O3 build was not even started: `why` = REFUSE_*
-    pub const O3_REFUSED: u8 = 13;
+    pub const O3_REFUSED: u8 = 12;
     /// queued to be built again (retier): `a` = retiers used
-    pub const RETIER: u8 = 14;
+    pub const RETIER: u8 = 13;
     /// a retier was refused: the budget (RETIERS) is used up
-    pub const RETIER_SPENT: u8 = 15;
+    pub const RETIER_SPENT: u8 = 14;
     /// its O2 build was queued: `why` = 0 slow baseline, 1 hot (with its O3 build)
-    pub const O2_QUEUED: u8 = 16;
+    pub const O2_QUEUED: u8 = 15;
     /// an O3 build panicked (dropped for it)
-    pub const O3_PANIC: u8 = 17;
-    pub const N: usize = 18;
+    pub const O3_PANIC: u8 = 16;
+    pub const N: usize = 17;
     pub const NAMES: [&str; N] = [
-        "?", "armed", "slow window", "stub retired", "queued", "counted again", "kept queued", "taken", "counted build", "counted window ended", "parked",
+        "?", "armed", "cost check", "queued", "counted again", "kept queued", "taken", "counted build", "counted window ended", "parked",
         "O3 installed", "O3 dropped", "O3 refused", "retier", "retier refused", "O2 queued", "O3 panicked",
     ];
 }
@@ -140,7 +137,7 @@ pub struct Hist {
     /// first and last time (ms of the run) per kind
     pub first_ms: [u32; ev::N],
     pub last_ms: [u32; ev::N],
-    /// count windows per code version: (code, ended fast = queued, timed out)
+    /// cost checks per code version: (code, queued, checks under the threshold)
     pub windows: Vec<(u64, u32, u32)>,
     /// the last events, oldest first
     pub recent: Vec<Ev>,
@@ -190,7 +187,7 @@ fn fold(h: &mut Hist, e: Ev) {
     }
     h.n[k] = h.n[k].saturating_add(1);
     h.last_ms[k] = ms;
-    if e.ev == ev::SLOW || (e.ev == ev::QUEUE && e.why == 0) {
+    if e.ev == ev::CHECK || (e.ev == ev::QUEUE && e.why == 0) {
         let w = match h.windows.iter_mut().position(|w| w.0 == e.b) {
             Some(i) => &mut h.windows[i],
             None => {
@@ -201,7 +198,7 @@ fn fold(h: &mut Hist, e: Ev) {
                 h.windows.last_mut().unwrap()
             }
         };
-        if e.ev == ev::SLOW {
+        if e.ev == ev::CHECK {
             w.2 += 1;
         } else {
             w.1 += 1;
@@ -235,9 +232,8 @@ pub fn describe(e: &Ev, code: &dyn Fn(u64) -> String) -> String {
     let ms = |ns: u64| format!("{:.1} ms", ns as f64 / 1e6);
     match e.ev {
         ev::ARM => format!("count stub armed on {} ({})", code(e.b), ARM_WHY.get(e.why as usize).unwrap_or(&"?")),
-        ev::SLOW => format!("count window timed out on {}: the calls took {} (window 1 s; {} slow in a row)", code(e.b), ms(e.a), e.why),
-        ev::RETIRE => format!("count stub retired from {} after {} slow windows: calls are no longer counted", code(e.b), e.why),
-        ev::QUEUE => format!("queued for O3 by {}{}{}", Q_WHY.get(e.why as usize).unwrap_or(&"?"), if e.a > 0 { format!(" at {}/s", e.a) } else { String::new() }, if e.b != 0 { format!(" on {}", code(e.b)) } else { String::new() }),
+        ev::CHECK => format!("cost check on {}: decayed cost {} under the threshold", code(e.b), e.a),
+        ev::QUEUE => format!("queued for O3 by {}{}{}", Q_WHY.get(e.why as usize).unwrap_or(&"?"), if e.a > 0 { format!(" at {} cost/s", e.a) } else { String::new() }, if e.b != 0 { format!(" on {}", code(e.b)) } else { String::new() }),
         ev::REVALIDATE => format!("O3 queue entry {} old: counted again", ms(e.a)),
         ev::KEPT => "O3 queue entry stays queued (other code was installed meanwhile)".into(),
         ev::POP => format!("taken by an O3 worker ({}) after {} in the queue", Q_WHY.get(e.why as usize).unwrap_or(&"?"), ms(e.a)),
@@ -255,9 +251,9 @@ pub fn describe(e: &Ev, code: &dyn Fn(u64) -> String) -> String {
     }
 }
 
-/// `why-tier retired`: the slots whose count stub is out of the slot while they still count
-/// (retired after slow windows): their calls are not counted, so only a hot loop can queue them.
-fn cmd_retired(req: &super::Req, out: &mut super::Out) {
+/// `why-tier uncounted`: the slots whose count stub is out of the slot while they still count
+/// (other code was installed over it): their calls are not counted.
+fn cmd_uncounted(req: &super::Req, out: &mut super::Out) {
     let n = req.num("n", 20) as usize;
     let up = crate::jit::current_unit();
     if up.is_null() {
@@ -266,15 +262,13 @@ fn cmd_retired(req: &super::Req, out: &mut super::Out) {
     let r = crate::owner::call_within(crate::owner::Class::Job, 10_000, move || {
         let u = unsafe { &*up };
         let v = crate::jit::tier_uncounted(u);
-        let mut rows = vec![format!("{} slots are not counted (their count stub retired or replaced while they count): they never queue O3 by calls", v.len())];
+        let mut rows = vec![format!("{} slots are not counted (their count stub replaced while they count): they never queue O3", v.len())];
         if !v.is_empty() {
-            rows.push("| slot | fn | code | retired at s |".into());
-            rows.push("|---|---|---|---|".into());
-            let mut v: Vec<(u32, Option<u32>)> = v.into_iter().map(|id| (id, history_peek(id).filter(|h| h.n[ev::RETIRE as usize] > 0).map(|h| h.last_ms[ev::RETIRE as usize]))).collect();
-            v.sort_by_key(|x| std::cmp::Reverse(x.1));
-            for (id, at) in v.iter().take(n) {
+            rows.push("| slot | fn | code |".into());
+            rows.push("|---|---|---|".into());
+            for id in v.iter().take(n) {
                 let f = &u.fns[*id as usize];
-                rows.push(format!("| S{} | `{}` | {} | {} |", id, super::short(&super::display_name(u, *id, 0), 80), super::codever::label(super::codever::kind_at(u, f.code)), at.map_or("?".into(), |ms| format!("{:.1}", ms as f64 / 1e3))));
+                rows.push(format!("| S{} | `{}` | {} |", id, super::short(&super::display_name(u, *id, 0), 80), super::codever::label(super::codever::kind_at(u, f.code))));
             }
             if v.len() > n {
                 rows.push(format!("+{} more (n=)", v.len() - n));
@@ -293,10 +287,6 @@ fn cmd_retired(req: &super::Req, out: &mut super::Out) {
     }
 }
 
-fn history_peek(id: u32) -> Option<Hist> {
-    let g = STORE.lock().unwrap_or_else(|e| e.into_inner());
-    g.as_ref().and_then(|st| st.by.get(&id).cloned())
-}
 
 /// ms of the run, for tables.
 pub fn at_s(t_ns: u64) -> String {
@@ -307,10 +297,10 @@ pub fn at_s(t_ns: u64) -> String {
 /// tier-up state now and its decision history (counts by kind, the last events).
 pub fn cmd_why_tier(req: &super::Req, out: &mut super::Out) {
     let Some(q) = req.pos.first().cloned() else {
-        return out.err("usage: why-tier <fn|file:line|@slot> | why-tier retired [n=20]");
+        return out.err("usage: why-tier <fn|file:line|@slot> | why-tier uncounted [n=20]");
     };
-    if q == "retired" {
-        return cmd_retired(req, out);
+    if q == "uncounted" {
+        return cmd_uncounted(req, out);
     }
     let q2 = q.clone();
     let up = crate::jit::current_unit();
@@ -347,7 +337,7 @@ pub fn cmd_why_tier(req: &super::Req, out: &mut super::Out) {
                         rows.push(format!("| {} | {} |", at_s(e.t), describe(e, &kind)));
                     }
                 }
-                None => rows.push("decisions: none recorded beyond being armed (no slow window, queue, build or drop)".into()),
+                None => rows.push("decisions: none recorded beyond being armed (no cost check, queue, build or drop)".into()),
             }
             rows.push(String::new());
         }
@@ -375,7 +365,7 @@ pub fn cmd_why_tier(req: &super::Req, out: &mut super::Out) {
 mod tests {
     use super::*;
 
-    /// Armed alone makes no history; a slow window does, and arming then counts; windows are kept
+    /// Armed alone makes no history; a cost check does, and arming then counts; checks are kept
     /// per code version.
     #[test]
     fn histories_start_at_a_decision() {
@@ -384,13 +374,13 @@ mod tests {
         note_arm(slot, ARM_NEW, 0x1000);
         drain();
         assert!(history(slot).0.is_none());
-        note(slot, ev::SLOW, 1, 1_500_000_000, 0x1000);
-        note(slot, ev::SLOW, 2, 1_700_000_000, 0x1000);
+        note(slot, ev::CHECK, 0, 15_000, 0x1000);
+        note(slot, ev::CHECK, 0, 27_000, 0x1000);
         drain();
         note_arm(slot, ARM_REARM, 0x2000);
         note(slot, ev::QUEUE, 0, 9000, 0x2000);
         let h = history(slot).0.unwrap();
-        assert_eq!(h.n[ev::SLOW as usize], 2);
+        assert_eq!(h.n[ev::CHECK as usize], 2);
         assert_eq!(h.n[ev::ARM as usize], 1);
         assert_eq!(h.windows, vec![(0x1000, 0, 2), (0x2000, 1, 0)]);
         assert_eq!(h.recent.len(), 4);

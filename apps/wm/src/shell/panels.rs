@@ -37,6 +37,13 @@ use super::{alpha, darker, CtrlState, ShellTokens};
 #[cfg(target_os = "linux")]
 #[path = "panels_linux.rs"]
 mod linux;
+/// The BlackShark headset's row and settings view (Controllers & devices).
+#[cfg(target_os = "linux")]
+#[path = "blackshark/panel_linux.rs"]
+mod headset;
+// Widget field types must be plain names for the derive's field parser.
+#[cfg(target_os = "linux")]
+use {headset::HeadsetDrag, super::blackshark::HeadsetEdits};
 #[cfg(target_os = "linux")]
 use {std::sync::Arc, super::system_linux::SystemSnapshot};
 #[cfg(target_os = "linux")]
@@ -327,6 +334,9 @@ enum Hit {
     HubRestart,
     #[cfg(target_os = "linux")]
     PairXbox(usize),
+    /// The BlackShark headset's row and settings view.
+    #[cfg(target_os = "linux")]
+    Headset(headset::HeadsetHit),
     /// Open or close the list of chat models.
     HubPickOpen,
     /// A chat model of that list (index into `hub_chat_models`).
@@ -493,6 +503,22 @@ pub struct ShellPanel {
     peripheral_scroll: usize,
     #[rust]
     peripheral_visible: usize,
+    /// Controllers & devices shows the BlackShark settings view.
+    #[cfg(target_os = "linux")]
+    #[rust]
+    headset_view: bool,
+    /// The first settings section shown when the view is taller than the card.
+    #[cfg(target_os = "linux")]
+    #[rust]
+    headset_scroll: usize,
+    #[cfg(target_os = "linux")]
+    #[rust]
+    headset_drag: Option<HeadsetDrag>,
+    /// Headset edits the headset has not confirmed yet (the WM copies them
+    /// from the system controller on each poll).
+    #[cfg(target_os = "linux")]
+    #[rust]
+    pub headset_pending: HeadsetEdits,
     /// The main window's actual layout scale as the WM last read it off the
     /// platform (`window_geom.dpi_factor`) — never the saved value. Zero
     /// until the first read; the panel then shows the launch default.
@@ -728,6 +754,9 @@ impl ShellPanel {
             self.gpu_scroll = 0;
             self.gpu_targets.clear();
             self.pointer_settings = false;
+            self.headset_view = false;
+            self.headset_scroll = 0;
+            self.headset_drag = None;
         }
         #[cfg(target_os = "linux")]
         if was_open == Some(PanelKind::Network) && self.open != Some(PanelKind::Network) {
@@ -869,8 +898,11 @@ impl ShellPanel {
             PanelKind::Monitor => self.monitor_height(),
             PanelKind::Network => self.network_height(),
             PanelKind::Bluetooth => 150.0,
+            #[cfg(target_os = "linux")]
+            PanelKind::Gamepad if self.headset_view => self.headset_height(),
             PanelKind::Gamepad => 136.0 + 68.0 * (self.data.game_controllers.controllers.len()
-                + self.data.game_controllers.batteries.len() + self.data.game_controllers.receivers.len()) as f64,
+                + self.data.game_controllers.batteries.len() + self.data.game_controllers.receivers.len()
+                + self.headset_list_rows()) as f64,
             PanelKind::Hub => self.hub_height(),
         } + pad * 2.0;
         // The body is inset by the padding AND the popup border. The
@@ -944,12 +976,27 @@ impl ShellPanel {
         }
     }
 
+    /// Rows the BlackShark headset adds to the device list (Linux only).
+    fn headset_list_rows(&self) -> usize {
+        #[cfg(target_os = "linux")]
+        return self.headset_rows();
+        #[cfg(not(target_os = "linux"))]
+        0
+    }
+
     fn draw_game_controllers(&mut self, cx: &mut Cx2d, body: Rect) {
+        #[cfg(target_os = "linux")]
+        if self.headset_view {
+            self.draw_headset(cx, body);
+            return;
+        }
         let tok = self.tokens;
         let fg = tok.popups.text;
         let inventory = self.data.game_controllers.clone();
         let (hero, mut rest) = cut_top(body, 52.0);
-        let count = inventory.controllers.len() + inventory.batteries.len();
+        // The headset row comes right after the controllers.
+        let headsets = self.headset_list_rows();
+        let count = inventory.controllers.len() + headsets + inventory.batteries.len();
         let status = if count == 0 { "No devices detected".into() } else { format!("{count} devices") };
         self.d.panel_hero(cx, hero, &tok, fg, Ico::Gamepad, "Controllers & devices", &status, 0.0);
         let rows = count + inventory.receivers.len();
@@ -963,8 +1010,14 @@ impl ShellPanel {
             let detail = controller.battery.as_ref().map_or("Connected".into(), |b| format!("Battery: {b}"));
             self.d.panel_hero(cx, row, &tok, fg, Ico::Gamepad, &controller.name, &detail, 0.0);
         }
-        for (index, battery) in inventory.batteries.iter().enumerate() {
+        #[cfg(target_os = "linux")]
+        for index in 0..headsets {
             if !visible.contains(&(inventory.controllers.len() + index)) { continue; }
+            let (row, next) = cut_top(rest, 68.0); rest = next;
+            self.draw_headset_row(cx, row);
+        }
+        for (index, battery) in inventory.batteries.iter().enumerate() {
+            if !visible.contains(&(inventory.controllers.len() + headsets + index)) { continue; }
             let (row, next) = cut_top(rest, 68.0); rest = next;
             use super::game_controllers::DeviceKind;
             let icon = match battery.kind {
@@ -2637,6 +2690,8 @@ impl Widget for ShellPanel {
                         }
                         #[cfg(target_os = "linux")]
                         Hit::DpiScaleSlider => self.dpi_drag_to(cx, e.abs),
+                        #[cfg(target_os = "linux")]
+                        Hit::Headset(hit) => self.headset_drag_to(cx, hit, e.abs),
                         _ => {}
                     }
                     return;
@@ -2722,6 +2777,8 @@ impl Widget for ShellPanel {
                         }
                     }
                     #[cfg(target_os = "linux")]
+                    Some(Hit::Headset(hit)) => self.headset_press(cx, hit, e.abs),
+                    #[cfg(target_os = "linux")]
                     Some(Hit::PairXbox(index)) => {
                         if let Some(receiver) = self.data.game_controllers.receivers.get(index) {
                             cx.widget_action(self.uid, ShellPanelAction::System(crate::linux_controls::ControlAction::Command(
@@ -2770,13 +2827,19 @@ impl Widget for ShellPanel {
             }
             Event::MouseUp(_) => {
                 #[cfg(target_os = "linux")]
-                self.dpi_drag_end(cx);
+                {
+                    self.dpi_drag_end(cx);
+                    self.headset_release(cx);
+                }
                 self.dragging = None;
             }
             #[cfg(target_os = "linux")]
             Event::Scroll(e) => {
                 if self.wants_scroll(e.abs) {
-                    if self.open == Some(PanelKind::Gamepad) {
+                    if self.open == Some(PanelKind::Gamepad) && self.headset_view {
+                        self.headset_scroll_by(cx, e.scroll.y);
+                    }
+                    else if self.open == Some(PanelKind::Gamepad) {
                         if e.scroll.y > 0.0 { self.peripheral_scroll = self.peripheral_scroll.saturating_add(1); }
                         else if e.scroll.y < 0.0 { self.peripheral_scroll = self.peripheral_scroll.saturating_sub(1); }
                         self.redraw(cx);
@@ -2801,10 +2864,12 @@ impl Widget for ShellPanel {
         match self.open {
             Some(PanelKind::Network) => self.wifi.summary(),
             Some(PanelKind::Audio | PanelKind::Monitor | PanelKind::Power) => self.system_summary(),
+            Some(PanelKind::Gamepad) if self.headset_view => self.headset_text(),
             Some(PanelKind::Gamepad) => {
                 let inv = &self.data.game_controllers;
                 let mut text = String::from("Controllers & devices");
                 for c in &inv.controllers { text.push_str(&format!("\n{}: {}", c.name, c.battery.as_deref().unwrap_or("Connected"))); }
+                if self.headset_rows() > 0 { text.push('\n'); text.push_str(&self.headset_text()); }
                 for b in &inv.batteries { text.push_str(&format!("\n{}: {}", b.name, b.detail)); }
                 for r in &inv.receivers { text.push_str(if r.pairing { "\nXbox receiver: Pairing" } else { "\nXbox receiver: Ready" }); }
                 text

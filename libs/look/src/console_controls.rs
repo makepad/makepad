@@ -37,6 +37,8 @@ script_mod! {
         text: ""
         text_input: TextInput{width: 0 height: 0}
         draw_bg +: {
+            // The quad is the box: a style sheet grows its slider family's quad for shadows, and this pixel draws to the box, so under a sheet it would scale up.
+            vertex: fn() {self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)}
             body_color: uniform(stage.groove)
             track_color: uniform(stage.track)
             fill_color: uniform(stage.accent)
@@ -71,6 +73,8 @@ script_mod! {
         text: ""
         text_input: TextInput{width: 0 height: 0}
         draw_bg +: {
+            // The quad is the box: a style sheet grows its slider family's quad for shadows, and this pixel draws to the box, so under a sheet it would scale up.
+            vertex: fn() {self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)}
             body_color: uniform(stage.groove)
             track_color: uniform(stage.track)
             fill_color: uniform(stage.accent)
@@ -112,6 +116,8 @@ script_mod! {
             height: 0
         }
         draw_bg +: {
+            // The quad is the box: a style sheet grows its slider family's quad for shadows, and this pixel draws to the box, so under a sheet it would scale up.
+            vertex: fn() {self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)}
             body_color: uniform(stage.groove)
             body_color_hover: uniform(stage.track)
             rim_color: uniform(stage.border_strong)
@@ -191,6 +197,8 @@ script_mod! {
             height: 0
         }
         draw_bg +: {
+            // The quad is the box: a style sheet grows its slider family's quad for shadows, and this pixel draws to the box, so under a sheet it would scale up.
+            vertex: fn() {self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)}
             body_color: uniform(stage.groove)
             track_color: uniform(stage.track)
             fill_color: uniform(stage.accent)
@@ -297,6 +305,8 @@ script_mod! {
         text: ""
         text_input: TextInput{width: 0 height: 0}
         draw_bg +: {
+            // The quad is the box: a style sheet grows its slider family's quad for shadows, and this pixel draws to the box, so under a sheet it would scale up.
+            vertex: fn() {self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)}
             body_color: uniform(stage.groove)
             track_color: uniform(stage.track)
             fill_color: uniform(stage.accent)

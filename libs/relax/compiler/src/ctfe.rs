@@ -21,10 +21,9 @@ use crate::types::{TyId, TyKind};
 const STEP_BUDGET: u32 = 4_000_000;
 const CALL_DEPTH: u32 = 32;
 
-crate::gen_local! {
+thread_local! {
     /// the constants whose data this thread's nested evaluations are reading (const_data)
-    /// (compiler TLS: the settle swap forgets the buffer with its generation)
-    static CONSTS_READING: std::cell::RefCell<Vec<(crate::program::DefId, Vec<TyId>)>>;
+    static CONSTS_READING: std::cell::RefCell<Vec<(crate::program::DefId, Vec<TyId>)>> = Default::default();
 }
 
 struct Ctx<'a> {

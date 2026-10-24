@@ -57,13 +57,19 @@ impl Worker {
     }
 }
 
-impl Drop for Worker {
-    fn drop(&mut self) {
+impl Worker {
+    /// The worker runs the jobs queued so far and ends; this returns once it has. Later
+    /// pushes are dropped. The end of the process (`D3d11::before_exit`) and `Drop`.
+    pub fn stop(&mut self) {
         self.tx.take();
         if let Some(t) = self.thread.take() {
-            let _ = t.join();
+            if t.join().is_err() { eprintln!("[hal-d3d11] a worker panicked"); }
         }
     }
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) { self.stop(); }
 }
 
 /// How a HAL format is stored, viewed and sampled.

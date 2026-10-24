@@ -6,7 +6,7 @@
 //! All of it runs on the owner thread.
 //!
 //! Zones: SLOTS and the edits are kept state (the program heap): the instrumented code calls the
-//! sites they name long after a settle swap destroyed the compiler arena the owner compiles in.
+//! sites they name for the rest of the run.
 //! The entries take `zone_alloc::kept()`; only `rebuild`'s compile runs in the compiler phase.
 
 use std::collections::HashMap;
@@ -86,42 +86,6 @@ fn active_entry(id: u32) -> Option<bool> {
     a.binary_search_by_key(&id, |x| x.0).ok().map(|k| a[k].1)
 }
 
-pub(crate) fn scan_kept(a: &mut crate::jit::zone_scan::Acc) {
-    if let Ok(v) = NOTES.try_lock() {
-        a.field("inspect.patch_notes");
-        a.vec(&v);
-    }
-    if let Ok(v) = ACTIVE.try_lock() {
-        a.field("inspect.patch_active");
-        a.vec(&v);
-    }
-    if let Ok(w) = WATCH.try_lock() {
-        a.field("inspect.patch_watch");
-        a.vec(&w);
-        for x in w.iter() {
-            a.vec(&x.lines);
-            a.vec(&x.targets);
-        }
-    }
-    let Ok(g) = SLOTS.try_lock() else { return };
-    let Some(m) = g.as_ref() else { return };
-    a.field("inspect.patch_slots");
-    a.map(m, |a, _, s| {
-        a.vec(&s.edits);
-        for (_, e) in &s.edits {
-            if let Edit::Watch { field } = e {
-                a.arc(field);
-            }
-            if let Edit::ProbeLocals { point, .. } = e {
-                a.arc(point);
-                a.vec(&point.params);
-                for p in &point.params {
-                    a.string(&p.0);
-                }
-            }
-        }
-    });
-}
 
 /// Is slot `id` instrumented now? (O3 / O2 installs keep its instruments)
 pub fn active(id: u32) -> bool {
@@ -236,7 +200,10 @@ pub fn code_installed(u: &crate::jit::Unit, id: u32) {
         first
     };
     if first {
-        crate::owner::post(crate::owner::Class::Program, || {
+        // queued also on the owner: an install inside a publish (a counted build's, an O3 build's)
+        // must not run the rebuild's front there (rule I-PUB; zone_swap's probe of path_dump, whose
+        // inliner got a counted build: "front inside a publish")
+        crate::owner::post_queued(crate::owner::Class::Program, || {
             let up = crate::jit::current_unit();
             if !up.is_null() {
                 unsafe { cover_new_inliners(up) };

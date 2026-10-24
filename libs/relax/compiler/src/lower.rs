@@ -80,7 +80,7 @@ fn lowers_slot(u: &Unit, slot: u32, cur_fn: u32) -> bool {
     slot == cur_fn || (slot as usize) < u.fns.len() && matches!(u.fns[slot as usize].key, crate::jit::FnKey::Plain(b) if b == cur_fn)
 }
 
-crate::gen_local! {
+crate::memo_local! {
     pub static PROBE_POINTS: std::cell::RefCell<Vec<ProbePoint>>;
     pub static PROBE_RESULTS: std::cell::RefCell<Vec<(u32, Result<(), String>)>>;
     pub static WATCH_FIELDS: std::cell::RefCell<Vec<WatchField>>;
@@ -10909,13 +10909,16 @@ impl<'a> Lcx<'a> {
                         21 | 22 => w == VW::S,
                         24 | 25 | 27 => w == VW::B,
                         26 => matches!(w, VW::H | VW::S),
-                        40..=53 | 60..=63 | 70..=74 | 80 | 81 => w == VW::S,
+                        // the SSE float ops: f32 (_ps) and f64 (_pd) lanes
+                        40..=51 => matches!(w, VW::S | VW::D),
+                        52 | 53 | 60..=63 | 70..=74 | 80 | 81 => w == VW::S,
                         _ => false,
                     }
                 } else {
                     match op {
                         0..=3 => true,
-                        4 | 7 | 8 | 9 | 10 => w == VW::S,
+                        7 | 8 | 10 | 11 => matches!(w, VW::S | VW::D),
+                        4 | 9 => w == VW::S,
                         5 | 6 => w == VW::B,
                         _ => false,
                     }
@@ -10977,24 +10980,24 @@ impl<'a> Lcx<'a> {
                         }
                         40..=53 | 60..=63 => {
                             let fop = match op {
-                                40 => VX::FAdd(VW::S, NanBits::Intel),
+                                40 => VX::FAdd(w, NanBits::Intel),
                                 60 => VX::FAdd(VW::S, NanBits::Neon),
-                                41 => VX::FSub(VW::S, NanBits::Intel),
+                                41 => VX::FSub(w, NanBits::Intel),
                                 61 => VX::FSub(VW::S, NanBits::Neon),
-                                42 => VX::FMul(VW::S, NanBits::Intel),
+                                42 => VX::FMul(w, NanBits::Intel),
                                 62 => VX::FMul(VW::S, NanBits::Neon),
-                                43 => VX::FDiv(VW::S, NanBits::Intel),
+                                43 => VX::FDiv(w, NanBits::Intel),
                                 63 => VX::FDiv(VW::S, NanBits::Neon),
-                                44 => VX::FMinLt(VW::S),
-                                45 => VX::FMaxGt(VW::S),
-                                46 => VX::FCmp(Cond::Eq, VW::S),
-                                47 => VX::FCmp(Cond::Ne, VW::S),
-                                48 => VX::FCmp(Cond::Lt, VW::S),
-                                49 => VX::FCmp(Cond::Le, VW::S),
-                                50 => VX::FCmp(Cond::Gt, VW::S),
+                                44 => VX::FMinLt(w),
+                                45 => VX::FMaxGt(w),
+                                46 => VX::FCmp(Cond::Eq, w),
+                                47 => VX::FCmp(Cond::Ne, w),
+                                48 => VX::FCmp(Cond::Lt, w),
+                                49 => VX::FCmp(Cond::Le, w),
+                                50 => VX::FCmp(Cond::Gt, w),
                                 52 => VX::FMinNeon(VW::S),
                                 53 => VX::FMaxNeon(VW::S),
-                                _ => VX::FCmp(Cond::Ge, VW::S),
+                                _ => VX::FCmp(Cond::Ge, w),
                             };
                             self.emit(Inst::VX(fop, d, a, b));
                             return self.vx_result(d, t);
@@ -11026,15 +11029,21 @@ impl<'a> Lcx<'a> {
                         5 => VX::BytesShrI(k),
                         6 => VX::BytesShlI(k),
                         7 | 9 => {
-                            self.emit(Inst::VX(VX::FSqrt(VW::S, if op == 7 { NanBits::Intel } else { NanBits::Neon }), d, a, a));
+                            self.emit(Inst::VX(VX::FSqrt(w, if op == 7 { NanBits::Intel } else { NanBits::Neon }), d, a, a));
                             return self.vx_result(d, t);
                         }
                         8 => {
-                            self.emit(Inst::VX(VX::FAbs(VW::S), d, a, a));
+                            self.emit(Inst::VX(VX::FAbs(w), d, a, a));
                             return self.vx_result(d, t);
                         }
                         10 => {
-                            self.emit(Inst::VX(VX::FNeg(VW::S), d, a, a));
+                            self.emit(Inst::VX(VX::FNeg(w), d, a, a));
+                            return self.vx_result(d, t);
+                        }
+                        11 => {
+                            // SSE4.1 roundps/roundpd immediate rounding (imm & 3)
+                            let r = [RoundTo::Even, RoundTo::Floor, RoundTo::Ceil, RoundTo::Trunc][(k & 3) as usize];
+                            self.emit(Inst::VX(VX::FRound(w, r), d, a, a));
                             return self.vx_result(d, t);
                         }
                         _ => {

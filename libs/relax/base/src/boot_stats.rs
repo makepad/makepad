@@ -43,12 +43,11 @@ static O3_ARMS: [AtomicU8; O3_RING] = [UNSET8; O3_RING];
 /// The function of each ring entry's install, to pick the star it ignites (hash of its slot).
 static O3_KEYS: [AtomicU32; O3_RING] = [ZERO32; O3_RING];
 
-/// The compiler-zone swap: its end in ms since process start + 1 (0: not yet), the chunks it
-/// destroyed, and the resident set (MB) around it.
-pub static SWAP_END_MS: AtomicU64 = AtomicU64::new(0);
-pub static SWAP_CHUNKS: AtomicU32 = AtomicU32::new(0);
-pub static SWAP_RSS_BEFORE_MB: AtomicU32 = AtomicU32::new(0);
-pub static SWAP_RSS_AFTER_MB: AtomicU32 = AtomicU32::new(0);
+/// The first settle (the compiles' state dropped, the heap trimmed): its end in ms since process
+/// start + 1 (0: not yet), and the resident set (MB) around it.
+pub static SETTLE_END_MS: AtomicU64 = AtomicU64::new(0);
+pub static SETTLE_RSS_BEFORE_MB: AtomicU32 = AtomicU32::new(0);
+pub static SETTLE_RSS_AFTER_MB: AtomicU32 = AtomicU32::new(0);
 
 /// The arm of crate `krate`; `name` is asked only when the crate opens an arm.
 pub fn arm_of(krate: u32, name: impl FnOnce() -> [u8; NAME_BYTES]) -> usize {
@@ -116,11 +115,13 @@ pub fn o3_install(index: u32) -> (usize, u32) {
     (O3_ARMS[n].load(Relaxed) as usize % ARMS, O3_KEYS[n].load(Relaxed))
 }
 
-pub fn swap_done(chunks: usize, rss_before: u64, rss_after: u64) {
-    SWAP_CHUNKS.store(chunks as u32, Relaxed);
-    SWAP_RSS_BEFORE_MB.store((rss_before >> 20) as u32, Relaxed);
-    SWAP_RSS_AFTER_MB.store((rss_after >> 20) as u32, Relaxed);
-    SWAP_END_MS.store(crate::clock::ms_since_process_start() as u64 + 1, Relaxed);
+pub fn settle_done(rss_before: u64, rss_after: u64) {
+    if SETTLE_END_MS.load(Relaxed) != 0 {
+        return;
+    }
+    SETTLE_RSS_BEFORE_MB.store((rss_before >> 20) as u32, Relaxed);
+    SETTLE_RSS_AFTER_MB.store((rss_after >> 20) as u32, Relaxed);
+    SETTLE_END_MS.store(crate::clock::ms_since_process_start() as u64 + 1, Relaxed);
 }
 
 pub fn main_called() {

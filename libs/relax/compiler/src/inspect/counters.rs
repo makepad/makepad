@@ -17,6 +17,7 @@ pub fn cmd_counters(req: &Req, out: &mut Out) {
     out.always("more: asm top vs=rustc ev=cycles  asm <fn> ev=instructions  prof threads=main");
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn g(x: f64) -> String {
     if x >= 1e9 {
         format!("{:.2} G", x / 1e9)

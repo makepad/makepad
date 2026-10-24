@@ -14,10 +14,6 @@
 //! (also not when its closure panics) before every task it spawned has finished and dropped
 //! what it captured, so tasks may borrow the caller's locals.
 //!
-//! A worker holds no compiler-generation state while it idles, but its thread-local caches and
-//! arena chunks belong to the generation it last ran in: the zone swap calls `retire_idle`
-//! and waits for the workers to end before it destroys the old generation.
-//!
 //! A section's own bookkeeping (its `ScopeData`, each task's box and result packet) is kept
 //! memory, and a task counts as finished only once its worker handed its chunks back and is
 //! idle again: when `scope` returns, nothing of the section touches the compiler generation any

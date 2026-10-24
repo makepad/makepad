@@ -148,67 +148,6 @@ impl Syms {
         Syms { dom0, vals, classes: crate::jit::alloc_rw(SYM_CAP), kinds: crate::conc::AppendVec::new_kept(SYM_CAP), inner: Mutex::new(SymsInner::default()), data: Mutex::new(DataIndex::default()), rw_blocks: Mutex::new(Vec::new()), rw_starts: Mutex::new(BTreeMap::new()), rw_syms: Mutex::new(BTreeMap::new()), const_copies: Mutex::new(HashMap::new()), initial_data: Mutex::new(HashMap::new()), foreign_defs: Mutex::new(HashMap::new()), rt_by_addr: OnceLock::new(), foreign_by_addr: Mutex::new(ForeignIndex::default()) }
     }
 
-    /// The kept-state scan (jit/zone_scan.rs): the owned allocations of the symbol table.
-    pub(crate) fn scan(&self, a: &mut crate::jit::zone_scan::Acc) {
-        fn kind(a: &mut crate::jit::zone_scan::Acc, k: &SymKind) {
-            match k {
-                SymKind::Foreign(s) | SymKind::Missing(s) | SymKind::Provided(s) => a.string(s),
-                _ => {}
-            }
-        }
-        a.field("syms.kinds");
-        self.kinds.alloc_ptrs(|p| a.ptr(p));
-        for k in self.kinds.iter() {
-            kind(a, k);
-        }
-        a.field("syms.map");
-        if let Ok(g) = self.inner.try_lock() {
-            a.map(&g.map, |a, k, _| kind(a, k));
-        }
-        a.field("syms.data");
-        if let Ok(g) = self.data.try_lock() {
-            a.vec(&g.objs);
-            for o in g.objs.iter() {
-                if let Some(n) = &o.name {
-                    a.string(n);
-                }
-                match &o.kind {
-                    DataKind::Words(w) => a.vec(w),
-                    DataKind::Relocs(r) => a.vec(r),
-                    _ => {}
-                }
-                if let Some(p) = &o.ptrs {
-                    a.arc(p);
-                    a.vec(p);
-                }
-            }
-            a.btree(&g.by_start, |_, _, _| {});
-        }
-        a.field("syms.rw_blocks");
-        if let Ok(g) = self.rw_blocks.try_lock() {
-            a.vec(&g);
-        }
-        a.field("syms.rw_starts");
-        if let Ok(g) = self.rw_starts.try_lock() {
-            a.btree(&g, |_, _, _| {});
-        }
-        a.field("syms.initial_data");
-        if let Ok(g) = self.initial_data.try_lock() {
-            a.map(&g, |a, _, v| a.vec(v));
-        }
-        a.field("syms.foreign_defs");
-        if let Ok(g) = self.foreign_defs.try_lock() {
-            a.map(&g, |_, _, _| {});
-        }
-        a.field("syms.rt_by_addr");
-        if let Some(m) = self.rt_by_addr.get() {
-            a.map(m, |_, _, _| {});
-        }
-        a.field("syms.foreign_by_addr");
-        if let Ok(g) = self.foreign_by_addr.try_lock() {
-            a.map(&g.by_addr, |_, _, _| {});
-        }
-    }
 
     /// The symbol for `kind` (created with `value` on first use; later calls return the same id).
     pub fn intern(&self, kind: SymKind, value: u64) -> Sym {

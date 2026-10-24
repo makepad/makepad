@@ -18,7 +18,7 @@ pub use activity::Want as ActivityWant;
 pub use layer::Want as LayerWant;
 use makepad_hal::{
     backend_id, buffer_kind, clock_ns, dialect, event_tag, format, info_flags, input, lifecycle,
-    pass_load, session::HOST, target, usage, window_kind, window_state, Attr, CmdWriter, EventBuf, EventQueue,
+    pass_load, session::HOST, target, usage, window_kind, window_state, window_style, Attr, CmdWriter, EventBuf, EventQueue,
     FrameMeta, Hal, HalEvent, HalInfo, Id, Pass, RawEvent,
 };
 use makepad_script::{id, LiveId};
@@ -220,11 +220,14 @@ pub struct Boot {
 }
 
 impl Boot {
+    /// `exact`: `geometry` is a launch size (`MAKEPAD_WINDOW`) the window system keeps as it
+    /// is, not fitted to the displays.
     pub fn new(
         info: HalInfo,
         document: Document,
         state: State,
         geometry: [f32; 4],
+        exact: bool,
     ) -> Result<Self, String> {
         let mut boot = Self {
             window: None,
@@ -285,7 +288,8 @@ impl Boot {
         let hal = Hal::global();
         let window = hal.with_world(|world| world.host_window(geometry));
         let mut writer = CmdWriter::new(HOST);
-        writer.window_create(window, window_kind::NORMAL, Id::NONE, geometry, false);
+        let style = if exact { window_style::EXACT_SIZE } else { 0 };
+        writer.window_create(window, window_kind::NORMAL | style, Id::NONE, geometry, false);
         writer.str_def(1, boot.state.app.as_bytes());
         writer.window_title(window, 1);
         let vertices: Vec<u8> = [0.0_f32, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0]

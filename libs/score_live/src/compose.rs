@@ -935,7 +935,9 @@ impl Composer {
             ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
         };
         let humanize = l.humanize;
+        #[cfg(not(target_arch = "wasm32"))]
         let neural = self.plays_neural(&l.name);
+        #[cfg(not(target_arch = "wasm32"))]
         let singer = if neural { makepad_score_player::sung::neural::shared() } else { None };
         let sampler_root = l.play.as_deref().and_then(|p| self.doc.inst(p)).and_then(|inst| match &inst.kind {
             InstKind::Sampler { root, .. } => Some(*root),
@@ -970,6 +972,7 @@ impl Composer {
             // A neural phrase: asked of the singer now, played at its own
             // start (never swung or humanized: its audio is one piece); a
             // loop on another instrument has no use for it.
+            #[cfg(not(target_arch = "wasm32"))]
             if let EmitKind::Phrase(key) = emit.what {
                 if !neural {
                     continue;

@@ -192,6 +192,7 @@ pub fn catalog(doc: Option<&ScoreDoc>, available: &Available) -> Vec<Choice> {
         out.push(choice("Voices", voice.to_string(), format!("a sung {voice} voice: sing(notes, \"lyrics\") in its loops"), "Voice", vec![("profile", format!("@{voice}"))]));
     }
     // The neural voice, when one is installed (`cantor_install`).
+    #[cfg(not(target_arch = "wasm32"))]
     if makepad_score_player::sung::neural::model_path().is_file() {
         out.push(choice("Neural singers", "Cantor".into(), "the neural singing voice: sing(notes, \"lyrics\") in its loops, each line rendered ahead".into(), "Voice", vec![("engine", "@neural".into())]));
     }

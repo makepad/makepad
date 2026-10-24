@@ -206,7 +206,7 @@ pub(crate) fn error(base: &ScriptVmBase, line: impl FnOnce() -> String) {
     }
 }
 
-/// A host diagnostic at script site `at` (vm_ctl ERR_PUSH_DIAGNOSTIC): counted on every call, the
+/// A host diagnostic at script site `at` (vm_ctl ERR_PUSH_DIAGNOSTIC / _ERROR): counted on every call, the
 /// error hook (the `scripterr` event) only at a site's `first` report.
 pub(crate) fn diagnostic(base: &ScriptVmBase, at: Option<(&str, u32)>, text: &str, first: bool) {
     if !ENABLED.load(Relaxed) {

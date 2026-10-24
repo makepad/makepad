@@ -248,6 +248,10 @@ fn allocation_layout(size: usize, align: usize, buckets: usize) -> (Layout, usiz
     (layout, offset)
 }
 
+// A trace cannot predict collisions in another address space: keys can contain
+// allocation addresses, and a different hash can visit another control group
+// or need an equality comparison that the training lookup never made.
+#[relax(keep_reachable)]
 fn probe_find<F: FnMut(usize) -> bool>(ctrl: *const u8, buckets: usize, hash: u64, mut eq: F) -> Option<usize> {
     if buckets == 0 { return None; }
     let mask = buckets - 1;

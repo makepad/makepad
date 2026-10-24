@@ -190,38 +190,6 @@ impl<T> Shared<T> {
 
 pub static REG: Shared<Reg> = Shared(relax_session::sync::Mutex::new(RefCell::new(None)));
 
-pub(crate) struct ZoneTaken(Option<Reg>);
-
-pub(crate) fn zone_take() -> ZoneTaken {
-    // The warm path must call register_and_strip again before expanding macros;
-    // registry lookups do not load a missing graph themselves.
-    let mut reg = REG.0.lock().unwrap_or_else(|e| e.into_inner());
-    let taken = ZoneTaken(std::mem::take(reg.get_mut()));
-    #[cfg(test)]
-    assert!(reg.get_mut().is_none());
-    taken
-}
-
-pub(crate) fn zone_put_back(taken: ZoneTaken) {
-    let mut reg = REG.0.lock().unwrap_or_else(|e| e.into_inner());
-    std::mem::forget(std::mem::replace(reg.get_mut(), taken.0));
-}
-
-/// The next compiler generation registers the running program's proc-macro graph again: a
-/// copy of the taken registry, made in the caller's (new) generation, and the runner's
-/// `registered` (the native macro graph is rebuilt there). A live edit after the swap expands
-/// the same derives and macro calls as before it; with the registry left empty its file
-/// reparsed without them (every derive's items "removed", every item macro "added": a
-/// restart for any edit).
-pub(crate) fn zone_reinstall(sess: &std::sync::Arc<crate::Session>, taken: &ZoneTaken) -> Result<(), String> {
-    let Some(reg) = taken.0.clone() else { return Ok(()) };
-    REG.with(|r| *r.borrow_mut() = Some(reg));
-    match RUNNER.get() {
-        Some(r) => r.registered(sess),
-        None => Ok(()),
-    }
-}
-
 static STATS_CELL: Shared<HostStats> = Shared(relax_session::sync::Mutex::new(RefCell::new(None)));
 
 /// `STATS.with(|s| ..)` over the shared stats (a copy in a Cell, written back).
@@ -597,46 +565,4 @@ pub fn run_derive(sess: &std::sync::Arc<crate::Session>, name: &str, item: &Toke
         Some(r) => r.call(sess, &e, item, call_span),
         None => Err(no_runner(&e)),
     })
-}
-
-#[cfg(test)]
-mod zone_tests {
-    use super::*;
-
-    /// The compiler-generation swap takes the registry with the other compiler statics; the new
-    /// generation registers the same proc-macro graph again (zone_reinstall), so a live edit
-    /// after the swap still expands the file's derives and macro calls. Without it the registry
-    /// stayed empty and every edit of a file with a derive classified as items removed (a restart).
-    #[test]
-    fn a_swapped_generation_registers_the_proc_macro_graph_again() {
-        const CHILD: &str = "RELAX_FRONT_MACRO_REG_ZONE_TEST_CHILD";
-        if std::env::var_os(CHILD).is_some() {
-            let unit = UnitInfo { name: "derive_crate".into(), src_path: "/d/lib.rs".into(), edition: 2021, features: Vec::new(), deps: Vec::new(), proc_macro: true };
-            let reg = Reg {
-                units: vec![unit],
-                std_dir: "/std".into(),
-                derives: vec![("Script".into(), Entry { unit: 0, fname: "derive_script".into(), kind: Kind::Derive })],
-                macros: vec![("script_mod".into(), Entry { unit: 0, fname: "script_mod".into(), kind: Kind::Bang })],
-                helpers: Vec::new(),
-            };
-            REG.with(|r| *r.borrow_mut() = Some(reg));
-            assert!(has_macro("Script") && has_macro("script_mod"));
-            let taken = zone_take();
-            assert!(!has_macro("Script"), "the swap takes the registry");
-            let sess = std::sync::Arc::new(crate::Session::default());
-            zone_reinstall(&sess, &taken).unwrap();
-            assert!(has_macro("Script") && has_macro("script_mod"), "the new generation has the program's macros");
-            assert_eq!(bang_index("script_mod"), Some(0));
-            // the taken registry stays intact for a rollback
-            zone_put_back(taken);
-            assert!(has_macro("Script"));
-            return;
-        }
-        // REG is process-wide: isolate the take/reinstall in a child of this test binary
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "macro_reg::zone_tests::a_swapped_generation_registers_the_proc_macro_graph_again"])
-            .env(CHILD, "1")
-            .status().unwrap();
-        assert!(status.success());
-    }
 }

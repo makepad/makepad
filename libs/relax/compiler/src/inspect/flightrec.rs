@@ -5,7 +5,7 @@
 //! - Marker rings (pstream.rs): every thread's spans, waits, wakes and the owner's service of each
 //!   request (class, requester, call site), per thread, lock-free (the timeline's markers).
 //! - Fixed-slot rings here (lock-free, seqlock slots, overwritten when full): events (app marks,
-//!   log lines, panics and their decisions, script errors, zone swaps, cache writes, hitches,
+//!   log lines, panics and their decisions, script errors, cache writes, hitches,
 //!   inspect events), the program's input events (as the remote commands that replay them, with
 //!   their frame), JIT installs (slot, tier, origin, bytes; names are read at dump time) and one
 //!   summary per UI frame (time, idle, lazy compiles, waits, waits on the owner).
@@ -458,7 +458,7 @@ fn is_ui_or_owner(t: &super::threads::Thread) -> bool {
 }
 
 fn watch() {
-    // everything this thread keeps outlives compiler generations (a zone swap frees their heaps)
+    // everything this thread keeps is process state: the kept heap
     let _k = crate::zone_alloc::kept();
     super::heap::exclude_this_thread();
     let mut last_heap = std::time::Instant::now();

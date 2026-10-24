@@ -4,39 +4,6 @@
 
 pub use relax_front::*;
 
-/// Compiler statics held for rollback; forget them before destroying their generations.
-pub struct ZoneTaken {
-    lazy: borrowck::lazy::ZoneTaken,
-    bound_vars: tcx::resolve_bound_vars::ZoneTaken,
-}
-
-/// Takes this crate's compiler statics while every compiler thread is quiesced.
-pub fn zone_take() -> ZoneTaken {
-    ZoneTaken { lazy: borrowck::lazy::zone_take(), bound_vars: tcx::resolve_bound_vars::zone_take() }
-}
-
-/// Restores the statics after an aborted swap, forgetting the new generation's values.
-pub fn zone_put_back(taken: ZoneTaken) {
-    borrowck::lazy::zone_put_back(taken.lazy);
-    tcx::resolve_bound_vars::zone_put_back(taken.bound_vars);
-}
-
-#[test]
-fn zone_reset_fresh_process() {
-    const CHILD: &str = "MAKEPAD_RUN_ZONE_RESET_TEST_CHILD";
-    if std::env::var_os(CHILD).is_some() {
-        std::mem::forget(zone_take());
-        std::mem::forget(zone_take());
-        return;
-    }
-    // Other tests use these statics; the reset and its empty-state assertions need isolation.
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "zone_reset_fresh_process"])
-        .env(CHILD, "1")
-        .status().unwrap();
-    assert!(status.success());
-}
-
 pub mod types;
 pub mod instance;
 pub mod consts;

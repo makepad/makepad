@@ -707,6 +707,11 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
                 continue;
             };
             if !matches!(domain, "chat" | "text") { continue; }
+            // claude-cli (a hub's own Claude Code) is never a fallback pick:
+            // only a client that names it gets it.
+            if row.get("backend").and_then(Value::as_str) == Some(crate::claude_cli::BACKEND) && wanted != Some(id) {
+                continue;
+            }
             if !crate::fleet::role_allows(base, domain) || (domain == "chat" && !has_chat) {
                 reasons.push(format!("{base}: {id} is excluded by role or capability"));
                 continue;
@@ -1559,6 +1564,8 @@ mod wire_transcript_tests {
         replies: Rc<RefCell<VecDeque<String>>>,
         polls: Rc<RefCell<VecDeque<Value>>>,
         think_open: Rc<RefCell<Option<bool>>>,
+        /// The node serves only a hub's claude-cli model.
+        claude_only: bool,
     }
 
     impl FleetTransport for Scripted {
@@ -1580,9 +1587,20 @@ mod wire_transcript_tests {
                 )]));
             }
             if url.ends_with("/models") {
+                let claude = json::obj(vec![
+                    ("id", json::s("claude-cli")),
+                    ("domain", json::s("chat")),
+                    ("backend", json::s("claude-cli")),
+                    ("available", Value::Bool(true)),
+                    ("state", json::s("ready")),
+                ]);
+                if self.claude_only {
+                    return Ok(json::obj(vec![("models", Value::Arr(vec![claude]))]));
+                }
                 return Ok(json::obj(vec![(
                     "models",
                     Value::Arr(vec![
+                        claude,
                         json::obj(vec![
                             ("id", json::s("qwen3.8-27b")),
                             ("domain", json::s("chat")),
@@ -1666,6 +1684,25 @@ mod wire_transcript_tests {
             transport.generates.borrow()[0].get("model").and_then(Value::as_str),
             Some("qwen3.6-27b")
         );
+    }
+
+    #[test]
+    fn claude_cli_is_picked_only_when_named() {
+        let transport = Scripted { claude_only: true, ..Scripted::default() };
+        let mut provider = FleetQwenChatProvider::new(transport.clone(), vec!["http://n1:1".into()]);
+        assert!(matches!(provider.availability(), ProviderAvailability::Unavailable { .. }));
+        let transport = Scripted::default();
+        let mut provider = FleetQwenChatProvider::new(transport.clone(), vec!["http://n1:1".into()]);
+        provider.begin_turn(&TurnInput::new("SYS", vec![user("hello")])).unwrap();
+        assert_eq!(transport.generates.borrow()[0].get("model").and_then(Value::as_str), Some("qwen3.8-27b"));
+        let transport = Scripted::default();
+        let mut provider = FleetQwenChatProvider::new(transport.clone(), vec!["http://n1:1".into()])
+            .with_preferred_model(Some("claude-cli".into()));
+        provider.begin_turn(&TurnInput::new("SYS", vec![user("hello")])).unwrap();
+        let body = &transport.generates.borrow()[0];
+        assert_eq!(body.get("model").and_then(Value::as_str), Some("claude-cli"));
+        assert_eq!(body.get("domain").and_then(Value::as_str), Some("chat"));
+        assert_eq!(body.get("chat_system").and_then(Value::as_str), Some("SYS"));
     }
 
     #[test]

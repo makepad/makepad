@@ -152,6 +152,19 @@ pub fn bit_op(o: BitOp, x: u64) -> u64 {
     }
 }
 
+/// Rotate left within the type's width (8, 16, 32 or 64 bits; the count mod the width): the low
+/// `bits` of the result, upper bits zero (callers re-extend to the type's canonical form). Every
+/// backend and the interpreter implement this, whatever the signedness.
+pub fn rotl(bits: u8, a: u64, b: u64) -> u64 {
+    let w = (bits as u32).clamp(1, 64);
+    if w == 64 {
+        return a.rotate_left((b & 63) as u32);
+    }
+    let mask = (1u64 << w) - 1;
+    let (x, k) = (a & mask, (b % w as u64) as u32);
+    if k == 0 { x } else { ((x << k) | (x >> (w - k))) & mask }
+}
+
 pub fn fold_ibin(op: IOp, it: IntTy, a: i64, b: i64) -> Option<i64> {
     let r = match op {
         IOp::Add => a.wrapping_add(b),
@@ -168,14 +181,7 @@ pub fn fold_ibin(op: IOp, it: IntTy, a: i64, b: i64) -> Option<i64> {
                 ((a as u64) >> (b & 63)) as i64
             }
         }
-        IOp::Rotl => {
-            let k = (b as u32) % (it.bits as u32).max(1);
-            match it.bits {
-                32 => (a as u32).rotate_left(k) as i64,
-                64 => (a as u64).rotate_left(k) as i64,
-                _ => return None,
-            }
-        }
+        IOp::Rotl => rotl(it.bits, a as u64, b as u64) as i64,
         IOp::Bzhi => {
             let n = (b & 63) as u32;
             if n == 0 {
@@ -657,12 +663,16 @@ pub fn compact_vregs(f: &mut Func) {
     }
     // (the debug table follows; a vreg no instruction mentions is gone: its leaf is no longer held)
     f.dbg_map_vregs(&|v| map.get(v.0 as usize).filter(|x| **x != NONE).map(|x| VReg(*x)));
+    // (the halves hint keeps the pairs whose both vregs remain)
+    let live = |v: VReg| map.get(v.0 as usize).is_some_and(|x| *x != NONE);
+    f.halves.retain(|(a, b)| live(*a) && live(*b));
+    for p in f.halves.iter_mut() {
+        *p = (m(p.0), m(p.1));
+    }
     f.vregs = cls;
 }
 
-// OnceLock cannot be reset through a shared static; see this crate's zone_take. The string is
-// leaked in the kept heap: it outlives every compiler generation (a settle swap destroys the
-// compiler phase's allocations).
+// Process state: the string is leaked in the kept heap.
 pub static T: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
 
 pub fn trace_opt(f: &Func, tag: &str) {
@@ -1440,7 +1450,11 @@ pub fn simplify(options: &relax_session::Options, f: &mut Func, ro: Option<RoRea
                                     };
                                     Some((*d, k))
                                 }
-                                RoRead::Ptr(p) if matches!(m, Mem::Int(8, _)) => Some((*d, K::A(p))),
+                                // The reader only returns Ptr for an exact
+                                // pointer-width read. wasm32's unsigned pointer
+                                // loads are symbolic addresses too; a signed
+                                // 32-bit integer read still needs sign extension.
+                                RoRead::Ptr(p) if matches!(m, Mem::Int(8, _) | Mem::Int(4, false)) => Some((*d, K::A(p))),
                                 _ => None,
                             }
                         }
@@ -1541,7 +1555,9 @@ pub fn simplify(options: &relax_session::Options, f: &mut Func, ro: Option<RoRea
                     // x * 1.0, 1.0 * x, x / 1.0, x - 0.0, x + -0.0, -0.0 + x: x itself (exact in
                     // IEEE arithmetic, a NaN's payload aside, which Rust leaves unspecified;
                     // LLVM's instsimplify does the same) -- `Vec4 { w: 1.0, .. }` through a matrix
-                    if let Inst::FBin(op, w, d, x, y) = new {
+                    // (not under Options::nan_exact: the op quiets a signaling NaN, the fold would not)
+                    if let (Inst::FBin(op, w, d, x, y), false) = (&new, options.nan_exact) {
+                        let (op, w, d, x, y) = (*op, *w, *d, *x, *y);
                         let kf = |v: VReg| match kn[v.0 as usize] {
                             Some(K::F(b, _)) => Some(b),
                             _ => None,
@@ -5227,11 +5243,16 @@ pub fn local_cse(options: &relax_session::Options, f: &mut Func) -> bool {
             if let (Some(d), Some(key)) = (cand, key) {
                 // the same key with another result class is another value: a VExtract of one
                 // lane as an integer (sign-extended) and as an f32
-                if let Some(e) = st.avail.iter().find(|x| x.0 == key && f.vregs[x.1 .0 as usize] == f.vregs[d.0 as usize]).map(|x| x.1) {
+                if let Some((e, stored)) = st.avail.iter().find(|x| x.0 == key && f.vregs[x.1 .0 as usize] == f.vregs[d.0 as usize]).map(|x| (x.1, x.3 && x.2[1] == x.1)) {
                     if e != d {
-                        b.insts[k] = match fx.fact[e.0 as usize] {
-                            Some(x) => Inst::Iconst(d, x),
-                            None => Inst::Mov(d, e),
+                        b.insts[k] = match (fx.fact[e.0 as usize], &b.insts[k]) {
+                            // a narrow load of a value a store just wrote: the load reads only the
+                            // stored low bytes, extended as the load says (the stored register may
+                            // hold more: `store u8 [p], x; load u8 [p]` is `x as u8`, FUZZ
+                            // f880dbd780695b33)
+                            (_, Inst::Load(Mem::Int(n, sg), ..)) if stored && *n < 8 => Inst::Conv(Conv::IntToInt(IntTy { bits: 8 * *n, signed: *sg }), d, e),
+                            (Some(x), _) => Inst::Iconst(d, x),
+                            (None, _) => Inst::Mov(d, e),
                         };
                         changed = true;
                         replaced = true;
@@ -5646,7 +5667,7 @@ pub fn sroa_reject_slot(ok: &mut [bool], sl: usize, why: SroaReject, stats: &mut
     }
 }
 
-relax_session::gen_local! {
+relax_session::memo_local! {
     /// sroa's answer to "does this call keep or return a pointer passed as argument k?":
     /// set by the O3 driver from the callees' RIR (param_nocapture), None elsewhere
     static SROA_NOCAP: std::cell::RefCell<Option<Box<dyn Fn(&Callee, usize) -> bool>>>;

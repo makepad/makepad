@@ -10,7 +10,7 @@ struct Semantic {
     types: *const Types,
     hashes: Vec<Option<u128>>,
 }
-crate::gen_local! {
+crate::memo_local! {
     static SEMANTIC: std::cell::RefCell<Option<Semantic>>;
 }
 struct SemanticGuard(Option<Semantic>);
@@ -165,7 +165,41 @@ impl Types {
         Some(self.collected_writer()?.finish())
     }
 
-    /// The interner's image. Consistent while other threads intern (the settle swap encodes
+    /// The settle rebuild (relax-compiler settle_rebuild.rs): `self` was restored from an image of
+    /// `live` encoded while compiles ran, so it holds the rows up to that encode's count. With
+    /// every type check held off (a front write), the rows interned since are copied as they are (same ids, same
+    /// bucket chains: a row's `next` is final once written) and the small tables -- regions,
+    /// constants, the list arena, the bucket heads -- are copied whole, so the restored interner
+    /// equals the live one. Nothing of `live`'s heap is shared (it is dropped after the rebuild).
+    /// None: `self` holds rows `live` does not.
+    pub fn top_up_from(&mut self, live: &Types) -> Option<()> {
+        let (n0, n1) = (self.len(), live.len());
+        if n0 > n1 { return None; }
+        let layout = std::alloc::Layout::array::<Entry>(CHUNK).ok()?;
+        for i in n0..n1 {
+            let row = *live.entry(TyId(i as u32));
+            let c = self.chunks[i >> CHUNK_BITS].get_mut();
+            if c.is_null() {
+                *c = unsafe { std::alloc::alloc(layout) as *mut Entry };
+                if c.is_null() { std::alloc::handle_alloc_error(layout); }
+            }
+            unsafe { c.add(i & (CHUNK - 1)).write(row) };
+        }
+        *self.len.get_mut() = n1 as u32;
+        for (b, h) in self.buckets.iter_mut().zip(live.buckets.iter()) { *b.get_mut() = h.load(Ordering::Acquire); }
+        let kinds: Vec<RegionKind> = live.regions.kinds.iter().copied().collect();
+        let args: Vec<std::sync::Arc<[RegionId]>> = live.regions.args.iter().map(|a| std::sync::Arc::from(&a[..])).collect();
+        self.regions = Regions::restored(kinds, args);
+        // (through the codec: a constant's value tree is a fresh allocation)
+        let mut w = Vec::new();
+        live.consts.lock().unwrap_or_else(|e| e.into_inner()).put(&mut w);
+        *self.consts.get_mut().unwrap_or_else(|e| e.into_inner()) = Codec::get(&mut Decode::new(&w))?;
+        *self.free_regions.get_mut() = live.free_regions.load(Ordering::Relaxed);
+        self.lists = list::Lists::copy_of(&live.lists);
+        Some(())
+    }
+
+    /// The interner's image. Consistent while other threads intern (a mid-run encode runs
     /// with compiles running): the row count is read first, every table read after it holds what
     /// those rows name, and a bucket head past the count is followed down its chain to the first
     /// row below it.
@@ -226,39 +260,6 @@ impl Types {
         Adopt::Adopted(whole << CHUNK_BITS)
     }
 
-    /// The settle swap (relax-compiler zone_swap.rs): `self` was restored from an image of
-    /// `live` encoded while compiles ran, so it holds the rows up to that encode's count. With
-    /// every compile paused, the rows interned since are copied as they are (same ids, same
-    /// bucket chains: a row's `next` is final once written) and the small tables -- regions,
-    /// constants, the list arena, the bucket heads -- are copied whole, so the restored interner
-    /// equals the live one. Nothing of `live`'s heap is shared (it is destroyed after the swap).
-    /// None: `self` holds rows `live` does not.
-    pub fn top_up_from(&mut self, live: &Types) -> Option<()> {
-        let (n0, n1) = (self.len(), live.len());
-        if n0 > n1 { return None; }
-        let layout = std::alloc::Layout::array::<Entry>(CHUNK).ok()?;
-        for i in n0..n1 {
-            let row = *live.entry(TyId(i as u32));
-            let c = self.chunks[i >> CHUNK_BITS].get_mut();
-            if c.is_null() {
-                *c = unsafe { std::alloc::alloc(layout) as *mut Entry };
-                if c.is_null() { std::alloc::handle_alloc_error(layout); }
-            }
-            unsafe { c.add(i & (CHUNK - 1)).write(row) };
-        }
-        *self.len.get_mut() = n1 as u32;
-        for (b, h) in self.buckets.iter_mut().zip(live.buckets.iter()) { *b.get_mut() = h.load(Ordering::Acquire); }
-        let kinds: Vec<RegionKind> = live.regions.kinds.iter().copied().collect();
-        let args: Vec<std::sync::Arc<[RegionId]>> = live.regions.args.iter().map(|a| std::sync::Arc::from(&a[..])).collect();
-        self.regions = Regions::restored(kinds, args);
-        // (through the codec: a constant's value tree is a fresh allocation)
-        let mut w = Vec::new();
-        live.consts.lock().unwrap_or_else(|e| e.into_inner()).put(&mut w);
-        *self.consts.get_mut().unwrap_or_else(|e| e.into_inner()) = Codec::get(&mut Decode::new(&w))?;
-        *self.free_regions.get_mut() = live.free_regions.load(Ordering::Relaxed);
-        self.lists = list::Lists::copy_of(&live.lists);
-        Some(())
-    }
 
     pub fn restore_collected(bytes: &'static [u8]) -> Option<Self> {
         let image = crate::image::Reader::new(bytes)?;
@@ -344,38 +345,6 @@ mod tests {
         assert!(again.kind(new) == restored.kind(new));
     }
 
-    /// The settle swap's restore: an image taken while the interner was still growing (here: the
-    /// rows interned after it), topped up from the live interner, equals it -- same ids, lookups
-    /// find the topped-up rows, lists and constants interned later resolve.
-    #[test]
-    fn restored_interner_topped_up_from_the_live_one() {
-        let tys = Types::new();
-        let r = tys.intern_region(RegionKind::ReStatic);
-        let base = tys.intern(TyKind::Ref(false, tys.u8_, r));
-        let early: Vec<TyId> = (0..3_000u64).map(|i| tys.mk_array(base, tys.const_usize(i))).collect();
-        let image = tys.collected_image().unwrap();
-        let late: Vec<TyId> = (3_000..9_000u64).map(|i| {
-            let a = tys.mk_array(base, tys.const_usize(i));
-            tys.intern(TyKind::Tuple(tys.mk_list(&[a, base])))
-        }).collect();
-        let late_region = tys.intern_region_args(&[r, tys.intern_region(RegionKind::ReEarlyParam(3))]);
-        let mut restored = Types::restore_collected(Box::leak(image.into_boxed_slice())).unwrap();
-        assert!(restored.len() < tys.len());
-        restored.top_up_from(&tys).unwrap();
-        assert_eq!(restored.len(), tys.len());
-        assert_eq!(restored.region_counts(), tys.region_counts());
-        assert_eq!(restored.list_const_counts(), tys.list_const_counts());
-        for &t in early.iter().chain(&late) {
-            assert!(restored.kind(t) == tys.kind(t));
-            assert_eq!(restored.intern(*tys.kind(t)), t);
-        }
-        assert_eq!(restored.region_args(late_region), tys.region_args(late_region));
-        assert_eq!(restored.const_usize(8_999), tys.const_usize(8_999));
-        let last = *late.last().unwrap();
-        let TyKind::Tuple(l) = *tys.kind(last) else { panic!() };
-        assert_eq!(restored.mk_list(tys.list(l)), l);
-        assert_eq!(restored.len(), tys.len(), "nothing interned twice");
-    }
 
     #[test]
     fn running_interner_adopts_its_image_and_keeps_interning() {
@@ -407,5 +376,38 @@ mod tests {
         let mut mine = Types::new();
         let _ = mine.intern(TyKind::Slice(mine.u32_));
         assert_eq!(mine.adopt_collected(theirs), Adopt::Mismatch);
+    }
+
+    /// The settle rebuild's restore: an image taken while the interner was still growing (here: the
+    /// rows interned after it), topped up from the live interner, equals it -- same ids, lookups
+    /// find the topped-up rows, lists and constants interned later resolve.
+    #[test]
+    fn restored_interner_topped_up_from_the_live_one() {
+        let tys = Types::new();
+        let r = tys.intern_region(RegionKind::ReStatic);
+        let base = tys.intern(TyKind::Ref(false, tys.u8_, r));
+        let early: Vec<TyId> = (0..3_000u64).map(|i| tys.mk_array(base, tys.const_usize(i))).collect();
+        let image = tys.collected_image().unwrap();
+        let late: Vec<TyId> = (3_000..9_000u64).map(|i| {
+            let a = tys.mk_array(base, tys.const_usize(i));
+            tys.intern(TyKind::Tuple(tys.mk_list(&[a, base])))
+        }).collect();
+        let late_region = tys.intern_region_args(&[r, tys.intern_region(RegionKind::ReEarlyParam(3))]);
+        let mut restored = Types::restore_collected(Box::leak(image.into_boxed_slice())).unwrap();
+        assert!(restored.len() < tys.len());
+        restored.top_up_from(&tys).unwrap();
+        assert_eq!(restored.len(), tys.len());
+        assert_eq!(restored.region_counts(), tys.region_counts());
+        assert_eq!(restored.list_const_counts(), tys.list_const_counts());
+        for &t in early.iter().chain(&late) {
+            assert!(restored.kind(t) == tys.kind(t));
+            assert_eq!(restored.intern(*tys.kind(t)), t);
+        }
+        assert_eq!(restored.region_args(late_region), tys.region_args(late_region));
+        assert_eq!(restored.const_usize(8_999), tys.const_usize(8_999));
+        let last = *late.last().unwrap();
+        let TyKind::Tuple(l) = *tys.kind(last) else { panic!() };
+        assert_eq!(restored.mk_list(tys.list(l)), l);
+        assert_eq!(restored.len(), tys.len(), "nothing interned twice");
     }
 }

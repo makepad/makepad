@@ -376,6 +376,14 @@ impl Backend for Metal {
         self.info
     }
 
+    /// The process ends next: what was encoded is committed and the threads that call Metal
+    /// (submit, allocator) are joined. The hang watchdog only reads the in-flight list.
+    fn before_exit(&mut self) {
+        let _pool = Pool::new();
+        self.end_batch();
+        self.dev.stop_workers();
+    }
+
     fn submit(&mut self, world: &mut World, sid: u32, view: &CmdView) {
         let _pool = Pool::new();
         exec::submit(self, world, sid, view);

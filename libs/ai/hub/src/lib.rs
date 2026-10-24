@@ -39,6 +39,7 @@ pub mod beats_backend;
 pub mod stems_backend;
 pub mod body_native_backend;
 pub mod chat_wire;
+pub mod claude_cli;
 pub use makepad_base64;
 pub mod client;
 mod child_process;
@@ -62,6 +63,12 @@ pub mod front;
 #[path = "front_portable.rs"]
 pub mod front;
 pub mod job;
+// Splash compute kernels on fleet CPUs: the wire and the client are
+// featureless; the node side is the `kernel` feature.
+pub mod kernel_wire;
+pub mod kernel_client;
+#[cfg(feature = "kernel")]
+pub mod kernel_compute;
 pub mod gpu;
 pub mod gpu_yield;
 pub mod home;

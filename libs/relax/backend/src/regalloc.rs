@@ -910,6 +910,8 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
     }
     let tab = OpTab::new(f, &reach);
     let mut call_pos = Vec::new();
+    // (call position, a result of the call)
+    let mut call_res: Vec<(u32, u32)> = Vec::new();
     let mut use_count = vec![0u32; nv as usize];
     for (bi, b) in f.blocks.iter().enumerate() {
         if !reach[bi] {
@@ -924,7 +926,11 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
             // nothing anyone reads afterwards: it does not count as a call position
             let noreturn = ii + 1 == b.insts.len() && matches!(b.term, Term::Unreachable);
             if let (Inst::Call(..), false) = (i, noreturn) {
-                call_pos.push(block_start[bi] + 2 * ii as u32 + 1);
+                let p = block_start[bi] + 2 * ii as u32 + 1;
+                call_pos.push(p);
+                for &d in tab.defs(k0 + ii) {
+                    call_res.push((p, d));
+                }
             }
         }
         for &u in tab.uses(k0 + b.insts.len()) {
@@ -1518,6 +1524,12 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
             }
         }
     }
+    // values in caller-saved registers across calls: a save slot each, stored / reloaded around
+    // every call strictly inside their ranges -- except a call whose result goes to the value's
+    // register (the value itself redefined, `x = f(x)` in a loop: its ranges touch at the call
+    // and merge; or a copy coalesced with it): the reload, after the result is in place, would
+    // overwrite the result (FUZZ 5b89fad58bb77d74)
+    call_res.sort_unstable();
     let mut saves: HashMap<u32, Vec<(VReg, i32)>> = HashMap::new();
     for v in needs_save {
         spill_bytes = grow_spill(spill_bytes, f.vregs[v as usize]);
@@ -1528,6 +1540,10 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
             for &p in &call_pos[from..] {
                 if p >= *b {
                     break;
+                }
+                let from_r = call_res.partition_point(|x| x.0 < p);
+                if call_res[from_r..].iter().take_while(|x| x.0 == p).any(|&(_, d)| loc[d as usize] == loc[v as usize]) {
+                    continue;
                 }
                 saves.entry(p).or_default().push((VReg(v), slot));
             }
@@ -2111,52 +2127,155 @@ fn second_chance(
     (evicts, prestores, lent_iv)
 }
 
-/// MAKEPAD_RUN_OPT=+checkra (debug): symbolic check of an integer allocation. A forward dataflow over
-/// which vregs each integer register holds -- set by definitions (a same-register move or plain
-/// integer cast adds its result to what the register holds), emptied by clobbers, calls (except the
-/// values a call restores: Alloc::saves minus restore_skip), spill windows over their positions,
-/// and set again by eviction reloads -- meeting by intersection; every read of a value placed in a
-/// register must find it there. Returns one line per violation.
-pub fn check_alloc(options: &relax_session::Options, f: &Func, cfg: &RegConfig, al: &Alloc) -> Vec<String> {
+/// MAKEPAD_RUN_RA_TRACE=<fn name suffix>: the allocation as the emitter reads it (locations,
+/// call saves and their skips, windows, evictions), one line each -- for reading a miscompile
+/// next to its machine code.
+pub fn trace_alloc(f: &Func, al: &Alloc) {
+    if !trace_on(f) {
+        return;
+    }
+    let mut o = format!("ra-alloc {}:\n{}", f.name, f.dump());
+    for (v, l) in al.loc.iter().enumerate() {
+        if !matches!(l, Loc::None) || al.remat[v].is_some() {
+            o.push_str(&format!("  v{} {:?} {:?} [{}, {}]\n", v, l, al.remat[v], al.start[v], al.end[v]));
+        }
+    }
+    let mut calls: Vec<_> = al.saves.keys().copied().collect();
+    calls.sort_unstable();
+    for p in calls {
+        let sv: Vec<String> = al.saves[&p].iter().map(|(v, o2)| format!("v{}@{}{}{}", v.0, o2, if al.save_skip.contains(&(p, v.0)) { " nosave" } else { "" }, if al.restore_skip.contains(&(p, v.0)) { " norestore" } else { "" })).collect();
+        o.push_str(&format!("  call @{}: {}\n", p, sv.join(", ")));
+    }
+    for w in &al.windows {
+        o.push_str(&format!("  window v{} [{}, {}] r{}\n", w.0, w.1, w.2, w.3));
+    }
+    for w in &al.chained {
+        o.push_str(&format!("  chained v{} [{}, {}] r{}\n", w.0, w.1, w.2, w.3));
+    }
+    for e in &al.evicts {
+        o.push_str(&format!("  evict {:?}\n", e));
+    }
+    for (p, v) in &al.store_skip {
+        o.push_str(&format!("  store_skip @{} v{}\n", p, v));
+    }
+    o.push_str(&format!("  blocks {:?}\n", al.block_start));
+    eprint!("{}", o);
+}
+
+/// Whether the allocation checker runs (`+checkra` in the options or MAKEPAD_RUN_OPT): then every
+/// finding fails the function's compile (`check_or_fail`) -- the checker is a gate, not a log.
+pub fn check_on(options: &relax_session::Options) -> bool {
+    crate::stats::opt_off(options, "+checkra") || crate::stats::opt_env_off("+checkra")
+}
+
+/// `check_alloc`, fatal: Err with every finding. `copies`: the emitter serves reads from
+/// copy_reuse's registers (it runs copy_reuse: env.opt_regs || f.full), so the check does too.
+pub fn check_or_fail(options: &relax_session::Options, f: &Func, cfg: &RegConfig, al: &Alloc, copies: bool) -> Result<(), String> {
+    let copy_reg = if copies { copy_reuse(options, f, al) } else { HashMap::new() };
+    let bad = check_alloc(options, f, cfg, al, &copy_reg);
+    if bad.is_empty() {
+        return Ok(());
+    }
+    Err(format!("{}: the register allocation check failed ({} findings):\n{}", f.name, bad.len(), bad.join("\n")))
+}
+
+/// MAKEPAD_RUN_OPT=+checkra: symbolic check of an allocation, as the emitter carries it out. A
+/// forward dataflow over which values each register (integer r0..r31, float / vector f0..f31) and
+/// each stack slot (spill homes, call save slots, eviction slots) holds, meeting by intersection:
+/// - a definition sets its register, or its home slot -- unless Alloc::store_skip drops that
+///   store -- and the register of a window starting right after it, and makes every other copy
+///   of the value stale (non-SSA RIR: a location holds v only with v's latest value); a
+///   same-location move or integer cast adds its result to what the location holds;
+/// - clobbers and calls empty registers; a call's saves copy the register into the save slot
+///   (save_skip: the slot is left as it is) and its restores -- after its results are in place,
+///   as the emitter orders them -- copy the slot back (restore_skip: the register stays empty);
+/// - a window's start loads its register from the home slot (a recomputed value: the value
+///   itself), chained windows load nothing; eviction prestores copy the register into the
+///   eviction slot and reloads copy it back (or recompute it);
+/// - every read must find its value where the emitter reads it: its register, the window or the
+///   copy_reuse register serving the read, or else its home slot; a store into a slot (save,
+///   prestore) must find the value in the register it stores.
+/// - a move between two values sharing a slot emits nothing (no read; d is in the slot when its
+///   source is).
+/// Not modelled: reads the emitter defers to the next instruction (RegConfig::defers) are checked
+/// at their own position. Returns one line per violation.
+pub fn check_alloc(options: &relax_session::Options, f: &Func, cfg: &RegConfig, al: &Alloc, copy_reg: &HashMap<(u32, u32), u8>) -> Vec<String> {
     let mut out = Vec::new();
     let nb = f.blocks.len();
     let reach = reachable(f);
-    let mut reload_at: HashMap<u32, Vec<(u8, u32)>> = HashMap::new();
-    for e in &al.evicts {
-        reload_at.entry(e.reload).or_default().push((e.reg, e.v));
-    }
-    let mut prestore_at: HashMap<u32, Vec<u32>> = HashMap::new();
-    for &(p, v, _, _) in &al.prestores {
-        prestore_at.entry(p).or_default().push(v);
-    }
-    // positions where a window occupies a register
-    // (integer windows only: a float window's register number names a float register)
-    let wins: Vec<(u32, u32, u8)> = al.windows.iter().chain(al.chained.iter()).filter(|w| f.vregs[w.0 as usize] == Cls::I).map(|&(_, a, z, r)| (a, z, r)).collect();
-    let win_regs = |p: u32| -> u64 {
-        let mut m = 0u64;
-        for &(a, z, r) in &wins {
-            if a <= p && p <= z {
-                m |= 1 << r;
-            }
+    // register index: integer r -> r, float / vector x -> 32 + x
+    const NR: usize = 64;
+    let loc_reg = |l: Loc| -> Option<usize> {
+        match l {
+            Loc::Reg(c) => Some(c as usize),
+            Loc::Flt(x) => Some(32 + x as usize),
+            _ => None,
         }
-        m
     };
-    let caller: u64 = cfg.int_caller.iter().fold(0, |m, r| m | 1 << r);
-    type St = Vec<Vec<u32>>;
+    let is_int = |v: u32| f.vregs[v as usize] == Cls::I;
+    // a window's register: its class names the bank
+    let win_idx = |v: u32, r: u8| if is_int(v) { r as usize } else { 32 + r as usize };
+    let mut reload_at: HashMap<u32, Vec<Evict>> = HashMap::new();
+    for e in &al.evicts {
+        reload_at.entry(e.reload).or_default().push(*e);
+    }
+    let mut prestore_at: HashMap<u32, Vec<(u32, u8, i32)>> = HashMap::new();
+    for &(p, v, r, o) in &al.prestores {
+        prestore_at.entry(p).or_default().push((v, r, o));
+    }
+    // windows by value (loaded and chained), loads by start position
+    let mut win_of: HashMap<u32, Vec<(u32, u32, usize)>> = HashMap::new();
+    let mut win_load: HashMap<u32, Vec<(u32, usize)>> = HashMap::new();
+    let mut def_win: HashMap<(u32, u32), usize> = HashMap::new();
+    for &(v, a, z, r) in &al.windows {
+        let ri = win_idx(v, r);
+        win_of.entry(v).or_default().push((a, z, ri));
+        win_load.entry(a).or_default().push((v, ri));
+        def_win.insert((a, v), ri);
+    }
+    for &(v, a, z, r) in &al.chained {
+        let ri = win_idx(v, r);
+        win_of.entry(v).or_default().push((a, z, ri));
+        def_win.insert((a, v), ri);
+    }
+    let in_win = |v: u32, p: u32| -> Option<usize> { win_of.get(&v)?.iter().find(|w| w.0 <= p && p <= w.1).map(|w| w.2) };
+    let mut caller = [false; NR];
+    for &r in &cfg.int_caller {
+        caller[r as usize] = true;
+    }
+    for &x in &cfg.flt_caller {
+        caller[32 + x as usize] = true;
+    }
+    #[derive(Clone, PartialEq)]
+    struct St {
+        reg: Vec<Vec<u32>>,
+        slot: std::collections::BTreeMap<i32, Vec<u32>>,
+    }
+    impl St {
+        fn slot_has(&self, o: i32, v: u32) -> bool {
+            self.slot.get(&o).map_or(false, |s| s.contains(&v))
+        }
+    }
     let mut state_in: Vec<Option<St>> = vec![None; nb];
-    let mut entry: St = vec![Vec::new(); 32];
+    let mut entry = St { reg: vec![Vec::new(); NR], slot: Default::default() };
     for p in &f.params {
-        if let Loc::Reg(c) = al.loc[p.0 as usize] {
-            entry[c as usize].push(p.0);
+        match al.loc[p.0 as usize] {
+            Loc::Stack(o) => entry.slot.entry(o).or_default().push(p.0),
+            l => {
+                if let Some(c) = loc_reg(l) {
+                    entry.reg[c].push(p.0);
+                }
+            }
         }
     }
     state_in[0] = Some(entry);
-    let reg_of = |mut u: u32| -> Option<(u32, u8)> {
+    // where a read of u is served: (the value, its location); recomputed bases + k follow to the base
+    let home_of = |mut u: u32| -> Option<(u32, Loc)> {
         for _ in 0..8 {
             match (al.loc[u as usize], al.remat[u as usize]) {
-                (Loc::Reg(c), _) if f.vregs[u as usize] == Cls::I => return Some((u, c)),
                 (Loc::None, Remat::Offset(b, _)) => u = b.0,
-                _ => return None,
+                (Loc::None, _) => return None,
+                (l, _) => return Some((u, l)),
             }
         }
         None
@@ -2209,6 +2328,7 @@ pub fn check_alloc(options: &relax_session::Options, f: &Func, cfg: &RegConfig, 
     let mut work: Vec<usize> = vec![0];
     let mut rounds = 0usize;
     let mut reported = std::collections::HashSet::new();
+    let name = |r: usize| if r < 32 { format!("r{}", r) } else { format!("f{}", r - 32) };
     while let Some(bi) = work.pop() {
         rounds += 1;
         if rounds > 50 * nb + 1000 {
@@ -2225,89 +2345,221 @@ pub fn check_alloc(options: &relax_session::Options, f: &Func, cfg: &RegConfig, 
             while m != 0 {
                 let r = m.trailing_zeros() as usize;
                 m &= m - 1;
-                st[r].clear();
+                st.reg[r].clear();
             }
         };
-        let mut check = |st: &St, dd: &[u64], u: u32, p: u32, what: &str, out: &mut Vec<String>| {
-            if let Some((v, c)) = reg_of(u) {
-                if dd[v as usize / 64] & (1 << (v % 64)) != 0 && !st[c as usize].contains(&v) && reported.insert((p, v)) {
-                    // how the holders and the read value were defined (diagnosing the checker)
+        // a read of u at p: Some(description of where it looked and what it found) when it misses
+        let miss = |st: &St, u: u32, p: u32| -> Option<(u32, String)> {
+            let (v, l) = home_of(u)?;
+            let at_reg = |r: usize| if st.reg[r].contains(&v) { None } else { Some((v, format!("{} holding {:?}", name(r), st.reg[r]))) };
+            match l {
+                Loc::Stack(o) => {
+                    if let Some(r) = in_win(v, p) {
+                        return at_reg(r);
+                    }
+                    if let Some(&r) = copy_reg.get(&(p, v)) {
+                        return at_reg(if is_int(v) { r as usize } else { 32 + r as usize });
+                    }
+                    if st.slot_has(o, v) {
+                        None
+                    } else {
+                        Some((v, format!("slot {} holding {:?}", o, st.slot.get(&o).cloned().unwrap_or_default())))
+                    }
+                }
+                l => at_reg(loc_reg(l)?),
+            }
+        };
+        let report = |reported: &mut std::collections::HashSet<(u32, u32)>, dd: &[u64], u: u32, p: u32, what: &str, st: &St, out: &mut Vec<String>| {
+            if let Some((v, found)) = miss(st, u, p) {
+                if dd[v as usize / 64] & (1 << (v % 64)) != 0 && reported.insert((p, v)) {
+                    // how the read value was defined (diagnosing the checker)
                     let mut defs = String::new();
-                    for &h in st[c as usize].iter().chain(std::iter::once(&v)) {
-                        for (b2, blk) in f.blocks.iter().enumerate() {
-                            for (k, i) in blk.insts.iter().enumerate() {
-                                let mut is = false;
-                                for_defs(i, |d| is |= d.0 == h);
-                                if is {
-                                    defs.push_str(&format!(" | v{} def b{}:{} {:?}", h, b2, k, i));
-                                }
+                    for (b2, blk) in f.blocks.iter().enumerate() {
+                        for (k, i) in blk.insts.iter().enumerate() {
+                            let mut is = false;
+                            for_defs(i, |d| is |= d.0 == v);
+                            if is {
+                                defs.push_str(&format!(" | v{} def b{}:{} {:?}", v, b2, k, i));
                             }
                         }
                     }
-                    out.push(format!("ra-check {}: {} of v{} (via v{}) at {} (b{} +{}) reads r{} holding {:?}{}", f.name, what, v, u, p, bi, p - bs, c, st[c as usize], defs));
+                    out.push(format!("ra-check {}: {} of v{} (via v{}) at {} (b{} +{}) reads {}{}", f.name, what, v, u, p, bi, p - bs, found, defs));
                 }
             }
         };
         for ii in 0..=n {
             let p = if ii < n { bs + 2 * ii as u32 + 1 } else { al.block_end[bi] - 1 };
-            // a prestore stores the register: it must hold its value
+            // eviction transfers, stores first: a prestore stores the register (it must hold the value)
             if let Some(vs) = prestore_at.get(&p) {
-                for &v in vs {
-                    check(&st, &dd, v, p, "prestore", &mut out);
+                for &(v, r, o) in vs {
+                    let ri = win_idx(v, r);
+                    if !st.reg[ri].contains(&v) && dd[v as usize / 64] & (1 << (v % 64)) != 0 && reported.insert((p, v)) {
+                        out.push(format!("ra-check {}: prestore of v{} at {} (b{} +{}) stores {} holding {:?}", f.name, v, p, bi, p - bs, name(ri), st.reg[ri]));
+                    }
+                    let held = st.reg[ri].clone();
+                    st.slot.insert(o, held);
                 }
             }
-            if let Some(rs) = reload_at.get(&p) {
-                for &(c, g) in rs {
-                    st[c as usize] = vec![g];
+            if let Some(es) = reload_at.get(&p) {
+                for e in es {
+                    let ri = win_idx(e.v, e.reg);
+                    st.reg[ri] = if e.remat.is_some() { vec![e.v] } else { st.slot.get(&e.slot).cloned().unwrap_or_default() };
                 }
             }
-            kill(&mut st, win_regs(p) & 0xffff_ffff);
+            // window loads: the home slot into the register (a recomputed value: itself)
+            if let Some(ls) = win_load.get(&p) {
+                for &(v, ri) in ls {
+                    st.reg[ri] = match al.loc[v as usize] {
+                        Loc::Stack(o) => st.slot.get(&o).cloned().unwrap_or_default(),
+                        _ => vec![v],
+                    };
+                }
+            }
             if ii == n {
                 term_uses(&b.term, &mut tu);
                 for &u in &tu {
-                    check(&st, &dd, u.0, p, "terminator read", &mut out);
+                    report(&mut reported, &dd, u.0, p, "terminator read", &st, &mut out);
                 }
                 break;
             }
             let i = &b.insts[ii];
             uses_defs(i, &mut us, &mut ds);
+            // a move between values sharing a slot (pieces of one split value) emits nothing: no
+            // read, no store -- d is in the slot only when its source is
+            let slot_mov = matches!(*i, Inst::Mov(d, s2) if matches!(al.loc[d.0 as usize], Loc::Stack(_)) && al.loc[d.0 as usize] == al.loc[s2.0 as usize]);
             for u in &us {
-                if reg_of(u.0).map_or(false, |(v, c)| !st[c as usize].contains(&v)) {
-                    check(&st, &dd, u.0, p, &format!("read by {:?}", i), &mut out);
+                if !slot_mov {
+                    report(&mut reported, &dd, u.0, p, &format!("read by {:?}", i), &st, &mut out);
                 }
             }
             if let Some(cl) = cfg.clobbers {
-                kill(&mut st, cl(options, f, i) & 0xffff_ffff);
+                kill(&mut st, cl(options, f, i));
             }
             if matches!(i, Inst::Call(..)) {
-                kill(&mut st, caller);
-                if let Some(sv) = al.saves.get(&p) {
-                    for &(v, _) in sv {
-                        if let Loc::Reg(c) = al.loc[v.0 as usize] {
-                            // (equal copies sharing the register are restored together)
-                            if !al.restore_skip.contains(&(p, v.0)) && !st[c as usize].contains(&v.0) {
-                                st[c as usize].push(v.0);
+                let saves = al.saves.get(&p);
+                // the saves: register -> save slot before the call (save_skip: the slot is kept)
+                for &(v, o) in saves.into_iter().flatten() {
+                    let Some(ri) = loc_reg(al.loc[v.0 as usize]) else { continue };
+                    if !al.save_skip.contains(&(p, v.0)) {
+                        if !st.reg[ri].contains(&v.0) && dd[v.0 as usize / 64] & (1 << (v.0 % 64)) != 0 && reported.insert((p, v.0)) {
+                            out.push(format!("ra-check {}: save of v{} at {} (b{} +{}) stores {} holding {:?}", f.name, v.0, p, bi, p - bs, name(ri), st.reg[ri]));
+                        }
+                        let held = st.reg[ri].clone();
+                        st.slot.insert(o, held);
+                    }
+                }
+                for r in 0..NR {
+                    if caller[r] {
+                        st.reg[r].clear();
+                    }
+                }
+            }
+            // (a cast coalesced into its operand's register is a move when it changes no bit,
+            // passes::cast_is_move; not modelled: every same-register cast counts as a copy)
+            let same = match *i {
+                Inst::Mov(d, s2) | Inst::Conv(Conv::IntToInt(_), d, s2) => Some((d, s2)),
+                _ => None,
+            };
+            // a move's source and the values equal to it, before the move's own write
+            let mov_eq: Option<Vec<u32>> = match *i {
+                Inst::Mov(d, s2) if s2 != d && dd[s2.0 as usize / 64] & (1 << (s2.0 % 64)) != 0 => {
+                    let mut eq = vec![s2.0];
+                    for h in st.reg.iter().chain(st.slot.values()) {
+                        if h.contains(&s2.0) {
+                            for &x in h {
+                                if x != d.0 && !eq.contains(&x) {
+                                    eq.push(x);
+                                }
+                            }
+                        }
+                    }
+                    Some(eq)
+                }
+                _ => None,
+            };
+            for d in &ds {
+                dd[d.0 as usize / 64] |= 1 << (d.0 % 64);
+                // (`v = v` changes nothing)
+                if matches!(*i, Inst::Mov(a, b2) if a == b2) {
+                    continue;
+                }
+                // a location holds v only with v's latest value: a definition makes every other
+                // copy stale (RIR redefines values: a loop's `x = f(x)`); a same-location copy
+                // adds its result to what the location holds
+                let l = al.loc[d.0 as usize];
+                let keep = matches!(same, Some((dv, s2)) if dv == *d && s2 != *d && al.loc[s2.0 as usize] == l && match l {
+                    Loc::Stack(o) => st.slot_has(o, s2.0),
+                    l => loc_reg(l).map_or(false, |r| st.reg[r].contains(&s2.0)),
+                });
+                for r in st.reg.iter_mut() {
+                    r.retain(|x| *x != d.0);
+                }
+                for s3 in st.slot.values_mut() {
+                    s3.retain(|x| *x != d.0);
+                }
+                match l {
+                    Loc::Stack(o) => {
+                        if keep {
+                            st.slot.entry(o).or_default().push(d.0);
+                        } else if !al.store_skip.contains(&(p, d.0)) && !slot_mov {
+                            st.slot.insert(o, vec![d.0]);
+                        }
+                        // a window starting right after the definition holds the result
+                        if let Some(&ri) = def_win.get(&(p + 1, d.0)) {
+                            st.reg[ri] = vec![d.0];
+                        }
+                    }
+                    l => {
+                        if let Some(c) = loc_reg(l) {
+                            if keep {
+                                st.reg[c].push(d.0);
+                            } else {
+                                st.reg[c] = vec![d.0];
+                            }
+                        }
+                    }
+                }
+                // a move: d and its source hold one value until either is redefined, so every
+                // location holding the source holds d too, and d's location the source and every
+                // value equal to it (held together with it somewhere: `t = v; w = t` with t
+                // recomputed and w sharing v's slot) -- the copy_reuse register or a shared slot
+                // serving a read of the spilled one of them
+                if let (Inst::Mov(dv, s2), Some(eq)) = (i, &mov_eq) {
+                    if dv == d && *s2 != *d {
+                        let mine = loc_reg(l);
+                        for (r, h) in st.reg.iter_mut().enumerate() {
+                            if h.contains(&s2.0) && !h.contains(&d.0) {
+                                h.push(d.0);
+                            } else if Some(r) == mine && h.contains(&d.0) {
+                                for &x in eq {
+                                    if !h.contains(&x) {
+                                        h.push(x);
+                                    }
+                                }
+                            }
+                        }
+                        for (o, h) in st.slot.iter_mut() {
+                            if h.contains(&s2.0) && !h.contains(&d.0) {
+                                h.push(d.0);
+                            } else if l == Loc::Stack(*o) && h.contains(&d.0) {
+                                for &x in eq {
+                                    if !h.contains(&x) {
+                                        h.push(x);
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
-            kill(&mut st, win_regs(p + 1) & 0xffff_ffff);
-            let same = match *i {
-                Inst::Mov(d, s2) | Inst::Conv(Conv::IntToInt(_), d, s2) => Some((d, s2)),
-                _ => None,
-            };
-            for d in &ds {
-                dd[d.0 as usize / 64] |= 1 << (d.0 % 64);
-                if let Loc::Reg(c) = al.loc[d.0 as usize] {
-                    if f.vregs[d.0 as usize] != Cls::I {
-                        continue;
-                    }
-                    let keep = matches!(same, Some((dd, s2)) if dd == *d && al.loc[s2.0 as usize] == Loc::Reg(c) && st[c as usize].contains(&s2.0));
-                    if keep {
-                        st[c as usize].push(d.0);
-                    } else {
-                        st[c as usize] = vec![d.0];
+            if matches!(i, Inst::Call(..)) {
+                // the restores, after the results are in place (the emitter's order): save
+                // slot -> register (restore_skip: the register stays empty; equal copies sharing
+                // the register are restored together)
+                for &(v, o) in al.saves.get(&p).into_iter().flatten() {
+                    let Some(ri) = loc_reg(al.loc[v.0 as usize]) else { continue };
+                    if !al.restore_skip.contains(&(p, v.0)) {
+                        st.reg[ri] = st.slot.get(&o).cloned().unwrap_or_default();
                     }
                 }
             }
@@ -2324,10 +2576,25 @@ pub fn check_alloc(options: &relax_session::Options, f: &Func, cfg: &RegConfig, 
                 }
                 Some(old) => {
                     let mut ch = false;
-                    for r in 0..32 {
-                        let before = old[r].len();
-                        old[r].retain(|v| st[r].contains(v));
-                        ch |= old[r].len() != before;
+                    for r in 0..NR {
+                        let before = old.reg[r].len();
+                        old.reg[r].retain(|v| st.reg[r].contains(v));
+                        ch |= old.reg[r].len() != before;
+                    }
+                    let mut drop = Vec::new();
+                    for (o, vs) in old.slot.iter_mut() {
+                        let before = vs.len();
+                        match st.slot.get(o) {
+                            Some(s) => vs.retain(|v| s.contains(v)),
+                            None => vs.clear(),
+                        }
+                        ch |= vs.len() != before;
+                        if vs.is_empty() {
+                            drop.push(*o);
+                        }
+                    }
+                    for o in drop {
+                        old.slot.remove(&o);
                     }
                     ch
                 }

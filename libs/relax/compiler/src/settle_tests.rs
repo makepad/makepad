@@ -698,7 +698,7 @@ fn round50_initializer_reload_policy() {
         // no storage, not literal, no scalar fold: the round-51 CTFE-relevant path (full publication)
         assert!(!std::sync::Arc::ptr_eq(&other_before, &u.tcx.typeck(&u.prog, unrelated)), "an unfoldable static without storage took the per-file path");
     }
-    if let Some(undo) = outcome.undo { unsafe { crate::reload::rollback(up, undo); } }
+    if let Some(undo) = outcome.undo { unsafe { crate::reload::rollback(up, undo, "test"); } }
     unsafe { call_jit(up, entry, &mut result as *mut u32 as u64).unwrap_or_else(|p| panic!("{}", p.message)); }
     assert_eq!(result, 3);
     assert_eq!(u.const_addr(value, vec![]), Some(old_addr));
@@ -739,7 +739,7 @@ fn round50_opaque_body_invalidates_solver_answer() {
     let outcome = unsafe { crate::reload::apply(up, vec![crate::reload::Edit { file: u.prog.def(owner).file, path: path.to_string_lossy().into_owned(), src: source.replace("1u8", "2u32").into_bytes() }]) };
     assert_eq!(outcome.rung, crate::reload::Rung::Patch, "{:?}", outcome.lines);
     assert_eq!(hidden(&u), u.tcx.tys.u32_);
-    unsafe { crate::reload::rollback(up, outcome.undo.unwrap()); }
+    unsafe { crate::reload::rollback(up, outcome.undo.unwrap(), "test"); }
     assert_eq!(hidden(&u), u.tcx.tys.u8_);
     std::fs::remove_file(path).unwrap();
 }
@@ -852,4 +852,57 @@ fn deferred_cache_record_is_dropped_when_a_source_changed() {
         u.cache = Some(cache);
     });
     std::mem::forget(u);
+}
+
+// INVALID2 (invalid.rs group_of): code built AFTER a patch that inlined patched code (here a lazy
+// first compile of an unpatched caller that inlines an `#[inline(always)]` helper the patch
+// changed, a helper that never had code of its own) is that patch generation's code: a rollback
+// of the generation invalidates it (PROT_NONE, stale range) and the caller is built again from
+// the restored source.
+#[test]
+fn invalid_inliner_built_after_patch_is_in_its_group() {
+    isolated_test!(invalid_inliner_built_after_patch_is_in_its_group);
+    const CHILD: &str = "MAKEPAD_RUN_INVALID_INLINER_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "jit::settle_tests::invalid_inliner_built_after_patch_is_in_its_group", "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0").output().unwrap();
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    crate::borrowck::lazy::disable_gandalf();
+    let source = "#![no_std] #[inline(always)] fn inl() -> u32 { 1 } #[inline(never)] fn late(out: *mut u32) { unsafe { *out = inl() * 100; } } fn early(out: *mut u32) { unsafe { *out = 7; } }";
+    let path = std::env::temp_dir().join(format!("relax-invalid-inliner-{}.rs", std::process::id()));
+    std::fs::write(&path, source).unwrap();
+    let session = std::sync::Arc::new(crate::Session::default());
+    let mut prog = Program::new(&session);
+    prog.load_crate("invalid_inliner", path.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
+    let named = |name| prog.defs.iter().enumerate().find_map(|(i, _)| (prog.name(DefId(i as u32)) == name).then_some(DefId(i as u32))).unwrap();
+    let (late, early, inl) = (named("late"), named("early"), named("inl"));
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    let mut u = Unit::new(prog, tcx, 0);
+    let up = &mut *u as *mut Unit;
+    let mut result = 0u32;
+    let early_entry = u.entry(u.fn_id(FnKey::Inst(early, vec![])));
+    unsafe { call_jit(up, early_entry, &mut result as *mut u32 as u64).unwrap_or_else(|p| panic!("{}", p.message)) };
+    assert_eq!(result, 7);
+    let outcome = unsafe { crate::reload::apply(up, vec![crate::reload::Edit { file: u.prog.def(late).file, path: path.to_string_lossy().into_owned(), src: source.replace("{ 1 }", "{ 2 }").into_bytes() }]) };
+    assert_eq!(outcome.rung, crate::reload::Rung::Patch, "{:?}", outcome.lines);
+    // late's first code: built now, from the patched helper
+    let late_id = u.fn_id(FnKey::Inst(late, vec![]));
+    let late_entry = u.entry(late_id);
+    unsafe { call_jit(up, late_entry, &mut result as *mut u32 as u64).unwrap_or_else(|p| panic!("{}", p.message)) };
+    assert_eq!(result, 200);
+    let inl_id = u.fn_id(FnKey::Inst(inl, vec![]));
+    assert!(u.body_deps.get(&late_id).is_some_and(|d| d.contains(&inl_id)), "late inlined inl: {:?}", u.body_deps.get(&late_id));
+    let code = u.fns[late_id as usize].code;
+    assert!(u.fns[late_id as usize].compiled && u.fns[late_id as usize].patch_gen == 0);
+    assert!(crate::stale::lookup(code).is_none());
+    unsafe { crate::reload::rollback(up, outcome.undo.unwrap(), "test") };
+    assert!(crate::stale::lookup(code).is_some(), "late's code (built after the patch, it inlined the patched helper) is invalidated by the rollback");
+    assert!(!u.fns[late_id as usize].compiled, "late is back at its lazy stub");
+    unsafe { call_jit(up, late_entry, &mut result as *mut u32 as u64).unwrap_or_else(|p| panic!("{}", p.message)) };
+    assert_eq!(result, 100, "late is built again from the restored helper");
+    std::fs::remove_file(path).unwrap();
 }

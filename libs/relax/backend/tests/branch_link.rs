@@ -62,19 +62,22 @@ fn thunk_heads() {
 #[test]
 fn count_stubs_jump_directly_in_reach() {
     let at = 0x7000_0000u64;
-    // x64: mov rax, counter (10) ; sub [rax], 1 (4) ; je (2) ; jmp rel32 code
-    let s = relax_backend::x64::count_stub(at, 0x1234_5678_9abc, 7, at + 0x1000, 0x5555_0000_0000);
-    assert_eq!(s[16], 0xe9);
-    assert_eq!(i32::from_le_bytes([s[17], s[18], s[19], s[20]]) as i64, 0x1000 - 21);
-    assert_eq!(s[15] as usize, 5, "je skips the direct jmp");
+    // x64: mov rax, counter (10) ; sub [rax], imm32 (7) ; jle (2) ; jmp rel32 code
+    let s = relax_backend::x64::count_stub(at, 0x1234_5678_9abc, 7, at + 0x1000, 0x5555_0000_0000, 300);
+    assert_eq!(&s[10..17], &[0x48, 0x81, 0x28, 0x2c, 0x01, 0, 0], "sub qword [rax], 300");
+    assert_eq!(s[17], 0x7e, "jle: a budget at or below zero goes hot");
+    assert_eq!(s[19], 0xe9);
+    assert_eq!(i32::from_le_bytes([s[20], s[21], s[22], s[23]]) as i64, 0x1000 - 24);
+    assert_eq!(s[18] as usize, 5, "jle skips the direct jmp");
     assert!(s.len() <= relax_backend::x64::COUNT_STUB_SIZE);
     // unknown address: the absolute form
-    let f = relax_backend::x64::count_stub(0, 0x1234_5678_9abc, 7, at + 0x1000, 0x5555_0000_0000);
-    assert_ne!(f[16], 0xe9);
-    // arm64: 4 words counter, ldr/subs/str, b.eq, then b code
-    let s = relax_backend::arm64::count_stub(at, 0x1234_5678_9abc, 7, at + 0x1000, 0x5555_0000_0000);
+    let f = relax_backend::x64::count_stub(0, 0x1234_5678_9abc, 7, at + 0x1000, 0x5555_0000_0000, 300);
+    assert_ne!(f[19], 0xe9);
+    // arm64: 4 words counter, ldr/subs/str, b.le, then b code
+    let s = relax_backend::arm64::count_stub(at, 0x1234_5678_9abc, 7, at + 0x1000, 0x5555_0000_0000, 300);
     let w = |k: usize| u32::from_le_bytes(s[4 * k..4 * k + 4].try_into().unwrap());
-    assert_eq!(w(7), 0x5400_0000 | 2 << 5, "b.eq skips the direct b");
+    assert_eq!(w(5), 0xF100_0000 | 300 << 10 | 17 << 5 | 17, "subs x17, x17, #300");
+    assert_eq!(w(7), 0x5400_000D | 2 << 5, "b.le skips the direct b");
     assert_eq!(w(8), 0x1400_0000 | ((0x1000 - 32) >> 2));
     assert!(s.len() <= relax_backend::arm64::COUNT_STUB_SIZE);
 }

@@ -33,7 +33,8 @@ fn survivors_keep_their_bytes_and_the_rest_goes_back() {
     let mut kept: Vec<Box<[u64; 8]>> = Vec::new();
     for round in 0..3u64 {
         let survivors = {
-            let _scope = zone_alloc::scratch(&runtime);
+            let _phase = zone_alloc::compiler();
+            let _scope = zone_alloc::job("test", runtime.burst_arena);
             let mut all: Vec<Box<[u64; 8]>> = Vec::with_capacity(1);
             for i in 0..200_000u64 {
                 all.push(Box::new([i ^ round; 8]));
@@ -45,7 +46,7 @@ fn survivors_keep_their_bytes_and_the_rest_goes_back() {
                     s.push(b);
                 }
             }
-            zone_alloc::outside_scratch(|| s.into_iter().collect::<Vec<_>>())
+            zone_alloc::copy_out(|| s.into_iter().collect::<Vec<_>>())
         };
         let r0 = rss_of_burst();
         zone_alloc::burst_trim();

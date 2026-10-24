@@ -57,47 +57,8 @@ pub fn kept() -> PhaseGuard {
     enter(KEPT)
 }
 
-thread_local! {
-    static AHEAD: std::cell::RefCell<Option<Vec<Box<dyn FnOnce()>>>> = const { std::cell::RefCell::new(None) };
-}
-
-/// The settle swap restores the collected image ahead of its pause (jit zone_swap.rs), while
-/// compiles still run on generation g's statics; the swap takes those statics only once the pause
-/// began. Between `ahead_begin` and `ahead_end` the writes this thread's restore makes to such
-/// statics are deferred (`defer`) instead; the swap runs them after its take (into the new
-/// generation's empty statics), or drops them when it aborts.
-pub fn ahead_begin() {
-    AHEAD.with(|a| *a.borrow_mut() = Some(Vec::new()));
-}
-
-/// Ends the restore ahead of the pause: the writes it deferred, in order.
-pub fn ahead_end() -> Vec<Box<dyn FnOnce()>> {
-    AHEAD.with(|a| a.borrow_mut().take()).unwrap_or_default()
-}
-
-/// Whether this thread restores ahead of a swap's pause (`ahead_begin`).
-pub fn ahead() -> bool {
-    AHEAD.with(|a| a.borrow().is_some())
-}
-
-/// Runs `f` now, or (a restore ahead of the swap's pause) after the swap took the statics.
-pub fn defer(f: impl FnOnce() + 'static) {
-    let f = AHEAD.with(|a| match a.borrow_mut().as_mut() {
-        Some(v) => {
-            v.push(Box::new(f));
-            None
-        }
-        None => Some(f),
-    });
-    if let Some(f) = f {
-        f()
-    }
-}
-
 /// An environment variable read once into `cell`; unset or empty = None. The value lives in the
-/// kept heap (a zone swap never resets the static), and the static holds a String, never an
-/// `Option`: a `None` written into an inline payload carries a stack temporary's bytes, which
-/// MAKEPAD_RUN_ZONE_CHECK=2 reports as stale compiler words.
+/// kept heap: it is process state, whichever thread and phase read it first.
 pub fn env_once(cell: &'static std::sync::OnceLock<String>, name: &str) -> Option<&'static str> {
     let s = cell.get_or_init(|| {
         let _k = kept();

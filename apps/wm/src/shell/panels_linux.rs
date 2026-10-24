@@ -1225,7 +1225,7 @@ impl ShellPanel {
 
     /// A small control face: `hit` `None` draws it disabled (no hit),
     /// `selected` in the chosen state; an icon, a label, or both.
-    fn small_button(&mut self, cx: &mut Cx2d, r: Rect, hit: Option<Hit>, selected: bool, icon: Option<Ico>, text: &str) {
+    pub(super) fn small_button(&mut self, cx: &mut Cx2d, r: Rect, hit: Option<Hit>, selected: bool, icon: Option<Ico>, text: &str) {
         let tok = self.tokens;
         let fg = tok.popups.text;
         let dim = darker(fg, 1.4);

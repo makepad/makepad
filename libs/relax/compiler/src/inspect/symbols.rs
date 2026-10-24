@@ -23,9 +23,8 @@ static IMAGES: Mutex<Vec<Image>> = Mutex::new(Vec::new());
 
 /// The function containing `pc`: (demangled name, image file name, pc's offset from the symbol).
 pub fn host_symbol(pc: u64) -> Option<(String, String, u64)> {
-    // IMAGES outlives the compiler generation of whichever thread asks first (a hitch report, a
-    // panic): what it holds is allocated in the kept heap (ZONE_CHECK=2 found its Vec in a
-    // destroyed generation on Stage)
+    // IMAGES is process state, filled by whichever thread asks first (a hitch report, a panic):
+    // it lives in the kept heap
     let _kept = crate::zone_alloc::kept();
     let mut images = IMAGES.lock().unwrap_or_else(|e| e.into_inner());
     if !images.iter().any(|i| pc >= i.lo && pc < i.hi) {

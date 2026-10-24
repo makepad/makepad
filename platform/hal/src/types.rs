@@ -230,10 +230,13 @@ pub mod info_flags {
     pub const WINDOW_LAYERS: u32 = 64;
     /// Session 0 may put badges on its windows (`window_kind::BADGE`).
     pub const WINDOW_BADGES: u32 = 128;
+    /// A makepad window manager hosts the windows (the Linux WM shell): they are its tiles,
+    /// which draw their own caption in the WM's style; the WM's messages arrive as `AppMessage`.
+    pub const WM_HOSTED: u32 = 256;
 
     #[test]
     fn the_flags_are_distinct_bits() {
-        let all = [PRIVILEGED, EMBEDDED, DISPLAY_CLOCK, GPU_TIMESTAMPS, CLIENT_CHROME, DIRECT_DISPLAY, WINDOW_LAYERS, WINDOW_BADGES];
+        let all = [PRIVILEGED, EMBEDDED, DISPLAY_CLOCK, GPU_TIMESTAMPS, CLIENT_CHROME, DIRECT_DISPLAY, WINDOW_LAYERS, WINDOW_BADGES, WM_HOSTED];
         for (i, a) in all.iter().enumerate() {
             assert!(a.is_power_of_two());
             assert!(all[i + 1..].iter().all(|b| a & b == 0), "flag {a} shares a bit");

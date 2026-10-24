@@ -58,6 +58,12 @@ pub trait VkSurfaceSource: Send {
 /// from GPU completion. The image lease must survive all display reads, including peers.
 pub trait FramePresenter: Send + Sync {
     fn submit(&self, session: u32, window: Id, image: Arc<super::Image>, presented: Box<dyn FnOnce(u64) + Send>);
+    /// A frame of this window was encoded for this presenter: its [`Self::submit`] (GPU done)
+    /// or [`Self::dropped`] (its batch failed) follows exactly once. A shell that grants its
+    /// windows frames itself bounds the frames in flight with this.
+    fn scheduled(&self, _session: u32, _window: Id) {}
+    /// A [`Self::scheduled`] frame whose batch did not run: it reaches no `submit`.
+    fn dropped(&self, _session: u32, _window: Id) {}
 }
 
 pub struct NativeSurface {

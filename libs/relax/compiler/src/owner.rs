@@ -142,13 +142,6 @@ struct Queue {
 
 static Q: Mutex<Queue> = Mutex::new(Queue { lanes: [const { VecDeque::new() }; CLASSES] });
 
-/// Whether the owner's queue is empty (the settle swap: a request queued since the quiesce looked
-/// may hold compiler-generation state, so the swap is tried again later). The queue's buffers are
-/// in the kept heap (`push`): a swap leaves them alone.
-pub(crate) fn queue_empty() -> bool {
-    Q.lock().unwrap_or_else(|e| e.into_inner()).lanes.iter().all(VecDeque::is_empty)
-}
-
 static WAKE: Condvar = Condvar::new();
 static STARTED: std::sync::Once = std::sync::Once::new();
 /// Program requests queued (diagnostics)
@@ -804,7 +797,7 @@ pub fn start() {
             .spawn(move || {
                 {
                     let _k = crate::zone_alloc::kept();
-                    // std's blocking context survives every compiler generation on this thread.
+                    // std's blocking context is set up once, in the kept heap, on this thread.
                     let (_tx, rx) = std::sync::mpsc::sync_channel::<()>(0);
                     let _ = rx.recv_timeout(std::time::Duration::ZERO);
                 }
@@ -1288,6 +1281,7 @@ fn owner_loop() -> ! {
                     break r;
                 }
                 OWNER_ASLEEP.store(true, Ordering::SeqCst);
+                crate::zone_alloc::compiler_hand_back_idle();
                 q = WAKE.wait(q).unwrap_or_else(|e| e.into_inner());
                 OWNER_ASLEEP.store(false, Ordering::SeqCst);
             }
@@ -1420,11 +1414,6 @@ pub struct ExitParked;
 /// Ends the request being served without an answer: the process is ending on another thread.
 pub fn park_for_exit() -> ! {
     std::panic::resume_unwind(Box::new(ExitParked))
-}
-
-/// The owner serves nothing and nothing is queued (the settle swap's drain).
-pub fn idle() -> bool {
-    NOW_CLASS.load(Ordering::Acquire) == u8::MAX && QUEUED_N.load(Ordering::SeqCst) == 0
 }
 
 /// The owner is serving a request of another thread than `tid` now.

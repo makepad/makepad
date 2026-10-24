@@ -784,8 +784,7 @@ fn zone_rows(t: &Tables, zone: &str) -> Vec<Row> {
         }
         let inside = match zone {
             "burst" => crate::zone_alloc::burst_owns(a as *const u8),
-            // a block of a destroyed generation was never freed through the hooks: not live
-            "compiler" => crate::zone_alloc::compiler_owns(a as *const u8) && crate::zone_alloc::compiler_tombstone_of(a as usize).is_none(),
+            "compiler" => crate::zone_alloc::compiler_owns(a as *const u8),
             _ => !crate::zone_alloc::burst_owns(a as *const u8) && !crate::zone_alloc::compiler_owns(a as *const u8),
         };
         if !inside {

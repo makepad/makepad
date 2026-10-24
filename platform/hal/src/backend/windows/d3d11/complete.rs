@@ -195,14 +195,24 @@ impl Completion {
     }
 }
 
-impl Drop for Completion {
-    fn drop(&mut self) {
+impl Completion {
+    /// The completion thread answers every batch submitted so far (it waits for each one's
+    /// GPU event) and ends; this returns once it has. The end of the process
+    /// (`D3d11::before_exit`) and `Drop`.
+    pub fn stop(&mut self) {
         let (m, cv) = &*self.queue;
         lock(m).stop = true;
         cv.notify_one();
         if let Some(t) = self.thread.take() {
-            let _ = t.join();
+            if t.join().is_err() { eprintln!("[hal-d3d11] the completion thread panicked"); }
         }
+    }
+}
+
+impl Drop for Completion {
+    fn drop(&mut self) {
+        self.stop();
+        let (m, _) = &*self.queue;
         for h in lock(m).free.drain(..) {
             unsafe {
                 let _ = CloseHandle(HANDLE(h as _));

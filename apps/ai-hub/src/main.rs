@@ -12,6 +12,17 @@
 //!   --registry  registry json path   (default: <cache-dir>/registry.json if it
 //!                                     exists, else the embedded registry)
 //!
+//!   --claude-cli  serve ONLY the `claude-cli` chat model: Claude Code on this
+//!               machine, chat-only and sandboxed, tool calls returned as text
+//!               (env MAKEPAD_AI_HUB_CLAUDE=1; libs/ai/hub/src/claude_cli.rs).
+//!               Needs --host <private LAN IP>, the fleet key in
+//!               <cache-dir>/fleet, and the token file
+//!               (MAKEPAD_AI_HUB_CLAUDE_TOKEN_FILE, default
+//!               ~/.makepad/ai-hub/claude.token, mode 600). Model:
+//!               MAKEPAD_AI_HUB_CLAUDE_MODEL (default sonnet).
+//!   --claude-cli-selftest  enable as --claude-cli, run hostile probe turns
+//!               (shell, file read, fetch) through it, print PASS/FAIL, exit.
+//!
 //!   env HF_TOKEN                     bearer token for gated HF repos (flux1-dev)
 //!   env MAKEPAD_ASSET_AI_HF_BASE   alternate HF endpoint / LAN mirror
 //! ```
@@ -38,6 +49,8 @@ fn run() -> Result<(), AssetAiError> {
     let mut machine = false;
     let mut activity_probe = None;
     let mut fleet_identity = false;
+    let mut claude_cli = makepad_ai_hub::claude_cli::requested_by_env();
+    let mut claude_selftest = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -86,9 +99,16 @@ fn run() -> Result<(), AssetAiError> {
             "--fleet-identity" => {
                 fleet_identity = true;
             }
+            "--claude-cli" => {
+                claude_cli = true;
+            }
+            "--claude-cli-selftest" => {
+                claude_cli = true;
+                claude_selftest = true;
+            }
             "--help" | "-h" => {
                 println!(
-                    "{SERVICE_NAME} {SERVICE_VERSION}\nusage: {SERVICE_NAME} [--port N] [--host ADDR] [--fleet NAME] [--cache-dir PATH] [--registry PATH] [--machine] [--fleet-identity] [--activity-probe SECONDS]"
+                    "{SERVICE_NAME} {SERVICE_VERSION}\nusage: {SERVICE_NAME} [--port N] [--host ADDR] [--fleet NAME] [--cache-dir PATH] [--registry PATH] [--machine] [--fleet-identity] [--activity-probe SECONDS] [--claude-cli] [--claude-cli-selftest]"
                 );
                 return Ok(());
             }
@@ -138,8 +158,30 @@ fn run() -> Result<(), AssetAiError> {
     // The machine node is machine-local by definition: loopback bind, no
     // matter what --host said.
     if machine {
+        if claude_cli {
+            return Err(AssetAiError::Io("--claude-cli and --machine exclude each other: claude-cli serves only on a LAN address".into()));
+        }
         host = "127.0.0.1".to_string();
     }
+    // The claude-cli hub serves that one model and nothing else.
+    let registry = if claude_cli {
+        let bind: std::net::SocketAddr = format!("{host}:{port}")
+            .parse()
+            .map_err(|_| AssetAiError::Io(format!("--claude-cli needs --host <a private LAN IP>, not {host:?}")))?;
+        let spec = makepad_ai_hub::claude_cli::enable(bind).map_err(AssetAiError::Io)?;
+        if claude_selftest {
+            return match makepad_ai_hub::claude_cli::selftest() {
+                Ok(report) => {
+                    println!("{report}");
+                    Ok(())
+                }
+                Err(report) => Err(AssetAiError::Io(report)),
+            };
+        }
+        Registry { models: vec![spec] }
+    } else {
+        registry
+    };
     let downloader = Downloader::from_env()?;
     let handle = start_service(ServiceConfig {
         host,
@@ -159,12 +201,15 @@ fn run() -> Result<(), AssetAiError> {
     println!("  listening on {scheme} {}", handle.addr);
     println!("  fleet {fleet}");
     println!("  cache dir {}", cache_dir.display());
+    if let Some(claude) = makepad_ai_hub::claude_cli::describe() {
+        println!("  {claude}");
+    }
     if std::env::var("HF_TOKEN").is_ok() {
         println!("  HF_TOKEN present (gated repos enabled)");
     }
     println!("  lora dir  {}", cache_dir.join("loras").display());
     println!(
-        "  endpoints: /health /models /jobs /loras POST:/generate /job/<id> POST:/job/<id>/cancel /artifact/<id> /v1/model_inventory /v1/model_blob/<sha256> POST:/realtime GET(ws):/realtime/<id>"
+        "  endpoints: /health /models /jobs /loras POST:/generate /job/<id> POST:/job/<id>/cancel /artifact/<id> /v1/model_inventory /v1/model_blob/<sha256> POST:/realtime GET(ws):/realtime/<id> /kernel POST:/kernel/jobs /kernel/job/<id>/tiles POST:/kernel/job/<id>/cancel"
     );
 
     if machine {

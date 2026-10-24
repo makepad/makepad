@@ -95,6 +95,10 @@ fn define_app_delegate() -> *const Class {
             CANCEL
         } else {
             app::windows_gone_before_exit();
+            // NOW: AppKit calls exit() itself, past the hosts' own end of run. The HAL's driver
+            // threads (Metal submit, allocator) stop and are joined first, as at every other
+            // end (Hal::before_exit; it waits on no main-thread work, so this thread may call it)
+            crate::Hal::global().before_exit();
             NOW
         }
     }

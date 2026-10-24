@@ -105,6 +105,20 @@ extern "system" {
     pub fn SetSecurityDescriptorControl(sd: *mut u8, bits: u16, value: u16) -> i32;
 }
 
+// code memory as two views of one section (W^X): placeholders, Windows 10 1803+
+#[link(name = "kernelbase", kind = "raw-dylib")]
+extern "system" {
+    pub fn VirtualAlloc2(process: HANDLE, addr: *mut u8, size: usize, kind: u32, protect: u32, params: *mut u8, nparams: u32) -> *mut u8;
+    pub fn MapViewOfFile3(section: HANDLE, process: HANDLE, addr: *mut u8, offset: u64, size: usize, kind: u32, protect: u32, params: *mut u8, nparams: u32) -> *mut u8;
+    pub fn UnmapViewOfFile2(process: HANDLE, addr: *mut u8, flags: u32) -> i32;
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    pub fn CreateFileMappingW(file: HANDLE, attrs: *const SecurityAttributes, protect: u32, size_high: u32, size_low: u32, name: *const u16) -> HANDLE;
+    pub fn UnmapViewOfFile(addr: *mut u8) -> i32;
+}
+
 #[link(name = "bcryptprimitives", kind = "raw-dylib")]
 extern "system" {
     pub fn ProcessPrng(buf: *mut u8, len: usize) -> i32;
@@ -147,6 +161,12 @@ pub const MEM_DECOMMIT: u32 = 0x4000;
 pub const PAGE_NOACCESS: u32 = 0x01;
 pub const PAGE_READWRITE: u32 = 0x04;
 pub const PAGE_EXECUTE_READWRITE: u32 = 0x40;
+pub const PAGE_EXECUTE_READ: u32 = 0x20;
+pub const MEM_RESERVE_PLACEHOLDER: u32 = 0x0004_0000;
+pub const MEM_REPLACE_PLACEHOLDER: u32 = 0x0000_4000;
+pub const MEM_PRESERVE_PLACEHOLDER: u32 = 0x0000_0002;
+pub const SEC_RESERVE: u32 = 0x0400_0000;
+pub const INVALID_HANDLE_VALUE: HANDLE = -1;
 
 pub const THREAD_SUSPEND_RESUME: u32 = 0x0002;
 pub const THREAD_GET_CONTEXT: u32 = 0x0008;

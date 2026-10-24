@@ -33,8 +33,8 @@ struct State {
     reasons: HashMap<u32, String>,
     events: Vec<Event>,
 }
-/// The accounting is process-wide and outlives the compiler generation of the threads that fill
-/// it (a settle swap destroys that one): everything State owns is allocated in the kept heap. The
+/// The accounting is process-wide, filled from compiler threads: everything State owns is
+/// allocated in the kept heap (process state, not compile state). The
 /// guard is held for every access that may allocate or free (keys, names, table growth, events).
 fn state() -> (relax_session::phase::PhaseGuard, relax_session::sync::MutexGuard<'static, State>) {
     static STATE: OnceLock<Mutex<State>> = OnceLock::new();
@@ -42,7 +42,7 @@ fn state() -> (relax_session::phase::PhaseGuard, relax_session::sync::MutexGuard
     let s = STATE.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
     (k, s)
 }
-relax_session::gen_local! {
+relax_session::memo_local! {
     static SLOTS: RefCell<Vec<(u32, u8)>>;
     static CHILD_CPU: RefCell<Vec<u64>>;
 }

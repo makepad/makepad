@@ -296,6 +296,14 @@ impl Backend for D3d11 {
     fn info(&self) -> HalInfo {
         self.info
     }
+    /// The process ends next: the open batch is handed on, the HLSL compilers and the
+    /// completion thread (GPU event waits, readback maps) run out and are joined.
+    fn before_exit(&mut self) {
+        let batch = std::mem::take(&mut self.batch);
+        self.complete.submit(batch);
+        for compiler in &mut self.compilers { compiler.stop(); }
+        self.complete.stop();
+    }
     fn submit(&mut self, world: &mut World, sid: u32, view: &CmdView) {
         self.recover(world);
         self.drain(world);

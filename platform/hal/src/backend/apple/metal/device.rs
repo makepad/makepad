@@ -402,17 +402,31 @@ impl Device {
     }
 }
 
+impl Device {
+    /// The threads that call Metal stop and are joined: the submitter commits every buffer
+    /// encoded so far (also those the saturated queue held back), the allocator runs its
+    /// compiles and releases. Afterwards `commit` keeps buffers back, `compile` drops its job and
+    /// `retire` releases on the caller. The end of the process (`Metal::before_exit`) and `Drop`.
+    pub fn stop_workers(&mut self) {
+        if let Some(tx) = self.submit_tx.take() {
+            for submission in self.submit_retry.drain(..) {
+                if tx.send(submission).is_err() { break; }
+            }
+        }
+        self.alloc_tx = None;
+        if let Some(t) = self.submit_thread.take() {
+            if t.join().is_err() { eprintln!("[hal-metal] the submit thread panicked"); }
+        }
+        if let Some(t) = self.alloc_thread.take() {
+            if t.join().is_err() { eprintln!("[hal-metal] the allocator thread panicked"); }
+        }
+    }
+}
+
 impl Drop for Device {
     fn drop(&mut self) {
         self.watchdog_stop.store(true, Ordering::Release);
-        self.submit_tx = None;
-        self.alloc_tx = None;
-        if let Some(t) = self.submit_thread.take() {
-            let _ = t.join();
-        }
-        if let Some(t) = self.alloc_thread.take() {
-            let _ = t.join();
-        }
+        self.stop_workers();
         if let Some(t) = self.watchdog_thread.take() {
             let _ = t.join();
         }

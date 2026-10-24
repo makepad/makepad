@@ -109,7 +109,27 @@ pub use imp::{stack_hi_of_self, walk_regs_with, Slot as HoldSlot};
 /// Pause: holds thread `tid` in its handler until `release_hold` (Linux).
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub fn hold_paused(tid: u64) -> Result<&'static HoldSlot, &'static str> {
-    imp::hold(tid, true)
+    imp::hold(tid, imp::HOLD_PAUSE)
+}
+
+/// Holds thread `tid` in its handler for good (a thread with a frame in code that never runs
+/// again: stale.rs `park_held`); a blocked thread is signalled too (it never returns from the
+/// handler, so an interrupted system call never comes back to its caller). Linux.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub fn hold_for_good(tid: u64) -> Result<&'static HoldSlot, &'static str> {
+    imp::hold(tid, imp::HOLD_FOREVER)
+}
+
+/// A pause's hold of a thread becomes a hold for good (`release_hold` is never called for it).
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub fn keep_held(s: &HoldSlot) {
+    imp::keep(s)
+}
+
+/// Whether thread `tid` stands still in its handler now (held by a pause or for good). Linux.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub fn is_held(tid: u64) -> bool {
+    imp::held(tid).is_some()
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -498,10 +518,14 @@ mod imp {
         /// x86_64: rip, rsp, rbp, rbx, r12, r13, r14, r15; arm64: pc, sp, fp, lr, -, -, -, -;
         /// then the pthread handle
         regs: [AtomicU64; 9],
-        /// a pause holds it (released by `resume`, not after one walk)
-        paused: std::sync::atomic::AtomicBool,
+        /// HOLD_CAPTURE (one walk, at most 5 s), HOLD_PAUSE (until `resume`, at most 10 minutes),
+        /// HOLD_FOREVER (a thread that must never run on: stale.rs `park_held`)
+        mode: AtomicU32,
     }
-    static HOLDS: [Slot; SLOTS] = [const { Slot { state: AtomicU32::new(0), tid: AtomicI32::new(0), regs: [const { AtomicU64::new(0) }; 9], paused: std::sync::atomic::AtomicBool::new(false) } }; SLOTS];
+    static HOLDS: [Slot; SLOTS] = [const { Slot { state: AtomicU32::new(0), tid: AtomicI32::new(0), regs: [const { AtomicU64::new(0) }; 9], mode: AtomicU32::new(0) } }; SLOTS];
+    pub const HOLD_CAPTURE: u32 = 0;
+    pub const HOLD_PAUSE: u32 = 1;
+    pub const HOLD_FOREVER: u32 = 2;
     static SIGNAL: AtomicI32 = AtomicI32::new(0);
 
     fn futex_wait(w: &AtomicU32, val: u32, ms: u64) {
@@ -548,7 +572,11 @@ mod imp {
                 if slot.state.load(Acquire) != 2 {
                     break;
                 }
-                let limit = if slot.paused.load(Relaxed) { 600 } else { 5 };
+                let limit = match slot.mode.load(Relaxed) {
+                    HOLD_CAPTURE => 5,
+                    HOLD_PAUSE => 600,
+                    _ => u64::MAX,
+                };
                 if t0.elapsed().as_secs() >= limit {
                     break;
                 }
@@ -561,7 +589,7 @@ mod imp {
 
     /// Asks thread `tid` to stand still in its handler; Some(slot) once its registers are in,
     /// None when it did not answer in time (signals blocked, uninterruptible, ended).
-    pub fn hold(tid: u64, paused: bool) -> Result<&'static Slot, &'static str> {
+    pub fn hold(tid: u64, mode: u32) -> Result<&'static Slot, &'static str> {
         if tid == super::self_os_id() {
             return Err("the calling thread (not held)");
         }
@@ -570,7 +598,7 @@ mod imp {
             return Err("no free real-time signal for stack capture");
         }
         let Some(slot) = HOLDS.iter().find(|h| h.state.compare_exchange(0, 1, AcqRel, Relaxed).is_ok()) else { return Err("too many held threads") };
-        slot.paused.store(paused, Relaxed);
+        slot.mode.store(mode, Relaxed);
         slot.tid.store(tid as i32, Release);
         if unsafe { syscall(SYS_TGKILL, getpid(), tid as i32, sig) } != 0 {
             slot.tid.store(0, Relaxed);
@@ -602,12 +630,17 @@ mod imp {
             futex_wait(&slot.state, 3, 10);
         }
         slot.tid.store(0, Relaxed);
-        slot.paused.store(false, Relaxed);
+        slot.mode.store(HOLD_CAPTURE, Relaxed);
         slot.state.store(0, Release);
     }
 
+    /// A held thread stays held for good.
+    pub fn keep(slot: &Slot) {
+        slot.mode.store(HOLD_FOREVER, Relaxed);
+    }
+
     /// The slot holding `tid` now (a paused thread), if any.
-    fn held(tid: u64) -> Option<&'static Slot> {
+    pub fn held(tid: u64) -> Option<&'static Slot> {
         HOLDS.iter().find(|h| h.tid.load(Acquire) == tid as i32 && h.state.load(Acquire) == 2)
     }
 
@@ -676,6 +709,13 @@ mod imp {
 
     pub fn capture(t: &Thread, raw: &mut Raw) -> Result<(), &'static str> {
         raw.n = 0;
+        // a paused thread already stands still in its handler: walked from the registers it was
+        // interrupted with (its own syscall now is the handler's futex wait: a walk from there
+        // has to step through the signal frame, and lost the program frames beyond it)
+        if let Some(slot) = held(t.os_id) {
+            walk_slot(slot, raw);
+            return Ok(());
+        }
         // a thread blocked in a syscall is never signalled (third-party code may not retry an
         // EINTR; an audio thread must not be held): its stack stands still while it blocks, so
         // it is walked from the syscall's sp and pc, and the walk is kept if it still blocks
@@ -689,12 +729,7 @@ mod imp {
                 raw.n = 0;
             }
         }
-        // a paused thread already stands still in its handler
-        if let Some(slot) = held(t.os_id) {
-            walk_slot(slot, raw);
-            return Ok(());
-        }
-        let slot = hold(t.os_id, false)?;
+        let slot = hold(t.os_id, HOLD_CAPTURE)?;
         walk_slot(slot, raw);
         release(slot);
         Ok(())

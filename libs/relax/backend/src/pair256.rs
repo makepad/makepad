@@ -29,6 +29,11 @@ pub struct Caps {
     pub avx2: bool,
     /// vfmadd*ps ymm
     pub fma: bool,
+    /// AVX2's 32-bit lane forms too (`op256_ints`: integer arithmetic, compares, shifts, zips,
+    /// conversions, rounding, selects, splats). Compute's eight-lane kernels turn it on (their
+    /// halves are integer and float chains alike); Relax's tiers keep the float forms only
+    /// until these are measured on its workloads.
+    pub ints: bool,
 }
 
 /// Lane-wise ops with a VEX.256 form here (the x64 emitter's `y_vx`).
@@ -38,6 +43,19 @@ pub fn op256(op: VX) -> bool {
         VX::FAdd(w, n) | VX::FSub(w, n) | VX::FMul(w, n) | VX::FDiv(w, n) => matches!(w, S | D) && n != NanBits::Neon,
         VX::FMinLt(w) | VX::FMaxGt(w) | VX::FCmp(_, w) => matches!(w, S | D),
         VX::And | VX::Or | VX::Xor | VX::AndNot => true,
+        _ => false,
+    }
+}
+
+/// The 32-bit lane forms of `Caps::ints` (the x64 emitter's `y_vx`, AVX2).
+pub fn op256_ints(op: VX) -> bool {
+    use VW::*;
+    match op {
+        VX::Add(S) | VX::Sub(S) | VX::MulLo(S) | VX::MinU(S) | VX::MaxU(S) | VX::MinS(S) | VX::MaxS(S) | VX::ICmp(_, S) | VX::Neg(S) => true,
+        VX::ShlI(S, _) | VX::ShrSI(S, _) | VX::ShrUI(S, _) | VX::ShlV(S) | VX::ShrSV(S) | VX::ShrUV(S) => true,
+        VX::ZipLo(S | D) | VX::ZipHi(S | D) => true,
+        VX::FNeg(S) | VX::FAbs(S) | VX::FRound(S, _) | VX::IToF(S) | VX::FToI(S) => true,
+        VX::FSqrt(S, n) => n != NanBits::Neon,
         _ => false,
     }
 }
@@ -52,6 +70,10 @@ enum Kind {
     Vx(VX),
     Fma(bool, bool),
     Mov,
+    /// VSel (mask, a, b)
+    Sel,
+    /// VSplat of this scalar
+    Splat(VReg),
 }
 
 #[derive(Clone, Copy)]
@@ -71,7 +93,9 @@ fn shape(f: &Func, i: &Inst, caps: Caps) -> Option<Shape> {
         Inst::VStore(b, o, s) if v(s) && o <= i32::MAX - 16 => Some(Shape { kind: Kind::Store(b), off: o, dest: None, ops: [s, z, z], n: 1 }),
         Inst::VLoadX(d, b, x, sh, o) if v(d) && o <= i32::MAX - 16 => Some(Shape { kind: Kind::LoadX(b, x, sh), off: o, dest: Some(d), ops: [z; 3], n: 0 }),
         Inst::VStoreX(b, x, sh, o, s) if v(s) && o <= i32::MAX - 16 => Some(Shape { kind: Kind::StoreX(b, x, sh), off: o, dest: None, ops: [s, z, z], n: 1 }),
-        Inst::VX(op, d, a, b) if op256(op) && v(d) && v(a) && v(b) => Some(Shape { kind: Kind::Vx(op), off: 0, dest: Some(d), ops: [a, b, z], n: 2 }),
+        Inst::VX(op, d, a, b) if (op256(op) || (caps.ints && op256_ints(op))) && v(d) && v(a) && v(b) => Some(Shape { kind: Kind::Vx(op), off: 0, dest: Some(d), ops: [a, b, z], n: 2 }),
+        Inst::VSel(d, m, a, b) if caps.ints && v(d) && v(m) && v(a) && v(b) => Some(Shape { kind: Kind::Sel, off: 0, dest: Some(d), ops: [m, a, b], n: 3 }),
+        Inst::VSplat(d, s) if caps.ints && v(d) && (caps.avx2 || f.vregs[s.0 as usize] == Cls::F32) => Some(Shape { kind: Kind::Splat(s), off: 0, dest: Some(d), ops: [z; 3], n: 0 }),
         Inst::VFma(np, na, d, a, b, c) if caps.fma && v(d) => Some(Shape { kind: Kind::Fma(np, na), off: 0, dest: Some(d), ops: [a, b, c], n: 3 }),
         Inst::Mov(d, a) if v(d) && v(a) && d != a => Some(Shape { kind: Kind::Mov, off: 0, dest: Some(d), ops: [a, z, z], n: 1 }),
         _ => None,
@@ -189,11 +213,21 @@ impl Cx {
     }
 }
 
-/// Fuses V128 pairs into V256 instructions; returns whether `f` changed.
+/// Fuses V128 pairs into V256 instructions; returns whether `f` changed. `f.halves` (vreg
+/// pairs a front end made as the (low, high) halves of one 256-bit value: compute's eight-lane
+/// kernels) seed the pairs: an instruction pair defining a seed pair is a candidate like one
+/// anchored by memory, so chains that start at registers (a loop counter, a splat) fuse too.
+/// Seeds only propose; every check below still decides (a pair fuses only when every
+/// definition of both halves fuses).
 pub fn pair256(f: &mut Func, caps: Caps) -> bool {
     if !f.vregs.iter().any(|c| *c == Cls::V128) {
         return false;
     }
+    let seeds = std::mem::take(&mut f.halves);
+    // kernel mode (`Caps::ints`, compute's eight-lane kernels): also destination votes, lane
+    // extracts of low halves in place, VAny of a pair, one Half per block and definition. Relax's
+    // tiers (ints off) keep the pass as it was until these are measured on its workloads.
+    let km = caps.ints;
     let nv = f.vregs.len();
     let mut cx = Cx { sh: Vec::new(), defs: vec![Vec::new(); nv], uses: vec![Vec::new(); nv], bcast: HashMap::new() };
     let mut any = false;
@@ -218,7 +252,7 @@ pub fn pair256(f: &mut Func, caps: Caps) -> bool {
         }
         cx.sh.push(row);
     }
-    if !any {
+    if !any && seeds.is_empty() {
         return false;
     }
     for v in 0..nv {
@@ -243,6 +277,13 @@ pub fn pair256(f: &mut Func, caps: Caps) -> bool {
     let mut pair_at: HashMap<(u32, u32), usize> = HashMap::new();
     // vreg -> its pair (lo, hi)
     let mut vp: HashMap<u32, (VReg, VReg)> = HashMap::new();
+    for &(x, y) in &seeds {
+        let ok = |v: VReg| (v.0 as usize) < nv && f.vregs[v.0 as usize] == Cls::V128;
+        if x != y && ok(x) && ok(y) && !vp.contains_key(&x.0) && !vp.contains_key(&y.0) {
+            vp.insert(x.0, (x, y));
+            vp.insert(y.0, (x, y));
+        }
+    }
     loop {
         let mut changed = false;
         for bi in 0..f.blocks.len() {
@@ -289,6 +330,21 @@ pub fn pair256(f: &mut Func, caps: Caps) -> bool {
                             }
                         }
                         _ => {}
+                    }
+                    // a seed pair's definitions: their destinations say which is the low half
+                    if let (true, Some(x), Some(y)) = (km, si.dest, sj.dest) {
+                        let vote = if vp.get(&x.0) == Some(&(x, y)) {
+                            Some(true)
+                        } else if vp.get(&y.0) == Some(&(y, x)) {
+                            Some(false)
+                        } else {
+                            None
+                        };
+                        match (vote, lo_i) {
+                            (Some(a), Some(b)) if a != b => ok = false,
+                            (Some(a), _) => lo_i = Some(a),
+                            _ => {}
+                        }
                     }
                     for p in 0..si.n {
                         let (a, b) = (si.ops[p], sj.ops[p]);
@@ -508,22 +564,72 @@ pub fn pair256(f: &mut Func, caps: Caps) -> bool {
     for v in &same {
         extra += cx.defs[*v as usize].len().max(1);
     }
+    // reads that need no Half: a lane extract of a low half reads the ymm register's low lanes
+    // as they are (the xmm view of the register), and `t = lo | hi` read only by VAny tests are
+    // one 256-bit test of the pair (vptest ymm)
+    let lo_of = |v: u32| vp.get(&v).map(|e| e.0 .0 == v).unwrap_or(true);
+    let mut any_of: HashMap<u32, u32> = HashMap::new();
+    for (bi, b) in f.blocks.iter().enumerate().filter(|_| km) {
+        for (k, i) in b.insts.iter().enumerate() {
+            let Inst::VX(VX::Or, t, x, y) = *i else { continue };
+            // read once, by the next instruction (no definition of the pair between)
+            let only_any = cx.defs[t.0 as usize].len() == 1 && cx.uses[t.0 as usize] == [(bi as u32, k as u32 + 1)] && matches!(b.insts.get(k + 1), Some(Inst::VAny(..)));
+            if only_any && fused(&von, x) == Some((x, y)) {
+                any_of.insert(t.0, x.0);
+                covered.insert((bi as u32, k as u32, x.0));
+                covered.insert((bi as u32, k as u32, y.0));
+            }
+        }
+    }
+    let free_read = |b: u32, k: u32, v: u32| km && lo_of(v) && matches!(f.blocks[b as usize].insts.get(k as usize), Some(Inst::VExtract(..)));
     let mut halves: Vec<(u32, u32, u32)> = Vec::new();
     for v in 0..nv {
         if fused(&von, VReg(v as u32)).is_none() {
             continue;
         }
         for &(b, k) in &cx.uses[v] {
-            if !covered.contains(&(b, k, v as u32)) {
+            if !covered.contains(&(b, k, v as u32)) && !free_read(b, k, v as u32) {
                 halves.push((b, k, v as u32));
             }
         }
     }
     halves.sort_unstable();
     halves.dedup();
-    extra += halves.len();
+    // a half read again before its pair is redefined reuses the first read's half (one Half per
+    // block and definition of the pair, not per read)
+    let mut fused_defs: HashMap<u32, Vec<(u32, u32, u32)>> = HashMap::new();
+    for p in &on {
+        if let Some(x) = sh(p, true).dest {
+            let (l, h) = vp[&x.0];
+            fused_defs.entry(p.b).or_default().push((p.lo.min(p.hi), l.0, h.0));
+        }
+    }
+    for d in fused_defs.values_mut() {
+        d.sort_unstable();
+    }
+    let mut half_n = 0usize;
+    {
+        let (mut cur_b, mut at, mut cached) = (u32::MAX, 0usize, HashSet::<u32>::new());
+        for &(b, k, v) in &halves {
+            if b != cur_b {
+                cur_b = b;
+                at = 0;
+                cached.clear();
+            }
+            let defs = fused_defs.get(&b).map_or(&[][..], |d| d.as_slice());
+            while at < defs.len() && defs[at].0 < k {
+                cached.remove(&defs[at].1);
+                cached.remove(&defs[at].2);
+                at += 1;
+            }
+            if cached.insert(v) || !km {
+                half_n += 1;
+            }
+        }
+    }
+    extra += half_n;
     if trace {
-        eprintln!("pair256 {}: {} fused, {} extra (halves {})", f.name, on.len(), extra, halves.len());
+        eprintln!("pair256 {}: {} fused, {} extra (halves {}, {} reads)", f.name, on.len(), extra, half_n, halves.len());
     }
     if on.len() <= extra {
         return false;
@@ -549,7 +655,6 @@ pub fn pair256(f: &mut Func, caps: Caps) -> bool {
         gone.insert((p.b, p.lo.max(p.hi)));
     }
     let halves: HashSet<(u32, u32, u32)> = halves.into_iter().collect();
-    let lo_of = |v: u32| vp.get(&v).map(|e| e.0 .0 == v).unwrap_or(true);
     let entry_same: Vec<u32> = same.iter().copied().filter(|v| cx.defs[*v as usize].is_empty()).collect();
     for bi in 0..f.blocks.len() {
         let old = std::mem::take(&mut f.blocks[bi].insts);
@@ -563,6 +668,8 @@ pub fn pair256(f: &mut Func, caps: Caps) -> bool {
             }
         }
         let b = bi as u32;
+        // the halves read so far in this block, until their pair is redefined
+        let mut hcache: HashMap<u32, VReg> = HashMap::new();
         for (k, i) in old.iter().enumerate() {
             let k32 = k as u32;
             let ps = old_pos.get(k).copied().unwrap_or(0);
@@ -570,6 +677,11 @@ pub fn pair256(f: &mut Func, caps: Caps) -> bool {
                 continue;
             }
             if let Some(p) = at_q.get(&(b, k32)) {
+                if let Some(x) = cx.sh[bi][p.lo as usize].unwrap().dest {
+                    let (l, h) = vp[&x.0];
+                    hcache.remove(&l.0);
+                    hcache.remove(&h.0);
+                }
                 let li = &old[p.lo as usize];
                 let (l, h) = (cx.sh[bi][p.lo as usize].unwrap(), cx.sh[bi][p.hi as usize].unwrap());
                 let mut ops = [VReg(0); 3];
@@ -610,21 +722,50 @@ pub fn pair256(f: &mut Func, caps: Caps) -> bool {
                     Inst::VX(op, ..) => Inst::VX(op, dest.unwrap(), ops[0], ops[1]),
                     Inst::VFma(np, na, ..) => Inst::VFma(np, na, dest.unwrap(), ops[0], ops[1], ops[2]),
                     Inst::Mov(..) => Inst::Mov(dest.unwrap(), ops[0]),
+                    Inst::VSel(..) => Inst::VSel(dest.unwrap(), ops[0], ops[1], ops[2]),
+                    Inst::VSplat(_, s) => Inst::VSplat(dest.unwrap(), s),
                     _ => unreachable!("pair256: unfusable instruction"),
                 };
                 out.push(fusedi);
                 pos.push(ps);
                 continue;
             }
+            // `t = lo | hi` for VAny only: gone; the tests read the pair
+            if let Inst::VX(VX::Or, t, ..) = *i {
+                if any_of.contains_key(&t.0) {
+                    continue;
+                }
+            }
+            if let Inst::VAny(d, t) = *i {
+                if let Some(x) = any_of.get(&t.0) {
+                    out.push(Inst::VAny(d, big[x]));
+                    pos.push(ps);
+                    continue;
+                }
+            }
             let mut i2 = i.clone();
             let mut ren: Vec<(VReg, VReg)> = Vec::new();
             let (mut uu, mut dd) = (Vec::new(), Vec::new());
             uses_defs(i, &mut uu, &mut dd);
             for x in &uu {
+                if km && lo_of(x.0) && matches!(i, Inst::VExtract(..)) && big.contains_key(&x.0) {
+                    // the register's low lanes, read as they are
+                    ren.push((*x, big[&x.0]));
+                    continue;
+                }
                 if halves.contains(&(b, k32, x.0)) && !ren.iter().any(|r| r.0 == *x) {
-                    let t = f.vreg(Cls::V128);
-                    out.push(Inst::VX(VX::Half(!lo_of(x.0)), t, big[&x.0], big[&x.0]));
-                    pos.push(ps);
+                    let t = match hcache.get(&x.0) {
+                        Some(t) => *t,
+                        None => {
+                            let t = f.vreg(Cls::V128);
+                            out.push(Inst::VX(VX::Half(!lo_of(x.0)), t, big[&x.0], big[&x.0]));
+                            pos.push(ps);
+                            if km {
+                                hcache.insert(x.0, t);
+                            }
+                            t
+                        }
+                    };
                     ren.push((*x, t));
                 }
             }
@@ -652,9 +793,15 @@ pub fn pair256(f: &mut Func, caps: Caps) -> bool {
         let mut ren: Vec<(VReg, VReg)> = Vec::new();
         for x in &tu {
             if halves.contains(&(b, n, x.0)) && !ren.iter().any(|r| r.0 == *x) {
-                let t = f.vreg(Cls::V128);
-                out.push(Inst::VX(VX::Half(!lo_of(x.0)), t, big[&x.0], big[&x.0]));
-                pos.push(f.blocks[bi].term_pos);
+                let t = match hcache.get(&x.0) {
+                    Some(t) => *t,
+                    None => {
+                        let t = f.vreg(Cls::V128);
+                        out.push(Inst::VX(VX::Half(!lo_of(x.0)), t, big[&x.0], big[&x.0]));
+                        pos.push(f.blocks[bi].term_pos);
+                        t
+                    }
+                };
                 ren.push((*x, t));
             }
         }

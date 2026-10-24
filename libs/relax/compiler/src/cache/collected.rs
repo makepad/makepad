@@ -8,8 +8,7 @@ use std::sync::Arc;
 
 const KIND_COLLECTED: u32 = 9;
 
-/// Proof passed from a boot certificate or an in-process swap to Cache::open. Fingerprints
-/// cover the cache's original crate prefix; a swap's Program may also hold runtime crates.
+/// Proof passed from a boot certificate to Cache::open. Fingerprints cover the cache's crates.
 pub struct CollectedCache {
     pub(super) indexes: Option<MappedIndexes>,
     pub(super) definitions: &'static [u8],
@@ -23,12 +22,12 @@ pub struct CollectedCache {
 
 fn enabled() -> bool { std::env::var("MAKEPAD_RUN_COLLECTED").map_or(true, |v| v != "0") }
 
-/// MAKEPAD_RUN_ZONE_TRACE: the encode's parts, timed (the settle swap's encode off the pause).
+/// MAKEPAD_RUN_COLLECTED_TRACE: the collected encode's parts, timed.
 struct Parts(Option<(std::time::Instant, String)>);
 impl Parts {
     fn new() -> Self {
         static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        Parts(ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_ZONE_TRACE").is_some()).then(|| (std::time::Instant::now(), String::new())))
+        Parts(ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_COLLECTED_TRACE").is_some()).then(|| (std::time::Instant::now(), String::new())))
     }
     fn lap(&mut self, what: &str, bytes: usize) {
         if let Some((t, line)) = &mut self.0 {
@@ -100,8 +99,7 @@ impl FrontImages {
         (first >= crate::std_pre_crates(&pre[0].cfg.session, false).len()).then_some(first)
     }
 
-    pub fn restore_collected(&self, session: &Arc<crate::Session>, pre: &[crate::preload::PreCrate], swap: Option<&CollectedWritten>) -> Option<(Program, Tcx, Option<CollectedCache>)> {
-        if let Some(written) = swap { return self.restore_swap(session, pre, written); }
+    pub fn restore_collected(&self, session: &Arc<crate::Session>, pre: &[crate::preload::PreCrate]) -> Option<(Program, Tcx, Option<CollectedCache>)> {
         let _profile = crate::load_profile::span(session.runtime.profile, "front-collected-restore", "main");
         // This handoff is scoped to one immutable load, never a later edit.
         self.pending_plan.lock().unwrap().take();
@@ -122,9 +120,7 @@ impl FrontImages {
             Some(graph) => (graph, pre.len()),
             None => {
                 stale = read_front_graph(&self.dir, GraphRecipe::new(pre).identity)?;
-                // (not for the swap's restore ahead of its pause: a whole program is restored, and
-                // the plan's worker thread would write the running generation's statics)
-                if !session.options.source_eager && session.options.rs_lazy && !relax_session::phase::ahead() {
+                if !session.options.source_eager && session.options.rs_lazy {
                     // Restore the immutable Program/Tcx while the demand worker
                     // computes the new selection. Nothing is retained or exposed
                     // to collection until that selection has been validated.
@@ -277,53 +273,6 @@ impl FrontImages {
         restored
     }
 
-    /// Only the quiesced swap supplies this entry. Files are addressed by their immutable run
-    /// images, including runtime crates that have no boot crate store or graph certificate.
-    fn restore_swap(&self, session: &Arc<crate::Session>, pre: &[crate::preload::PreCrate], written: &CollectedWritten) -> Option<(Program, Tcx, Option<CollectedCache>)> {
-        if !enabled() || crate::syms::perturb(&session.options) != 0 { return None; }
-        let st = Arc::new(Store::open(&written.dest)?);
-        let at = st.index.binary_search_by(|e| { let k = e.key; k.cmp(&written.key) }).ok()?;
-        let ix = st.index[at];
-        if { ix.len } != written.len || { ix.sum } != written.sum || { ix.kind } != KIND_COLLECTED { return None; }
-        let (_, bytes) = st.get_at(at, written.key)?;
-        pin_front(&st, Some(at));
-        let bytes: &'static [u8] = unsafe { std::slice::from_raw_parts(bytes.as_ptr(), bytes.len()) };
-        let image = crate::image::Reader::new(bytes)?;
-        let recipe = GraphRecipe::new(pre);
-        if image.len() != 8 || image.bytes(0, 0)? != recipe.identity.to_le_bytes() { return None; }
-        let ifaces: &[MappedKey] = image.slice(5, 5)?;
-        let fps: &[MappedKey] = image.slice(7, 7)?;
-        if fps.len() >= pre.len() || ifaces.len() != fps.len() { return None; }
-        let mut refs = crate::crate_image::Decode::new(image.bytes(6, 6)?);
-        let files = Vec::<(Vec<u8>, Option<Vec<u8>>)>::get(&mut refs)?;
-        if !refs.bytes.is_empty() { return None; }
-        let mut prog = Program::restore_collected(session, image.bytes(1, 1)?, pre, |f, _, cfg, meta| {
-            let (main, part) = files.get(f)?;
-            let (loc, img) = front_run::resolve(&self.dir, main, false)?;
-            let mut pf = crate::front::restore_certified(meta, img)?;
-            pf.image = Some(loc);
-            pf.sink = self.sink();
-            if let Some(part) = part {
-                let (loc, img) = front_run::resolve(&self.dir, part, false)?;
-                if !crate::front::apply_part(&meta.path, &mut pf, img, cfg, true) { return None; }
-                pf.part.get_mut()?.image = Some(loc);
-            }
-            Some(pf)
-        })?;
-        if files.len() != prog.files.len() || prog.crates.iter().zip(&recipe.crates)
-            .any(|(c, (name, root))| prog.syms.str(c.name) != name || c.root_path() != root) { return None; }
-        prog.front_sink = self.sink();
-        // front_graph stays absent: this program must never be published as a boot image.
-        let tcx = Tcx::restore_collected(image.bytes(2, 2)?, prog.files.len(), prog.crates.len())?;
-        let indexes = MappedIndexes::read(image.bytes(4, 4)?, &self.dir).filter(|ix|
-            ix.stores.len() == fps.len() && ix.stores.iter().zip(pre.iter().zip(fps)).all(|(s, (c, fp))|
-                s.path == self.dir.join(front_store_name(&session.options, &c.name, fp.get()))));
-        let cache = CollectedCache {
-            indexes, definitions: image.bytes(3, 3)?, fps: fps.iter().map(|k| k.get()).collect(),
-            ifaces: ifaces.iter().map(|k| k.get()).collect(), defs: prog.defs.len(), files: prog.files.len(),
-        };
-        Some((prog, tcx, Some(cache)))
-    }
 }
 
 /// What the collected encode reads of a Cache: `Cache::encoder` borrows the cache's own fields
@@ -339,9 +288,11 @@ struct Encoder<'a> {
     committed: bool,
 }
 
-/// The cache fields the collected encode reads, copied in one owner request: the settle swap
-/// then encodes the program on its own thread under a front read, outside its pause
-/// (zone_swap.rs; OWNERARCH.DESIGN.md 6.2 fix 1). The owner may `take()` the cache meanwhile.
+
+
+/// The cache fields the collected encode reads, copied in one owner request: the settle rebuild
+/// (jit settle_rebuild.rs) then encodes the program on its own thread under a front read. The
+/// owner may `take()` the cache meanwhile.
 pub(crate) struct CollectedInputs {
     mode: Mode,
     dir: PathBuf,
@@ -352,32 +303,28 @@ pub(crate) struct CollectedInputs {
 }
 
 impl CollectedInputs {
-    fn encoder(&self) -> Encoder<'_> {
-        Encoder { mode: self.mode, dir: &self.dir, fps: &self.fps, iface_plain: &self.iface_plain,
-            crate_path: &self.crate_path, crate_ident: &self.crate_ident, boot: None, committed: false }
-    }
-
     /// The collected image of the program as it is now: neither a committed mark nor a frozen
     /// boot snapshot short-circuits it, so the image covers every type, definition and file
-    /// added since the first encode (the settle swap restores from it, and compares the counts).
-    pub(crate) fn encode_now(&self, prog: &Program, tcx: &Tcx, pre: &[crate::preload::PreCrate], extra: &[crate::preload::PreCrate], stop: &dyn Fn() -> bool) -> CollectedRecord {
-        let e = self.encoder();
-        if !extra.is_empty() { return e.encode_swap(prog, tcx, pre, extra, stop); }
-        e.encode_as(prog, tcx, stop, true)
+    /// added since the first encode (the settle rebuild restores from it, and compares the counts).
+    pub(crate) fn encode_now(&self, prog: &Program, tcx: &Tcx, stop: &dyn Fn() -> bool) -> CollectedRecord {
+        Encoder { mode: self.mode, dir: &self.dir, fps: &self.fps, iface_plain: &self.iface_plain,
+            crate_path: &self.crate_path, crate_ident: &self.crate_ident, boot: None, committed: false }
+            .encode_as(prog, tcx, stop, true)
     }
 }
 
 impl Cache {
+    pub(crate) fn collected_inputs(&self) -> CollectedInputs {
+        CollectedInputs { mode: self.mode, dir: self.dir.clone(), fps: self.fps.clone(), iface_plain: self.iface_plain.clone(),
+            crate_path: self.crate_path.clone(), crate_ident: self.crate_ident.clone() }
+    }
+
     fn encoder(&self) -> Encoder<'_> {
         Encoder { mode: self.mode, dir: &self.dir, fps: &self.fps, iface_plain: &self.iface_plain,
             crate_path: &self.crate_path, crate_ident: &self.crate_ident, boot: self.collected_boot.as_ref(),
             committed: self.collected_committed }
     }
 
-    pub(crate) fn collected_inputs(&self) -> CollectedInputs {
-        CollectedInputs { mode: self.mode, dir: self.dir.clone(), fps: self.fps.clone(), iface_plain: self.iface_plain.clone(),
-            crate_path: self.crate_path.clone(), crate_ident: self.crate_ident.clone() }
-    }
 
     /// Both the unit and front-end write locks are held. This only encodes metadata:
     /// crate stores, the graph certificate and the collected store are still published
@@ -490,67 +437,6 @@ impl Encoder<'_> {
         Some(image)
     }
 
-    /// A whole-program snapshot private to this run. Keep the boot cache's identities and
-    /// stores unchanged: runtime files are referenced directly instead of extending that cache.
-    fn encode_swap(&self, prog: &Program, tcx: &Tcx, pre: &[crate::preload::PreCrate], extra: &[crate::preload::PreCrate], stop: &dyn Fn() -> bool) -> CollectedRecord {
-        if !enabled() || self.mode == Mode::ReadOnly { return CollectedRecord::Failed; }
-        let mut why = "recipe";
-        let recorded = (|| {
-            let crates: Vec<_> = pre.iter().chain(extra).cloned().collect();
-            let recipe = GraphRecipe::new(&crates);
-            if recipe.crates.len() != prog.crates.len() || recipe.crates.iter().zip(&prog.crates)
-                .any(|((name, root), c)| prog.syms.str(c.name) != name || c.root_path() != root)
-                || self.fps.len() != pre.len() || self.iface_plain.len() != pre.len() { return None; }
-            let mut image = crate::image::Writer::default();
-            image.add_bytes(0, recipe.identity.to_le_bytes().to_vec());
-            let mut parts = Parts::new();
-            why = "Program";
-            let p = Arc::new(prog.collected_writer_with(stop)?.into_owned());
-            parts.lap("swap Program", p.len());
-            image.add_image(1, p);
-            if stop() { return None; }
-            why = "Tcx";
-            let t = Arc::new(tcx.collected_writer_with(stop)?.into_owned());
-            parts.lap("Tcx", t.len());
-            image.add_image(2, t);
-            if stop() { return None; }
-            why = "definitions";
-            let d = Arc::new(self.definitions(prog, tcx, stop)?);
-            parts.lap("definitions", d.len());
-            image.add_image(3, d);
-            if stop() { return None; }
-            why = "index snapshot";
-            image.add_bytes(4, MappedIndexes::record(self.crate_path, &[])?);
-            image.add_owned(5, &self.iface_plain.iter().map(|&k| MappedKey::new(k)).collect::<Vec<_>>());
-            why = "file images";
-            let files = prog.files.iter().map(|f| {
-                if stop() { return None; }
-                let main = front_run::encode_ref(f.image.as_ref()?);
-                let part = match f.part.get() {
-                    Some(p) => Some(front_run::encode_ref(p.image.as_ref()?)),
-                    None => None,
-                };
-                Some((main, part))
-            }).collect::<Option<Vec<_>>>()?;
-            image.add_bytes(6, crate::crate_image::encode(&files));
-            image.add_owned(7, &self.fps.iter().map(|&k| MappedKey::new(k)).collect::<Vec<_>>());
-            if stop() { return None; }
-            // One replaceable entry per process, in a namespace boot never reads.
-            static NONCE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-            let mut h = Sip128::new();
-            h.str("collected-swap-v1"); h.u128(front_graph_key(GraphRecipe::new(pre).identity));
-            h.u64(*NONCE.get_or_init(crate::pack::nonce));
-            let key = h.finish128();
-            let dest = self.dir.join(format!("collected_swap-{:016x}.rcs", key as u64));
-            Some(CollectedRecord::Ready((dest, key), image))
-        })();
-        recorded.unwrap_or_else(|| {
-            if stop() { return CollectedRecord::Yielded; }
-            if crate::preload::trace() { eprintln!("makepad-run collected: swap not recorded: {why}"); }
-            CollectedRecord::Failed
-        })
-    }
-
     fn encode_as(&self, prog: &Program, tcx: &Tcx, stop: &dyn Fn() -> bool, fresh: bool) -> CollectedRecord {
         if !enabled() || self.mode == Mode::ReadOnly { return CollectedRecord::Failed; }
         if self.committed && !fresh { return CollectedRecord::Current; }
@@ -599,7 +485,6 @@ impl Encoder<'_> {
 impl Cache {
     /// `report`: the crate count to print (verbose). The entry as the store now holds it.
     pub fn commit_collected(report: Option<usize>, (dest, key): (PathBuf, u128), payload: crate::image::Writer<'static>) -> Option<CollectedWritten> {
-        // A swap can reference runtime files whose images have no crate-store spill.
         front_run::commit_marks(&front_run::run_marks()).ok()?;
         // Hash/verify outside the compiler locks, alongside the store write. The
         // immutable snapshot is already complete; a current store needs no replacement.

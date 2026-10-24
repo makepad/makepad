@@ -4,7 +4,7 @@
 //! it), so a host never starts a binary older than its sources; an installation (no
 //! checkout, or the Builder's) starts the built binary, building it first when allowed.
 
-use crate::{build_argv, builder_install, built_binary, has_sources, run_argv, AppEntry};
+use crate::{build_argv, builder_install, built_binary, has_sources, run_argv, AppEntry, AppTarget, MAKEPAD_RUN};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
@@ -17,6 +17,18 @@ use std::process::{Child, Command, ExitStatus};
 pub enum BuildPolicy {
     IfMissing,
     Rebuild,
+}
+
+/// What runs the app's code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Runner {
+    /// Its own release binary, a `--stdin-loop` child of its host.
+    Native,
+    /// The JIT: `makepad run <package>` (tools/run). From a checkout that is `cargo run --release -p
+    /// makepad-run --bin makepad -- run <package>`, so the tool is never older than its sources.
+    /// It is not a `--stdin-loop` child: on Linux its HAL asks the WM's socket for its window
+    /// (`makepad_hal::wm_socket`), and the WM pairs that request with this launch by pid.
+    Jit,
 }
 
 /// What a spawned process is, for the host's environment and output handling.
@@ -60,6 +72,7 @@ pub fn launch_argv(app: &AppEntry, root: Option<&Path>, extra: &[String]) -> Res
 /// `poll` only uses `try_wait`: compilation never blocks the UI thread.
 pub struct AppLaunch {
     app: &'static AppEntry,
+    runner: Runner,
     root: Option<PathBuf>,
     extra: Vec<String>,
     building: bool,
@@ -82,6 +95,7 @@ impl AppLaunch {
     /// and the fresh binary starts when released.
     pub fn start(
         app: &'static AppEntry,
+        runner: Runner,
         root: Option<PathBuf>,
         extra: Vec<String>,
         policy: BuildPolicy,
@@ -89,14 +103,15 @@ impl AppLaunch {
         mut spawn: impl FnMut(Command, LaunchKind) -> Result<Child, String>,
     ) -> Result<(Self, Child), String> {
         let policy = if held { BuildPolicy::Rebuild } else { policy };
+        let target = Self::target_of(app, runner);
         let run = !held && builder_install().is_none()
-            && root.as_deref().is_some_and(|root| has_sources(&app.target(), root));
+            && root.as_deref().is_some_and(|root| has_sources(&target, root));
         let building = run || root.is_some() && match policy {
-            BuildPolicy::IfMissing => built_binary(&app.target(), root.as_deref()).is_none(),
+            BuildPolicy::IfMissing => built_binary(&target, root.as_deref()).is_none(),
             BuildPolicy::Rebuild => true,
         };
         let launch = Self {
-            app, root, extra, building, run, ran: false,
+            app, runner, root, extra, building, run, ran: false,
             status: if run { format!("starting {}…", app.label) } else if building { format!("building {}…", app.label) } else { format!("starting {}…", app.label) },
             progress: String::new(),
             diagnostic: String::new(),
@@ -110,6 +125,10 @@ impl AppLaunch {
 
     pub fn is_building(&self) -> bool {
         self.building
+    }
+
+    pub fn runner(&self) -> Runner {
+        self.runner
     }
 
     pub fn status(&self) -> &str {
@@ -156,21 +175,48 @@ impl AppLaunch {
         Some((self.status.clone(), linked))
     }
 
+    /// What cargo builds and runs for `app` under `runner`: the app itself, or the `makepad` tool.
+    fn target_of(app: &'static AppEntry, runner: Runner) -> AppTarget<'static> {
+        match runner {
+            Runner::Native => app.target(),
+            Runner::Jit => MAKEPAD_RUN,
+        }
+    }
+
+    /// The arguments of the started process: the app's (`--stdin-loop`, registry, host), or the
+    /// tool's `run <package>` with the app's after `--`.
+    fn process_args(&self) -> Vec<String> {
+        let app_args = self.app.args.iter().map(|arg| arg.to_string()).chain(self.extra.iter().cloned());
+        match self.runner {
+            Runner::Native => std::iter::once("--stdin-loop".to_string()).chain(app_args).collect(),
+            Runner::Jit => {
+                let app_args: Vec<String> = app_args.collect();
+                let mut args = vec!["run".to_string(), self.app.package.to_string()];
+                if !app_args.is_empty() {
+                    args.push("--".to_string());
+                    args.extend(app_args);
+                }
+                args
+            }
+        }
+    }
+
     fn command(&self) -> Result<Command, String> {
+        let target = Self::target_of(self.app, self.runner);
         let (program, args) = if self.run {
             let root = self.root.as_deref().ok_or("no checkout to run from")?;
-            let mut app_args = vec!["--stdin-loop".to_string()];
-            app_args.extend(self.app.args.iter().map(|arg| arg.to_string()));
-            app_args.extend(self.extra.iter().cloned());
-            run_argv(&self.app.target(), root, &app_args)
+            run_argv(&target, root, &self.process_args())
         } else if self.building {
             let root = self.root.as_deref().ok_or("no checkout to build from")?;
-            if !has_sources(&self.app.target(), root) {
-                return Err(format!("sources not found: {}", self.app.dir));
+            if !has_sources(&target, root) {
+                return Err(format!("sources not found: {}", target.dir));
             }
-            build_argv(&self.app.target(), root)
-        } else {
+            build_argv(&target, root)
+        } else if self.runner == Runner::Native {
             launch_argv(self.app, self.root.as_deref(), &self.extra)?
+        } else {
+            let program = built_binary(&target, self.root.as_deref()).ok_or_else(|| format!("not built yet: {}", target.bin))?;
+            (program, self.process_args())
         };
         let mut command = Command::new(program);
         command.args(args);
@@ -331,5 +377,35 @@ pub fn cargo_progress(raw: &str) -> Option<(String, bool)> {
         Some(("build failed — see the app log".into(), false))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The command `start` hands its host, captured (the spawn refuses, so nothing runs).
+    fn started(id: &str, runner: Runner, root: &Path) -> (Vec<String>, LaunchKind) {
+        let mut seen = None;
+        let entry = crate::find(id).unwrap();
+        let _ = AppLaunch::start(entry, runner, Some(root.to_path_buf()), vec!["--x".into()], BuildPolicy::IfMissing, false, |cmd, kind| {
+            seen = Some((cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect(), kind));
+            Err("captured".into())
+        });
+        seen.expect("start spawned")
+    }
+
+    /// Under the JIT a checkout launch is `cargo run` of the makepad tool with `run <package>`, the
+    /// app's arguments after `--`, and no `--stdin-loop` (the HAL finds the WM by its socket).
+    #[test]
+    fn a_jit_launch_runs_the_package_under_the_makepad_tool() {
+        let root = crate::checkout_at_or_above(Path::new(env!("CARGO_MANIFEST_DIR"))).expect("tests run in a checkout");
+        let (args, kind) = started("terminal", Runner::Jit, &root);
+        assert_eq!(kind, LaunchKind::Run);
+        let tail: Vec<&str> = args.iter().map(String::as_str).skip_while(|a| *a != "-p").collect();
+        assert_eq!(tail, ["-p", "makepad-run", "--bin", "makepad", "--", "run", "makepad-app-terminal", "--", "--x"]);
+        let (native, _) = started("terminal", Runner::Native, &root);
+        assert!(native.iter().any(|a| a == "--stdin-loop"), "{native:?}");
+        assert!(native.iter().any(|a| a == "makepad-app-terminal"));
     }
 }

@@ -138,6 +138,7 @@ impl GlBackend {
         let mut backend = Self::with_source(wake, Box::new(super::linux::EglSurfaceSource(shell)), Some(shell))?;
         backend.info.flags |= info_flags::DISPLAY_CLOCK;
         if shell.client_chrome() { backend.info.flags |= info_flags::CLIENT_CHROME; }
+        if shell.window_manager() { backend.info.flags |= info_flags::WM_HOSTED; }
         backend.info.dpi = shell.dpi();
         Ok(backend)
     }
@@ -360,13 +361,22 @@ impl Backend for GlBackend {
     fn window_pixels(&mut self, world: &mut World, sid: u32, window: Option<Id>) -> Option<Pixels> {
         self.host_window_pixels(world, sid, window)
     }
+    /// The process ends next: the render thread (the one GL context) runs what was queued,
+    /// finishes the GPU's work (`Renderer::drop`) and is joined.
+    fn before_exit(&mut self) { self.stop(); }
+}
+
+impl GlBackend {
+    fn stop(&mut self) {
+        self.queue.push(|r| r.exit());
+        if let Some(thread) = self.thread.take() {
+            if thread.join().is_err() { eprintln!("[hal-gl] the render thread panicked"); }
+        }
+    }
 }
 
 impl Drop for GlBackend {
-    fn drop(&mut self) {
-        self.queue.push(|r| r.exit());
-        if let Some(thread) = self.thread.take() { let _ = thread.join(); }
-    }
+    fn drop(&mut self) { self.stop(); }
 }
 
 impl Gpu for GlBackend {

@@ -131,6 +131,7 @@ impl Vulkan {
         let mut backend = Self::with_sources(flags, sessions, super::linux::surface_source(shell), Box::new(NativeImages::default()))?;
         backend.info.flags |= info_flags::DISPLAY_CLOCK;
         if shell.client_chrome() { backend.info.flags |= info_flags::CLIENT_CHROME; }
+        if shell.window_manager() { backend.info.flags |= info_flags::WM_HOSTED; }
         if shell.direct_display() { backend.info.flags |= info_flags::DIRECT_DISPLAY; }
         backend.info.dpi = shell.dpi();
         backend.shell = Some(shell);
@@ -477,34 +478,23 @@ impl Backend for Vulkan {
         self.sharing.session_closed(sid);
         self.pressure.forget_session(sid);
         exec::free_session(world, sid);
-        // The last app session closed: its process is about to exit. The frames still in flight
-        // free their buffers and descriptor pools on the queue workers when their fences signal;
-        // exit() unloads the driver under them (a SIGSEGV in the ICD at every quit). Those
-        // workers run out first.
-        if world.session_ids().iter().all(|id| *id == sid || *id == HOST) {
-            self.settle_workers("the last session closed");
-        }
         #[cfg(target_os = "linux")]
         if let Some(shell) = self.shell { shell.session_closed(sid); }
     }
     fn window_pixels(&mut self, world: &mut World, sid: u32, window: Option<Id>) -> Option<Pixels> { self.host_window_pixels(world, sid, window) }
     fn simulate_device_loss(&mut self) { self.simulate = true; }
-    // the host's own session (the boot window of `makepad run`) never closes: its pipeline
-    // compiles were still in the driver when exit() unloaded it (a SIGSEGV on
-    // makepad-vulkan-compile at a quit during boot)
+    /// The process ends next: exit() runs the driver's exit handlers (NVIDIA's EGL teardown
+    /// unloads its core), and a worker still in a driver call faulted inside it (a SIGSEGV in
+    /// `submit_until_room` at a SIGTERM mid-frame; on makepad-vulkan-compile at a quit during
+    /// boot). What was recorded is submitted, every swapchain retires, and the three workers
+    /// stop in dependency order -- compiles; the queue (its submits, presents and retirements,
+    /// which hand completions on); the completions (fence waits, frees) -- each joined.
     fn before_exit(&mut self) {
         self.flush();
-        self.settle_workers("the host is exiting");
-    }
-}
-
-impl Vulkan {
-    /// The driver work on this backend's threads (pipeline compiles, frames in flight whose
-    /// fences free their buffers and descriptor pools) runs out.
-    fn settle_workers(&self, why: &str) {
-        let limit = std::time::Duration::from_secs(2);
-        let settled = self.compiler.settle(limit) && self.queue.as_ref().is_some_and(|q| q.settle(limit)) && self.complete.settle(limit);
-        if !settled { eprintln!("[hal-vulkan] {why} with GPU work still running after {limit:?}; exiting may race the driver"); }
+        if let Some(queue) = self.queue.as_ref() { self.windows.clear(queue); }
+        self.compiler.stop();
+        if let Some(queue) = self.queue.as_ref() { queue.stop(); }
+        self.complete.stop();
     }
 }
 

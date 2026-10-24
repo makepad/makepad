@@ -22,6 +22,7 @@ use makepad_widgets::*;
 
 pub mod ai_pane;
 pub mod bar;
+pub mod blackshark;
 pub mod file_picker;
 pub mod gallery;
 pub mod game_controllers;

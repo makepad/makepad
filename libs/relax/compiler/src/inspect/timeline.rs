@@ -110,7 +110,7 @@ fn ring() -> Option<&'static Ring> {
     if !p.is_null() {
         return Some(unsafe { &*p });
     }
-    // a ring outlives every compiler generation (the owner records on its own thread too)
+    // a ring is process state (the owner records on its own thread too)
     let _k = crate::zone_alloc::kept();
     let r: &'static Ring = Box::leak(Box::new(Ring {
         recs: (0..RING).map(|_| std::cell::UnsafeCell::new(Rec { t: 0, kind: 0, label_len: 0, label: 0, a: 0, b: 0 })).collect(),

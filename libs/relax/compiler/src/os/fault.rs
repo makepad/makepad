@@ -524,12 +524,17 @@ mod imp {
         }
         let mc = *(uc.add(UC_MCONTEXT) as *const *mut u8);
         let reg = |off: usize| -> *mut u64 { mc.add(off) as *mut u64 };
+        if UNIT.is_null() {
+            return;
+        }
         let u = &*UNIT;
         let (pc, fp) = (*reg(SS_PC), *reg(SS_FP));
         let lr = *reg(SS + 240);
         let x16 = *reg(SS + 16 * 8);
         let x17 = *reg(SS + 17 * 8);
-        let nm = |a: u64| u.find_fn(a).map(|id| format!("{}#{}", u.fns[id as usize].name, id)).unwrap_or("-".to_string());
+        // the code tables without waiting (the faulting thread may hold them)
+        let find = |a: u64| u.code.try_read().ok().and_then(|t| t.slot_at(a));
+        let nm = |a: u64| find(a).map(|id| format!("{}#{}", u.fns[id as usize].name, id)).unwrap_or("-".to_string());
         let mut slots = Vec::new();
         for id in 0..u.fns.len() {
             let t = *(u.slots.table(id as u32) as *const u64);
@@ -539,7 +544,7 @@ mod imp {
         }
         let ins = |a: u64| if a >= 8 { *((a) as *const u32) } else { 0 };
         eprintln!("makepad-run fault-regs: pc {:#x} ({}) lr {:#x} ({}) fp {:#x} x16 {:#x} ({}) x17 {:#x}; table slots holding x16/pc: {:?}; insts at lr-12..lr: {:08x} {:08x} {:08x}", pc, nm(pc), lr, nm(lr), fp, x16, nm(x16), x17, slots, ins(lr - 12), ins(lr - 8), ins(lr - 4));
-        if let Some(id) = u.find_fn(lr) {
+        if let Some(id) = find(lr) {
             let f = &u.fns[id as usize];
             eprintln!("makepad-run fault-regs: caller {} code {:#x} len {} lr off {:#x}", f.name, f.code, f.code_len, lr.wrapping_sub(f.code));
         }

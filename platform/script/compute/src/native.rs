@@ -201,7 +201,8 @@ static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 /// variable's update `x' = x * k; x = x'` and the fbm accumulator kept two registers and a copy
 /// per iteration (instructions per element, x4 heights 211 -> 199, one pass 612 -> 580). Not on
 /// x86-64: there it removed register moves the core eliminates anyway (heights x4 -3%
-/// instructions) and measured +1.3% cycles on heights x4 (165, two tq tickets).
+/// instructions) and measured +1.3% cycles on heights x4 (165, two tq tickets). Float identities
+/// that would drop a signaling NaN's quieting stay ops (`Options::nan_exact`).
 pub(crate) fn options() -> &'static relax_session::Options {
     static O: std::sync::OnceLock<relax_session::Options> = std::sync::OnceLock::new();
     O.get_or_init(|| {
@@ -210,6 +211,8 @@ pub(crate) fn options() -> &'static relax_session::Options {
             o.ra_prio = relax_session::options::Priority::Sqrt;
         }
         o.ra_quick_coalesce = cfg!(target_arch = "aarch64");
+        // results are the interpreter's bits: `x * 1.0` quiets a signaling NaN there
+        o.nan_exact = true;
         #[cfg(target_arch = "x86_64")]
         {
             o.cpu = relax_backend::x64::detect_cpu(&o);
@@ -271,6 +274,23 @@ pub(crate) fn emit_keyed(f: &Func, key: Option<u128>, thorough: bool) -> Option<
         let _ = std::fs::write(format!("{}/kernel{}.addr", dir, SEQ.load(std::sync::atomic::Ordering::Relaxed).wrapping_sub(1)), format!("{:#x}\n", code.ptr() as usize));
     }
     Some(Code { code })
+}
+
+/// Eight-lane kernels on x86-64: each pair of 128-bit halves (a value's two parts, `f.halves`,
+/// their instructions side by side) becomes one 256-bit instruction (the back end's `pair256`
+/// seeded with the pairs, which keeps the meaning of the V128 code). The back end runs that
+/// pass itself only for its optimised tiers (thorough allocation); kernels allocate in one
+/// quick round, so they run it here, after optimisation, before code generation. AArch64 keeps
+/// the halves (two NEON registers in flight per value).
+pub(crate) fn pair_halves(f: &mut Func) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let o = options();
+        if !f.halves.is_empty() && relax_backend::x64::host_avx(o) && !relax_backend::stats::opt_off(o, "-pair256") {
+            relax_backend::pair256::pair256(f, relax_backend::pair256::Caps { avx2: o.cpu.avx2, fma: o.cpu.fma, ints: o.cpu.avx2 });
+        }
+    }
+    f.halves.clear();
 }
 
 /// The lowered and optimised RIR of a program (tests, dumps).

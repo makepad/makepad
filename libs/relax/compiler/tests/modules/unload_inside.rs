@@ -6,6 +6,8 @@
 //   (the dead windows stay counted, the live arena count does not grow with them).
 // - SAFE2_UNLOAD_CRASH=parked: a thread parked inside the module (in a host call it made) when
 //   the module is unloaded resumes into its window -> the process ends (JIT code faulting).
+// - SAFE2_UNLOAD_CRASH=trusted_call (trusted modules): a call of an unloaded module's fn through a
+//   kept fn pointer runs into its invalidated code -> parked / the process ends (INVALID).
 // - SAFE2_UNLOAD_CRASH=host: host code keeps a pointer the module handed it and reads it after the
 //   unload -> the process ends (host code faulting).
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -67,6 +69,17 @@ fn unload_inside() {
         // even under a guard
         let r = t.join();
         println!("out parked call after unload was contained: {:?}", r.map(|g| g.is_ok()));
+        return;
+    }
+    if mode == "trusted_call" {
+        // MAKEPAD_RUN_MODULES_TRUSTED=1: the export is the module fn's own slot; after the unload its
+        // code is invalidated (invalid.rs) and a call through the kept fn pointer is a stale access
+        let f: fn(u64) -> u64 = parker.get("f").unwrap();
+        assert_eq!(f(2), 1024);
+        parker.unload();
+        // not reached past this call
+        let v = f(3);
+        println!("out called an unloaded module's code: {}", v);
         return;
     }
     if mode == "host" {

@@ -60,10 +60,10 @@ pub trait CxMediaApi {
         let mut fenced = crate::audio_output_fence::FencedOutput::new(index, f);
         let mut meter = crate::audio_deadline::DeadlineMeter::new("output");
         let seam = move |info: AudioInfo, buffer: &mut AudioBuffer| {
-            let t0 = std::time::Instant::now();
+            let t0 = crate::monotonic_seconds();
             fenced.call(info, buffer);
             crate::audio_output_tap::feed_audio_output_tap(index, info, buffer);
-            meter.block(buffer.frame_count(), info.sample_rate, t0.elapsed());
+            meter.block(buffer.frame_count(), info.sample_rate, t0, crate::monotonic_seconds() - t0);
         };
         #[cfg(relax)]
         std::relax::realtime(&seam);

@@ -114,6 +114,8 @@ struct State {
     backend: Option<(u32, Box<dyn Backend>)>,
     /// how many times a backend instance was created (stays 1 across relaunches)
     backend_inits: u32,
+    /// `before_exit` ran: the process is ending, no backend is made again
+    exited: bool,
 }
 
 /// Who has something to pick up: one blocking queue per session, plus the all-sessions wake.
@@ -333,7 +335,7 @@ impl Hal {
         raise_open_file_limit();
         Arc::new_cyclic(|me| Hal {
             me: me.clone(),
-            state: Mutex::new(State { world: World::new(), backend: None, backend_inits: 0 }),
+            state: Mutex::new(State { world: World::new(), backend: None, backend_inits: 0, exited: false }),
             sig: Arc::new(Sig { signal: Mutex::new(Signal::default()), cv: Condvar::new() }),
             next_req: AtomicU32::new(1),
             runners: Mutex::new(Default::default()),
@@ -439,6 +441,7 @@ impl Hal {
             // AUTO takes the backend the first open selected
             Some((id, _)) if *id != req.backend && req.backend != backend_id::AUTO => return refused,
             Some(_) => {}
+            None if st.exited => return refused,
             None => match make(req.backend) {
                 Some(b) => {
                     st.backend = Some((b.info().backend, b));
@@ -797,13 +800,23 @@ impl Hal {
         self.wake();
     }
 
-    /// The host is about to end the process (its sessions are done, its app domains stopped):
-    /// the backend's driver threads run out first, so exit() does not unload the driver under
-    /// them. A host API, called once at the end of the run.
+    /// The host ends the process next (its sessions are done, its app domains stopped): the
+    /// backend leaves the Hal -- no call reaches it any more, no backend is made again -- and its
+    /// driver threads stop and are joined (work in flight completes or is abandoned), so exit()
+    /// never runs the driver's exit handlers under a thread inside the driver. Returns once
+    /// they are gone. A host API, the last HAL call of every way the host ends; once is enough.
     pub fn before_exit(&self) {
-        let mut guard = lock(&self.state);
-        if let Some((_, b)) = guard.backend.as_mut() {
+        let backend = {
+            let mut guard = lock(&self.state);
+            guard.exited = true;
+            guard.backend.take()
+        };
+        // outside the state lock: a worker's last jobs may still deliver to the sessions
+        if let Some((_, mut b)) = backend {
             b.before_exit();
+            // the process ends: its GPU objects go with it (destroying them now would only be
+            // more driver calls on the way out)
+            std::mem::forget(b);
         }
     }
 

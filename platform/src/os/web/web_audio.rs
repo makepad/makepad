@@ -141,6 +141,11 @@ impl WebAudioAccess {
     }
 }
 
+/// One output block: the page asks for `frames` x `channels` planar samples (channel `c`
+/// at `c * frames` from the returned address). `sample_time` is the block's first frame
+/// on the output stream; `heard_at` is when that frame is heard, in seconds of the page's
+/// monotonic clock (performance.now() / 1000), or NaN where the caller cannot tell (the
+/// threaded worklet).
 #[export_name = "wasm_audio_output_entrypoint"]
 #[cfg(target_arch = "wasm32")]
 pub unsafe extern "C" fn wasm_audio_output_entrypoint(
@@ -148,6 +153,8 @@ pub unsafe extern "C" fn wasm_audio_output_entrypoint(
     frames: u32,
     channels: u32,
     sample_rate: f64,
+    sample_time: f64,
+    heard_at: f64,
 ) -> u32 {
     let wa = context_ptr as *const Mutex<WebAudioAccess>;
     let (output_fn, mut output_buffer, device_id) = {
@@ -168,7 +175,11 @@ pub unsafe extern "C" fn wasm_audio_output_entrypoint(
         output_fn(
             AudioInfo {
                 device_id,
-                time: None,
+                time: heard_at.is_finite().then(|| AudioTime {
+                    sample_time,
+                    host_time: (heard_at.max(0.0) * 1e9) as u64,
+                    rate_scalar: 1.0,
+                }),
                 sample_rate,
             },
             &mut output_buffer,

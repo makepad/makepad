@@ -13,10 +13,32 @@ use std::sync::mpsc::{channel, Receiver};
 /// Ids the socket hands out: far above the WM's own counter, so the two never meet.
 const FIRST_ADOPTED_CLIENT: ClientId = 1 << 32;
 
+/// Processes the WM launched itself that will ask the socket for their window (a JIT run:
+/// `makepad run`'s HAL finds the WM by its socket, it is not a `--stdin-loop` child): pid -> the
+/// client slot the launch already made. Their request is admitted as that client, so the
+/// launch's tile is the window; anything else gets a new tile.
+static EXPECTED: std::sync::Mutex<Vec<(u32, ClientId)>> = std::sync::Mutex::new(Vec::new());
+
+/// The WM started `pid` as client `client`; it will come to the socket by itself.
+pub(crate) fn expect(pid: u32, client: ClientId) {
+    let mut expected = EXPECTED.lock().unwrap_or_else(|e| e.into_inner());
+    expected.retain(|(p, c)| *p != pid && *c != client);
+    expected.push((pid, client));
+}
+
+/// The client a launch made for `pid`, once.
+fn expected_client(pid: u32) -> Option<ClientId> {
+    let mut expected = EXPECTED.lock().unwrap_or_else(|e| e.into_inner());
+    let at = expected.iter().position(|(p, _)| *p == pid)?;
+    Some(expected.remove(at).1)
+}
+
 pub(crate) struct Adopted {
     pub client: ClientId,
     pub pid: u32,
     pub crate_name: String,
+    /// The WM launched it (`expect`): its slot and tile exist already.
+    pub launched: bool,
 }
 
 pub(crate) struct Adoptions {
@@ -48,9 +70,12 @@ impl Adoptions {
             for stream in socket.listener.incoming() {
                 let Ok(stream) = stream else { continue };
                 let served = WmSocket::serve(stream, makepad_studio_protocol::WIRE, |request| {
-                    let client = next;
-                    next += 1;
-                    tx.send(Adopted { client, pid: request.pid, crate_name: request.crate_name.clone() })
+                    let launched = expected_client(request.pid);
+                    let client = launched.unwrap_or_else(|| {
+                        next += 1;
+                        next - 1
+                    });
+                    tx.send(Adopted { client, pid: request.pid, crate_name: request.crate_name.clone(), launched: launched.is_some() })
                         .map_err(|_| "the WM is shutting down".to_string())?;
                     SignalToUI::set_ui_signal();
                     Ok(Admission { port: hub_port, client })
@@ -78,7 +103,11 @@ impl App {
     pub(crate) fn drain_adoptions(&mut self, cx: &mut Cx) {
         let Some(adoptions) = self.adoptions.as_ref() else { return };
         let adopted: Vec<Adopted> = adoptions.rx.try_iter().collect();
-        for Adopted { client, pid, crate_name } in adopted {
+        for Adopted { client, pid, crate_name, launched } in adopted {
+            if launched {
+                log!("wm: {crate_name} (pid {pid}), launched as client {client}, asked for its window");
+                continue;
+            }
             let entry = makepad_app_registry::apps().iter().find(|a| a.package == crate_name);
             let (app, label) = entry.map_or((crate_name.clone(), crate_name.clone()), |e| (e.id.to_string(), e.label.to_string()));
             log!("wm: {label} (pid {pid}) came to the WM by itself; client {client}");

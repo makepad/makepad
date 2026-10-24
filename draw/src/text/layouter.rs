@@ -636,6 +636,12 @@ impl LayoutContext {
         let mut line_break_len = 0;
         for (line_index, (len, next_line_break_len)) in lines_and_breaks(&text).enumerate() {
             if line_index != 0 {
+                // `max_rows` cut the previous line off mid-line: the row end is
+                // where layout stopped, not at the line break, so stepping over
+                // the "break" would land inside the next character.
+                if self.is_past_max_rows() {
+                    break;
+                }
                 self.finish_current_row(true);
                 // finish_current_row steps over one byte; a `\r\n` has two.
                 self.current_row_start += line_break_len - 1;
@@ -2304,6 +2310,37 @@ mod tests {
             assert_eq!(crlf.rows.len(), lf.rows.len(), "max_rows {max_rows}");
             assert_eq!(crlf.is_truncated, lf.is_truncated, "max_rows {max_rows}");
         }
+    }
+
+    /// A multi-line text whose first line `max_rows` cuts off mid-line: the row end is
+    /// where layout stopped, not a line break, so the next line must not step one byte
+    /// past it (Sandbox panicked on a status "… 'hud_panel' — game.api() …\n…" when the
+    /// cut fell right before the 3-byte em dash).
+    #[test]
+    fn max_rows_cut_mid_line_before_a_multibyte_char() {
+        let mut layouter = real_font_layouter();
+        let text = "game failed: game.splash:314:14: unknown game verb 'hud_panel' — game.api() lists every verb\n\
+                    game.splash:315:14: unknown game verb 'hud_panel' — game.api() lists every verb";
+        let mut cut_before_dash = false;
+        for max_rows in 1..=3 {
+            for ellipsis in [true, false] {
+                for width in (40..=900).step_by(3) {
+                    let laidout =
+                        wrapped_layout(&mut layouter, LATIN_FAMILY, text, width as f32, Some(max_rows), ellipsis);
+                    assert!(laidout.rows.len() <= max_rows, "width {width} max_rows {max_rows}");
+                    for row in &laidout.rows {
+                        let start = row.text.start_in_parent();
+                        assert!(text.is_char_boundary(start), "row start {start} at width {width}");
+                        assert!(text.is_char_boundary(start + row.text.len()), "row end at width {width}");
+                    }
+                    let first = &laidout.rows[0];
+                    if max_rows == 1 && first.text.start_in_parent() + first.text.len() == text.find('—').unwrap() {
+                        cut_before_dash = true;
+                    }
+                }
+            }
+        }
+        assert!(cut_before_dash, "some width must cut the first line right before the em dash");
     }
 
     /// The recency list pops oldest first, a touch moves an entry to the back,

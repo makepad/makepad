@@ -137,7 +137,7 @@ fn loop_copy_chain_joins_into_one_slot() {
     let f0 = build(false);
     let mut f = f0.clone();
     assert_eq!(copies(&f), 2);
-    assert!(opt::coalesce_slot_copies(&mut f));
+    assert!(opt::coalesce_slot_copies(&mut f, true));
     f.verify().unwrap();
     // both join: B's fields are written only where C's bytes are dead (C = B follows), and D is
     // written only by its copy
@@ -152,11 +152,144 @@ fn loop_copy_chain_joins_into_one_slot() {
 fn interfering_slots_stay_apart() {
     let f0 = build(true);
     let mut f = f0.clone();
-    opt::coalesce_slot_copies(&mut f);
+    opt::coalesce_slot_copies(&mut f, true);
     f.verify().unwrap();
     for n in [0u64, 1, 2, 3, 10, 1000] {
         assert_eq!(run(&f, n), reference(n, true), "after, n {}", n);
     }
     // B and C stay apart; D = C still joins
+    assert_eq!(copies(&f), 1, "{}", f.dump());
+}
+
+/// The prefix case: B (16 bytes) is copied into the start of the 24-byte C, whose last field (a
+/// tag) is written past B's end while B is still read; D (16 bytes) takes C's first 16 bytes.
+/// f(n): acc = 0; for i < n { if i % 3 != 0 { B = (i, 3i); C[..16] = B; C.tag = i; acc += B.0
+/// [clobber: B.0 = 99 after the copy, read with C still live] } else { C.0 = 7 }
+/// D = C[..16]; acc = acc * 31 + (D.0 ^ D.1) + C.tag [+ B.0 when clobber] }
+fn build_prefix(clobber: bool) -> Func {
+    let mut f = Func::new("slot_coalesce_prefix".into(), 0);
+    let n = f.vreg(Cls::I);
+    f.params.push(n);
+    f.rets.push(Cls::I);
+    let (sb, sc_, sd) = (f.slot(16, 8), f.slot(24, 8), f.slot(16, 8));
+    for _ in 0..7 {
+        f.block();
+    }
+    let v = |f: &mut Func| f.vreg(Cls::I);
+    let (pb, pc, pd, acc, i, z, c) = (v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f));
+    push(&mut f, 0, Inst::SlotAddr(pb, sb));
+    push(&mut f, 0, Inst::SlotAddr(pc, sc_));
+    push(&mut f, 0, Inst::SlotAddr(pd, sd));
+    push(&mut f, 0, Inst::Iconst(z, 0));
+    for o in [0, 8, 16] {
+        push(&mut f, 0, Inst::Store(Mem::Int(8, false), pc, o, z));
+    }
+    if clobber {
+        // B is read in every iteration: zero it as Rust's reference does
+        push(&mut f, 0, Inst::Store(Mem::Int(8, false), pb, 0, z));
+        push(&mut f, 0, Inst::Store(Mem::Int(8, false), pb, 8, z));
+    }
+    push(&mut f, 0, Inst::Iconst(acc, 0));
+    push(&mut f, 0, Inst::Iconst(i, 0));
+    f.blocks[0].term = Term::Jump(1);
+    push(&mut f, 1, Inst::ICmp(Cond::Lt, false, c, i, n));
+    f.blocks[1].term = Term::Branch(c, 2, 6);
+    let (r, t, three) = (v(&mut f), v(&mut f), v(&mut f));
+    push(&mut f, 2, Inst::Iconst(three, 3));
+    push(&mut f, 2, Inst::IBin(IOp::Rem, U64, r, i, three));
+    push(&mut f, 2, Inst::ICmpI(Cond::Ne, false, t, r, 0));
+    f.blocks[2].term = Term::Branch(t, 3, 4);
+    let (i3, b0) = (v(&mut f), v(&mut f));
+    push(&mut f, 3, Inst::Store(Mem::Int(8, false), pb, 0, i));
+    push(&mut f, 3, Inst::IBinI(IOp::Mul, U64, i3, i, 3));
+    push(&mut f, 3, Inst::Store(Mem::Int(8, false), pb, 8, i3));
+    push(&mut f, 3, Inst::Copy(pc, pb, 16));
+    push(&mut f, 3, Inst::Store(Mem::Int(8, false), pc, 16, i));
+    push(&mut f, 3, Inst::Load(Mem::Int(8, false), b0, pb, 0));
+    push(&mut f, 3, Inst::IBin(IOp::Add, U64, acc, acc, b0));
+    if clobber {
+        let k = v(&mut f);
+        push(&mut f, 3, Inst::Iconst(k, 99));
+        push(&mut f, 3, Inst::Store(Mem::Int(8, false), pb, 0, k));
+    }
+    f.blocks[3].term = Term::Jump(5);
+    let seven = v(&mut f);
+    push(&mut f, 4, Inst::Iconst(seven, 7));
+    push(&mut f, 4, Inst::Store(Mem::Int(8, false), pc, 0, seven));
+    f.blocks[4].term = Term::Jump(5);
+    let (a0, a1, x, m, tag) = (v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f));
+    push(&mut f, 5, Inst::Copy(pd, pc, 16));
+    push(&mut f, 5, Inst::Load(Mem::Int(8, false), a0, pd, 0));
+    push(&mut f, 5, Inst::Load(Mem::Int(8, false), a1, pd, 8));
+    push(&mut f, 5, Inst::Load(Mem::Int(8, false), tag, pc, 16));
+    push(&mut f, 5, Inst::IBin(IOp::Xor, U64, x, a0, a1));
+    push(&mut f, 5, Inst::IBinI(IOp::Mul, U64, m, acc, 31));
+    push(&mut f, 5, Inst::IBin(IOp::Add, U64, acc, m, x));
+    push(&mut f, 5, Inst::IBin(IOp::Add, U64, acc, acc, tag));
+    if clobber {
+        let b1 = v(&mut f);
+        push(&mut f, 5, Inst::Load(Mem::Int(8, false), b1, pb, 0));
+        push(&mut f, 5, Inst::IBin(IOp::Add, U64, acc, acc, b1));
+    }
+    push(&mut f, 5, Inst::IBinI(IOp::Add, U64, i, i, 1));
+    f.blocks[5].term = Term::Jump(1);
+    f.blocks[6].term = Term::Ret(vec![acc]);
+    f.verify().unwrap();
+    f
+}
+
+fn reference_prefix(n: u64, clobber: bool) -> u64 {
+    let (mut b, mut c) = ([0u64; 2], [0u64; 3]);
+    let mut acc = 0u64;
+    for i in 0..n {
+        if i % 3 != 0 {
+            b = [i, i.wrapping_mul(3)];
+            c[0] = b[0];
+            c[1] = b[1];
+            c[2] = i;
+            acc = acc.wrapping_add(b[0]);
+            if clobber {
+                b[0] = 99;
+            }
+        } else {
+            c[0] = 7;
+        }
+        let d = [c[0], c[1]];
+        acc = acc.wrapping_mul(31).wrapping_add(d[0] ^ d[1]).wrapping_add(c[2]);
+        if clobber {
+            acc = acc.wrapping_add(b[0]);
+        }
+    }
+    acc
+}
+
+#[test]
+fn prefix_copies_join_into_the_larger_slot() {
+    let f0 = build_prefix(false);
+    let mut f = f0.clone();
+    assert_eq!(copies(&f), 2);
+    assert!(opt::coalesce_slot_copies(&mut f, true));
+    f.verify().unwrap();
+    // B becomes C's start (C's tag write lies past B's end), D too
+    assert_eq!(copies(&f), 0, "{}", f.dump());
+    for n in [0u64, 1, 2, 3, 10, 1000] {
+        assert_eq!(run(&f0, n), reference_prefix(n, false), "before, n {}", n);
+        assert_eq!(run(&f, n), reference_prefix(n, false), "after, n {}", n);
+    }
+    // off: equal sizes only, nothing joins here
+    let mut g = f0.clone();
+    assert!(!opt::coalesce_slot_copies(&mut g, false));
+}
+
+#[test]
+fn interfering_prefix_slots_stay_apart() {
+    let f0 = build_prefix(true);
+    let mut f = f0.clone();
+    opt::coalesce_slot_copies(&mut f, true);
+    f.verify().unwrap();
+    for n in [0u64, 1, 2, 3, 10, 1000] {
+        assert_eq!(run(&f, n), reference_prefix(n, true), "after, n {}", n);
+    }
+    // B is written after the copy while C holds its bytes: apart; D = C[..16] still joins
     assert_eq!(copies(&f), 1, "{}", f.dump());
 }

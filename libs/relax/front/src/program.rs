@@ -139,7 +139,7 @@ impl Interner {
     }
     /// load-time names (not the late ones)
     pub fn len(&self) -> usize { self.image.as_ref().map_or(0, |m| m.len()) + self.strs.len() }
-    /// Names interned late (through a shared reference, `late`): the settle swap's change check.
+    /// Names interned late (through a shared reference, `late`): the settle rebuild's change check.
     pub fn late_len(&self) -> usize { self.late.lock().unwrap_or_else(|e| e.into_inner()).1.len() }
     /// load-time names in id order
     pub fn names(&self) -> impl Iterator<Item = &str> + '_ { (0..self.len() as Sym).map(|i| self.str(i)) }
@@ -5406,20 +5406,6 @@ pub fn set_record_import_uses(on: bool) { RECORD_IMPORT_USES.store(on, std::sync
 
 static SHARED_STD: relax_session::sync::Mutex<Option<HashMap<String, std::sync::Arc<SharedParse>>>> = relax_session::sync::Mutex::new(None);
 
-pub(crate) struct ZoneTaken(Option<HashMap<String, std::sync::Arc<SharedParse>>>);
-
-pub(crate) fn zone_take() -> ZoneTaken {
-    let mut shared = SHARED_STD.lock().unwrap_or_else(|e| e.into_inner());
-    let taken = ZoneTaken(std::mem::take(&mut *shared));
-    #[cfg(test)]
-    assert!(shared.is_none());
-    taken
-}
-
-pub(crate) fn zone_put_back(taken: ZoneTaken) {
-    let mut shared = SHARED_STD.lock().unwrap_or_else(|e| e.into_inner());
-    std::mem::forget(std::mem::replace(&mut *shared, taken.0));
-}
 static SHARED_CV: relax_session::sync::Condvar = relax_session::sync::Condvar::new();
 /// the program's std load is running: the world waits for its files
 static SHARING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -5455,6 +5441,17 @@ impl Drop for WorldWait {
 
 /// The program's std crates are loaded: a world still waiting for a file the program did not
 /// load parses it itself.
+/// Drops the std parses shared during the load (a settle rebuild; a later proc-macro world parses
+/// what it needs again). Nothing while a load shares them.
+pub fn drop_shared_std() {
+    let m = {
+        let mut g = SHARED_STD.lock().unwrap_or_else(|e| e.into_inner());
+        if SHARING.load(std::sync::atomic::Ordering::Acquire) { return; }
+        g.take()
+    };
+    drop(m);
+}
+
 pub fn share_std_end() {
     let _g = SHARED_STD.lock().unwrap_or_else(|e| e.into_inner());
     SHARING.store(false, std::sync::atomic::Ordering::Release);
@@ -5858,7 +5855,7 @@ struct TraitQuery {
     hits: Vec<(u32, std::sync::Arc<Vec<(DefId, BindVis)>>)>,
 }
 
-crate::gen_local! {
+crate::memo_local! {
     /// (skipped module, name) pairs a lookup on this thread missed since the last take_missing.
     static MISSING: std::cell::RefCell<Vec<(u32, String)>>;
 }
@@ -5868,7 +5865,7 @@ thread_local! {
     /// noted before the mark (an earlier lookup of the same name).
     static MISSING_FROM: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
-crate::gen_local! {
+crate::memo_local! {
     /// The notes of MISSING[from..] as a set (push_missing's dedup), valid for (generation,
     /// from, len); a body's bound-variable walk notes thousands of misses in one window, and
     /// a scan of the window per note made that quadratic.

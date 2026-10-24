@@ -11,6 +11,16 @@ use std::cell::RefCell;
 
 struct RelaxProbe;
 
+/// Pushes onto a thread's probe stack; the stack grows in the kept heap: it outlives the build
+/// whose job arena it would otherwise be grown in (a job survivor for the thread's life).
+fn push_kept<T>(v: &mut Vec<T>, x: T) {
+    if v.len() == v.capacity() {
+        let _k = relax_session::phase::kept();
+        v.reserve(8);
+    }
+    v.push(x);
+}
+
 thread_local! {
     static PHASES: RefCell<Vec<crate::fncost::Phase>> = const { RefCell::new(Vec::new()) };
     static SCOPES: RefCell<Vec<crate::warm::Scope>> = const { RefCell::new(Vec::new()) };
@@ -24,7 +34,7 @@ impl relax_backend::probe::Probe for RelaxProbe {
     // destructor) finds the stacks gone: its guards are then not kept (profiling only).
     fn phase_enter(&self, phase: usize) {
         let mut p = Some(crate::fncost::phase(phase));
-        let _ = PHASES.try_with(|s| s.borrow_mut().push(p.take().unwrap()));
+        let _ = PHASES.try_with(|s| push_kept(&mut s.borrow_mut(), p.take().unwrap()));
         std::mem::forget(p);
     }
     fn phase_leave(&self) {
@@ -33,7 +43,7 @@ impl relax_backend::probe::Probe for RelaxProbe {
     }
     fn backend_enter(&self, name: &str) {
         let mut s = Some(crate::warm::Scope::backend(name));
-        let _ = SCOPES.try_with(|v| v.borrow_mut().push(s.take().unwrap()));
+        let _ = SCOPES.try_with(|v| push_kept(&mut v.borrow_mut(), s.take().unwrap()));
         std::mem::forget(s);
     }
     fn backend_leave(&self) {

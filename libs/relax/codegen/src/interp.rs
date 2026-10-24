@@ -761,7 +761,9 @@ fn ibin(op: u8, bits: u8, s: bool, a: u64, b: u64) -> u64 {
         return if n == 0 { 0 } else { a & (u64::MAX >> (64 - n)) };
     }
     if op == OP_ROTL {
-        return if bits == 32 { (a as u32).rotate_left(b as u32 & 31) as u64 } else { a.rotate_left(b as u32 & 63) };
+        // within the type's width, re-extended (passes::rotl: the one definition)
+        let r = relax_backend::passes::rotl(bits, a, b);
+        return if bits < 64 { ext(r, bits, s) } else { r };
     }
     if bits == 32 && !s && op != OP_DIV && op != OP_REM && op != OP_MULHI {
         let (x, y) = (a as u32, b as u32);

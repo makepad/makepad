@@ -14,8 +14,9 @@ static SPILLS: relax_session::sync::Mutex<Option<HashMap<u32, Vec<relax_backend:
 /// The values slot `id`'s last O3 build spilled (the register allocator's choices).
 pub fn record_spills(id: u32, v: Vec<relax_backend::remark::SpillRemark>) {
     let _k = crate::zone_alloc::kept();
-    let mut v = v;
-    v.shrink_to_fit();
+    // a copy in the kept heap: `v` was built in the O3 job's arena (a shrink moves it only when
+    // it has spare capacity; an exact-sized one stayed behind as a job survivor)
+    let v = v.to_vec();
     SPILLS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(id, v);
 }
 
@@ -39,8 +40,9 @@ static LOOPS: relax_session::sync::Mutex<Option<HashMap<u32, Vec<relax_backend::
 /// The loops slot `id`'s last O3 build's vectorisers looked at, and how far each got.
 pub fn record_loops(id: u32, v: Vec<relax_backend::remark::LoopRemark>) {
     let _k = crate::zone_alloc::kept();
-    let mut v = v;
-    v.shrink_to_fit();
+    // a copy in the kept heap: `v` was built in the O3 job's arena (a shrink moves it only when
+    // it has spare capacity; an exact-sized one stayed behind as a job survivor)
+    let v = v.to_vec();
     LOOPS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(id, v);
 }
 
@@ -92,40 +94,6 @@ pub fn inline_of(id: u32) -> Vec<SiteRemark> {
     INLINE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&id).cloned()).unwrap_or_default()
 }
 
-pub(crate) fn scan_kept(a: &mut crate::jit::zone_scan::Acc) {
-    if let Ok(g) = INLINE.try_lock() {
-        if let Some(m) = g.as_ref() {
-            a.field("inspect.remarks");
-            for v in m.values() {
-                a.vec(v);
-            }
-        }
-    }
-    if let Ok(g) = LOOPS.try_lock() {
-        if let Some(m) = g.as_ref() {
-            a.field("inspect.loops");
-            for v in m.values() {
-                a.vec(v);
-            }
-        }
-    }
-    if let Ok(g) = SPILLS.try_lock() {
-        if let Some(m) = g.as_ref() {
-            a.field("inspect.spills");
-            for v in m.values() {
-                a.vec(v);
-            }
-        }
-    }
-    if let Ok(g) = COUNTS.try_lock() {
-        if let Some(m) = g.as_ref() {
-            a.field("inspect.counts");
-            for v in m.values() {
-                a.vec(v);
-            }
-        }
-    }
-}
 
 /// `remarks <fn|@slot> [n=20]`: the O3 decisions of the fn's slots: the calls the inliner kept
 /// (hot sites first) with the refusal and its numbers, the tier history of its code.

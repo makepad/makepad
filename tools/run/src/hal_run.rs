@@ -369,18 +369,26 @@ pub fn run(mut compile: Box<dyn FnMut() -> i32 + Send>) -> i32 {
     QUIT.store(true, Ordering::Release);
     RETRY.notify_all();
     Hal::global().wake_session(HOST);
+    let mut code = None;
     if thread.join().is_err() {
         quit_trace("the compile thread panicked");
-        return 101;
+        code = Some(101);
     }
-    if let Some(pump) = PUMP.lock().unwrap_or_else(|e| e.into_inner()).take() {
+    let pump = PUMP.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(pump) = pump {
         quit_trace("the compile thread joined");
         if pump.join().is_err() {
-            return 101;
+            code = code.or(Some(101));
         }
     }
+    // Every way the run ends comes here (window close, a signal's quit, a failed boot, no window
+    // backend) and the process exits right after: the HAL's driver threads stop and are joined
+    // first. exit() runs the driver's exit handlers (NVIDIA's EGL teardown), and a Vulkan worker
+    // still in vkQueueSubmit faulted inside it (a SIGSEGV at a SIGTERM mid-frame).
+    quit_trace("before_exit");
+    Hal::global().before_exit();
     quit_trace("the run ends");
-    EXIT.load(Ordering::Acquire)
+    code.unwrap_or_else(|| EXIT.load(Ordering::Acquire))
 }
 
 fn document(package_dir: &str) -> Result<Document, String> {
@@ -503,6 +511,10 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
             (g.iter().all(|v| v.is_finite()) && g[2] > 0.0 && g[3] > 0.0).then_some(g)
         })
         .unwrap_or([f32::NAN, f32::NAN, 1280.0, 800.0]);
+    // `MAKEPAD_WINDOW=WxH@scale` sizes the app's first window, which adopts this one: it is made
+    // at that size from the start, exactly, and the size is not kept for the next run
+    let launch = launch_window(info.dpi);
+    let geometry = launch.unwrap_or(geometry);
     let history = History::load(
         relax_compiler::dirs::cache_dir()
             .join("boot")
@@ -552,7 +564,7 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
                 }
                 let _stop = StopLoop;
                 let _kept = relax_compiler::zone_alloc::kept();
-                let mut host = match HostWindow::new(info, document, initial.clone(), geometry) {
+                let mut host = match HostWindow::new(info, document, initial.clone(), geometry, launch.is_some()) {
                     Ok(host) => host,
                     Err(error) => {
                         let _ = ready.try_send(Err(error));
@@ -566,7 +578,7 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
                     host,
                     initial,
                     history,
-                    state_path,
+                    launch.is_none().then_some(state_path),
                     package_dir,
                     watched_document,
                     ready,
@@ -575,6 +587,19 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
             .map_err(|e| e.to_string())?,
     );
     first.recv().map_err(|e| e.to_string())?
+}
+
+/// The boot window's geometry for `MAKEPAD_WINDOW=WxH@scale`: the native size that gives the app's
+/// window a `W`x`H` layout at `scale` on a display running at `dpi` (the app's `--window` does the
+/// same for a native launch: `makepad_platform::remote::app_clock::LaunchWindow::native_size`).
+fn launch_window(dpi: f32) -> Option<[f32; 4]> {
+    let value = std::env::var("MAKEPAD_WINDOW").ok()?;
+    let (size, scale) = value.split_once('@')?;
+    let (w, h) = size.split_once('x')?;
+    let [w, h, scale] = [w, h, scale].map(|v| v.trim().parse::<f32>().ok().filter(|v| v.is_finite() && *v > 0.0));
+    let dpi = if dpi.is_finite() && dpi > 0.0 { dpi } else { 1.0 };
+    let scale = scale?;
+    Some([f32::NAN, f32::NAN, w? * scale / dpi, h? * scale / dpi])
 }
 
 pub fn start(spec: AppSpec) -> Result<(), String> {
@@ -824,7 +849,7 @@ fn pump(
     mut host: HostWindow,
     mut data: State,
     history: History,
-    geometry_path: PathBuf,
+    geometry_path: Option<PathBuf>,
     package_dir: PathBuf,
     document: Document,
     ready: std::sync::mpsc::SyncSender<Result<(), String>>,
@@ -1107,16 +1132,17 @@ fn pump(
             lent_to_app = lent == domain && domain != 0 && !stopping && !pending;
             app_frame = borrower_frame && lent == domain && domain != 0 && !stopping && !pending;
             may_present = !borrower_frame || lent == 0;
-            if saved_geometry != Some(geom)
-                && geom.iter().all(|v| v.is_finite())
-                && geom[2] > 0.0
-                && geom[3] > 0.0
-            {
+            if let Some(path) = geometry_path.as_ref().filter(|_| {
+                saved_geometry != Some(geom)
+                    && geom.iter().all(|v| v.is_finite())
+                    && geom[2] > 0.0
+                    && geom[3] > 0.0
+            }) {
                 saved_geometry = Some(geom);
                 enqueue(
                     &mut work_pending,
                     Work::Save(
-                        geometry_path.clone(),
+                        path.clone(),
                         format!("{} {} {} {}\n", geom[0], geom[1], geom[2], geom[3]),
                     ),
                 );
@@ -1578,7 +1604,4 @@ fn pump(
     if worker.join().is_err() {
         eprintln!("makepad: run action worker panicked");
     }
-    quit_trace("before_exit");
-    // nothing draws any more: the driver's threads run out before exit() unloads it
-    hal.before_exit();
 }

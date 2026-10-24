@@ -103,6 +103,10 @@ pub enum ControlAction {
     /// "Restart desktop now", confirmed: restart the WM so the session
     /// script applies the saved render-on GPU (apps close).
     RestartDesktop,
+    /// A BlackShark headset edit. It bypasses the command queue: the
+    /// worker keeps the newest value per setting until the headset
+    /// confirms it, so a full queue can never drop one.
+    Headset(shell::blackshark::HeadsetEdit),
     Command(SystemCommand),
 }
 
@@ -633,6 +637,14 @@ impl App {
                 self.request_restart(cx);
                 return;
             }
+            ControlAction::Headset(edit) => {
+                match self.linux_controls.controller.as_mut().filter(|c| c.worker_alive()) {
+                    Some(controller) => controller.headset_edit(edit),
+                    None => self.linux_controls.notice = "System controls are unavailable".into(),
+                }
+                self.poll_linux_controls(cx);
+                return;
+            }
             ControlAction::GpuChoice(choice) => {
                 self.linux_controls.notice.clear();
                 if let Some(message) = choice.as_deref().and_then(|identity| validate_gpu_choice(identity).err()) {
@@ -689,6 +701,7 @@ impl App {
                 | ControlAction::RestartDesktop
                 | ControlAction::GpuChoice(_)
                 | ControlAction::InvertScroll(_)
+                | ControlAction::Headset(_)
                 | ControlAction::PointerSpeed { .. } => {}
                 ControlAction::Command(command) => {
                     if state.waiting.len() < 32 {
@@ -720,8 +733,10 @@ impl App {
             }
         }
         let mut changed = false;
+        let mut headset_pending = None;
         let snapshot = if let Some(controller) = state.controller.as_mut() {
             changed = controller.poll();
+            headset_pending = Some(controller.headset_pending());
             if controller.worker_alive() {
                 // The display settings first: each is the newest intent in
                 // its own slot, so a backlog of other commands never drops it.
@@ -982,6 +997,10 @@ impl App {
             }
             if panel.invert_scroll != state.invert_scroll {
                 panel.invert_scroll = state.invert_scroll;
+                changed = true;
+            }
+            if let Some(pending) = headset_pending.filter(|p| *p != panel.headset_pending) {
+                panel.headset_pending = pending;
                 changed = true;
             }
             if let Some(snapshot) = snapshot {
@@ -1313,6 +1332,13 @@ impl App {
     /// instead of 0 (an ordinary quit).
     pub(crate) fn restart_requested(&self) -> bool {
         self.linux_controls.restart_requested
+    }
+
+    /// The headset as the worker last published it, with the edits still
+    /// waiting for it: the WM test service's `headset_status`.
+    pub(crate) fn headset_status_text(&self) -> Option<String> {
+        let controller = self.linux_controls.controller.as_ref()?;
+        Some(shell::blackshark::device_linux::describe(&controller.snapshot().headset, &controller.headset_pending()))
     }
 }
 

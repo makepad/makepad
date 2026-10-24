@@ -43,20 +43,6 @@ thread_local! { static MY_SLOT: usize = NEXT_SLOT.fetch_add(1, Ordering::Relaxed
 /// Items that took long enough to list: (what, name, ms).
 static SLOW: relax_session::sync::Mutex<Vec<(&'static str, String, f64)>> = relax_session::sync::Mutex::new(Vec::new());
 
-pub(crate) struct ZoneTaken(Vec<(&'static str, String, f64)>);
-
-pub(crate) fn zone_take() -> ZoneTaken {
-    let mut slow = SLOW.lock().unwrap_or_else(|e| e.into_inner());
-    let taken = ZoneTaken(std::mem::take(&mut *slow));
-    #[cfg(test)]
-    assert!(slow.is_empty());
-    taken
-}
-
-pub(crate) fn zone_put_back(taken: ZoneTaken) {
-    let mut slow = SLOW.lock().unwrap_or_else(|e| e.into_inner());
-    std::mem::forget(std::mem::replace(&mut *slow, taken.0));
-}
 /// The crate being loaded and when it started.
 static LOADING: relax_session::sync::Mutex<(String, f64)> = relax_session::sync::Mutex::new((String::new(), 0.0));
 
@@ -160,7 +146,7 @@ pub fn crate_begin(name: &str) {
         return;
     }
     crate_end();
-    // process state (the status line reads it in any phase, across the settle swap)
+    // process state (the status line reads it in any phase)
     let name = crate::zone_alloc::kept_with(|| name.to_string());
     *LOADING.lock().unwrap() = (name, crate::clock::ms_since_process_start());
 }

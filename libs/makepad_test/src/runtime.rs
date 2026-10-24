@@ -1148,6 +1148,7 @@ fn studio_msg_name(msg: &StudioToApp) -> &'static str {
         StudioToApp::LiveChange { .. } => "LiveChange",
         StudioToApp::Swapchain(_) => "Swapchain",
         StudioToApp::WindowGeomChange { .. } => "WindowGeomChange",
+        StudioToApp::WindowFocus { .. } => "WindowFocus",
         StudioToApp::Tick => "Tick",
         StudioToApp::MouseDown(_) => "MouseDown",
         StudioToApp::MouseUp(_) => "MouseUp",
@@ -1167,6 +1168,7 @@ fn studio_msg_name(msg: &StudioToApp) -> &'static str {
         StudioToApp::None => "None",
         StudioToApp::Kill => "Kill",
         StudioToApp::Relay(_) => "Relay",
+        StudioToApp::WindowFocus { .. } => "WindowFocus",
     }
 }
 

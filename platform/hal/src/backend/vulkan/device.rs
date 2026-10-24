@@ -405,7 +405,10 @@ pub(super) type Later = Arc<Mutex<Vec<(std::time::Instant, LaterJob)>>>;
 pub(super) struct Worker {
     jobs: Arc<Mutex<VecDeque<Job>>>,
     later: Later,
-    tx: Option<SyncSender<()>>,
+    /// the wakeup sender: `None` once the worker was let go (`Drop`) or stopped (`stop`)
+    tx: Mutex<Option<SyncSender<()>>>,
+    /// joined by `stop` (the end of the process); a dropped worker runs out on its own
+    thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl Worker {
@@ -415,7 +418,7 @@ impl Worker {
         let later: Later = Arc::new(Mutex::new(Vec::new()));
         let timed = later.clone();
         let (tx, rx) = sync_channel(1);
-        std::thread::Builder::new().name(name.into()).spawn(move || {
+        let thread = std::thread::Builder::new().name(name.into()).spawn(move || {
             loop {
                 let next = lock(&timed).iter().map(|(at, _)| *at).min();
                 let alive = match next {
@@ -438,38 +441,100 @@ impl Worker {
                 if !alive { break; }
             }
         }).map_err(|e| e.to_string())?;
-        Ok(Self { jobs, later, tx: Some(tx) })
+        Ok(Self { jobs, later, tx: Mutex::new(Some(tx)), thread: Mutex::new(Some(thread)) })
     }
 
     /// The timed-job list, for jobs of this worker that continue later on it.
     pub fn later(&self) -> Later { self.later.clone() }
 
+    /// Queues `job`. On a stopped worker (the process is ending, `stop`) the job is abandoned:
+    /// dropped here, never run.
     pub fn push(&self, job: impl FnOnce() + Send + 'static) {
+        let tx = lock(&self.tx);
+        let Some(wake) = tx.as_ref() else {
+            drop(tx);
+            drop(job);
+            return;
+        };
         lock(&self.jobs).push_back(Box::new(job));
-        match self.tx.as_ref().expect("live worker").try_send(()) {
+        match wake.try_send(()) {
             Ok(()) | Err(TrySendError::Full(())) => {} // an existing wake drains the FIFO
             Err(TrySendError::Disconnected(())) => panic!("Vulkan driver worker stopped"),
         }
     }
-}
 
-impl Worker {
     /// Waits (up to `limit`) until the worker ran every job pushed before this call.
     pub fn settle(&self, limit: std::time::Duration) -> bool {
         let (done, wait) = std::sync::mpsc::sync_channel(1);
         self.push(move || { let _ = done.send(()); });
         wait.recv_timeout(limit).is_ok()
     }
+
+    /// The end of the process (`Vulkan::before_exit`): the worker runs every job queued so far,
+    /// its timed jobs early (closing), and its thread ends; this returns once it has. Jobs pushed
+    /// afterwards are abandoned (`push`). Never on the worker's own thread.
+    pub fn stop(&self) {
+        lock(&self.tx).take();
+        let thread = lock(&self.thread).take();
+        if let Some(thread) = thread {
+            debug_assert!(thread.thread().id() != std::thread::current().id(), "a Vulkan worker cannot stop itself");
+            if thread.join().is_err() { eprintln!("[hal-vulkan] a driver worker panicked"); }
+        }
+    }
 }
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        self.tx.take();
+        lock(&self.tx).take();
         // The worker drains the FIFO and exits. Jobs retain their device/resources; dropping
-        // the HAL on a UI thread must not join a thread that can be waiting for a GPU fence.
+        // the HAL on a UI thread must not join a thread that can be waiting for a GPU fence
+        // (only the end of the process joins it: `stop`).
     }
 }
 
 /// The Vulkan loader. makepad-vulkan opens it once per process and never closes it (ICDs register
 /// process-exit and thread-exit handlers that must not outlive their library).
 fn loader() -> Result<Entry, String> { unsafe { Entry::load() } }
+
+#[cfg(test)]
+mod tests {
+    use super::Worker;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// The end of the process stops a driver worker: every job queued before `stop` ran, its
+    /// timed jobs ran early (closing), its thread is gone when `stop` returns, and a job pushed
+    /// afterwards is abandoned (dropped, never run, no panic).
+    #[test]
+    fn stop_runs_the_queued_jobs_and_joins_the_thread() {
+        let worker = Worker::new("makepad-vulkan-test").expect("worker");
+        let ran = Arc::new(AtomicUsize::new(0));
+        let closing = Arc::new(AtomicUsize::new(0));
+        let thread_name = Arc::new(std::sync::Mutex::new(None));
+        {
+            let (later, closing, name) = (worker.later(), closing.clone(), thread_name.clone());
+            worker.push(move || {
+                *name.lock().unwrap() = std::thread::current().name().map(str::to_owned);
+                // a retry far in the future: only the stop runs it, as closing
+                later.lock().unwrap().push((std::time::Instant::now() + std::time::Duration::from_secs(3600), Box::new(move |c: bool| {
+                    if c { closing.fetch_add(1, Ordering::SeqCst); }
+                })));
+            });
+        }
+        for _ in 0..100 {
+            let ran = ran.clone();
+            worker.push(move || { ran.fetch_add(1, Ordering::SeqCst); });
+        }
+        worker.stop();
+        assert_eq!(ran.load(Ordering::SeqCst), 100, "every queued job ran before stop returned");
+        assert_eq!(closing.load(Ordering::SeqCst), 1, "the timed job ran early, closing");
+        assert_eq!(thread_name.lock().unwrap().as_deref(), Some("makepad-vulkan-test"));
+        assert!(super::lock(&worker.thread).is_none(), "the thread was joined");
+        let late = ran.clone();
+        worker.push(move || { late.fetch_add(1, Ordering::SeqCst); });
+        assert_eq!(ran.load(Ordering::SeqCst), 100, "a job after stop never runs");
+        assert_eq!(Arc::strong_count(&ran), 1, "the abandoned job was dropped");
+        // stopping again (a second before_exit) is a no-op
+        worker.stop();
+    }
+}

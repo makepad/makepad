@@ -483,12 +483,10 @@ fn activity(names: &[super::Frame]) -> &'static str {
 
 fn pick(sel: &str) -> Box<dyn Fn(&super::threads::Thread) -> bool> {
     let sel = sel.to_string();
-    let main = crate::jit::MAIN_TID.load(std::sync::atomic::Ordering::Relaxed);
     let owner = crate::owner::owner_tid();
-    let pid = std::process::id() as u64;
     Box::new(move |t: &super::threads::Thread| match sel.as_str() {
         "all" | "" => true,
-        "main" => (t.handle != 0 && t.handle == main) || t.os_id == pid,
+        "main" => super::is_program_main(t),
         "owner" => t.handle != 0 && t.handle == owner,
         "compiler" => t.name.starts_with("run-") || t.handle == owner,
         "program" => !t.name.starts_with("run-") && !t.name.starts_with("gandalf") && t.handle != owner,
@@ -705,8 +703,7 @@ pub fn cmd_why_slow(req: &Req, out: &mut Out) {
     let syms = names(&run, &mut partial);
     out.measured(&format!("{:.1} s: CPU samples of every thread at 250 Hz, thread CPU times, owner service counters", run.secs), "perf_event / thread suspend + owner counters", &partial);
     let pid = std::process::id() as u64;
-    let main_h = crate::jit::MAIN_TID.load(std::sync::atomic::Ordering::Relaxed);
-    let main_id = run.threads.iter().find(|t| (t.handle != 0 && t.handle == main_h) || t.os_id == pid).map(|t| t.os_id).unwrap_or(pid);
+    let main_id = run.threads.iter().find(|t| super::is_program_main(t)).map(|t| t.os_id).unwrap_or(pid);
     let cpu_of = |l: &[super::threads::Thread], id: u64| l.iter().find(|t| t.os_id == id).map_or(0, |t| t.cpu_ns);
     let main_cpu_ms = cpu_of(&cpu1, main_id).saturating_sub(cpu_of(&cpu0, main_id)) as f64 / 1e6;
     let wall_ms = run.secs * 1000.0;

@@ -245,6 +245,10 @@ impl Shared {
     pub fn direct_display(&self) -> bool {
         matches!(lock(&self.run).ready.as_ref(), Some(Ok(Protocol::Direct)))
     }
+    /// A makepad window manager hosts this process's windows (wm.rs).
+    pub fn window_manager(&self) -> bool {
+        matches!(lock(&self.run).ready.as_ref(), Some(Ok(Protocol::Wm)))
+    }
     fn flags(&self) -> u32 {
         self.flags.load(Ordering::Acquire)
     }

@@ -455,7 +455,18 @@ pub fn can_decide() -> bool {
 /// for good): listed and announced as a parked panic -- `panics`, `watch`, the Run panel -- with the
 /// choices `restart` (the app domain relaunches; only for the app's own domain) and `stop`. Waits
 /// for the decision without a timeout. True: stop; false: the domain was relaunched.
-pub fn park_stale(os_id: u64, domain: Option<crate::domain::DomainId>, message: &str, frames: &[u64]) -> bool {
+/// What the user decided for a parked stale access.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StaleDecision {
+    /// the process ends by the fault's signal
+    Stop,
+    /// the app domain was relaunched (window kept): the program runs on, the thread stays parked
+    RestartDomain,
+    /// no app domain: the process starts again with its command line
+    RestartProcess,
+}
+
+pub fn park_stale(os_id: u64, domain: Option<crate::domain::DomainId>, message: &str, frames: &[u64]) -> StaleDecision {
     let _k = crate::zone_alloc::kept();
     let id = PANIC_IDS.fetch_add(1, SeqCst) + 1;
     let top: Vec<u64> = frames.iter().copied().take(12).collect();
@@ -473,8 +484,8 @@ pub fn park_stale(os_id: u64, domain: Option<crate::domain::DomainId>, message: 
         json_str(&location),
         json_str(&thread),
         fr.join(","),
-        if primary { format!(",\"restart\":{{\"domain\":{},\"window_kept\":true}}", domain.unwrap()) } else { String::new() },
-        if primary { format!("\"resume P{} restart\",", id) } else { String::new() },
+        if primary { format!(",\"restart\":{{\"domain\":{},\"window_kept\":true}}", domain.unwrap()) } else { ",\"restart\":{\"process\":true,\"state_kept\":false}".to_string() },
+        format!("\"resume P{} restart\",", id),
         id
     );
     let mut list = PARKED.lock().unwrap_or_else(|e| e.into_inner());
@@ -482,7 +493,7 @@ pub fn park_stale(os_id: u64, domain: Option<crate::domain::DomainId>, message: 
     let p = std::sync::Arc::new(Parked { id, seq, os_id, domain, decision: AtomicU32::new(0), words: Mutex::new(Vec::new()), event, what: (thread, message.to_string(), location), frames: frames.iter().copied().take(64).collect(), regs: Vec::new(), stale: true });
     list.push(p.clone());
     parked_changed();
-    eprintln!("makepad: stale access parked as P{} -- makepad inspect {} panics; resume P{} {}stop", id, std::process::id(), id, if primary { "restart | " } else { "" });
+    eprintln!("makepad: stale access parked as P{} -- makepad inspect {} panics; resume P{} restart | stop", id, std::process::id(), id);
     while p.decision.load(SeqCst) == 0 {
         list = RESUME.wait_timeout(list, std::time::Duration::from_millis(500)).unwrap_or_else(|e| e.into_inner()).0;
     }
@@ -490,8 +501,13 @@ pub fn park_stale(os_id: u64, domain: Option<crate::domain::DomainId>, message: 
     drop(list);
     parked_changed();
     let decision = p.decision.load(SeqCst);
-    super::flightrec::panic_decided(id, if decision == 5 { "stale: stop" } else { "stale: restart" });
-    decision == 5
+    let d = match decision {
+        5 => StaleDecision::Stop,
+        3 => StaleDecision::RestartProcess,
+        _ => StaleDecision::RestartDomain,
+    };
+    super::flightrec::panic_decided(id, match d { StaleDecision::Stop => "stale: stop", StaleDecision::RestartDomain => "stale: restart (domain)", StaleDecision::RestartProcess => "stale: restart (process)" });
+    d
 }
 
 /// "file:line:col" of a compiler-known panic site.
@@ -563,7 +579,12 @@ pub fn cmd_resume(req: &Req, out: &mut Out) {
     match list.iter().find(|p| p.id == id) {
         Some(p) if p.stale && decision != 3 && decision != 5 => out.err(&format!("P{} is a stale access: its thread cannot go on (resume P{} restart | stop)", id, id)),
         Some(p) if !p.stale && decision == 5 => out.err(&format!("P{} is a panic: stop is for stale accesses", id)),
-        Some(p) if p.stale && decision == 3 && !(p.domain.is_some() && p.domain == crate::run::app_domain()) => out.err(&format!("P{}: no app domain to relaunch here (resume P{} stop)", id, id)),
+        Some(p) if p.stale && decision == 3 && !(p.domain.is_some() && p.domain == crate::run::app_domain()) => {
+            // no app domain: the process starts again (stale.rs restart_process)
+            p.decision.store(3, SeqCst);
+            RESUME.notify_all();
+            out.line(&format!("{{\"resumed\":\"P{}\",\"as\":\"process restart\",\"state_kept\":false}}", id));
+        }
         Some(p) => {
             if decision == 3 && p.domain.is_some() && p.domain == crate::run::app_domain() {
                 match crate::run::relaunch() {

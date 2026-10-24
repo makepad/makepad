@@ -797,6 +797,7 @@ fn install(vm: &mut ScriptVm, module: ScriptObject, ctx: Shared) {
         }
         // The line as a neural phrase too (a loop on a neural voice plays it;
         // the others drop it): its score goes in the phrase book.
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some((key, score, first)) = makepad_score_player::sung::neural::phrase_of(&lowered, ctx.bpm, makepad_score_player::sung::neural::SINGER) {
             makepad_score_player::sung::neural::remember(key, score);
             let lead = makepad_score_player::sung::neural::LEAD as f64 * ctx.bpm / 60.0;

@@ -39,9 +39,7 @@ impl<T> DeclarationCell<T> {
         // `Self::Name`, a bound whose projection needs the bounds being lowered) would wait on its
         // own OnceLock forever. That is rustc's query cycle (E0391, reported by the item's own
         // check); the nested ask sees the empty declaration.
-        // compiler TLS: its buffer is a generation's block, so the settle swap must forget it
-        // (a plain thread_local kept the dead buffer and the next push wrote into it)
-        crate::gen_local! { static IN_FLIGHT: std::cell::RefCell<Vec<usize>>; }
+        crate::memo_local! { static IN_FLIGHT: std::cell::RefCell<Vec<usize>>; }
         let key = self as *const Self as usize;
         if self.0.get().is_none() && IN_FLIGHT.try_with(|v| v.borrow().contains(&key)).unwrap_or(false) {
             return Box::leak(Box::new(T::default()));

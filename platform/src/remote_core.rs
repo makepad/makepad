@@ -324,6 +324,7 @@ pub struct QueuedCmd {
 pub enum Cmd {
     Activity(Sender<Reply>),
     Gamepads(Sender<Reply>),
+    Focus(Sender<Reply>),
     Input {
         window: Option<usize>,
         inputs: Vec<Input>,
@@ -714,6 +715,7 @@ pub fn err(msg: &str) -> Answer {
 pub const COMMANDS: &[Command] = &[
     Command { words: "status", args: "[w=ID]", answers: "{\"app\",\"pid\",\"w\":[{\"i\":id,\"t\":title,\"sz\":[w,h],\"px\":[w,h],\"dpi\",\"pos\":[x,y]}],\"activity\"}", service: "ui", risk: CmdRisk::Read, params: "\"w\":{\"type\":\"integer\",\"description\":\"window id (status lists them)\"}", required: &[], positional: &[] },
     Command { words: "gamepads", args: "", answers: "connected controllers and their current input states", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
+    Command { words: "focus", args: "", answers: "{\"key\":{\"r\":[x,y,w,h],\"w\",\"p\":widget path}|null,\"window\":focused window|null}: who has the key focus (rect as snap gives it) and which window is focused", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
     Command { words: "activity", args: "", answers: "native user activity: user_active, user_seq, idle_ms, quiet_ms, held, last_input, window (also in status)", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
     Command { words: "grab", args: "[w=ID] [scale=1] [out=FILE]", answers: "client side (frames service): the window as a PNG file; prints {\"png\":path,\"w\",\"sz\",\"capture_ms\",\"encode_ms\",\"capture_kind\"}", service: "ui", risk: CmdRisk::Read, params: "\"w\":{\"type\":\"integer\"},\"scale\":{\"type\":\"number\"},\"out\":{\"type\":\"string\"}", required: &[], positional: &[] },
     Command { words: "gseq", args: "[n=8] [every_ms=50] [scale=1] [w=ID] [out=DIR]", answers: "client side (frames service): n frames, a separate present per deadline; n=1..64, every_ms>=8, span<=60s", service: "ui", risk: CmdRisk::Read, params: "\"n\":{\"type\":\"integer\"},\"every_ms\":{\"type\":\"integer\"},\"scale\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"},\"out\":{\"type\":\"string\"}", required: &[], positional: &[] },

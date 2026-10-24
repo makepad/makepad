@@ -266,6 +266,11 @@ fn load_file_direct(abs_path: &str) -> Option<Result<Rc<Vec<u8>>, String>> {
 
 #[cfg(target_arch = "wasm32")]
 fn web_resource_request_path(cx: &Cx, dep_path: &str) -> String {
+    // Embedded resources use crate-relative keys, not deployment URLs. Resolve
+    // that identity before adding the page directory for a network fallback.
+    if crate::os::web::web_embed::embedded().is_some_and(|embed| embed.get(dep_path).is_some()) {
+        return dep_path.to_string();
+    }
     let mut base_path = String::new();
     if let crate::cx::OsType::Web(params) = &cx.os_type {
         base_path = web_resource_base_path(&params.pathname);

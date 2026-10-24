@@ -291,7 +291,8 @@ pub mod intrinsics_vx {
     // 17/18 zip low/high, 19 pack i16->u8, 20 pack i16->i8,
     // 21 pack i32->i16, 22 pack i32->u16, 23 madd i16, 24 sad u8,
     // 25 pshufb, 26 multiply low, 27 madd u8*i8, 29 unsigned greater.
-    // 40..45 f32 add/sub/mul/div/Intel min/max; 46..51 eq/ne/lt/le/gt/ge.
+    // 40..45 SSE float add/sub/mul/div/Intel min/max; 46..51 eq/ne/lt/le/gt/ge
+    // (width 32: f32 lanes, 64: f64 lanes; Intel NaN results).
     // 52/53 f32 NEON min/max (NaN propagation and signed-zero ordering).
     // 60..63 NEON f32 add/sub/mul/div.
     // SHA binary (width 32): 70 x86 sha1nexte, 71 sha1msg1, 72 sha1msg2,
@@ -303,7 +304,9 @@ pub mod intrinsics_vx {
     // vx_sha1rnds4: x86, immediate FUNC in 0..=3, checked at lowering.
     // vx_sha1h: Arm, scalar u32 -> u32 through lane 0 of a V128.
     // Unary: 0 abs, 1 shl, 2 unsigned shr, 3 signed shr, 4 shuffle i32,
-    // 5/6 byte shift right/left, 7 sqrt f32, 8 abs f32, 9 NEON sqrt f32, 10 neg f32. Narrow: 19/20/21 as above,
+    // 5/6 byte shift right/left, 7 SSE sqrt, 8 float abs, 9 NEON sqrt f32, 10 float neg
+    // 11 SSE4.1 round to integral, imm & 3 = nearest-even / down / up / toward zero
+    // (7/8/10/11: width 32 f32, 64 f64). Narrow: 19/20/21 as above,
     // 30 unsigned u16->u8. Narrow results are 8 bytes, all other vectors 16.
 
     extern "relax-intrinsic" {

@@ -20,7 +20,7 @@
 //! own thunk and its own RIR: function pointers stay distinct, tier-ups, patches and the disk
 //! cache see an ordinary build.
 //!
-//! Lifetime: compiler generation (taken at the zone swap with the other compile statics), keyed
+//! Lifetime: the process (dropped by value as the generations below rotate), keyed
 //! by the live-patch epoch the front ran under (a patch can change read-only data a body folds),
 //! kept in two generations of MAX_BYTES / 2 (estimated) each: when the newer one fills, the older
 //! one is dropped. Only slots whose body can have siblings take part (instances of generic fns,

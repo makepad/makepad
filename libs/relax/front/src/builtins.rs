@@ -56,7 +56,7 @@ fn crate_meta(path: &str) -> (String, String, String, String) {
 }
 
 fn crate_meta_uncached(path: &str) -> (String, String, String, String) {
-    crate::gen_local! {
+    crate::memo_local! {
         static CACHE: std::cell::RefCell<crate::fxhash::HashMap<String, (String, String, String, String)>>;
     }
     let mut dir = std::path::Path::new(path).parent().map(|p| p.to_path_buf());
@@ -226,33 +226,12 @@ fn line_col(src: &[u8], ls: &[u32], pos: u32) -> LineColumn {
 /// Marker prefix of an `include_bytes!` literal whose bytes live in the payload table. The whole
 /// marker is `\0relax-include:<key>:<path in hex>`: the key (content hash and length) names the
 /// payload, the path names the file it was read from. The marker is part of the expansion text, so
-/// it lives on in front images (a warm start's, the compiler-zone swap's restore) while the table
-/// is per compiler generation: a key the table does not hold is read again from its file
-/// (`payload_of`), checked against the key, and registered in the current generation.
+/// it lives on in front images (a warm start's) while the table is per process: a key the table
+/// does not hold is read again from its file (`payload_of`), checked against the key, and
+/// registered.
 pub const PAYLOAD_MARK: &str = "\\0relax-include:";
 
 static PAYLOADS: relax_session::sync::Mutex<Option<crate::fxhash::HashMap<String, std::sync::Arc<Vec<u8>>>>> = relax_session::sync::Mutex::new(None);
-
-pub(crate) struct ZoneTaken {
-    payloads: Option<crate::fxhash::HashMap<String, std::sync::Arc<Vec<u8>>>>,
-    dirs: Option<crate::fxhash::HashMap<String, (String, String, String, String)>>,
-}
-
-pub(crate) fn zone_take() -> ZoneTaken {
-    let mut payloads = PAYLOADS.lock().unwrap_or_else(|e| e.into_inner());
-    let mut dirs = BY_DIR.lock().unwrap_or_else(|e| e.into_inner());
-    let taken = ZoneTaken { payloads: std::mem::take(&mut *payloads), dirs: std::mem::take(&mut *dirs) };
-    #[cfg(test)]
-    { assert!(payloads.is_none()); assert!(dirs.is_none()); }
-    taken
-}
-
-pub(crate) fn zone_put_back(taken: ZoneTaken) {
-    let mut payloads = PAYLOADS.lock().unwrap_or_else(|e| e.into_inner());
-    std::mem::forget(std::mem::replace(&mut *payloads, taken.payloads));
-    let mut dirs = BY_DIR.lock().unwrap_or_else(|e| e.into_inner());
-    std::mem::forget(std::mem::replace(&mut *dirs, taken.dirs));
-}
 
 /// The content part of a payload key: its hash and length (the same text whichever thread or order
 /// includes it; files parse in parallel).
@@ -318,9 +297,6 @@ pub fn payload_of(b: &[u8]) -> Option<std::sync::Arc<Vec<u8>>> {
         Some(x) if **x == data => Some(x.clone()),
         Some(_) => fail(&format!("not registered, and `{path}` collides with another payload's key")),
         None => {
-            if std::env::var_os("MAKEPAD_RUN_ZONE_TRACE").is_some() {
-                eprintln!("makepad-run zone: include_bytes! payload {key} read again from `{path}`");
-            }
             let x = std::sync::Arc::new(data);
             p.insert(key.to_string(), x.clone());
             Some(x)
@@ -388,7 +364,7 @@ pub fn lookup(name: &str) -> Builtin {
 /// `bitflags!` (MAKEPAD_RUN_NATIVE_BITFLAGS=0 keeps the crate's macro_rules, for A/B measurement).
 pub fn override_rules(options: &crate::options::Options, d: crate::macros::MacroRef) -> crate::macros::MacroRef {
     if d.name == "bitflags" && d.krate == "bitflags" && options.native_bitflags {
-        crate::gen_local! {
+        crate::memo_local! {
             static BF: std::cell::OnceCell<crate::macros::MacroRef>;
         }
         return BF.with(|b| b.get_or_init(|| std::sync::Arc::new(crate::macros::MacroDef { name: "bitflags".to_string(), krate: "bitflags".to_string(), exported: true, arms: Vec::new(), builtin: Builtin::Bitflags as u8, def_file: String::new(), def_pos: 0, def_mod: String::new(), input: None })).clone());
@@ -425,7 +401,7 @@ pub fn from_u8(x: u8) -> Builtin {
     Builtin::None
 }
 
-crate::gen_local! {
+crate::memo_local! {
     static DEFS: std::cell::RefCell<Vec<Option<crate::macros::MacroRef>>>;
 }
 
@@ -1677,7 +1653,7 @@ fn single_punct(c: char) -> Option<T> {
     })
 }
 
-crate::gen_local! {
+crate::memo_local! {
     /// derive expansions computed ahead in parallel (pre_expand_derives): (file, item byte range)
     static PRE: std::cell::RefCell<crate::fxhash::HashMap<(String, u32, u32), Result<Option<Expansion>, (u32, String)>>>;
 }

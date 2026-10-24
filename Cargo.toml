@@ -141,6 +141,7 @@ workspace.members = [
     "examples/aichat",
     "examples/pdf",
     "examples/shader",
+    "examples/fractal_zoom",
     "examples/material_lab",
     "examples/raytrace",
     "examples/text_input",

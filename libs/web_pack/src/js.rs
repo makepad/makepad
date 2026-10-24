@@ -115,12 +115,14 @@ pub fn runtime_body(source_root: &Path, stripped: &[&str]) -> Result<String, Str
         js.push_str(&format!("\n// ---- {rel}\n"));
         js.push_str(&unmodule(&source));
     }
-    let worklet = read(AUDIO_WORKLET_JS)?;
-    js.push_str("\n// ---- the audio worklet, loaded from a blob (one file)\n");
-    js.push_str(&format!("const MAKEPAD_AUDIO_WORKLET_SOURCE = {};\n", js_string(&worklet)));
-    let worker = read(WEB_WORKER_JS)?;
-    js.push_str("\n// ---- the threads' worker, loaded from a blob (threaded builds)\n");
-    js.push_str(&format!("const MAKEPAD_WEB_WORKER_SOURCE = {};\n", js_string(&worker)));
+    if !stripped.contains(&"threads") {
+        let worklet = read(AUDIO_WORKLET_JS)?;
+        js.push_str("\n// ---- the audio worklet, loaded from a blob (one file)\n");
+        js.push_str(&format!("const MAKEPAD_AUDIO_WORKLET_SOURCE = {};\n", js_string(&worklet)));
+        let worker = read(WEB_WORKER_JS)?;
+        js.push_str("\n// ---- the threads' worker, loaded from a blob (threaded builds)\n");
+        js.push_str(&format!("const MAKEPAD_WEB_WORKER_SOURCE = {};\n", js_string(&worker)));
+    }
     Ok(js)
 }
 
@@ -133,14 +135,88 @@ pub fn one_wasm_js(source_root: &Path, stripped: &[&str], wasm_name: &str) -> Re
     let from = START_JS.find(FETCH_START).ok_or("web_pack: START_JS lost its fetch")?;
     let to = START_JS.find(APP_START).ok_or("web_pack: START_JS lost start_app")?;
     let start = format!("{}{}{}", &START_JS[..from], ONE_WASM_FETCH_JS, &START_JS[to..]);
+    let start = strip_sections(&start, &["threads"], "single-thread startup")?;
+    let start = start.replace("makepad_crash_reporter.set_wasm(wasm);", "if (wasm._has_thread_support) throw new Error(\"This page requires an unshared wasm memory\");\n    makepad_crash_reporter.set_wasm(wasm);");
+    let mut stripped = stripped.to_vec();
+    stripped.push("threads");
     let mut js = format!("// {wasm_name}.js: Makepad's web runtime and the page's start (one deflated wasm).\n");
-    js.push_str(&runtime_body(source_root, stripped)?);
+    js.push_str(&runtime_body(source_root, &stripped)?);
     js.push_str(&start.replace("__WASM__", wasm_name));
     Ok(js)
 }
 
 const FETCH_START: &str = "// The wasm's bytes: __WASM__.wasm.br";
 const APP_START: &str = "export async function start_app";
+
+/// Static export accesses in our generated glue. Computed accesses are rejected:
+/// adding a new callback must extend the package contract, never evade it.
+pub fn export_references(js: &str) -> Result<std::collections::BTreeSet<String>, String> {
+    let mut names = std::collections::BTreeSet::new();
+    let tokens: Vec<&str> = js.split(|c: char| c.is_whitespace()).filter(|s| !s.is_empty()).collect();
+    let compact = tokens.concat();
+    for rest in compact.split(".exports").skip(1) {
+        if rest.starts_with('[') || rest.starts_with("?.") {
+            return Err("computed wasm export access in packaged glue".into());
+        }
+        if let Some(rest) = rest.strip_prefix('.') {
+            let n = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$')).unwrap_or(rest.len());
+            if n == 0 { return Err("invalid wasm export access in packaged glue".into()); }
+            names.insert(rest[..n].to_string());
+        }
+    }
+    Ok(names)
+}
+
+/// Check every static glue access against the linked module before writing a
+/// page. Thread-only accesses have already been removed for this profile.
+pub fn check_exports(js: &str, wasm: &[u8]) -> Result<(), String> {
+    fn leb(bytes: &[u8], at: &mut usize) -> Result<usize, String> {
+        let mut value = 0usize;
+        for shift in (0..35).step_by(7) {
+            let b = *bytes.get(*at).ok_or("truncated wasm export contract")?;
+            *at += 1;
+            if shift == 28 && b > 15 { return Err("invalid wasm u32".into()); }
+            value |= ((b & 127) as usize) << shift;
+            if b < 128 { return Ok(value); }
+        }
+        Err("invalid wasm u32".into())
+    }
+    if wasm.get(..8) != Some(b"\0asm\x01\0\0\0") { return Err("invalid wasm header".into()); }
+    let mut exports = std::collections::BTreeMap::new();
+    let mut at = 8;
+    while at < wasm.len() {
+        let section = wasm[at]; at += 1;
+        let size = leb(wasm, &mut at)?;
+        let end = at.checked_add(size).filter(|end| *end <= wasm.len()).ok_or("truncated wasm section")?;
+        if section == 5 {
+            let mut p = at;
+            if leb(wasm, &mut p)? != 1 || leb(wasm, &mut p)? & 2 != 0 {
+                return Err("single-thread page requires one unshared wasm memory".into());
+            }
+        }
+        if section == 7 {
+            let bytes = &wasm[at..end];
+            let mut p = 0;
+            for _ in 0..leb(bytes, &mut p)? {
+                let len = leb(bytes, &mut p)?;
+                let name_end = p.checked_add(len).ok_or("invalid export name length")?;
+                let name = std::str::from_utf8(bytes.get(p..name_end).ok_or("truncated export name")?).map_err(|e| e.to_string())?;
+                p = name_end;
+                let kind = *bytes.get(p).ok_or("missing export kind")?; p += 1;
+                leb(bytes, &mut p)?;
+                exports.insert(name.to_string(), kind);
+            }
+        }
+        at = end;
+    }
+    for name in export_references(js)? {
+        let kind = if name == "memory" { 2 } else if name == "__indirect_function_table" { 1 } else { 0 };
+        if exports.get(&name) != Some(&kind) {
+            return Err(format!("packaged glue requires missing wasm export {name} (kind {kind})"));
+        }
+    }
+    Ok(())
+}
 
 const ONE_WASM_FETCH_JS: &str = r#"// The wasm's bytes: __WASM__.wasm, deflated (zlib), or already decoded by the host.
 async function pack_fetch_wasm(sizes, on_progress) {
@@ -178,9 +254,11 @@ fn js_string(s: &str) -> String {
 /// to the WebGL host, and report progress to the page's loader.
 const START_JS: &str = r#"
 // ---- the app's start
+// @section threads
 const pack_audio_worklet_url = URL.createObjectURL(new Blob([MAKEPAD_AUDIO_WORKLET_SOURCE], { type: "text/javascript" }));
 globalThis.makepad_audio_worklet_url = pack_audio_worklet_url;
 globalThis.makepad_web_worker_url = URL.createObjectURL(new Blob([MAKEPAD_WEB_WORKER_SOURCE], { type: "text/javascript" }));
+// @end threads
 
 function pack_is_wasm(bytes) {
     return bytes.length >= 4 && bytes[0] === 0 && bytes[1] === 0x61 && bytes[2] === 0x73 && bytes[3] === 0x6d;

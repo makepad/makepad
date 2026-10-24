@@ -5,7 +5,6 @@
 
 use super::{frame_json, json_str, thread_label, Captured, Out, Req};
 use crate::waits::{Kind, Wait};
-use std::sync::atomic::Ordering::Relaxed;
 
 /// Edges thread -> holder (handles) of the registry's waits whose holder is a thread handle.
 fn edges(waits: &[Wait]) -> Vec<(u64, u64)> {
@@ -54,9 +53,7 @@ pub fn why_hung(req: &Req, out: &mut Out) {
     let depth = req.num("depth", 12) as usize;
     let before = super::threads::list();
     // the main thread sampled during the probe: where a busy main spends it
-    let main_h = crate::jit::MAIN_TID.load(Relaxed);
-    let pid = std::process::id() as u64;
-    let is_main = move |t: &super::threads::Thread| (t.handle != 0 && t.handle == main_h) || t.os_id == pid;
+    let is_main = |t: &super::threads::Thread| super::is_program_main(t);
     let mut main_tops: Vec<Vec<u64>> = Vec::new();
     let t0 = std::time::Instant::now();
     while t0.elapsed().as_millis() < probe as u128 {

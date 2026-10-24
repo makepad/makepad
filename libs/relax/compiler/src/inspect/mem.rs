@@ -377,6 +377,11 @@ fn relax_parts(s: &mut Snap, compiler: bool, partial: &mut Vec<String>) {
     let (committed, live, _) = crate::zone_alloc::burst_stats();
     s.add("makepad-run/burst arena committed", committed as u64);
     s.add("makepad-run/burst arena live", live as u64);
+    let (jobs, survivor_jobs, survivor_bytes) = crate::zone_alloc::job_stats();
+    s.add("makepad-run/job arena/jobs ended", jobs as u64);
+    s.add("makepad-run/job arena/jobs that left survivors", survivor_jobs as u64);
+    s.add("makepad-run/job arena/survivor bytes (not copied out)", survivor_bytes as u64);
+    s.add("makepad-run/settle rebuilds", crate::jit::settle_rebuild::rebuilds() as u64);
     let (ccommitted, clive, cchunks) = crate::zone_alloc::compiler_stats();
     s.add("makepad-run/compiler arena committed", ccommitted as u64);
     s.add("makepad-run/compiler arena live", clive as u64);
@@ -434,6 +439,19 @@ pub fn cmd_memory(req: &Req, out: &mut Out) {
             d.id, json_str(&d.package), json_str(&format!("{:?}", d.state)), d.arena_in_use, d.arena_committed, d.arena_detail.0, d.arena_detail.1, d.arena_detail.2, d.static_committed, d.threads,
             d.thread_names.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(",")));
     }
+    // chunk states with resident bytes (MB): attached / listed / released / full, then large, then sparse
+    let st = |a: &[usize; 24]| {
+        let mb = |b: usize| format!("{:.1}", b as f64 / 1048576.0);
+        let row = |r: usize| format!("{{\"chunks\":{},\"touched_mb\":{},\"live_slots_mb\":{},\"resident_mb\":{}}}", a[r * 4], mb(a[r * 4 + 1]), mb(a[r * 4 + 2]), mb(a[r * 4 + 3]));
+        format!("\"attached\":{},\"listed\":{},\"released\":{},\"full\":{},\"large\":{{\"runs\":{},\"committed_mb\":{},\"resident_mb\":{}}},\"sparse\":{{\"chunks\":{},\"resident_mb\":{}}},\"old\":{{\"chunks\":{},\"live_slots_mb\":{},\"resident_mb\":{}}}",
+            row(0), row(1), row(2), row(3), a[16], mb(a[17]), mb(a[18]), a[19], mb(a[20]), a[21], mb(a[22]), mb(a[23]))
+    };
+    for (id, a) in crate::domain::heap_states() {
+        out.line(&format!("{{\"arena_states\":\"domain {id:?}\",{}}}", st(&a)));
+    }
+    let (cs, bs) = crate::zone_alloc::arena_states();
+    out.line(&format!("{{\"arena_states\":\"compiler\",{}}}", st(&cs)));
+    out.line(&format!("{{\"arena_states\":\"burst\",{}}}", st(&bs)));
     let compiler = req.get("compiler") == Some("1");
     let n = req.num("n", 24) as usize;
     let mut partial = Vec::new();
@@ -454,10 +472,11 @@ pub fn cmd_memory(req: &Req, out: &mut Out) {
     total.push('}');
     out.line(&total);
     let ev = crate::zone_alloc::compiler_events();
+    let jobs = crate::zone_alloc::job_stats();
     // the three heaps apart (zone_alloc.rs): the program's malloc, the compiler's own arena, the JIT's mappings
     out.line(&format!("{{\"trims\":{},\"last_trim_ms\":{}}}", crate::memstat::TRIMS.load(std::sync::atomic::Ordering::Relaxed), crate::memstat::LAST_TRIM_MS.load(std::sync::atomic::Ordering::Relaxed)));
     out.line(&format!(
-        "{{\"split\":{{\"routing\":{},\"program_heap_in_use_mb\":{},\"program_heap_held_free_mb\":{},\"compiler_arena_committed_mb\":{},\"compiler_arena_live_mb\":{},\"jit_code_mb\":{},\"jit_ro_data_mb\":{},\"program_statics_mb\":{},\"burst_arena_committed_mb\":{},\"compiler_arena_touched_mb\":{},\"compiler_arena_live_slots_mb\":{},\"compiler_arena_large_mb\":{},\"compiler_arena_chunks_listed\":{},\"compiler_arena_events\":{{\"contended_chunk\":{},\"contended_pool\":{},\"contended_warm\":{},\"contended_partial\":{},\"yields\":{},\"commits\":{},\"decommits\":{},\"pushes\":{},\"pops\":{},\"tombstone_frees\":{},\"generation\":{},\"tombstones\":{}}}{}}}}}",
+        "{{\"split\":{{\"routing\":{},\"program_heap_in_use_mb\":{},\"program_heap_held_free_mb\":{},\"compiler_arena_committed_mb\":{},\"compiler_arena_live_mb\":{},\"jit_code_mb\":{},\"jit_ro_data_mb\":{},\"program_statics_mb\":{},\"burst_arena_committed_mb\":{},\"compiler_arena_touched_mb\":{},\"compiler_arena_live_slots_mb\":{},\"compiler_arena_large_mb\":{},\"compiler_arena_chunks_listed\":{},\"compiler_arena_events\":{{\"contended_chunk\":{},\"contended_pool\":{},\"contended_warm\":{},\"contended_partial\":{},\"yields\":{},\"commits\":{},\"decommits\":{},\"pushes\":{},\"pops\":{}}},\"job_arena\":{{\"jobs\":{},\"survivor_jobs\":{},\"survivor_bytes\":{}}}}}}}",
         json_str(if crate::zone_alloc::compiler_arena_enabled() { "compiler arena" } else { "off (MAKEPAD_RUN_COMPILER_ARENA=0)" }),
         mb(inuse),
         mb(free),
@@ -472,8 +491,7 @@ pub fn cmd_memory(req: &Req, out: &mut Out) {
         mb(snap.get("makepad-run/compiler arena/large blocks")),
         snap.get("makepad-run/compiler arena/chunks listed for reuse"),
         ev[0], ev[1], ev[2], ev[3], ev[4], ev[5], ev[6], ev[7], ev[8],
-        crate::zone_alloc::compiler_tombstone_frees(), crate::zone_alloc::compiler_generation(), crate::zone_alloc::compiler_tombstones(),
-        match crate::jit::zone_scan::last_total() { Some(n) => format!(",\"kept_in_compiler\":{n}"), None => String::new() },
+        jobs.0, jobs.1, jobs.2,
     ));
     // the arenas' census: committed bytes by small chunk / large run, and how much of the small
     // chunks' touched pages a few surviving blocks pin

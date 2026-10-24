@@ -214,37 +214,6 @@ pub(super) fn note_sites(idx: u64, slot: u32, watched: &[(u32, u64)]) {
     }
 }
 
-pub(crate) fn scan_kept(a: &mut crate::jit::zone_scan::Acc) {
-    let Ok(ws) = WATCHES.try_lock() else { return };
-    a.field("inspect.watches");
-    a.vec(&ws);
-    for w in ws.iter() {
-        a.arc(w);
-        a.string(&w.what);
-        a.vec(&w.fields);
-        if let Ok(p) = w.pending.try_lock() {
-            a.vec(&p);
-            for x in p.iter() {
-                a.string(&x.0);
-            }
-        }
-        if let Ok(s) = w.sites.try_lock() {
-            a.vec(&s);
-            for x in s.iter() {
-                a.string(&x.last);
-            }
-        }
-        if let Ok(r) = w.recent.try_lock() {
-            let (x, y) = r.as_slices();
-            if r.capacity() > 0 {
-                a.ptr(if x.is_empty() { y.as_ptr() } else { x.as_ptr() });
-            }
-            for e in r.iter() {
-                a.string(&e.2);
-            }
-        }
-    }
-}
 
 /// Is `t` (bytes after `.field`) an assignment: `=` (not `==`) or a compound `op=`?
 fn assigns(t: &[u8]) -> bool {

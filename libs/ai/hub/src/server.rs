@@ -293,6 +293,11 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
     let addr: SocketAddr = format!("{}:{}", config.host, port)
         .parse()
         .map_err(|e| AssetAiError::Http(format!("bad listen address {}:{port}: {e}", config.host)))?;
+    // A hub that serves claude-cli does so only as the enabled, LAN-bound,
+    // credentialed fleet node (see crate::claude_cli), whoever built the config.
+    if config.registry.models.iter().any(|spec| spec.backend == crate::claude_cli::BACKEND) {
+        crate::claude_cli::check_serving(addr).map_err(AssetAiError::Io)?;
+    }
 
     // Initial model states from what is already in the cache. Use the same
     // full hardware snapshot as request/discovery availability so an empty-
@@ -581,7 +586,13 @@ impl FleetMode {
         eprintln!("fleet: TLS front on {} (certificate {fp})", self.listen);
         crate::fleet_auth::set_node_credential(self.node_credential);
         crate::fleet_auth::install_fleet_client(&shared.cache_dir.join("fleet"));
-        crate::discovery::start_fleet_beacon(node_id, self.listen.port(), self.fleet.clone(), shared.node_key.clone());
+        // A claude-cli hub is reached by pin only (MAKEPAD_AI_HUB): no beacon,
+        // so no client finds it unless pointed at it.
+        if crate::claude_cli::enabled() {
+            eprintln!("fleet: claude-cli hub, no LAN beacon (clients pin it with MAKEPAD_AI_HUB)");
+        } else {
+            crate::discovery::start_fleet_beacon(node_id, self.listen.port(), self.fleet.clone(), shared.node_key.clone());
+        }
         Ok(self.listen)
     }
 }
@@ -632,7 +643,9 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
             } => {
                 // Blob chunks go through their own bounded worker pool so a
                 // 32 MiB read never stalls /health, job polling or submits.
-                if headers.path.split('?').next() == Some("/control/watch") {
+                if headers.path.starts_with("/kernel") {
+                    route_kernel(&shared, &headers, "GET", Vec::new(), response_sender);
+                } else if headers.path.split('?').next() == Some("/control/watch") {
                     if caller_of(&shared, &headers).is_none() {
                         let _ = response_sender.send(unauthorized_response());
                         continue;
@@ -654,6 +667,10 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
                 body,
                 response,
             } => {
+                if headers.path.starts_with("/kernel") {
+                    route_kernel(&shared, &headers, "POST", body, response);
+                    continue;
+                }
                 let out = route_post_request(&shared, &headers, &body);
                 let _ = response.send(out);
             }
@@ -670,6 +687,10 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
                 headers,
                 response_sender,
             } => {
+                if headers.path.split('?').next() == Some("/kernel/stream") {
+                    route_kernel_stream(&shared, &headers, web_socket_id, response_sender);
+                    continue;
+                }
                 if !caller_of(&shared, &headers).is_some_and(|caller| may_read(&shared, &caller, &headers.path)) {
                     let _ = response_sender.send(Vec::new());
                     continue;
@@ -697,6 +718,11 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
                 response_sender,
                 data,
             } => {
+                #[cfg(feature = "kernel")]
+                if crate::kernel_compute::facility().is_stream(web_socket_id) {
+                    crate::kernel_compute::facility().stream_frame(web_socket_id, &data);
+                    continue;
+                }
                 if let Some(session) = realtime_session_for_socket(&shared, web_socket_id) {
                     if let Err(e) = session.handle_binary(&data) {
                         let _ = response_sender
@@ -717,6 +743,8 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
                 }
             }
             HttpServerRequest::DisconnectWebSocket { web_socket_id } => {
+                #[cfg(feature = "kernel")]
+                crate::kernel_compute::facility().stream_closed(web_socket_id);
                 if let Some(job_id) = shared.ws_sessions.lock().unwrap().remove(&web_socket_id) {
                     if let Some(session) = shared.realtime_sessions.lock().unwrap().get(&job_id).cloned() {
                         session.remove_socket(web_socket_id);
@@ -728,6 +756,84 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
 }
 
 
+
+/// The `kernel` domain (`crate::kernel_wire`): Splash compute kernels on
+/// this node's CPUs, for LAN-role credentials only. Submits and polls answer
+/// from the facility's threads, never blocking this routing thread.
+fn route_kernel(
+    shared: &Arc<ServiceShared>,
+    headers: &HttpServerHeaders,
+    method: &str,
+    body: Vec<u8>,
+    response_sender: mpsc::Sender<HttpServerResponse>,
+) {
+    let Some(caller) = caller_of(shared, headers) else {
+        let _ = response_sender.send(unauthorized_response());
+        return;
+    };
+    if caller.role != crate::fleet_auth::Role::Lan {
+        let _ = response_sender.send(error_json(401, "kernel jobs need a lan credential".into()));
+        return;
+    }
+    let (path, query) = headers.path.split_once('?').unwrap_or((headers.path.as_str(), ""));
+    #[cfg(feature = "kernel")]
+    {
+        let facility = crate::kernel_compute::facility();
+        let reply = move |result: Result<Vec<u8>, (u16, String)>, content_type: &str| {
+            let response = match result {
+                Ok(body) => {
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nCache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    HttpServerResponse::new(header, body)
+                }
+                Err((status, message)) => error_json(status, message),
+            };
+            let _ = response_sender.send(response);
+        };
+        let job_route = |suffix: &str| path.strip_prefix("/kernel/job/").and_then(|r| r.strip_suffix(suffix)).and_then(|id| id.parse::<u64>().ok());
+        match method {
+            "GET" if path == "/kernel" => reply(Ok(facility.info().serialize_json().into_bytes()), "application/json"),
+            "GET" => match job_route("/tiles") {
+                Some(id) => {
+                    let timeout = query
+                        .split('&')
+                        .find_map(|kv| kv.strip_prefix("timeout_ms=").and_then(|v| v.parse::<u64>().ok()))
+                        .unwrap_or(2000);
+                    facility.poll(&caller.client_id, id, Duration::from_millis(timeout), Box::new(move |r| reply(r, "application/octet-stream")));
+                }
+                None => reply(Err((404, "no such kernel route".into())), ""),
+            },
+            "POST" if path == "/kernel/jobs" => facility.submit(&caller.client_id, body, Box::new(move |r| reply(r, "application/json"))),
+            "POST" => match job_route("/cancel") {
+                Some(id) if facility.cancel(&caller.client_id, id) => reply(Ok(b"{\"cancelled\":true}".to_vec()), "application/json"),
+                Some(_) => reply(Err((404, "no such kernel job".into())), ""),
+                None => reply(Err((404, "no such kernel route".into())), ""),
+            },
+            _ => reply(Err((404, "no such kernel route".into())), ""),
+        }
+    }
+    #[cfg(not(feature = "kernel"))]
+    {
+        let _ = (method, body, path, query);
+        let _ = response_sender.send(error_json(404, "this node does not serve kernel jobs".into()));
+    }
+}
+
+/// `GET /kernel/stream` (websocket): one long-lived stream per client and
+/// node for kernel jobs (frames: `crate::kernel_wire`). LAN credentials only.
+fn route_kernel_stream(shared: &Arc<ServiceShared>, headers: &HttpServerHeaders, web_socket_id: u64, response_sender: mpsc::Sender<Vec<u8>>) {
+    let caller = caller_of(shared, headers).filter(|c| c.role == crate::fleet_auth::Role::Lan);
+    #[cfg(feature = "kernel")]
+    if let Some(caller) = caller {
+        crate::kernel_compute::facility().stream_open(web_socket_id, &caller.client_id, response_sender);
+        return;
+    }
+    #[cfg(not(feature = "kernel"))]
+    let _ = (caller, web_socket_id);
+    let _ = response_sender.send(Vec::new());
+}
 
 /// Who sent a request, or None when it is not allowed in at all.
 fn caller_of(shared: &ServiceShared, headers: &HttpServerHeaders) -> Option<crate::front::Caller> {
@@ -1670,6 +1776,9 @@ fn route_generate(shared: &Arc<ServiceShared>, caller: &crate::front::Caller, bo
     if spec.backend == "llm" {
         crate::llm_backend::apply_chat_thinking_control(&mut request);
     }
+    if spec.backend == crate::claude_cli::BACKEND && caller.role == crate::fleet_auth::Role::Node {
+        return error_json(403, "claude-cli is not a node route".to_string());
+    }
     let gpu = shared.gpu.get();
     if let Err(reason) = model_availability(spec, &gpu, shared.residency.reserve_mb) {
         return error_json(503, format!("model {} is unavailable: {reason}", spec.id));
@@ -1904,7 +2013,7 @@ fn health_json(shared: &Arc<ServiceShared>) -> HealthJson {
                         .is_none()
                 })
         })
-        .map(|spec| spec.domain.as_str().to_string())
+        .map(|spec| crate::claude_cli::advertised_domain(spec).to_string())
         .collect();
     // Same llm weights serve conversational chat; advertise it so FleetQwen
     // stops treating every turn as a text-expander fallback.
@@ -2031,7 +2140,7 @@ fn models_json(shared: &Arc<ServiceShared>) -> ModelsJson {
             let available = unavailable_reason.is_none() && too_small_note.is_none();
             ModelInfoJson {
                 id: spec.id.clone(),
-                domain: spec.domain.as_str().to_string(),
+                domain: crate::claude_cli::advertised_domain(spec).to_string(),
                 backend: spec.backend.clone(),
                 available,
                 gated: spec.gated,

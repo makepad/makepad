@@ -146,7 +146,7 @@ pub fn instrument(up: *const Unit, slot: u32, f: &mut Func) {
 /// Initializer slots are an implementation detail of evaluation, not Rust
 /// runtime functions. run_init may interpret the same item to data or execute
 /// its lowered body (including after NeedsLoad); neither creates a runtime root.
-fn runtime_function(u: &Unit, slot: u32) -> bool {
+pub(crate) fn runtime_function(u: &Unit, slot: u32) -> bool {
     use crate::program::DefKind;
     match u.fns[slot as usize].key {
         crate::jit::FnKey::Inst(d, _) => !matches!(u.prog.def(d).kind,

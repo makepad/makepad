@@ -10,7 +10,9 @@
 //! its app crates. Desktop default is Process (decision 5): a linked
 //! module is still launched as a process unless `~/.makepad/wm/apps.splash`
 //! says otherwise (a settings file, never an environment variable) or a
-//! dev run passes `--module <id>`. A build without processes — the web,
+//! dev run passes `--module <id>`. `id: Jit` keeps the app a process but runs
+//! it under the JIT (`makepad run <package>`, `Runner::Jit`) instead of its
+//! release binary. A build without processes — the web,
 //! iOS, or a desktop all-in-one with `modules_only` — ignores the switch:
 //! everything is a module there.
 
@@ -24,6 +26,8 @@ use std::path::Path;
 pub enum Hosting {
     Process,
     Module,
+    /// A process running under the JIT: `makepad run <package>`.
+    Jit,
 }
 
 /// What a menu may offer to launch: the linked modules, and — where this
@@ -134,7 +138,17 @@ impl AppRegistry {
         }
         match self.overrides.get(id) {
             Some(Hosting::Module) if self.module(id).is_some() => Hosting::Module,
+            Some(Hosting::Jit) => Hosting::Jit,
             _ => Hosting::Process,
+        }
+    }
+
+    /// What runs a process launch of `id`: the JIT when the settings say `id: Jit`, else its
+    /// release binary.
+    pub fn runner(&self, id: &str) -> makepad_app_registry::Runner {
+        match self.hosting(id) {
+            Hosting::Jit => makepad_app_registry::Runner::Jit,
+            _ => makepad_app_registry::Runner::Native,
         }
     }
 
@@ -160,7 +174,7 @@ impl AppRegistry {
         Launchable { linked, processes: self.processes, mobile: self.mobile }
     }
 
-    /// `~/.makepad/wm/apps.splash`: one `id: Module` or `id: Process` per
+    /// `~/.makepad/wm/apps.splash`: one `id: Module`, `id: Process` or `id: Jit` per
     /// line, optionally inside `{ }`, commas and `//` comments allowed —
     /// the same shape as the theme files, small enough to read without
     /// the VM.
@@ -175,6 +189,7 @@ impl AppRegistry {
             let hosting = match hosting.trim().trim_matches(',').trim().to_lowercase().as_str() {
                 "module" => Hosting::Module,
                 "process" => Hosting::Process,
+                "jit" => Hosting::Jit,
                 _ => continue,
             };
             out.push((id.trim().to_lowercase(), hosting));
@@ -227,6 +242,21 @@ mod tests {
             AppRegistry::parse_overrides(text),
             vec![("sheets".to_string(), Hosting::Module), ("terminal".to_string(), Hosting::Process)]
         );
+    }
+
+    #[test]
+    fn a_jit_override_runs_the_process_under_the_jit() {
+        assert_eq!(AppRegistry::parse_overrides("{ Sandbox: Jit }"), vec![("sandbox".to_string(), Hosting::Jit)]);
+        let dir = std::env::temp_dir().join(format!("wm-apps-jit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("apps.splash");
+        std::fs::write(&settings, "sandbox: Jit\n").unwrap();
+        let registry = AppRegistry::load(&settings, &[], &build(false, false), true);
+        let _ = std::fs::remove_file(&settings);
+        let _ = std::fs::remove_dir(&dir);
+        assert_eq!(registry.hosting("sandbox"), Hosting::Jit);
+        assert_eq!(registry.runner("sandbox"), makepad_app_registry::Runner::Jit);
+        assert_eq!(registry.runner("terminal"), makepad_app_registry::Runner::Native);
     }
 
     #[test]

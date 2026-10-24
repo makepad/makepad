@@ -64,7 +64,7 @@ pub fn private_inc() -> &'static [u8] { PRIVATE_INC }
 /// The UI font (182 KB) as a static slice: read here and parsed by relax-diffpkg `font`.
 pub static FONT: &[u8] = include_bytes!("../../../../../../widgets/resources/IBMPlexSans-SemiBold.ttf");
 /// The same file through include_str!, a const include_bytes! and an array-typed static: relax-diffpkg
-/// `zone_swap` first uses them (and FONT, INC) after the compiler-zone swap.
+/// `late_tables` first uses them (and FONT, INC) after the run settled.
 pub static TEXT: &str = include_str!("lib.rs");
 pub const CINC: &[u8] = include_bytes!("lib.rs");
 pub static ARR: &[u8; CINC.len()] = include_bytes!("lib.rs");

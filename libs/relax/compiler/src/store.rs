@@ -1085,7 +1085,7 @@ static PROGRAMS: relax_session::sync::Mutex<Option<std::collections::BTreeMap<u6
 /// Records the stores program `key` uses, by role (a later call for the same program, after a
 /// live edit, replaces them).
 pub fn note_program(key: u64, roles: &std::collections::BTreeMap<String, String>) {
-    // copied on the kept heap: the caller's (a compiler zone's) is destroyed by a zone swap
+    // process state: copied on the kept heap
     let _k = crate::zone_alloc::kept();
     let roles: std::collections::BTreeMap<String, String> = roles.iter().map(|(r, n)| (r.as_str().to_owned(), n.as_str().to_owned())).collect();
     PROGRAMS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(key, roles);
