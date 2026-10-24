@@ -354,6 +354,7 @@ impl Renderer {
             None
         };
         let impostor_scale = self.impostor_scale;
+        let terrain_overlay_reach = self.terrain_overlay_reach;
         let occluder_focus = self.occluder.focus();
         // Dynamic lights. STATICS share one transient-only block (their
         // lamp light is baked; only the dl_split prefix reaches them, so a
@@ -573,7 +574,15 @@ impl Renderer {
                 // always inside the fade cone, which kept every ground tile
                 // on the discarding pipeline: hidden ground under a city
                 // then shaded in full (gpuperf lane, citydrive).
-                let ground = inst.model.starts_with("gen/surface/level-terrain") || inst.model.starts_with("gen/surface/level-road");
+                let terrain = inst.model.starts_with("gen/surface/level-terrain");
+                // A terrain tile's own distance: its vertices are in world
+                // space under an identity transform, so the copy's origin
+                // says nothing; the nearest point of its bounding sphere does.
+                let tile_distance = if terrain {
+                    let (center, radius) = variants::bounding_sphere(root.min, root.max, &inst.transform);
+                    ((center - eye).length() - radius).max(0.0)
+                } else { distance };
+                let ground = terrain || inst.model.starts_with("gen/surface/level-road");
                 let screen_clip = adjust.w > 0.5
                     || !ground && occluder_focus.is_some_and(|focus| {
                         let (center, radius) = variants::bounding_sphere(root.min, root.max, &inst.transform);
@@ -653,6 +662,11 @@ impl Renderer {
                 let impostor_at = impostor_shader.map_or(0.0, |_| layer_draws().filter_map(|l| l.4.surface.as_ref().map(|s| s.definition.impostor)).fold(0.0f32, f32::max) * impostor_scale);
                 for (geometry_id, texture, detail, dscale, material) in layer_draws().skip(layer_pass).take(1) {
                     let stand_in = material.surface.as_ref().is_some_and(|s| s.definition.impostor > 0.0);
+                    // A far terrain tile's paint overlays (alpha-cut layers over
+                    // the dominant one) only within the tier's reach.
+                    if terrain && tile_distance > terrain_overlay_reach && material.surface.as_ref().is_some_and(|s| s.definition.alpha_mode == 1) {
+                        continue;
+                    }
                     let mut layer_window = 0.0f32;
                     if impostor_at > 0.0 {
                         match chain_fade_windows(impostor_at, distance).filter(|_| window <= 0.0) {

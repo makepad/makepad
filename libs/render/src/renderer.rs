@@ -432,6 +432,8 @@ pub struct Renderer {
     /// The tier's grass radius multiplier and kept blade fraction.
     grass_radius_scale: f32,
     grass_density: f32,
+    /// The tier's reach of terrain paint overlays (quality_tier.rs).
+    terrain_overlay_reach: f32,
     graphics_tier: crate::quality_tier::GraphicsTier,
     grass_rings: [Vec<(f32, f32)>; 3],
     /// The PBR pipeline can draw this frame (`draw_models_inner`).
@@ -744,6 +746,7 @@ impl Default for Renderer {
             impostor_scale: crate::quality_tier::GraphicsTier::High.budget().impostor_scale,
             grass_radius_scale: 1.0,
             grass_density: 1.0,
+            terrain_overlay_reach: f32::MAX,
             graphics_tier: crate::quality_tier::GraphicsTier::High,
             grass_rings: Default::default(),
             pbr_ready: false,
