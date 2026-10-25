@@ -620,6 +620,12 @@ pub fn finish(u: &Unit) {
             return;
         }
     };
+    if !block_profile() && module_inline_on() {
+        let (sites, bodies) = module_inline(u, &mut funcs, &kept);
+        if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
+            eprintln!("wasm export: module inline: {sites} call sites inlined into {bodies} bodies");
+        }
+    }
     let hits = crate::coverage::export_hits(u, &union);
     // MAKEPAD_RUN_WASM_EXPORT_VARIANTS="a=opts;b=opts": one module per variant from this capture
     // (<path>.a.wasm, ...) for size work; else one module with MAKEPAD_RUN_WASM_OPT
@@ -734,8 +740,16 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
     // a provided crate holds, vtables), which the static walk from the entry does not see. A slot
     // that ran but is named only by direct calls its callers' later builds inlined is dropped.
     let mut seeds: Vec<u32> = roots.iter().map(|r| r.0).collect();
-    seeds.extend(forced.iter().copied());
-    if !block_profile() { seeds.extend(funcs.keys().copied()); }
+    if block_profile() || !module_inline_on() {
+        seeds.extend(forced.iter().copied());
+        if !block_profile() { seeds.extend(funcs.keys().copied()); }
+    } else {
+        // the module inliner's profile: what the module can still call -- the entry, the exports,
+        // every address taken (tables, vtables, callbacks) and the keep_reachable closures; a
+        // function every caller inlined is gone (its code ships in them: the manifest names it
+        // through their inline instances)
+        seeds.extend(funcs.keys().copied().filter(|id| (*id as usize) < u.fns.len() && crate::jit::keep_reachable(u, *id)));
+    }
     address_taken(u, funcs.values(), &mut seeds, &mut std::collections::HashSet::new());
     seeds.sort_unstable();
     seeds.dedup();
@@ -1285,6 +1299,152 @@ fn single_thread(name: &str) -> Option<HostBind> {
         "__relax_key_get" => HostBind::Builtin(Builtin::KeyGet),
         "__relax_key_set" => HostBind::Builtin(Builtin::KeySet),
         _ => return None,
+    })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum O3Policy {
+    Off,
+    Hot,
+    All,
+}
+
+/// MAKEPAD_RUN_WASM_EXPORT_FULL (default on): shipping bodies take O1's whole pipeline.
+pub(crate) fn full_o1() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_WASM_EXPORT_FULL").map_or(true, |v| v != "0"))
+}
+
+/// MAKEPAD_RUN_WASM_EXPORT_INLINE=1: the shipping module's own inlining (module_inline) and
+/// static reachability from the entry, exports and taken addresses.
+fn module_inline_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_WASM_EXPORT_INLINE").is_ok_and(|v| v != "0"))
+}
+
+/// The shipping module's inlining, as a size-first AOT compiler's: bottom-up over the direct-call
+/// graph of the final bodies (a callee is finished before its callers take it), small callees --
+/// no bigger than their call, small leaves, accessors and the iterator / Result helpers O1 leaves
+/// as calls in cold code and in user crates -- inline at every site; each changed body is
+/// simplified again. Returns (call sites inlined, bodies changed).
+fn module_inline(u: &Unit, funcs: &mut BTreeMap<u32, Func>, kept: &std::collections::BTreeSet<u32>) -> (usize, usize) {
+    use relax_backend::rir::Callee;
+    let options = u.prog.session.options.clone();
+    let up = crate::jit::current_unit();
+    let ro = Some(relax_backend::passes::RoReader::new(ro_read, up as usize));
+    // post-order over direct calls (iterative DFS; a back edge of a cycle is not followed)
+    let ids: Vec<u32> = funcs.keys().copied().filter(|id| kept.contains(id)).collect();
+    let mut state: HashMap<u32, u8> = HashMap::new();
+    let mut order: Vec<u32> = Vec::with_capacity(ids.len());
+    for &root in &ids {
+        if state.contains_key(&root) {
+            continue;
+        }
+        let mut stack: Vec<(u32, Vec<u32>)> = Vec::new();
+        let callees = |id: u32| -> Vec<u32> {
+            let mut v: Vec<u32> = funcs[&id].blocks.iter().flat_map(|b| &b.insts).filter_map(|i| match i {
+                Inst::Call(Callee::Fn(c), _, _) if *c != id && funcs.contains_key(c) => Some(*c),
+                _ => None,
+            }).collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        state.insert(root, 1);
+        stack.push((root, callees(root)));
+        while let Some((id, todo)) = stack.last_mut() {
+            match todo.pop() {
+                Some(c) => {
+                    if !state.contains_key(&c) {
+                        state.insert(c, 1);
+                        let cs = callees(c);
+                        stack.push((c, cs));
+                    }
+                }
+                None => {
+                    let id = *id;
+                    state.insert(id, 2);
+                    order.push(id);
+                    stack.pop();
+                }
+            }
+        }
+    }
+    // size-first (rustc -Oz's rule): a callee no bigger than its call (RULE_TINY), and a callee
+    // with one call site in the module whose address nothing takes (its body moves, the
+    // function goes): never a copy that grows the module
+    let mut site_count: HashMap<u32, usize> = HashMap::new();
+    for id in &ids {
+        for i in funcs[id].blocks.iter().flat_map(|b| &b.insts) {
+            if let Inst::Call(Callee::Fn(c) | Callee::CFn(c, _), _, _) = i {
+                *site_count.entry(*c).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut taken: Vec<u32> = Vec::new();
+    address_taken(u, funcs.values(), &mut taken, &mut std::collections::HashSet::new());
+    let taken: std::collections::HashSet<u32> = taken.into_iter().collect();
+    // ... a loop-free one only: a browser engine tiers a function up when it is called again (no
+    // on-stack replacement), so a callee's loop moved into a caller that runs once (a decode
+    // driver) stays in baseline code (mp3 decode: first run 3.3x slower when merged)
+    let loop_free = |f: &Func| relax_backend::regalloc::loop_depths(f, &relax_backend::regalloc::reachable(f)).iter().all(|d| *d == 0);
+    let single: std::collections::HashSet<u32> = site_count.iter().filter(|(c, n)| **n == 1 && !taken.contains(c)
+        && !((**c as usize) < u.fns.len() && crate::jit::keep_reachable(u, **c))
+        && funcs.get(c).is_some_and(|f| loop_free(f) && relax_codegen::opt::inst_count(f) <= 400)).map(|(c, _)| *c).collect();
+    let lim = relax_codegen::opt::InlineLimits { budget: usize::MAX / 4, leaf_insts: 0, leaf_blocks: 0, hint_insts: 0, chain_insts: 0, always_insts: 4000, free_any: false, ordered: false, hot_insts: 0, growth_limit: None };
+    let (mut sites, mut bodies) = (0usize, 0usize);
+    for id in order {
+        let Some(mut f) = funcs.remove(&id) else { continue };
+        let calls_any = f.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, Inst::Call(Callee::Fn(_), _, _)));
+        if calls_any {
+            let get = |c: u32| -> Option<(*const Func, u8)> {
+                funcs.get(&c).map(|g| (g as *const Func, if single.contains(&c) { relax_codegen::opt::ATTR_ALWAYS } else { 0u8 }))
+            };
+            let n = relax_codegen::opt::inline_calls(&options, &mut f, id, &get, &|_| true, &lim).len();
+            if n > 0 {
+                sites += n;
+                bodies += 1;
+                relax_backend::passes::simplify(&options, &mut f, ro, true, true);
+                relax_backend::passes::live_dce(&mut f);
+                relax_backend::passes::dce(&mut f);
+                relax_backend::passes::relayout(&mut f);
+            }
+        }
+        funcs.insert(id, f);
+    }
+    (sites, bodies)
+}
+
+/// The crate that defines slot `id` (a closure's or shim's owner's), "" for generated code.
+pub(crate) fn slot_crate(u: &Unit, id: u32) -> &str {
+    let mut owner = id;
+    loop {
+        match &u.fns[owner as usize].key {
+            crate::jit::FnKey::Inst(d, _) => return u.prog.syms.str(u.prog.crates[u.prog.def(*d).krate as usize].name),
+            crate::jit::FnKey::Closure(_, _, p) | crate::jit::FnKey::Plain(p) | crate::jit::FnKey::Sandbox(p)
+                if *p != owner && (*p as usize) < u.fns.len() => owner = *p,
+            _ => return "",
+        }
+    }
+}
+
+/// MAKEPAD_RUN_WASM_EXPORT_O3_CRATES=a,b: crates whose functions all take the O3 pipeline, as the
+/// rustc web build compiles its hot crates at opt-level 3 (default: the Splash VM, makepad_script,
+/// the old film exporter's HOT_CRATES).
+pub(crate) fn o3_crate(u: &Unit, id: u32) -> bool {
+    static C: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let crates = C.get_or_init(|| std::env::var("MAKEPAD_RUN_WASM_EXPORT_O3_CRATES").unwrap_or_else(|_| "makepad_script".to_string())
+        .split(',').filter(|c| !c.is_empty()).map(|c| c.replace('-', "_")).collect());
+    !crates.is_empty() && crates.iter().any(|c| c == slot_crate(u, id))
+}
+
+/// MAKEPAD_RUN_WASM_EXPORT_O3=hot|all|0: shipping bodies built by the JIT's O3 pipeline.
+pub(crate) fn o3_policy() -> O3Policy {
+    static P: std::sync::OnceLock<O3Policy> = std::sync::OnceLock::new();
+    *P.get_or_init(|| match std::env::var("MAKEPAD_RUN_WASM_EXPORT_O3").as_deref() {
+        Ok("0") | Ok("off") => O3Policy::Off,
+        Ok("all") => O3Policy::All,
+        _ => O3Policy::Hot,
     })
 }
 

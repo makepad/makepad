@@ -8180,12 +8180,28 @@ pub unsafe fn export_rir(up: *mut Unit, id: u32, optimized: bool) -> Result<rela
         if let Some(error) = (&mut *up).refused_by_check(owner) { return Err(error); }
     }
     if optimized || (&*up).fns[id as usize].rir.is_none() {
-        build_rir_mode(up, id, if optimized { RirMode::Normal } else { RirMode::Tier0 })?;
+        // MAKEPAD_RUN_WASM_EXPORT_FULL=0: shipping bodies as the trace's O1 (A/B)
+        let full = optimized && crate::wasm_export::full_o1();
+        let was = EXPORT_FULL.with(|c| c.replace(full));
+        let r = build_rir_mode(up, id, if optimized { RirMode::Normal } else { RirMode::Tier0 });
+        EXPORT_FULL.with(|c| c.set(was));
+        r?;
     }
+    // MAKEPAD_RUN_WASM_EXPORT_O3: which shipping bodies take the JIT's O3 pipeline: `hot`
+    // (default: the slots the trace ran at O3), `all`, `0` (none: normal O1 only)
+    let o3 = optimized && match crate::wasm_export::o3_policy() {
+        crate::wasm_export::O3Policy::Off => false,
+        crate::wasm_export::O3Policy::All => true,
+        crate::wasm_export::O3Policy::Hot => trace_o3(&*up, id) || crate::wasm_export::o3_crate(&*up, id),
+    };
+    let o3_body = if o3 { export_o3_rir(up, id) } else { None };
     let u = &*up;
     let session = u.prog.session.clone();
     let rir = u.fns[id as usize].rir.clone().ok_or("no RIR for this slot")?;
-    let mut f = tier0_codegen_rir(&session.options, &rir, u.opt.fold, u.opt.layout).into_owned();
+    let mut f = match o3_body {
+        Some(f) => f,
+        None => tier0_codegen_rir(&session.options, &rir, u.opt.fold, u.opt.layout).into_owned(),
+    };
     if optimized {
         // Instrumentation is not program semantics. Remove it before the final
         // simplification, so unused addresses and constant branches cannot seed
@@ -8204,6 +8220,34 @@ pub unsafe fn export_rir(up: *mut Unit, id: u32, optimized: bool) -> Result<rela
         f.verify().map_err(|e| format!("shipping RIR: {e}"))?;
     }
     Ok(f)
+}
+
+thread_local! {
+    /// export_o3_rir on this thread: Some(None) while compile_tier1 runs for it, Some(Some(f))
+    /// once it took the optimised RIR
+    static EXPORT_O3: std::cell::RefCell<Option<Option<relax_backend::rir::Func>>> = const { std::cell::RefCell::new(None) };
+}
+const EXPORT_O3_TAKEN: &str = "wasm export: O3 RIR taken";
+
+fn export_o3_mode() -> bool {
+    EXPORT_O3.try_with(|c| c.borrow().is_some()).unwrap_or(false)
+}
+
+/// The O3 RIR of slot `id` for a wasm export: the JIT's O3 build (its inline snapshot, PGO
+/// counts, the whole pipeline) without speculation guards or probes and without native code.
+/// None when O3 does not build it (no tier, refused, failed): the caller keeps normal RIR.
+pub unsafe fn export_o3_rir(up: *mut Unit, id: u32) -> Option<relax_backend::rir::Func> {
+    if (&*up).tier1.is_none() {
+        return None;
+    }
+    EXPORT_O3.with(|c| *c.borrow_mut() = Some(None));
+    let _ = compile_tier1(up, id);
+    EXPORT_O3.with(|c| c.borrow_mut().take().flatten())
+}
+
+/// The trace ran slot `id` hot enough for O3 code (or its source asks for O3 always).
+pub fn trace_o3(u: &Unit, id: u32) -> bool {
+    u.fns[id as usize].o3.load(Ordering::Relaxed)
 }
 
 thread_local! {
@@ -8263,6 +8307,17 @@ fn o2_release_later() {
 
 fn o2_build() -> bool {
     O2_BUILD.try_with(|c| c.get()).unwrap_or(false)
+}
+
+thread_local! {
+    /// a wasm export's shipping build on this thread (export_rir): normal RIR is built as O1 builds
+    /// without O3 (`Func::full`: the whole O1 pipeline, Relax core's helpers inlined everywhere),
+    /// its inline candidates too -- an AOT build, not a tier below a JIT's O3
+    static EXPORT_FULL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn export_full() -> bool {
+    EXPORT_FULL.try_with(|c| c.get()).unwrap_or(false)
 }
 
 /// `#[relax(O2)]` slots waiting for their O2 build: (unit, slot)
@@ -9390,7 +9445,7 @@ unsafe fn build_rir_unguarded(up: *mut Unit, id: u32, mode: RirMode) -> Result<(
     {
         let u = &mut *up;
         if let Some(r) = &u.fns[id as usize].rir {
-            let to_o2 = normal && o2_build() && !r.full;
+            let to_o2 = normal && (o2_build() || export_full()) && !r.full;
             if !normal || !(upgradable(r) || to_o2) || u.fns[id as usize].building || u.fns[id as usize].inflight {
                 return Ok(());
             }
@@ -9601,7 +9656,7 @@ unsafe fn prepare_rir_from(up: *mut Unit, id: u32, defer: bool, lowered: Option<
     }
     // O2: a `#[relax(O2)]` fn built by the O2 worker (o2_thread) compiles as O1 does without
     // O3; its on-demand builds on the program's threads stay O1
-    let full = !baseline && o2_build() && marked_hot(u, id);
+    let full = !baseline && (o2_build() && marked_hot(u, id) || export_full());
     func.full = full;
     let mut cfg = u.opt;
     if baseline {
@@ -15934,7 +15989,7 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
         }
         // speculation: sites of this slot that finished profiling are decided now; the guessed
         // targets join the snapshot (their RIR inlines into the guarded call)
-        if crate::guards::enabled() && !sandboxed && !(&*up).fns[id as usize].unverified.load(Ordering::Relaxed) {
+        if crate::guards::enabled() && !sandboxed && !export_o3_mode() && !(&*up).fns[id as usize].unverified.load(Ordering::Relaxed) {
             let u = &*up;
             let slots = crate::guards::decide(id, &|a| u.thunk_slot(a));
             for &(_, s) in &slots {
@@ -16400,6 +16455,12 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
         let verified = func.verify();
         relax_backend::stats::pass_time(13, tv);
         verified.map_err(|e| format!("RIR verify after O3: {}", e))?;
+        // a wasm export's O3 body (export_o3_rir): the optimised RIR is the result, no native code
+        if export_o3_mode() {
+            let f = crate::zone_alloc::kept_with(|| func.clone());
+            EXPORT_O3.with(|c| *c.borrow_mut() = Some(Some(f)));
+            return Err(EXPORT_O3_TAKEN.to_string());
+        }
         let freq = match &t1_freq {
             Some(_) if counts.is_some() => {
                 counted_freqs(&mut func)
@@ -16554,6 +16615,9 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
         let (left, cold_left, absent, inlined, nounwind_used) = crate::zone_alloc::copy_out(|| (left.clone(), cold_left.clone(), absent.clone(), inlined.clone(), nounwind_used.clone()));
         Ok((c.code, c.pc_map, c.relocs, (inlined, left, cold_left, absent, c.frame_size, self_call, nounwind_used, profile_entry)))
     }));
+    if export_o3_mode() {
+        return false;
+    }
     let t2 = cpu_ns();
     if let Some(m) = measure.as_mut() { m.phase(2, t2); }
     trace_tier1_phase(id, "built");

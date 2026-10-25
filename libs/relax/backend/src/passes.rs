@@ -1199,8 +1199,11 @@ pub fn simplify(options: &relax_session::Options, f: &mut Func, ro: Option<RoRea
         // variable assigned only masked values stays narrow): 0 = no definition seen yet,
         // 64 = unknown; a fixpoint below
         let mut zw: Vec<u8> = vec![0; nv];
+        // wasm32: a reference parameter is an address in the 4 GB linear memory
+        let w32 = options.check_target.web() == Some(relax_session::options::PtrWidth::W32);
         for p in &f.params {
-            zw[p.0 as usize] = 64;
+            let reference = f.nonnull.contains(p) || f.deref.iter().any(|(d, _)| d == p);
+            zw[p.0 as usize] = if w32 && reference { 32 } else { 64 };
         }
         // vregs read only by arithmetic and stores (not by copies, compares, selects or
         // terminators, where a select of constants feeds the Ordering / phi folds): a 0/1 select
@@ -1278,6 +1281,22 @@ pub fn simplify(options: &relax_session::Options, f: &mut Func, ro: Option<RoRea
                     };
                     match i {
                         Inst::Load(Mem::Int(n, false), d, ..) | Inst::LoadX(Mem::Int(n, false), d, ..) => set(*d, (*n * 8).min(64), &mut zw),
+                        // wasm32: a stack slot's address is an offset in the 4 GB linear memory (the
+                        // frame pointer's; web32 transform, wasm frames), so its zero-extension is
+                        // the address itself and slot promotion still sees the slot
+                        Inst::SlotAddr(d, _) if w32 => set(*d, 32, &mut zw),
+                        // an unsigned narrow op's result is re-extended to its type
+                        Inst::IBin(IOp::Add | IOp::Sub | IOp::Mul | IOp::Shl | IOp::Shr | IOp::Div | IOp::Rem | IOp::Rotl, it, d, ..)
+                        | Inst::IBinI(IOp::Add | IOp::Sub | IOp::Mul | IOp::Shl | IOp::Shr | IOp::Div | IOp::Rem | IOp::Rotl, it, d, ..)
+                        | Inst::INeg(it, d, _) | Inst::INot(it, d, _) if !it.signed && it.bits < 64 => set(*d, it.bits, &mut zw),
+                        Inst::IBin(IOp::And, _, d, x, y) => {
+                            let b = w(x, &zw).min(w(y, &zw));
+                            set(*d, b, &mut zw)
+                        }
+                        Inst::IBin(IOp::Or | IOp::Xor, _, d, x, y) => {
+                            let b = w(x, &zw).max(w(y, &zw));
+                            set(*d, b, &mut zw)
+                        }
                         Inst::Conv(Conv::IntToInt(t), d, x) if !t.signed => {
                             let b = t.bits.min(w(x, &zw).max(1));
                             set(*d, if w(x, &zw) == 0 { 0 } else { b }, &mut zw)
@@ -1996,7 +2015,7 @@ pub fn simplify(options: &relax_session::Options, f: &mut Func, ro: Option<RoRea
         let t = pass_clock();
         thread_jumps(f);
         trace_opt(f, "dce+jumps");
-        changed |= ic_nn && fold_nonnull(f);
+        changed |= ic_nn && fold_nonnull_for(f, options.check_target.web() == Some(relax_session::options::PtrWidth::W32));
         if !opt_off(options, "-unfoldsel") {
             changed |= unfold_branch_selects(f);
         }
@@ -2594,6 +2613,12 @@ pub const THREAD_MAX_INSTS: usize = 8;
 /// params, in-bounds pointer arithmetic from a non-null base, and
 /// a vreg all of whose definitions are non-null (a loop's pointer cell: start, then +4).
 pub fn fold_nonnull(f: &mut Func) -> bool {
+    fold_nonnull_for(f, false)
+}
+
+/// fold_nonnull; `w32`: pointers are 32-bit (wasm32), so 32-bit unsigned address arithmetic
+/// (the pointer's width) keeps a non-null base non-null as 64-bit arithmetic does.
+pub fn fold_nonnull_for(f: &mut Func, w32: bool) -> bool {
     let nv = f.vregs.len();
     // optimistic: every vreg some definition could make non-null starts as such; a definition
     // that is not removes it, to a fixpoint
@@ -2632,11 +2657,12 @@ pub fn fold_nonnull(f: &mut Func) -> bool {
                 let ok = |nn: &[bool]| -> bool {
                     match i {
                         Inst::SlotAddr(..) | Inst::Addr(..) | Inst::FnAddr(..) => true,
-                        Inst::Load(Mem::Int(8, _), d, ..) | Inst::LoadX(Mem::Int(8, _), d, ..) => marked[d.0 as usize],
+                        // a pointer-sized load lowering marked (8 bytes; 4 on wasm32)
+                        Inst::Load(Mem::Int(8 | 4, _), d, ..) | Inst::LoadX(Mem::Int(8 | 4, _), d, ..) => marked[d.0 as usize],
                         Inst::Mov(_, x) => nn[x.0 as usize],
                         // Integer constants (even nonzero ones) never seed this rule:
                         // the base must trace back to one of the pointer leaves above.
-                        Inst::IBinI(IOp::Add, it, _, x, _) | Inst::IBin(IOp::Add, it, _, x, _) => it.bits == 64 && nn[x.0 as usize],
+                        Inst::IBinI(IOp::Add, it, _, x, _) | Inst::IBin(IOp::Add, it, _, x, _) => (it.bits == 64 || w32 && it.bits == 32 && !it.signed) && nn[x.0 as usize],
                         Inst::Sel(_, _, x, y) => nn[x.0 as usize] && nn[y.0 as usize],
                         _ => false,
                     }

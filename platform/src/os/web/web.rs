@@ -1526,6 +1526,8 @@ impl Cx {
                     self.action(FileDialogAction::FileCancelled { id: dialog.id });
                     self.handle_actions();
                 }
+                // a page has no window chrome: the app-drawn caption's hit regions name nothing
+                CxOsOp::SetWindowCaption(..) => {}
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 } /*
