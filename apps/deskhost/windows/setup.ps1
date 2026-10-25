@@ -1,31 +1,51 @@
 # Desk Host setup, all in one: installs the built host, writes its settings (served only to the
-# listed viewer addresses), registers the at-logon task in this user's session and the inbound
-# firewall rule, then starts it. Asks for elevation itself (one UAC prompt).
+# listed viewer addresses), registers the at-logon task in this user's session, the console task
+# and the inbound firewall rule, then starts it. Asks for elevation itself (one UAC prompt).
 #   powershell -ep bypass -f setup.ps1 [-Exe <built exe>] [-Peers 10.0.0.222] [-Port 8790]
-# Undo: Unregister-ScheduledTask -TaskName "Makepad Desk Host"; Remove-NetFirewallRule -DisplayName "Makepad Desk Host"
+#   -SettingsOnly: rewrites deskhost.conf (and the firewall rule's peers) and restarts the host
+# Undo: Unregister-ScheduledTask -TaskName "Makepad Desk Host"; Unregister-ScheduledTask -TaskName "Makepad Desk Host console"
+#       Remove-NetFirewallRule -DisplayName "Makepad Desk Host"
+#
+# The console task: desktop duplication and the GPU's encoder need the session on the console.
+# A session shown over Remote Desktop (or disconnected from it) has no GPU output, so when a
+# viewer wants to watch it, the host runs "Makepad Desk Host console" (as SYSTEM: tscon of the
+# host's session to the console; this user may run it, nobody else). The Remote Desktop client
+# is disconnected; the desktop and its apps stay as they are.
 param(
-    [string]$Exe = "$env:USERPROFILE\rc\rdesk\target\release\makepad-app-deskhost.exe",
+    [string]$Exe = "$env:USERPROFILE\rc\windesk\target\release\makepad-app-deskhost.exe",
     [string[]]$Peers = @("10.0.0.222"),
     [int]$Port = 8790,
-    [string]$ForUser = "$env:USERDOMAIN\$env:USERNAME",
-    [string]$ForProfile = $env:USERPROFILE
+    [int]$Fps = 120,
+    [string]$ForUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name,
+    [string]$ForProfile = $env:USERPROFILE,
+    [switch]$SettingsOnly
 )
 $ErrorActionPreference = "Stop"
+$Peers = @($Peers | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $admin) {
     # the elevated copy acts for this user and this profile
-    $a = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Exe `"$Exe`" -Port $Port -ForUser `"$ForUser`" -ForProfile `"$ForProfile`" -Peers $($Peers -join ',')"
+    $a = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Exe `"$Exe`" -Port $Port -Fps $Fps -ForUser `"$ForUser`" -ForProfile `"$ForProfile`" -Peers $($Peers -join ',')"
+    if ($SettingsOnly) { $a += " -SettingsOnly" }
     Start-Process powershell -Verb RunAs -Wait -ArgumentList $a
     exit
 }
-if (-not (Test-Path $Exe)) { throw "no Desk Host build at $Exe" }
+$task = "Makepad Desk Host"
+$consoleTask = "Makepad Desk Host console"
+$dir = Join-Path $ForProfile "AppData\Local\Makepad\DeskHost"
+$installed = Join-Path $dir "makepad-app-deskhost.exe"
+Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue | Stop-ScheduledTask -ErrorAction SilentlyContinue
+# the at-logon task's process outlives Stop-ScheduledTask when it was started by hand
+$running = @(Get-Process -Name makepad-app-deskhost -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $installed })
+$running | Stop-Process -Force -ErrorAction SilentlyContinue
+$running | ForEach-Object { $_.WaitForExit(10000) | Out-Null }
 
 # 1. the installed copy (rebuilds in the build folder do not touch the running host)
-$dir = Join-Path $ForProfile "AppData\Local\Makepad\DeskHost"
-New-Item -ItemType Directory -Force -Path $dir | Out-Null
-Get-ScheduledTask -TaskName "Makepad Desk Host" -ErrorAction SilentlyContinue | Stop-ScheduledTask -ErrorAction SilentlyContinue
-$installed = Join-Path $dir "makepad-app-deskhost.exe"
-Copy-Item -Force $Exe $installed
+if (-not $SettingsOnly) {
+    if (-not (Test-Path $Exe)) { throw "no Desk Host build at $Exe" }
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    Copy-Item -Force $Exe $installed
+}
 
 # 2. settings: this machine's LAN address, the viewers' addresses only
 $home_ = Join-Path $ForProfile ".makepad"
@@ -39,21 +59,42 @@ if (-not (Test-Path (Join-Path $fleet "fleet.key"))) { Write-Warning "no fleet k
     "enabled = on",
     "host = $ip",
     "port = $Port",
+    "fps = $Fps",
     "allow_peers = $($Peers -join ', ')"
 ) | Set-Content -Encoding ascii (Join-Path $home_ "deskhost.conf")
 
-# 3. at logon, in this user's interactive session (desktop duplication needs it)
-$action = New-ScheduledTaskAction -Execute $installed -WorkingDirectory $dir
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $ForUser
-$principal = New-ScheduledTaskPrincipal -UserId $ForUser -LogonType Interactive -RunLevel Limited
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-    -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-Register-ScheduledTask -TaskName "Makepad Desk Host" -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+if (-not $SettingsOnly) {
+    # 3. at logon, in this user's interactive session (desktop duplication needs it)
+    $action = New-ScheduledTaskAction -Execute $installed -WorkingDirectory $dir
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $ForUser
+    $principal = New-ScheduledTaskPrincipal -UserId $ForUser -LogonType Interactive -RunLevel Limited
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+        -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+    Register-ScheduledTask -TaskName $task -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
 
-# 4. inbound TCP from the viewers only, private networks only
+    # 4. the console task: SYSTEM moves the host's session to the console; only this user (and
+    #    administrators) may run it
+    $sid = (New-Object Security.Principal.NTAccount($ForUser)).Translate([Security.Principal.SecurityIdentifier]).Value
+    $svc = New-Object -ComObject Schedule.Service
+    $svc.Connect()
+    $def = $svc.NewTask(0)
+    $def.RegistrationInfo.Description = "Moves the Desk Host user's session to the console so a Desk Link viewer can watch it (desktop duplication needs the console)."
+    $def.Settings.AllowDemandStart = $true
+    $def.Settings.DisallowStartIfOnBatteries = $false
+    $def.Settings.StopIfGoingOnBatteries = $false
+    $def.Settings.ExecutionTimeLimit = "PT1M"
+    $def.Settings.MultipleInstances = 2  # ignore a second request while one runs
+    $act = $def.Actions.Create(0)
+    $act.Path = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+    $act.Arguments = "-NoProfile -NonInteractive -Command `"`$p = Get-Process -Name makepad-app-deskhost -ErrorAction Stop | Where-Object { `$_.Path -eq '$installed' } | Select-Object -First 1; & `$env:SystemRoot\System32\tscon.exe `$p.SessionId /dest:console`""
+    $sddl = "D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;$sid)"
+    $svc.GetFolder("\").RegisterTaskDefinition($consoleTask, $def, 6, "SYSTEM", $null, 5, $sddl) | Out-Null
+}
+
+# 5. inbound TCP from the viewers only (any network profile: the rule names the peers)
 Remove-NetFirewallRule -DisplayName "Makepad Desk Host" -ErrorAction SilentlyContinue
 New-NetFirewallRule -DisplayName "Makepad Desk Host" -Direction Inbound -Action Allow -Protocol TCP `
-    -LocalPort $Port -RemoteAddress $Peers -Program $installed -Profile Private | Out-Null
+    -LocalPort $Port -RemoteAddress $Peers -Program $installed -Profile Any | Out-Null
 
-Start-ScheduledTask -TaskName "Makepad Desk Host"
-Write-Host "Desk Host serves $ip`:$Port to $($Peers -join ', ') (log: $home_\deskhost.log)"
+Start-ScheduledTask -TaskName $task
+Write-Host "Desk Host serves $ip`:$Port to $($Peers -join ', ') (log: $home_\deskhost.log, status: $home_\deskhost.status)"

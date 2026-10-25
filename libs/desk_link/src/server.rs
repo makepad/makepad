@@ -358,6 +358,12 @@ impl Server {
     }
 }
 
+/// `MAKEPAD_DESK_LINK_TRACE=1`: every message written is logged (type, size, result).
+fn trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MAKEPAD_DESK_LINK_TRACE").is_some_and(|v| v == "1"))
+}
+
 struct SessionCtx {
     session: u32,
     peer: SocketAddr,
@@ -479,10 +485,11 @@ impl SessionCtx {
             out: out_tx,
             backlog: backlog.clone(),
         });
-        // steady state: short reads, writes in between
-        let tcp = stream.try_clone_tcp().map_err(|e| e.to_string())?;
-        tcp.set_read_timeout(Some(Duration::from_millis(1))).map_err(|e| e.to_string())?;
-        tcp.set_write_timeout(Some(Duration::from_millis(5))).map_err(|e| e.to_string())?;
+        // steady state: short reads, writes in between. Set on the TLS stream's own socket: on
+        // Windows a duplicated handle's SO_RCVTIMEO does not reach the stream's reads, which then
+        // block until the viewer sends (its 1 s ping), and nothing queued was ever written.
+        stream.set_read_timeout(Some(Duration::from_millis(1))).map_err(|e| e.to_string())?;
+        stream.set_write_timeout(Some(Duration::from_millis(5))).map_err(|e| e.to_string())?;
         loop {
             if self.stop.load(Ordering::Acquire) {
                 let _ = proto::write_all(&mut stream, &ServerMsg::Bye { reason: "the desktop stopped serving".into() }.encode());
@@ -490,7 +497,13 @@ impl SessionCtx {
             }
             loop {
                 match out_rx.try_recv() {
-                    Ok(Out::Msg(bytes)) => proto::write_all(&mut stream, &bytes).map_err(|e| format!("write: {e}"))?,
+                    Ok(Out::Msg(bytes)) => {
+                        let r = proto::write_all(&mut stream, &bytes);
+                        if trace() {
+                            (self.log)(&format!("desk link session {}: message type {} ({} bytes) written: {r:?}", self.session, bytes.first().copied().unwrap_or(0), bytes.len()));
+                        }
+                        r.map_err(|e| format!("write: {e}"))?
+                    }
                     Ok(Out::Video(mut bytes)) => {
                         // one picture: its parts' messages back to back, stamped as they go out
                         proto::stamp_videos(&mut bytes, (self.clock)());

@@ -772,7 +772,7 @@ impl WindowsVideoFileDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{VideoMatrix, VideoPrimaries, VideoTransfer};
+    use crate::{VideoMatrix, VideoPrimaries, VideoRange, VideoTransfer};
 
     #[test]
     fn mf_codes_map_to_video_color() {

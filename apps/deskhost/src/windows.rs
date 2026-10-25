@@ -4,17 +4,27 @@
 //!
 //! The duplicated frame is copied, on the GPU, into a keyed-mutex shared texture named the way
 //! the HAL names its shared textures (`Local\makepad-hal-<pid>-<serial>`), which the stream
-//! encoder (`makepad_video`, Windows backend: `makepad_hal::shared_texture`) reads by its key:
-//! the encoder's device is this host's device, the GPU of the desktop.
+//! encoder (`makepad_video`, Windows backend: `makepad_hal::shared_texture`) reads by its key on
+//! its own device. The capture has a device of its own on the output's GPU: a duplication waits
+//! in AcquireNextFrame (up to its timeout) holding its device's lock, and the encoder's calls on
+//! a shared device waited behind it (pictures took 100-300 ms instead of a few).
 //!
 //! Duplication works only in the logged-in user's interactive session (winsta0\default), never
-//! in session 0: the host runs from an at-logon task of the user.
+//! in session 0: the host runs from an at-logon task of the user. It also needs the session on
+//! the console: a session shown over Remote Desktop has only the remote display adapter (no GPU
+//! output, no hardware encoder), a disconnected one no display at all. When a viewer wants to
+//! watch such a session, the host runs the task `Makepad Desk Host console` (installed by
+//! setup.ps1, runs as SYSTEM: `tscon <session> /dest:console`), which moves it to the console:
+//! the Remote Desktop client is disconnected, the desktop and its apps stay as they are.
+//!
+//! The process is per-monitor DPI aware: the duplication's desktop coordinates, the cursor's
+//! position and SendInput's virtual desktop are all physical pixels.
 
 use crate::{log, Desktop, Frame};
 use makepad_desk_link::server::{Input, InputFactory};
 use makepad_desk_link::{button, GamepadState, ScreenInfo};
 use makepad_windows_sys as windows;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::RECT;
@@ -45,6 +55,11 @@ impl Drop for Slot {
 }
 
 fn outputs() -> Vec<(IDXGIOutput, DXGI_OUTPUT_DESC)> {
+    adapter_outputs().into_iter().map(|(_, o, d)| (o, d)).collect()
+}
+
+/// The desktop's outputs with the GPU each is on.
+fn adapter_outputs() -> Vec<(IDXGIAdapter1, IDXGIOutput, DXGI_OUTPUT_DESC)> {
     let mut out = Vec::new();
     unsafe {
         let Ok(raw) = CreateDXGIFactory1(&IDXGIFactory1::IID) else { return out };
@@ -65,7 +80,7 @@ fn outputs() -> Vec<(IDXGIOutput, DXGI_OUTPUT_DESC)> {
                 let Some(output) = output else { break };
                 if let Ok(desc) = output.GetDesc() {
                     if desc.AttachedToDesktop.as_bool() {
-                        out.push((output, desc));
+                        out.push((adapter.clone(), output, desc));
                     }
                 }
                 o += 1;
@@ -90,10 +105,26 @@ pub struct WinDesktop {
     /// The streamed output's rectangle on the virtual desktop (pixels).
     target: Arc<Mutex<RECT>>,
     cursors: Vec<(isize, &'static str)>,
+    /// The captured screen's refresh (Hz, from its duplication; 0 until known) and its index.
+    hz: Arc<AtomicU32>,
+    captured: Option<usize>,
 }
+
+/// The session is shown over Remote Desktop (or is disconnected from it), not on the console.
+fn remote_session() -> bool {
+    // SM_REMOTESESSION
+    unsafe { GetSystemMetrics(SYSTEM_METRICS_INDEX(0x1000)) != 0 }
+}
+
+/// The scheduled task that moves this user's session to the console (setup.ps1).
+const CONSOLE_TASK: &str = "Makepad Desk Host console";
 
 impl WinDesktop {
     pub fn new() -> WinDesktop {
+        // physical pixels everywhere (capture, cursor, input); fails only when already set
+        unsafe {
+            let _ = windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
         let mut cursors = Vec::new();
         for (id, shape) in [
             (IDC_ARROW, "Default"),
@@ -112,33 +143,80 @@ impl WinDesktop {
                 cursors.push((c.0 as isize, shape));
             }
         }
-        WinDesktop { capture: None, target: Arc::new(Mutex::new(RECT::default())), cursors }
+        WinDesktop { capture: None, target: Arc::new(Mutex::new(RECT::default())), cursors, hz: Arc::new(AtomicU32::new(0)), captured: None }
     }
 }
 
 /// The capture thread: duplication of `output` into the shared slot, a frame per new picture.
-fn capture_loop(output: IDXGIOutput, frames: Sender<Frame>, stop: Arc<AtomicBool>) -> Result<(), String> {
+/// The refresh rate of a duplication's mode, rounded (Hz).
+unsafe fn mode_hz(dup: &IDXGIOutputDuplication) -> u32 {
+    let mut d = DXGI_OUTDUPL_DESC::default();
+    dup.GetDesc(&mut d);
+    let r = d.ModeDesc.RefreshRate;
+    if r.Denominator == 0 { 0 } else { (r.Numerator + r.Denominator / 2) / r.Denominator }
+}
+
+fn capture_loop(adapter: IDXGIAdapter1, output: IDXGIOutput, frames: Sender<Frame>, stop: Arc<AtomicBool>, hz: Arc<AtomicU32>) -> Result<(), String> {
     unsafe {
-        let device = makepad_hal::shared_texture::device()?;
-        let ctx = device.GetImmediateContext().map_err(|e| format!("GetImmediateContext: {e:?}"))?;
+        use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1};
+        let mut device: Option<ID3D11Device> = None;
+        let mut ctx: Option<ID3D11DeviceContext> = None;
+        D3D11CreateDevice(
+            Some(adapter.as_IDXGIAdapter()),
+            D3D_DRIVER_TYPE_UNKNOWN,
+            None,
+            D3D11_CREATE_DEVICE_FLAG(D3D11_CREATE_DEVICE_BGRA_SUPPORT.0),
+            Some(&[D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0]),
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            Some(&mut ctx),
+        )
+        .map_err(|e| format!("D3D11CreateDevice (capture): {e:?}"))?;
+        let device = device.ok_or("D3D11CreateDevice (capture) returned no device")?;
+        let ctx = ctx.ok_or("D3D11CreateDevice (capture) returned no context")?;
         let output1 = IDXGIOutput1::query(output.as_raw()).map_err(|e| format!("IDXGIOutput1: {e:?}"))?;
-        let mut dup = output1.DuplicateOutput(device.as_IUnknown()).map_err(|e| format!("DuplicateOutput: {e:?} (the host must run in the user's session, on the desktop's GPU)"))?;
+        let mut dup = Some(output1.DuplicateOutput(device.as_IUnknown()).map_err(|e| format!("DuplicateOutput: {e:?} (the host must run in the user's session, on the desktop's GPU)"))?);
+        hz.store(mode_hz(dup.as_ref().unwrap()), Ordering::Release);
         let mut serial = 0u64;
         let mut slot: Option<Slot> = None;
+        let mut said = String::new();
         while !stop.load(Ordering::Acquire) {
+            // lost (a mode change, the secure desktop of a UAC prompt or the lock screen, the
+            // session gone to Remote Desktop): duplicate again until it works
+            let Some(d) = dup.as_ref() else {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                match output1.DuplicateOutput(device.as_IUnknown()) {
+                    Ok(d) => {
+                        hz.store(mode_hz(&d), Ordering::Release);
+                        if !said.is_empty() {
+                            log("capture: the screen is back");
+                            said.clear();
+                        }
+                        dup = Some(d);
+                    }
+                    Err(e) => {
+                        let why = if remote_session() { "the session is on Remote Desktop".to_string() } else { format!("{e:?}") };
+                        if why != said {
+                            log(&format!("capture: waits for the screen ({why})"));
+                            said = why;
+                        }
+                    }
+                }
+                continue;
+            };
             let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut resource: Option<IDXGIResource> = None;
-            match dup.AcquireNextFrame(100, &mut info, &mut resource) {
+            match d.AcquireNextFrame(100, &mut info, &mut resource) {
                 Ok(()) => {}
                 Err(e) if e == DXGI_ERROR_WAIT_TIMEOUT => continue,
-                Err(e) if e == DXGI_ERROR_ACCESS_LOST => {
-                    // a mode change, the secure desktop: duplicate again
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    dup = output1.DuplicateOutput(device.as_IUnknown()).map_err(|e| format!("DuplicateOutput: {e:?}"))?;
+                Err(e) if e == DXGI_ERROR_ACCESS_LOST || e == DXGI_ERROR_INVALID_CALL => {
+                    dup = None;
                     continue;
                 }
                 Err(e) => return Err(format!("AcquireNextFrame: {e:?}")),
             }
+            let d = dup.as_ref().unwrap();
             // a pointer-only update has no new picture
             if info.LastPresentTime != 0 {
                 if let Some(resource) = resource {
@@ -159,7 +237,7 @@ fn capture_loop(output: IDXGIOutput, frames: Sender<Frame>, stop: Arc<AtomicBool
                     }
                 }
             }
-            let _ = dup.ReleaseFrame();
+            let _ = d.ReleaseFrame();
         }
     }
     Ok(())
@@ -204,25 +282,56 @@ impl Desktop for WinDesktop {
             .collect()
     }
 
+    /// A session not on the console moves there (the task `Makepad Desk Host console`), and the
+    /// host waits for it (10 s at most).
+    fn prepare_watch(&mut self) -> Result<(), String> {
+        if !remote_session() {
+            return Ok(());
+        }
+        log("the session is on Remote Desktop (or disconnected): moving it to the console for the viewer");
+        let ran = std::process::Command::new("schtasks.exe").args(["/run", "/tn", CONSOLE_TASK]).output();
+        match ran {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => return Err(format!("this session is on Remote Desktop, and the task '{CONSOLE_TASK}' that moves it to the console did not run ({}): run setup.ps1 again", String::from_utf8_lossy(&o.stderr).trim())),
+            Err(e) => return Err(format!("this session is on Remote Desktop, and schtasks.exe did not start: {e}")),
+        }
+        let since = std::time::Instant::now();
+        while remote_session() {
+            if since.elapsed() > std::time::Duration::from_secs(10) {
+                return Err("this session is on Remote Desktop and did not move to the console (10 s)".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        // the console's outputs come up after the session moved
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        log("the session is on the console");
+        Ok(())
+    }
+
     fn capture(&mut self, index: usize, _fps: u32, frames: Sender<Frame>) -> Result<(), String> {
         self.stop_capture();
-        let mut list = outputs();
+        let mut list = adapter_outputs();
         if index >= list.len() {
             return Err("no such screen".into());
         }
-        let (output, desc) = list.swap_remove(index);
+        let (adapter, output, desc) = list.swap_remove(index);
         *self.target.lock().unwrap() = desc.DesktopCoordinates;
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = stop.clone();
+        let hz = self.hz.clone();
+        if self.captured != Some(index) {
+            hz.store(0, Ordering::Release);
+        }
+        self.captured = Some(index);
         // COM objects move to the thread that alone uses them
-        struct SendOutput(IDXGIOutput);
+        struct SendOutput(IDXGIAdapter1, IDXGIOutput);
         unsafe impl Send for SendOutput {}
-        let output = SendOutput(output);
+        let output = SendOutput(adapter, output);
         let thread = std::thread::Builder::new()
             .name("deskhost-capture".into())
             .spawn(move || {
                 let output = output;
-                if let Err(e) = capture_loop(output.0, frames, stop2) {
+                if let Err(e) = capture_loop(output.0, output.1, frames, stop2, hz) {
                     log(&format!("capture: {e}"));
                 }
             })
@@ -239,6 +348,10 @@ impl Desktop for WinDesktop {
                 let _ = t.join();
             }
         }
+    }
+
+    fn refresh(&mut self, index: usize) -> u32 {
+        if self.captured == Some(index) { self.hz.load(Ordering::Acquire) } else { 0 }
     }
 
     fn cursor(&mut self, _index: usize) -> (u16, u16, bool, u8) {
@@ -307,7 +420,7 @@ impl WinInput {
             r#type: INPUT_MOUSE,
             Anonymous: INPUT_0 { mi: MOUSEINPUT { dx, dy, mouseData: data, dwFlags: MOUSE_EVENT_FLAGS(flags), time: 0, dwExtraInfo: 0 } },
         };
-        unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
+        sent(unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) });
     }
 
     fn keyboard(&self, vk: u16, extended: bool, down: bool) {
@@ -319,7 +432,20 @@ impl WinInput {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VIRTUAL_KEY(vk), wScan: 0, dwFlags: KEYBD_EVENT_FLAGS(flags), time: 0, dwExtraInfo: 0 } },
         };
-        unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
+        sent(unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) });
+    }
+}
+
+/// SendInput's answer: 0 when Windows blocked the input (the secure desktop of a UAC prompt or
+/// the lock screen, a window of a higher integrity level in front), said once per blocked run.
+fn sent(n: u32) {
+    static BLOCKED: AtomicBool = AtomicBool::new(false);
+    if n == 0 {
+        if !BLOCKED.swap(true, Ordering::AcqRel) {
+            log("input: Windows blocks it now (a UAC prompt or the lock screen, or an elevated window in front)");
+        }
+    } else if BLOCKED.swap(false, Ordering::AcqRel) {
+        log("input: taken again");
     }
 }
 

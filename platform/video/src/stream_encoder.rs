@@ -258,6 +258,15 @@ impl VideoStreamEncoder {
         self.os.set_bitrate_kbps(kbps);
     }
 
+    /// The last shared-texture picture's stages in µs, where the platform splits them (Windows:
+    /// copy out of the shared slot, NV12 conversion, encode); zeros elsewhere.
+    pub fn stages(&self) -> [u32; 3] {
+        #[cfg(target_os = "windows")]
+        return self.os.stages();
+        #[cfg(not(target_os = "windows"))]
+        return [0; 3];
+    }
+
     /// What encodes (codec, size, rate, device), for logs and status lines.
     pub fn description(&self) -> String {
         #[cfg(any(target_os = "linux", target_os = "windows"))]

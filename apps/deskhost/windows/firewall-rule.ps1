@@ -10,5 +10,5 @@ param(
 $ErrorActionPreference = "Stop"
 Remove-NetFirewallRule -DisplayName "Makepad Desk Host" -ErrorAction SilentlyContinue
 New-NetFirewallRule -DisplayName "Makepad Desk Host" -Direction Inbound -Action Allow -Protocol TCP `
-    -LocalPort $Port -RemoteAddress $Peers -Program $Exe -Profile Private | Out-Null
-Write-Host "allowed TCP $Port to $Exe from $($Peers -join ', ') (private networks only)"
+    -LocalPort $Port -RemoteAddress $Peers -Program $Exe -Profile Any | Out-Null
+Write-Host "allowed TCP $Port to $Exe from $($Peers -join ', ') (any network profile: the rule names the peers)"

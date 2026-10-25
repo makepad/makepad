@@ -14,6 +14,9 @@
 //! Windows backend takes the same code path through the same facade and is
 //! compile-gated with `cargo build --target x86_64-pc-windows-msvc`.
 
+// the clip helpers serve the macOS test; elsewhere they only compile
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+
 use makepad_video::{
     PcmAudioTrackOptions, VideoFileCodec, VideoFileDecoder, VideoFileEncoder,
     VideoFileEncoderOptions,

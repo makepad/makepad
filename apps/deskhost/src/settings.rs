@@ -10,6 +10,8 @@
 //! kbps = 0                # 0: by picture size
 //! fps = 120               # the cap: the stream runs at the lowest of it, the screen's refresh
 //!                         # and the watching viewers' displays
+//! key_every = 10          # seconds between scheduled key frames while pictures flow (0: only
+//!                         # on a new viewer, a request or a lost picture)
 //! fleet_dir =             # fleet.key + revoked; default: ~/.makepad/weights/fleet (the AI hub's)
 //! ```
 
@@ -23,6 +25,7 @@ pub struct Settings {
     pub port: u16,
     pub kbps: u32,
     pub fps: u32,
+    pub key_every: u32,
     pub fleet_dir: Option<PathBuf>,
     /// The only peers served (`allow_peers`).
     pub allow_peers: Vec<IpAddr>,
@@ -30,7 +33,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { enabled: false, host: "0.0.0.0".into(), port: makepad_desk_link::DEFAULT_PORT, kbps: 0, fps: 120, fleet_dir: None, allow_peers: Vec::new() }
+        Settings { enabled: false, host: "0.0.0.0".into(), port: makepad_desk_link::DEFAULT_PORT, kbps: 0, fps: 120, key_every: 10, fleet_dir: None, allow_peers: Vec::new() }
     }
 }
 
@@ -87,6 +90,7 @@ impl Settings {
                 "port" => value.parse().map(|p| s.port = p).is_ok(),
                 "kbps" => value.parse().map(|k| s.kbps = k).is_ok(),
                 "fps" => value.parse::<u32>().ok().filter(|f| (1..=240).contains(f)).map(|f| s.fps = f).is_some(),
+                "key_every" => value.parse().map(|k| s.key_every = k).is_ok(),
                 "allow_peers" => {
                     let mut ok = true;
                     s.allow_peers = value
@@ -131,7 +135,8 @@ mod tests {
     fn off_unless_enabled_and_lan_only() {
         assert!(!Settings::parse("").enabled);
         let s = Settings::parse("enabled = on\nhost = 10.0.0.230\nfps = 0\nallow_peers = 10.0.0.222");
-        assert!(s.enabled && s.fps == 120 && s.listen_addr().is_ok());
+        assert!(s.enabled && s.fps == 120 && s.key_every == 10 && s.listen_addr().is_ok());
+        assert_eq!(Settings::parse("key_every = 0").key_every, 0);
         assert_eq!(s.allow_peers, vec!["10.0.0.222".parse::<IpAddr>().unwrap()]);
         assert!(Settings::parse("host = 1.1.1.1").listen_addr().is_err());
     }

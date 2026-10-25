@@ -1,4 +1,4 @@
-//! desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--split tiles|interleave|off] [--stall MS,EVERY_MS] [--window WxH[@SCALE]] [--hz N] [--dump DIR] [--420]: a headless Desk Link viewer for
+//! desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--split tiles|interleave|off] [--stall MS,EVERY_MS] [--window WxH[@SCALE]] [--hz N] [--dump DIR] [--420] [--keyreq MS]: a headless Desk Link viewer for
 //! checks. It connects with this machine's fleet credential, prints the Welcome, counts the
 //! pictures and bytes, pings once a second (RTT), and with `--input` moves the desktop's pointer
 //! between two points twice a second, timing each move until the desktop's own Cursor message
@@ -7,6 +7,11 @@
 //! refresh (default 120 with `--window`): a desktop that follows its viewer takes that size.
 //! `--dump DIR` writes each encoder stream (from its first key frame) to DIR/stream-<i>.h264 and
 //! its tile position to DIR/tiles.txt (`<i> <x0> <y0>`), for decoding them elsewhere.
+//!
+//! It checks the bitstream as it goes: each stream starts (and restarts after a resume) at a
+//! key frame, every key frame carries SPS, PPS and an IDR slice in band, and the `key` flag says
+//! exactly whether a picture has an IDR. `--keyreq MS` asks for a key frame every MS ms and
+//! counts the answers.
 
 use makepad_network::fleet::auth as fleet_auth;
 use makepad_desk_link::{self as proto, ClientMsg, Inbox, ServerMsg};
@@ -17,7 +22,7 @@ use std::time::{Duration, Instant};
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let Some(target) = args.get(1).filter(|a| !a.starts_with("--")) else {
-        eprintln!("usage: desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--split tiles|interleave|off] [--stall MS,EVERY_MS] [--window WxH[@SCALE]] [--hz N] [--dump DIR] [--420]");
+        eprintln!("usage: desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--split tiles|interleave|off] [--stall MS,EVERY_MS] [--window WxH[@SCALE]] [--hz N] [--dump DIR] [--420] [--keyreq MS]");
         std::process::exit(2);
     };
     let secs: u64 = args.windows(2).find(|w| w[0] == "--secs").and_then(|w| w[1].parse().ok()).unwrap_or(10);
@@ -47,7 +52,8 @@ fn main() {
     let dump: Option<std::path::PathBuf> = args.windows(2).find(|w| w[0] == "--dump").map(|w| w[1].clone().into());
     // --420: a viewer whose decoder does not take 4:4:4 (the desktop streams 4:2:0)
     let caps = if args.iter().any(|a| a == "--420") { 0 } else { proto::caps::FULL_CHROMA };
-    let opts = Opts { window, hz, dump, caps };
+    let keyreq: Option<u64> = args.windows(2).find(|w| w[0] == "--keyreq").and_then(|w| w[1].parse().ok());
+    let opts = Opts { window, hz, dump, caps, keyreq };
     let (host, port) = match target.rsplit_once(':') {
         Some((h, p)) if p.parse::<u16>().is_ok() => (h.to_string(), p.to_string()),
         _ => (target.clone(), proto::DEFAULT_PORT.to_string()),
@@ -63,6 +69,7 @@ struct Opts {
     hz: Option<u16>,
     dump: Option<std::path::PathBuf>,
     caps: u32,
+    keyreq: Option<u64>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -76,6 +83,9 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
     }
     // bytes and pictures per stream (Mbit/s per tile)
     let mut per_stream: Vec<(u64, u64)> = Vec::new();
+    let mut check = Check::default();
+    let (mut last_keyreq, mut keyreqs) = (Instant::now(), 0u32);
+    let keyreq = opts.keyreq;
     let credential = fleet_auth::own_credential().ok_or("no fleet credential")?;
     let (mut stream, fp) = SocketStream::connect_capture(host, port).map_err(|e| format!("connect: {e}"))?;
     println!("probe: certificate {}", makepad_network::tls::to_hex(&fp));
@@ -116,7 +126,17 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
             if flapped.0.elapsed() >= Duration::from_millis(ms) {
                 flapped = (Instant::now(), !flapped.1, flapped.2 + 1);
                 let msg = if flapped.1 { ClientMsg::Pause } else { ClientMsg::Resume };
+                if !flapped.1 {
+                    check.resumed();
+                }
                 proto::write_all(&mut stream, &msg.encode()).map_err(|e| e.to_string())?;
+            }
+        }
+        if let Some(ms) = keyreq.filter(|_| welcomed) {
+            if last_keyreq.elapsed() >= Duration::from_millis(ms) {
+                last_keyreq = Instant::now();
+                keyreqs += 1;
+                proto::write_all(&mut stream, &ClientMsg::RequestKeyframe.encode()).map_err(|e| e.to_string())?;
             }
         }
         if last_ping.elapsed() >= Duration::from_secs(1) {
@@ -138,6 +158,9 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
             Err(e) => return Err(e.to_string()),
         }
         while let Some((ty, payload)) = inbox.next().map_err(|e| e.to_string())? {
+            if std::env::var_os("PROBE_VERBOSE").is_some() {
+                println!("probe: message type {ty}, {} bytes", payload.len());
+            }
             match ServerMsg::decode(ty, &payload).map_err(|e| e.to_string())? {
                 ServerMsg::Welcome { screens, screen, stream: stream_size, input, input_note, server, .. } => {
                     welcomed = true;
@@ -179,6 +202,7 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
                     // its encode time is its slowest part's
                     bytes += data.len() as u64;
                     streams = streams.max(stream as u32 + 1);
+                    check.picture(stream, key, &data);
                     let ms = encoded_ns.saturating_sub(built_ns) as f64 / 1e6;
                     slowest = if slowest.0 == frame { (frame, slowest.1.max(ms)) } else { (frame, ms) };
                     if parts <= 1 || stream + 1 == parts {
@@ -203,7 +227,11 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
                         }
                     }
                 }
-                _ => {}
+                other => {
+                    if std::env::var_os("PROBE_VERBOSE").is_some() {
+                        println!("probe: message {:?}", std::mem::discriminant(&other));
+                    }
+                }
             }
         }
     }
@@ -240,8 +268,105 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
     if flap.is_some() {
         println!("probe: {} pause/resume flips", flapped.2);
     }
+    println!("{}", check.report());
+    if keyreq.is_some() {
+        println!("probe: {keyreqs} key frame requests");
+    }
     if input {
         println!("probe: pointer -> cursor round trip median {:.2} ms over {} moves", median(&mut latencies), latencies.len());
     }
     Ok(())
+}
+
+/// The bitstream checks (see the module doc).
+#[derive(Default)]
+struct Check {
+    /// Per stream: a key frame seen since the start or the last resume.
+    started: Vec<bool>,
+    /// Pictures before their stream's first key frame (or after a resume, before its key).
+    before_key: u32,
+    /// Key frames without SPS, PPS or IDR in band.
+    bare_keys: u32,
+    /// Pictures whose `key` flag disagrees with an IDR slice in them.
+    wrong_flags: u32,
+    /// The first SPS's profile_idc, constraint flags, level_idc.
+    sps: Option<[u8; 3]>,
+    /// NAL types seen in key frames (bit per type).
+    key_nals: u32,
+}
+
+impl Check {
+    fn resumed(&mut self) {
+        self.started.iter_mut().for_each(|s| *s = false);
+    }
+
+    fn picture(&mut self, stream: u8, key: bool, data: &[u8]) {
+        let s = stream as usize;
+        if self.started.len() <= s {
+            self.started.resize(s + 1, false);
+        }
+        let nals = nal_units(data);
+        let has = |t: u8| nals.iter().any(|n| n.first().map(|b| b & 0x1f) == Some(t));
+        let idr = has(5);
+        if key != idr {
+            self.wrong_flags += 1;
+        }
+        if key {
+            self.started[s] = true;
+            if !(has(7) && has(8) && idr) {
+                self.bare_keys += 1;
+            }
+            for n in &nals {
+                if let Some(b) = n.first() {
+                    self.key_nals |= 1 << (b & 0x1f);
+                }
+            }
+            if self.sps.is_none() {
+                self.sps = nals.iter().find(|n| n.first().map(|b| b & 0x1f) == Some(7) && n.len() >= 4).map(|n| [n[1], n[2], n[3]]);
+            }
+        } else if !self.started[s] {
+            self.before_key += 1;
+        }
+    }
+
+    fn report(&self) -> String {
+        let sps = match self.sps {
+            Some([profile, flags, level]) => format!("SPS profile_idc {profile} (constraints {flags:#04x}) level_idc {level}"),
+            None => "no SPS".into(),
+        };
+        let types: Vec<String> = (0..32).filter(|t| self.key_nals & (1 << t) != 0).map(|t| t.to_string()).collect();
+        let ok = self.before_key == 0 && self.bare_keys == 0 && self.wrong_flags == 0 && self.sps.is_some();
+        format!(
+            "probe: bitstream {}: {sps}; key frame NAL types [{}]; {} pictures before a key frame, {} key frames without SPS/PPS/IDR, {} wrong key flags",
+            if ok { "OK" } else { "BAD" },
+            types.join(","),
+            self.before_key,
+            self.bare_keys,
+            self.wrong_flags
+        )
+    }
+}
+
+/// The NAL units of an Annex-B access unit (start codes of 3 or 4 bytes).
+fn nal_units(data: &[u8]) -> Vec<&[u8]> {
+    let mut starts = Vec::new();
+    let mut i = 0;
+    while i + 2 < data.len() {
+        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+            starts.push((i, i + 3));
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    let mut out = Vec::new();
+    for (k, &(_, begin)) in starts.iter().enumerate() {
+        let mut end = starts.get(k + 1).map_or(data.len(), |s| s.0);
+        // a 4-byte start code's leading zero belongs to it
+        while end > begin && data[end - 1] == 0 && k + 1 < starts.len() {
+            end -= 1;
+        }
+        out.push(&data[begin..end]);
+    }
+    out
 }

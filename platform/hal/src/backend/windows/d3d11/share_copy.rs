@@ -326,6 +326,13 @@ pub fn to_nv12(picture: &ID3D11Texture2D, width: u32, height: u32) -> Result<ID3
     let stream = D3D11_VIDEO_PROCESSOR_STREAM { Enable: super::device::b(true), pInputSurface: in_view.as_raw(), ..Default::default() };
     unsafe {
         c.vctx.VideoProcessorSetStreamFrameFormat(&c.processor, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+        // full-range RGB in, BT.709 limited-range YCbCr out (the default output is BT.601):
+        // the colours the encoder's VUI names. Bits: Usage, RGB_Range, YCbCr_Matrix,
+        // YCbCr_xvYCC, Nominal_Range (2).
+        let rgb_full = D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 0 };
+        let bt709_limited = D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: (1 << 2) | (1 << 4) };
+        c.vctx.VideoProcessorSetStreamColorSpace(&c.processor, 0, &rgb_full);
+        c.vctx.VideoProcessorSetOutputColorSpace(&c.processor, &bt709_limited);
         c.vctx.VideoProcessorBlt(&c.processor, &out_view, 0, &[stream]).map_err(|e| hr("VideoProcessorBlt", e))?;
         dev.ctx.Flush();
     }
