@@ -488,7 +488,7 @@ impl Resolver {
                     }
                 }
             };
-            bins.push(Target { name: bname, path, edition: s(bt, "edition").unwrap_or_else(|| edition.clone()), kind: vec!["bin".to_string()], required_features: strs(bt, "required-features"), harness: true });
+            bins.push(Target { name: bname, path, edition: s(bt, "edition").unwrap_or_else(|| edition.clone()), kind: vec!["bin".to_string()], required_features: strs(bt, "required-features"), harness: b(bt, "harness").unwrap_or(true) });
         }
         // autobins: default on, except for edition 2015 packages with explicit [[bin]] targets
         let autobins = match b(pkg, "autobins") {
@@ -513,6 +513,7 @@ impl Resolver {
                     }
                 }
             }
+            found.sort();
             for (n, p) in found {
                 // an explicit target with that name or path replaces the discovered one
                 if !bins.iter().any(|b| b.name == n || b.path == p) {
@@ -712,16 +713,18 @@ impl Resolver {
     }
 }
 
-/// The test programs of the workspace member `package`: whether it has a lib target, and its
-/// integration test targets by name with their source paths (cargo test's order: the lib's unit
-/// tests, then the test targets by name).
-pub fn test_targets(sess: &std::sync::Arc<crate::Session>, dir: &str, package: &str) -> Result<(Option<String>, Vec<(String, String)>), String> {
+/// The test programs of the workspace member `package`: whether it has a lib target, its bin
+/// targets with `harness = true`, and its integration test targets by name with their source paths
+/// (cargo test's order: the lib's unit tests, the bins' unit tests, then the test targets by name).
+pub fn test_targets(sess: &std::sync::Arc<crate::Session>, dir: &str, package: &str) -> Result<(Option<String>, Vec<(String, String)>, Vec<(String, String)>), String> {
     let mut r = Resolver::new(sess, dir)?;
     let i = r.find_member(package)?;
     let m = &r.manifests[i];
+    let mut bins: Vec<(String, String)> = m.bins.iter().filter(|t| t.harness).map(|t| (t.name.clone(), t.path.clone())).collect();
+    bins.sort();
     let mut tests: Vec<(String, String)> = m.tests.iter().map(|t| (t.name.clone(), t.path.clone())).collect();
     tests.sort();
-    Ok((m.lib.as_ref().map(|l| l.path.clone()), tests))
+    Ok((m.lib.as_ref().map(|l| l.path.clone()), bins, tests))
 }
 
 /// The folder of the workspace member `package` of the workspace containing `dir`.
@@ -969,6 +972,8 @@ pub struct Options {
 pub enum TestSel {
     /// the lib target built with `--test`
     Lib,
+    /// these bin targets built with `--test` (empty: all of them)
+    Bins(Vec<String>),
     /// these integration test targets (empty: all of them)
     Integration(Vec<String>),
 }
@@ -976,6 +981,8 @@ pub enum TestSel {
 pub fn parse_flags(flags: &[String]) -> Result<Options, String> {
     let mut o = Options { no_default_features: false, all_features: false, features: Vec::new(), bin: None, test: None };
     let mut lib = false;
+    let mut bins = false;
+    let mut bin_names: Vec<String> = Vec::new();
     let mut tests: Option<Vec<String>> = None;
     let mut i = 0;
     while i < flags.len() {
@@ -991,7 +998,8 @@ pub fn parse_flags(flags: &[String]) -> Result<Options, String> {
                 let v = value(&mut i)?;
                 o.features.extend(v.split([',', ' ']).filter(|x| !x.is_empty()).map(str::to_string));
             }
-            "--bin" => o.bin = Some(value(&mut i)?),
+            "--bins" => bins = true,
+            "--bin" => bin_names.push(value(&mut i)?),
             "--lib" => lib = true,
             "--tests" => {
                 tests.get_or_insert_with(Vec::new);
@@ -1005,7 +1013,7 @@ pub fn parse_flags(flags: &[String]) -> Result<Options, String> {
                 if let Some(v) = f.strip_prefix("--features=") {
                     o.features.extend(v.split([',', ' ']).filter(|x| !x.is_empty()).map(str::to_string));
                 } else if let Some(v) = f.strip_prefix("--bin=") {
-                    o.bin = Some(v.to_string());
+                    bin_names.push(v.to_string());
                 } else if let Some(v) = f.strip_prefix("--test=") {
                     tests.get_or_insert_with(Vec::new).push(v.to_string());
                 } else {
@@ -1015,11 +1023,18 @@ pub fn parse_flags(flags: &[String]) -> Result<Options, String> {
         }
         i += 1;
     }
-    o.test = match (lib, tests) {
-        (true, Some(_)) => return Err("unit graph: --lib and integration tests are separate test programs; select one".to_string()),
-        (true, None) => Some(TestSel::Lib),
-        (false, Some(t)) => Some(TestSel::Integration(t)),
-        (false, None) => None,
+    let bins = if bins {
+        Some(bin_names)
+    } else {
+        o.bin = bin_names.into_iter().last();
+        None
+    };
+    o.test = match (lib, bins, tests) {
+        (true, None, None) => Some(TestSel::Lib),
+        (false, Some(b), None) => Some(TestSel::Bins(b)),
+        (false, None, Some(t)) => Some(TestSel::Integration(t)),
+        (false, None, None) => None,
+        _ => return Err("unit graph: --lib, --bins and integration tests are separate test programs; select one".to_string()),
     };
     Ok(o)
 }
@@ -1193,6 +1208,8 @@ pub struct GraphUnit {
 pub struct Units {
     pub units: Vec<GraphUnit>,
     pub roots: Vec<usize>,
+    /// binary target names of the root package when building integration tests (`CARGO_BIN_EXE_<name>`)
+    pub bins: Vec<String>,
 }
 
 impl Units {
@@ -1223,7 +1240,7 @@ impl Units {
             })
             .collect();
         let roots = j.get("roots").map(|r| r.arr().iter().map(|x| x.num() as usize).collect()).unwrap_or_default();
-        Ok(Units { units, roots })
+        Ok(Units { units, roots, bins: Vec::new() })
     }
 }
 
@@ -1309,6 +1326,8 @@ enum UKind {
     /// the root's lib target built with `--test` (its unit tests)
     LibTest,
     Bin(usize),
+    /// the root's bin target built with `--test` (its unit tests)
+    BinTest(usize),
     /// the root's integration test target
     Test(usize),
     BuildCompile,
@@ -1348,6 +1367,28 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
     let rm = &r.manifests[root];
     match &o.test {
         Some(TestSel::Lib) if rm.lib.is_none() => return Err(format!("no library targets found in package `{}`", rm.name)),
+        Some(TestSel::Bins(names)) => {
+            if rm.bins.is_empty() {
+                return Err(format!("no bin targets found in package `{}`", rm.name));
+            }
+            for n in names {
+                if !rm.bins.iter().any(|t| &t.name == n) {
+                    return Err(format!("no bin target named `{}` in package `{}`", n, rm.name));
+                }
+            }
+            for (bi, bt) in rm.bins.iter().enumerate() {
+                if !names.is_empty() && !names.contains(&bt.name) {
+                    continue;
+                }
+                if !bt.required_features.iter().all(|f| rn.features.contains(f)) {
+                    continue;
+                }
+                if !bt.harness {
+                    return Err(format!("bin target `{}` of package `{}` has `harness = false`: makepad test runs libtest-harness targets only", bt.name, rm.name));
+                }
+                roots.push(add((root, false), UKind::BinTest(bi), &mut units));
+            }
+        }
         Some(TestSel::Integration(names)) => {
             for n in names {
                 if !rm.tests.iter().any(|t| &t.name == n) {
@@ -1369,16 +1410,21 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
         }
         _ => {}
     }
+    let mut bins = Vec::new();
     for (bi, bt) in r.manifests[root].bins.iter().enumerate() {
+        if !bt.required_features.iter().all(|f| rn.features.contains(f)) {
+            continue;
+        }
         if o.test.is_some() {
-            break;
+            if matches!(o.test, Some(TestSel::Integration(_))) {
+                bins.push(bt.name.clone());
+            }
+            continue;
         }
         if o.bin.as_ref().is_some_and(|b| b != &bt.name) {
             continue;
         }
-        if bt.required_features.iter().all(|f| rn.features.contains(f)) {
-            roots.push(add((root, false), UKind::Bin(bi), &mut units));
-        }
+        roots.push(add((root, false), UKind::Bin(bi), &mut units));
     }
     if let Some(b) = &o.bin {
         if !r.manifests[root].bins.iter().any(|t| &t.name == b) {
@@ -1401,9 +1447,9 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
                 let t = &m.tests[*ti];
                 (t.kind.clone(), t.name.clone(), t.path.clone(), t.edition.clone(), "test")
             }
-            UKind::Bin(bi) => {
+            UKind::Bin(bi) | UKind::BinTest(bi) => {
                 let b = &m.bins[*bi];
-                (b.kind.clone(), b.name.clone(), b.path.clone(), b.edition.clone(), "build")
+                (b.kind.clone(), b.name.clone(), b.path.clone(), b.edition.clone(), if matches!(u, UKind::BinTest(_)) { "test" } else { "build" })
             }
             UKind::BuildCompile | UKind::BuildRun => {
                 let p = m.build.clone().unwrap();
@@ -1415,7 +1461,7 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
         // dependencies
         let mut deps: Vec<(usize, String)> = Vec::new();
         // dev-dependencies: only the test targets' (the plain lib of a test graph has none)
-        let dev = matches!(u, UKind::LibTest | UKind::Test(_));
+        let dev = matches!(u, UKind::LibTest | UKind::BinTest(_) | UKind::Test(_));
         let normal_edges = |deps: &mut Vec<(usize, String)>, build: bool| {
             for (di, tk) in &node.edges {
                 let d = &m.deps[*di];
@@ -1437,7 +1483,7 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
                     deps.push((bi, "build_script_build".to_string()));
                 }
             }
-            UKind::Bin(_) | UKind::Test(_) => {
+            UKind::Bin(_) | UKind::BinTest(_) | UKind::Test(_) => {
                 if let Some(&li) = index.get(&(*k, UKind::Lib)) {
                     deps.push((li, lib_name(k.0)));
                 }
@@ -1478,7 +1524,7 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
             deps,
         });
     }
-    Ok(Units { units: out, roots })
+    Ok(Units { units: out, roots, bins })
 }
 
 #[cfg(test)]
