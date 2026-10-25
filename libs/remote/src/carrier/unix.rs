@@ -1,5 +1,6 @@
 //! The local carrier: a Unix socket `$TMPDIR/makepad-remote-<pid>.sock` (0600, same-uid peers
-//! only) next to the discovery file `makepad-remote-<pid>.json`. On Windows the same
+//! only); its discovery file `makepad-remote-<pid>.json` is in the user's registry dir
+//! ([`crate::discovery::registry_dir`], the same for every process whatever its TMPDIR). On Windows the same
 //! discovery file points at the loopback carrier (`carrier::loopback`: TCP on 127.0.0.1 behind a token).
 
 use crate::endpoint::Endpoint;
@@ -8,8 +9,10 @@ use std::path::PathBuf;
 
 /// The socket and discovery file paths of process `pid`.
 pub fn paths(pid: u32) -> (PathBuf, PathBuf) {
-    let dir = std::env::temp_dir();
-    (dir.join(format!("makepad-remote-{pid}.sock")), dir.join(format!("makepad-remote-{pid}.json")))
+    (
+        std::env::temp_dir().join(format!("makepad-remote-{pid}.sock")),
+        crate::discovery::registry_dir().join(format!("makepad-remote-{pid}.json")),
+    )
 }
 
 /// Removes the socket and discovery file of this process (at exit).

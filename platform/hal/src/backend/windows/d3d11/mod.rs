@@ -450,12 +450,6 @@ impl Gpu for D3d11 {
         if on { self.badged.entry(window.index).or_insert(None); } else { self.badged.remove(&window.index); }
     }
 
-    fn window_overlay(&mut self, s: &mut Session, _id: Id, rect: Option<[f32; 4]>, _layer: Id, _now: u64) {
-        if rect.is_some() {
-            s.stats.overlay_unsupported += 1;
-        }
-    }
-
     fn os(&mut self, sid: u32, command: exec::OsCmd) -> bool {
         match self.shell {
             Some(shell) => shell.command(sid, command),

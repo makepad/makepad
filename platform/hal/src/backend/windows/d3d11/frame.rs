@@ -309,6 +309,17 @@ impl D3d11 {
         let badges = layered && kind & target::BADGES != 0;
         if badges {
             self.compose = self.begin_compose(key);
+            // an opaque panel (`target::OVERLAY`) needs nothing under it: with no frame of the
+            // window kept yet (an app parked before it drew under the layer) the window's
+            // retained image is made at the panel's size and composed over as it is
+            if self.compose.is_none() && kind & target::OVERLAY != 0 {
+                if let Some(v) = view.passes[pr.clone()].first().map(|p| p.viewport) {
+                    let size = [(v[0] + v[2]).ceil().max(1.0) as u32, (v[1] + v[3]).ceil().max(1.0) as u32];
+                    if self.window_storage(s, target, size, now).is_ok() {
+                        self.compose = self.begin_compose(key);
+                    }
+                }
+            }
             if self.compose.is_none() {
                 // nothing rendered yet to draw the layer over
                 if !replay {

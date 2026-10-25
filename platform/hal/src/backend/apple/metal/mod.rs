@@ -661,6 +661,9 @@ impl Gpu for Metal {
         self.set_overlay(s, id, rect, layer, now);
     }
 
+    /// Panels are composed here (`set_overlay`, `composite_overlay`), over the base frame kept for them.
+    fn overlays(&self) -> bool { true }
+
     fn badge_layer(&mut self, window: Id, on: bool) {
         if on {
             self.badged.entry(window.index).or_insert(None);

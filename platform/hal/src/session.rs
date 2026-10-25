@@ -200,6 +200,10 @@ pub struct WindowOverlay {
     pub frame: Option<u64>,
     /// the window layer's texture (NONE: an opaque panel)
     pub layer: Id,
+    /// The executor composes this opaque panel as the window's layer (`Gpu::overlays` false: the
+    /// backend draws no panels itself): while it is up the borrower's frames render into the
+    /// window's retained image and never reach the window; only the panel's frames present.
+    pub composed: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -242,6 +246,9 @@ pub struct WindowObj {
     pub badge_hovered: bool,
     /// Session 0's window: its badge layer (`target::BADGES`), drawn over every frame it presents.
     pub badges: Option<std::sync::Arc<KeptFrame>>,
+    /// Session 0's window: the backend has its layer on (`Gpu::badge_layer`) for its badges or a
+    /// composed panel (`exec::sync_layer` keeps the two in step).
+    pub layer_on: bool,
 }
 
 /// A frame kept past its batch (session 0's badge layer): its packet with its own passes and
@@ -594,6 +601,10 @@ pub struct ExecRecord {
     pub deps: Vec<(u32, Id, u64)>,
     /// Window composition in back-to-front order. Empty for texture/pick frames.
     pub layers: Vec<(u32, Id, u64)>,
+    /// What reached the window with this frame, back to front: the frame itself, or the panel or
+    /// badge layer it is composed with. Empty: nothing reached it (a texture or pick frame, or a
+    /// borrower's frame under a composed panel, which only renders into the retained image).
+    pub shown: Vec<(u32, Id, u64)>,
 }
 
 impl Default for World {

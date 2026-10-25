@@ -158,7 +158,13 @@ pub trait Gpu {
     /// Configure the separate host surface; `None` restores the last base image
     /// immediately, including when the borrower has stopped producing frames.
     /// `layer`: the window layer's texture of session 0 (NONE: an opaque panel at `rect`).
-    fn window_overlay(&mut self, s: &mut Session, id: Id, rect: Option<[f32; 4]>, layer: Id, now: u64);
+    fn window_overlay(&mut self, _s: &mut Session, _id: Id, _rect: Option<[f32; 4]>, _layer: Id, _now: u64) {}
+    /// The backend composes session 0's opaque panels (`window_overlay` without a layer texture)
+    /// over a lent window itself. Otherwise the executor composes them through the window's
+    /// layer (`badge_layer`, see [`sync_layer`]): the panel's frames are layer frames
+    /// (`target::BADGES | target::OVERLAY`) and the borrower's frames stay in the retained image.
+    /// A backend with neither has no panels: the borrower keeps the window and its input.
+    fn overlays(&self) -> bool { false }
     /// Mobile shells lend their permanent host window even without an explicit adopt flag.
     fn auto_adopt(&self) -> bool { false }
     /// The backend composes session 0's badge layers (`target::BADGES`) into the frames its
@@ -238,27 +244,60 @@ fn badge_frame(gpu: &mut dyn Gpu, world: &mut World, sid: u32, window: Id, kind:
     let Some(kept) = KeptFrame::keep(view, packet) else { s.bad(); return };
     let kept = std::sync::Arc::new(kept);
     let Ok(w) = s.windows.get_mut(HOST, window) else { return };
-    let had = w.val.badges.is_some();
     let ends = !kept.draws();
+    // under a composed panel the badges are kept for later but not drawn: the panel covers the
+    // window, and a badge frame presenting would show the app's retained frame between its frames
+    let covered = w.val.overlay.as_ref().is_some_and(|o| o.composed);
     w.val.badges = Some(kept.clone());
-    if !had {
-        gpu.badge_layer(window, true);
-    }
+    sync_layer(gpu, world, window);
+    let Some(s) = world.session_mut(HOST) else { return };
+    let serial = kept.view().frames[0].frame;
     // a last frame without draws shows the window without its layer, then the layer goes
-    let _ = gpu.frame(s, HOST, window, kind, 0, &kept.view(), now);
+    if !covered {
+        let _ = gpu.frame(s, HOST, window, kind, 0, &kept.view(), now);
+    }
     if ends {
         if let Ok(w) = s.windows.get_mut(HOST, window) { w.val.badges = None; }
-        gpu.badge_layer(window, false);
+        sync_layer(gpu, world, window);
     }
-    if gpu.completes_inline() {
-        world.frame_done(HOST, window, kind, kept.view().frames[0].frame, 0, now, [0.0; 2]);
+    if covered || gpu.completes_inline() {
+        world.frame_done(HOST, window, kind, serial, 0, now, [0.0; 2]);
+    }
+}
+
+/// Puts the backend's layer of session 0's window `window` on or off as the window needs it:
+/// for its badges, or for a panel the executor composes (`WindowOverlay::composed`). Called
+/// wherever either changes, and before every frame of the window (a borrower that ends takes
+/// its panel with it, `World::unlend`).
+pub(crate) fn sync_layer(gpu: &mut dyn Gpu, world: &mut World, window: Id) {
+    let Some(w) = world.session_mut(HOST).and_then(|s| s.windows.get_mut(HOST, window).ok()) else { return };
+    let want = w.val.badges.is_some() || w.val.overlay.as_ref().is_some_and(|o| o.composed);
+    if want != w.val.layer_on {
+        w.val.layer_on = want;
+        gpu.badge_layer(window, want);
+    }
+}
+
+/// The borrower of session 0's window `window` draws a complete frame (`Redraw`): a composed
+/// panel went away and the window shows the panel's last frame until the app's next one.
+fn redraw_borrower(world: &mut World, window: Id) {
+    let Some(lent) = world.lent_to(window) else { return };
+    let alias = world.session(lent).and_then(|s| {
+        s.windows.keys_of(lent).into_iter().find(|id| s.windows.get(lent, *id).is_ok_and(|e| e.val.alias_of == Some(window)))
+    });
+    if let Some(alias) = alias {
+        world.to_session(lent, |q| q.redraw(alias, false));
     }
 }
 
 /// Session 0's host window `window` shows a new frame: its badge layer is drawn over it.
 fn replay_badges(gpu: &mut dyn Gpu, world: &mut World, window: Id, now: u64) {
     let Some(s) = world.session_mut(HOST) else { return };
-    let Some(kept) = s.windows.get(HOST, window).ok().and_then(|w| w.val.badges.clone()) else { return };
+    // a composed panel covers the window: nothing is drawn over the borrower's frame (it stays in
+    // the retained image)
+    let Some(kept) = s.windows.get(HOST, window).ok()
+        .filter(|w| !w.val.overlay.as_ref().is_some_and(|o| o.composed))
+        .and_then(|w| w.val.badges.clone()) else { return };
     let frame = s.frame;
     let _ = gpu.frame(s, HOST, window, target::WINDOW | target::BADGES | target::REPLAY, 0, &kept.view(), now);
     // a replay is not a frame of session 0's: its frame counter stays
@@ -546,7 +585,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 badge_moved(world, id, None);
             }
             let badge = world.session(sid).and_then(|s| s.windows.get(sid, id).ok()).is_some_and(|w| w.val.kind & 0xff == window_kind::BADGE);
-            if sid == HOST && !badge && world.session(HOST).and_then(|s| s.windows.get(HOST, id).ok()).is_some_and(|w| w.val.badges.is_some()) {
+            if sid == HOST && !badge && world.session(HOST).and_then(|s| s.windows.get(HOST, id).ok()).is_some_and(|w| w.val.layer_on) {
                 gpu.badge_layer(id, false);
             }
             let hosted = world.session(sid).and_then(|s| s.windows.get(sid, id).ok()).is_some_and(|w| w.val.is_hosted());
@@ -558,6 +597,8 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             let mut handled = false;
             if closed {
                 if let Some(host) = host {
+                    // the panel went with the loan (`World::unlend`)
+                    sync_layer(gpu, world, host);
                     gpu.window_lent(sid, id, host, false);
                 } else {
                     gpu.window_closed(sid, id);
@@ -692,13 +733,46 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 s.bad();
                 return;
             }
+            // an opaque panel the backend does not compose itself: the executor composes it
+            // through the window's layer, or, without one, there is no panel (the app keeps the
+            // window and its input; nothing would show what the input went to)
+            let composed = layer.is_none() && !gpu.overlays();
+            if on && composed && !gpu.badges() {
+                s.stats.overlay_unsupported += 1;
+                return;
+            }
             let next = on.then_some((rect, layer));
             if w.val.overlay.as_ref().map(|o| (o.rect, o.layer)) == next { return; }
-            w.val.overlay = next.map(|(rect, layer)| WindowOverlay { rect, frame: None, layer });
+            let was_composed = w.val.overlay.as_ref().is_some_and(|o| o.composed);
+            w.val.overlay = next.map(|(rect, layer)| WindowOverlay { rect, frame: None, layer, composed: on && composed });
             gpu.window_overlay(s, id, on.then_some(rect), layer, now);
+            if was_composed || composed {
+                sync_layer(gpu, world, id);
+            }
+            if was_composed && !on {
+                // the badges over the app's last frame at once (an idle or parked app), and a
+                // new frame of the app
+                replay_badges(gpu, world, id, now);
+                redraw_borrower(world, id);
+            }
             return;
         }
         HalCmd::Frame { target, mut kind, packet } => {
+            // the physical window a window frame goes to (session 0's, which a borrower draws
+            // through its alias), and its layer as it needs it now: a borrower that ended took
+            // its panel with it (`World::unlend`)
+            let physical = (kind & !target::FLAGS == target::WINDOW).then(|| if sid == HOST {
+                Some(target)
+            } else {
+                world.session(sid).and_then(|s| s.windows.get(sid, target).ok()).and_then(|w| w.val.alias_of)
+            }).flatten();
+            if let Some(physical) = physical {
+                sync_layer(gpu, world, physical);
+            }
+            // a panel the executor composes covers the window (`Gpu::overlays`)
+            let covered = kind & target::PICK == 0 && physical.is_some_and(|p| world.session(HOST)
+                .and_then(|s| s.windows.get(HOST, p).ok())
+                .is_some_and(|w| w.val.overlay.as_ref().is_some_and(|o| o.composed)));
             let Some(s) = world.session_mut(sid) else { return };
             // Only the executor selects this target: clients cannot bypass lending.
             if kind & (target::OVERLAY | target::REPLAY) != 0 { s.bad(); return; }
@@ -715,6 +789,10 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 && kind & target::PICK == 0
                 && s.windows.get(sid, target).is_ok_and(|w| w.val.overlay.is_some());
             if overlay { kind |= target::OVERLAY; }
+            // the composed panel's frame is the window's layer frame: drawn over the retained
+            // image (it is opaque: nothing of the app shows) and presented; the borrower's frames
+            // under it only render into the retained image
+            if overlay && covered { kind |= target::BADGES; }
             // Adoption may race the owner's last draw. Once the borrower encodes
             // a window frame, only it may replace that image. Uploads remain valid.
             if sid == HOST && kind & !target::FLAGS == target::WINDOW
@@ -775,6 +853,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             let frame = s.frame;
             let trace = world.trace_exec;
             let mut layers = Vec::new();
+            let mut shown = Vec::new();
             if submitted.window {
                 let physical = host.unwrap_or(target);
                 let owner = if host.is_some() { HOST } else { sid };
@@ -789,6 +868,15 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                         if let Some(frame) = w.val.overlay.as_ref().and_then(|o| o.frame) {
                             layers.push((HOST, physical, frame));
                         }
+                        shown = if covered {
+                            if overlay { vec![(HOST, physical, frame)] } else { Vec::new() }
+                        } else {
+                            let mut shown = layers.clone();
+                            if let Some(badges) = w.val.badges.as_ref().filter(|_| kind & target::PICK == 0) {
+                                shown.push((HOST, physical, badges.view().frames[0].frame));
+                            }
+                            shown
+                        };
                     }
                 }
             }
@@ -816,7 +904,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             }
             if world.trace_exec {
                 let seq = world.exec_log.len() as u64;
-                world.exec_log.push(ExecRecord { seq, session: sid, frame, target, deps: seen, layers });
+                world.exec_log.push(ExecRecord { seq, session: sid, frame, target, deps: seen, layers, shown });
             }
             return;
         }

@@ -388,10 +388,6 @@ impl Gpu for GlBackend {
         self.media = media;
         handled
     }
-    /// The host's run-state overlay is drawn by the macOS backend only so far; counted here.
-    fn window_overlay(&mut self, s: &mut Session, _id: Id, rect: Option<[f32; 4]>, _layer: Id, _now: u64) {
-        if rect.is_some() { s.stats.overlay_unsupported += 1; }
-    }
     fn os(&mut self, sid: u32, command: exec::OsCmd) -> bool {
         if matches!(&command, exec::OsCmd::FileDialog { .. }) { return self.media.dialog(sid, command); }
         if let Some(shell) = self.shell { shell.command(sid, command); true } else { false }

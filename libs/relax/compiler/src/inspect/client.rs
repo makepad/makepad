@@ -1,5 +1,5 @@
 //! `makepad inspect <pid|app|all|list> <command> [args]`: the client side of the inspect protocol.
-//! Finds running apps by their discovery files (makepad-remote-<pid>.json in the temp dir), sends
+//! Finds running apps by their discovery files (makepad-remote-<pid>.json in the registry dir, `makepad_remote::discovery::registry_dir`), sends
 //! one request line and prints the answer's JSON lines (the `end` line left out). Exit status 1 when
 //! the answer had an error, 2 for usage / no such app.
 //!

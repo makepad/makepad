@@ -687,13 +687,6 @@ impl Gpu for Vulkan {
     fn badge_layer(&mut self, window: Id, on: bool) {
         if on { self.badged.entry(window.index).or_default(); } else { self.badged.remove(&window.index); }
     }
-    /// The host's run-state overlay is drawn by the macOS backend only so far (the bootloader
-    /// host runs on macOS); here it is counted as unsupported, never silently dropped.
-    fn window_overlay(&mut self, s: &mut Session, _id: Id, rect: Option<[f32; 4]>, _layer: Id, _now: u64) {
-        if rect.is_some() {
-            s.stats.overlay_unsupported += 1;
-        }
-    }
 
     #[cfg(target_os = "android")]
     fn auto_adopt(&self) -> bool { self.shell.as_ref().is_some_and(|s| s.auto_adopt()) }
