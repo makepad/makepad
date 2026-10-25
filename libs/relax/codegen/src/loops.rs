@@ -2140,10 +2140,16 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
         let h = *h;
         let core: Vec<u32> = (0..m0.len() as u32).filter(|b| m0[*b as usize]).collect();
         if core.iter().any(|b| touched[*b as usize]) {
+            if tr {
+                eprintln!("full-unroll {}: loop b{}: overlaps a changed loop", f.name, h);
+            }
             continue;
         }
         // innermost: no other loop's header inside
         if loops.iter().any(|(h2, _)| *h2 != h && m0[*h2 as usize]) {
+            if tr {
+                eprintln!("full-unroll {}: loop b{} ({} blocks): not innermost (headers {:?})", f.name, h, core.len(), loops.iter().filter(|(h2, _)| *h2 != h && m0[*h2 as usize]).map(|x| x.0).collect::<Vec<_>>());
+            }
             continue;
         }
         // The loop's panic exits (a bounds check's failing edge: a small block that calls the panic
@@ -2211,6 +2217,14 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
             t.succs().any(|s| Some(s) != unwind && !(split_ok && h_exit.contains(&s)) && !m.get(s as usize).copied().unwrap_or(false))
         });
         let split_used = !early_exit && members.iter().any(|b| *b != h && !latches.contains(b) && f.blocks[*b as usize].term.succs().any(|s| h_exit.contains(&s)));
+        // Early exits are worth their copies where the counter indexes a local array that the
+        // copies turn into plain values: camera_path_limit's `for a in 0..3` over `[o.x, o.y,
+        // o.z]`-style arrays with a `continue 'entities` from two tests stayed a loop of indexed
+        // stack loads and six stores per entity; unrolled, every access has a constant offset and
+        // the slots go to registers (rustc: no arrays left, the axis tests hoisted out of the
+        // entity loop). Only short trips (checked with the trip count below).
+        let early_ok = early_exit && !relax_backend::stats::opt_off(options, "-unrollearly");
+        let early_exit = early_exit && !early_ok;
         if early_exit {
             if tr {
                 eprintln!("  early exits from the body (header b{}, latches {:?})", h, latches);
@@ -2311,13 +2325,24 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
         // solve_contacts_convex) only saves an index add per access: unrolled, it cost +277
         // static insts and +1.8..11% instructions on box3d_physics (GAPB2). The copies of such
         // loops also stay within a tighter budget.
+        if early_ok && !counter_indexes_local_values(f, &members, c, tr) {
+            if tr {
+                eprintln!("  early exits from the body and no local array indexed by the counter (header b{})", h);
+            }
+            continue;
+        }
         let general = multi || split_used;
+        // a loop whose latches leave too (`continue 'outer` from the test that ends an iteration):
+        // its copies pay where the counter indexes a local array of plain values (camera_path_limit's
+        // slab test over `[f32; 3]`s), as for early exits; short trips only (checked below)
+        let mut local_gain = early_ok;
         if general {
             let gain = counter_indexes_fixed_memory(f, &members, c);
+            local_gain = local_gain || (!gain && !relax_backend::stats::opt_off(options, "-unrollearly") && counter_indexes_local_values(f, &members, c, tr));
             if tr {
-                eprintln!("  several latches {} / split exit {}: fixed-address gain {}", multi, split_used, gain);
+                eprintln!("  several latches {} / split exit {}: fixed-address gain {} local-values gain {}", multi, split_used, gain, local_gain);
             }
-            if !gain {
+            if !gain && !local_gain {
                 continue;
             }
         }
@@ -2428,7 +2453,13 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
                 continue 'next;
             }
         }
-        if size * t > budget || all * t > 2400 || (general && size * t > 400) {
+        if local_gain && t > 4 {
+            if tr {
+                eprintln!("  early exits: {} copies, over 4", t);
+            }
+            continue;
+        }
+        if size * t > budget || all * t > 2400 || ((general || early_ok) && size * t > 400) {
             if tr {
                 eprintln!("  {} copies of {} insts over the budget {}", t, size, budget);
             }
@@ -2525,6 +2556,133 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
         changed = true;
     }
     changed
+}
+
+/// Whether the loop indexes, with its counter `c`, a stack slot that every other access reaches at
+/// a constant offset: a local array (`let d = [dir.x, dir.y, dir.z]; .. d[a] ..`) whose address
+/// goes nowhere but load and store bases (directly, plus constants) and the counter-indexed
+/// addresses of the loop, which in turn are only load and store bases. In the copies the index is
+/// a constant, every access has a fixed offset, and the slot's values forward to registers.
+fn counter_indexes_local_values(f: &Func, members: &[u32], c: VReg, tr: bool) -> bool {
+    const NONE: u32 = u32::MAX;
+    let nv = f.vregs.len();
+    // definitions counted now (the pass's counts predate copies made earlier in this pass)
+    let mut ndef = vec![0u32; nv];
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    for b in &f.blocks {
+        for i in &b.insts {
+            for_defs(i, |d| ndef[d.0 as usize] += 1);
+        }
+    }
+    let inloop = |b: usize| members.contains(&(b as u32));
+    // values computed from the counter inside the loop (not through memory)
+    let mut ctr = vec![false; nv];
+    ctr[c.0 as usize] = true;
+    loop {
+        let mut grew = false;
+        for &b in members {
+            for i in &f.blocks[b as usize].insts {
+                let d = match *i {
+                    Inst::Mov(d, a) | Inst::IBinI(_, _, d, a, _) | Inst::Conv(Conv::IntToInt(_), d, a) if ctr[a.0 as usize] => d,
+                    _ => continue,
+                };
+                if !ctr[d.0 as usize] && d != c {
+                    ctr[d.0 as usize] = true;
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    // the slot a single-definition vreg points into at a constant offset (SlotAddr, moves, + k)
+    let mut root = vec![NONE; nv];
+    loop {
+        let mut grew = false;
+        for b in &f.blocks {
+            for i in &b.insts {
+                let (d, r) = match *i {
+                    Inst::SlotAddr(d, sl) => (d, sl),
+                    Inst::Mov(d, a) | Inst::IBinI(IOp::Add | IOp::Sub, _, d, a, _) if root[a.0 as usize] != NONE => (d, root[a.0 as usize]),
+                    _ => continue,
+                };
+                if ndef[d.0 as usize] == 1 && root[d.0 as usize] == NONE {
+                    root[d.0 as usize] = r;
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    // addresses `slot + counter value` made in the loop (single definitions)
+    let mut indexed = vec![NONE; nv];
+    for &b in members {
+        for i in &f.blocks[b as usize].insts {
+            if let Inst::IBin(IOp::Add, _, d, a, x) = *i {
+                let r = if root[a.0 as usize] != NONE && ctr[x.0 as usize] {
+                    root[a.0 as usize]
+                } else if root[x.0 as usize] != NONE && ctr[a.0 as usize] {
+                    root[x.0 as usize]
+                } else {
+                    continue;
+                };
+                if ndef[d.0 as usize] == 1 {
+                    indexed[d.0 as usize] = r;
+                }
+            }
+        }
+    }
+    if indexed.iter().all(|r| *r == NONE) {
+        if tr {
+            eprintln!("  local-values: counter {:?}: no slot + counter address", c);
+        }
+        return false;
+    }
+    // each slot's address may only be a load / store base, the source of a fixed-offset address,
+    // or (in the loop) the base of an indexed address that is itself only a load / store base
+    let ns = f.slots.len();
+    let mut bad = vec![false; ns];
+    let mut uses = Vec::new();
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for i in &b.insts {
+            let mut check = |u: VReg, ok: bool| {
+                let r = if root[u.0 as usize] != NONE { root[u.0 as usize] } else { indexed[u.0 as usize] };
+                if r != NONE && !ok {
+                    if tr && !bad[r as usize] {
+                        eprintln!("  local-values: slot {} escapes at b{}: {:?}", r, bi, i);
+                    }
+                    bad[r as usize] = true;
+                }
+            };
+            match *i {
+                Inst::Load(_, _, base, _) => check(base, true),
+                Inst::Store(_, base, _, src) => {
+                    check(base, true);
+                    check(src, false);
+                }
+                Inst::Mov(_, a) | Inst::IBinI(IOp::Add | IOp::Sub, _, _, a, _) => check(a, indexed[a.0 as usize] == NONE),
+                Inst::IBin(IOp::Add, _, d, a, x) if indexed[d.0 as usize] != NONE && inloop(bi) => {
+                    check(a, true);
+                    check(x, true);
+                }
+                _ => for_uses(i, |u| check(u, false)),
+            }
+        }
+        uses.clear();
+        relax_backend::regalloc::term_uses(&b.term, &mut uses);
+        for u in &uses {
+            let r = if root[u.0 as usize] != NONE { root[u.0 as usize] } else { indexed[u.0 as usize] };
+            if r != NONE {
+                bad[r as usize] = true;
+            }
+        }
+    }
+    indexed.iter().any(|r| *r != NONE && !bad[*r as usize])
 }
 
 /// Whether the loop reads, at `slot + (value of the counter c)`, a stack slot that holds addresses of

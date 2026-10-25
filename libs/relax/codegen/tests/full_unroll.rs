@@ -24,13 +24,17 @@ fn eval(f: &Func, args: &[u64]) -> (Vec<u64>, Vec<u64>) {
         r[p.0 as usize] = *a;
     }
     let mut trace = Vec::new();
+    let mut mem: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
     let mut b = 0usize;
     for _ in 0..100_000 {
         for i in &f.blocks[b].insts {
             match *i {
                 Inst::Iconst(d, k) => r[d.0 as usize] = k as u64,
                 Inst::SlotAddr(d, s) => r[d.0 as usize] = 0x1000 + 0x100 * s as u64,
-                Inst::Store(..) => {}
+                Inst::Store(_, base, off, src) => {
+                    mem.insert(r[base.0 as usize].wrapping_add(off as i64 as u64), r[src.0 as usize]);
+                }
+                Inst::Load(_, d, base, off) => r[d.0 as usize] = mem.get(&r[base.0 as usize].wrapping_add(off as i64 as u64)).copied().unwrap_or(0),
                 Inst::Mov(d, s) => r[d.0 as usize] = r[s.0 as usize],
                 Inst::IBin(IOp::Add, _, d, a, c) => r[d.0 as usize] = r[a.0 as usize].wrapping_add(r[c.0 as usize]),
                 Inst::IBinI(IOp::Add, _, d, a, k) => r[d.0 as usize] = r[a.0 as usize].wrapping_add(k as u64),
@@ -193,4 +197,84 @@ fn the_gain_check_after_an_earlier_unrolled_loop_in_the_same_pass() {
     for seed in 0..8u64 {
         assert_eq!(eval(&f, &[seed, 0x5000]), eval(&g, &[seed, 0x5000]), "seed {}", seed);
     }
+}
+
+/// camera_path_limit's slab test: `for a in 0..3` over a local array of plain values (`let d =
+/// [dir.x, dir.y, dir.z]`), read at `slot + a * 8` and nowhere else but fixed-offset stores, whose two
+/// latches also leave the loop (`continue 'entities` from the test that ends each iteration):
+/// b0: s = slot; s[0], s[8], s[16] = seed, seed + 1, seed * 3; c = 0; acc = 0 -> b1
+/// b1 (header): c < 3 -> b2 : b5
+/// b2: k = c; c = c + 1; x = s[k * 8]; odd = x & 1 -> b6 : b3
+/// b3: acc = acc + x; stop = acc == 7 -> b4 (leaves: latch 1) : b1
+/// b6: acc = acc + 1; stop2 = acc == 5 -> b4 (latch 2) : b1
+/// b4: ret acc + 1000;  b5: ret acc
+/// Unrolled (the counter indexes the array: the copies read it at constant offsets), and the result
+/// agrees; with MAKEPAD_RUN_OPT=-unrollearly it stays rolled.
+fn slab_loop() -> Func {
+    let mut f = Func::new("slab".into(), 0);
+    let seed = f.vreg(Cls::I);
+    f.params.push(seed);
+    f.rets.push(Cls::I);
+    for _ in 0..7 {
+        f.block();
+    }
+    let v: Vec<VReg> = (0..16).map(|_| f.vreg(Cls::I)).collect();
+    let (s, x1, x3, c, acc, lt, k, sh, ad, x, odd, stop, stop2, r4) = (v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11], v[12], v[13]);
+    let sl = f.slot(24, 8);
+    push(&mut f, 0, Inst::SlotAddr(s, sl));
+    push(&mut f, 0, Inst::Store(Mem::Int(8, false), s, 0, seed));
+    push(&mut f, 0, Inst::IBinI(IOp::Add, U64, x1, seed, 1));
+    push(&mut f, 0, Inst::Store(Mem::Int(8, false), s, 8, x1));
+    push(&mut f, 0, Inst::IBinI(IOp::Mul, U64, x3, seed, 3));
+    push(&mut f, 0, Inst::Store(Mem::Int(8, false), s, 16, x3));
+    push(&mut f, 0, Inst::Iconst(c, 0));
+    push(&mut f, 0, Inst::Iconst(acc, 0));
+    f.blocks[0].term = Term::Jump(1);
+    push(&mut f, 1, Inst::ICmpI(Cond::Lt, false, lt, c, 3));
+    f.blocks[1].term = Term::Branch(lt, 2, 5);
+    push(&mut f, 2, Inst::Mov(k, c));
+    push(&mut f, 2, Inst::IBinI(IOp::Add, U64, c, c, 1));
+    push(&mut f, 2, Inst::IBinI(IOp::Mul, U64, sh, k, 8));
+    push(&mut f, 2, Inst::IBin(IOp::Add, U64, ad, s, sh));
+    push(&mut f, 2, Inst::Load(Mem::Int(8, false), x, ad, 0));
+    push(&mut f, 2, Inst::IBinI(IOp::And, U64, odd, x, 1));
+    f.blocks[2].term = Term::Branch(odd, 6, 3);
+    push(&mut f, 3, Inst::IBin(IOp::Add, U64, acc, acc, x));
+    push(&mut f, 3, Inst::ICmpI(Cond::Eq, false, stop, acc, 7));
+    f.blocks[3].term = Term::Branch(stop, 4, 1);
+    push(&mut f, 6, Inst::IBinI(IOp::Add, U64, acc, acc, 1));
+    push(&mut f, 6, Inst::ICmpI(Cond::Eq, false, stop2, acc, 5));
+    f.blocks[6].term = Term::Branch(stop2, 4, 1);
+    push(&mut f, 4, Inst::IBinI(IOp::Add, U64, r4, acc, 1000));
+    f.blocks[4].term = Term::Ret(vec![r4]);
+    f.blocks[5].term = Term::Ret(vec![acc]);
+    for b in &mut f.blocks {
+        b.pos = vec![1; b.insts.len()];
+    }
+    f
+}
+
+#[test]
+fn a_short_loop_over_a_local_array_of_values_whose_latches_leave_unrolls() {
+    let f = slab_loop();
+    f.verify().unwrap();
+    let o = relax_session::Options::default();
+    let mut g = f.clone();
+    assert!(relax_codegen::loops::unroll_const_loops(&o, &mut g), "not unrolled:\n{}", f.dump());
+    g.verify().unwrap();
+    for seed in 0..16u64 {
+        assert_eq!(eval(&f, &[seed]), eval(&g, &[seed]), "seed {}", seed);
+    }
+    relax_backend::passes::simplify(&o, &mut g, None, true, true);
+    g.verify().unwrap();
+    let reach = reachable(&g);
+    let preds = relax_backend::regalloc::preds_of(&g, &reach);
+    assert!(relax_backend::regalloc::natural_loops(&g, &reach, &preds, false).is_empty(), "a loop is left:\n{}", g.dump());
+    for seed in 0..16u64 {
+        assert_eq!(eval(&f, &[seed]), eval(&g, &[seed]), "seed {} after simplify", seed);
+    }
+    let mut off = relax_session::Options::default();
+    off.opt = vec!["-unrollearly".to_string()];
+    let mut h = f.clone();
+    assert!(!relax_codegen::loops::unroll_const_loops(&off, &mut h), "unrolled with -unrollearly");
 }
