@@ -318,6 +318,11 @@ impl KeptFrame {
     }
 }
 
+/// The room at the right of an app's caption that the host's caption badge (`makepad run`'s
+/// JIT ring) takes: just left of window buttons at the caption's right, else at the window's
+/// right edge (window points). An app's caption controls keep out of it (`Cx::caption_badge_room`).
+pub const CAPTION_BADGE_ROOM: f32 = 32.0;
+
 /// The caption an app draws in its window (`WindowCaption`), in window points.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct AppCaption {

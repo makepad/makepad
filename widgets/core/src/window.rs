@@ -342,6 +342,10 @@ script_mod! {
                 }
             }
             voice_wave := VoiceWave {}
+            // Under `makepad run` the JIT ring sits here, at the caption's right (left of the
+            // window buttons): an app's caption controls keep out of its room
+            // (`Cx::caption_badge_room`, set in `sync_caption_bar_state`).
+            jit_ring_gap := View{visible: false width: 0 height: 1}
             windows_buttons := View {
                 visible: false
                 width: Fit height: Fit
@@ -1131,7 +1135,7 @@ impl Window {
         });
         let bar_content = self.view(cx, ids!(caption_bar)).borrow().is_some_and(|view| {
             view.children.iter().any(|(id, _)| !matches!(*id,
-                id!(hosted_controls_gap) | id!(caption_label) | id!(voice_wave) | id!(windows_buttons) | id!(web_fullscreen)))
+                id!(hosted_controls_gap) | id!(caption_label) | id!(voice_wave) | id!(jit_ring_gap) | id!(windows_buttons) | id!(web_fullscreen)))
         });
         let content = label_content || bar_content;
         self.caption_has_content = Some(content);
@@ -1166,6 +1170,7 @@ impl Window {
 
     fn sync_caption_bar_state(&mut self, cx: &mut Cx) {
         let has_content = self.caption_contains_app_content(cx);
+        self.sync_jit_ring_gap(cx, has_content);
         if cx.in_makepad_studio() || under_wm() {
             // Under the WM a makepad app draws its own caption, as on macOS: the WM draws
             // no title bar for it (`HostedChrome`), the app's caption carries the window
@@ -1262,6 +1267,21 @@ impl Window {
         self.set_caption_window_gap(cx, os_lights && !self.hosted_mac_controls);
     }
 
+    /// Keeps the JIT ring's room (`jit_ring_gap`) free of an app's caption controls under
+    /// `makepad run`. A title-only caption has nothing to keep out, so its title stays centred.
+    fn sync_jit_ring_gap(&mut self, cx: &mut Cx, has_content: bool) {
+        let room = cx.caption_badge_room();
+        // a direct child of the bar: no tree walk
+        let gap = self.view.child(id!(caption_bar)).child(id!(jit_ring_gap));
+        let visible = has_content && room > 0.0;
+        if gap.visible() != visible {
+            if let Some(mut view) = gap.borrow_mut::<View>() {
+                view.walk.width = Size::Fixed(room);
+            }
+            gap.set_visible(cx, visible);
+        }
+    }
+
     /// Shows or hides an app's `caption_window_gap`, anywhere in its caption bar.
     fn set_caption_window_gap(&mut self, cx: &mut Cx, visible: bool) {
         if self.caption_window_gap.is_none() {
@@ -1313,6 +1333,10 @@ impl Window {
             self.hosted_controls_rect
         } else if bar.visible() && own.visible() {
             own.area().rect(cx)
+        } else if under_wm() {
+            // the window draws every control it has under the WM: none shown (fullscreen)
+            // is none, never the host's geometry
+            Rect::default()
         } else {
             cx.windows[self.window.window_id()].window_geom.window_chrome_buttons
         };
@@ -1411,7 +1435,7 @@ impl Window {
             }
         }
         let mut rects = Vec::new();
-        let stock_bar = |id: LiveId| matches!(id, id!(caption_label) | id!(voice_wave) | id!(windows_buttons) | id!(web_fullscreen));
+        let stock_bar = |id: LiveId| matches!(id, id!(caption_label) | id!(voice_wave) | id!(jit_ring_gap) | id!(windows_buttons) | id!(web_fullscreen));
         let stock_label = |id: LiveId| matches!(id, id!(caption_icon) | id!(label));
         // Both are direct children, which are much cheaper to get than searching the widget tree.
         let caption_bar = self.view.child(id!(caption_bar));

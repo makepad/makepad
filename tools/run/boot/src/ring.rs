@@ -367,6 +367,16 @@ mod tests {
     }
 
     #[test]
+    fn ring_badge_stays_in_the_room_apps_keep_free() {
+        // apps keep `CAPTION_BADGE_ROOM` free left of the window buttons, else at the right edge
+        let room = makepad_hal::CAPTION_BADGE_ROOM;
+        let r = Ring::place([800.0, 600.0], caption([0.0, 0.0, 800.0, 29.0], [662.0, 0.0, 138.0, 29.0]));
+        assert!(r[0] >= 662.0 - room && r[0] + r[2] <= 662.0);
+        let r = Ring::place([900.0, 600.0], caption([0.0, 0.0, 900.0, 28.0], [7.0, 6.0, 54.0, 16.0]));
+        assert!(r[0] >= 900.0 - room && r[0] + r[2] <= 900.0);
+    }
+
+    #[test]
     fn tooltip_stays_in_the_window() {
         let ring = Ring::place([300.0, 200.0], None);
         let tip = Ring::place_tip(ring, 400.0, [300.0, 200.0]);
