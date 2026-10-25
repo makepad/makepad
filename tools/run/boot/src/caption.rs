@@ -7,16 +7,29 @@
 //! minimise / maximise / close, 46 x 29 points each, at the strip's right. The title is centred
 //! in the strip when the buttons leave room for it, else in the widest gap they leave, cut with
 //! an ellipsis. The strip is the window's drag region (`Boot::drag_answer`).
+//!
+//! Under a makepad window manager (`info_flags::WM_HOSTED`) the window's controls are the WM's,
+//! as the app's own caption draws them (widgets' `resolve_chrome`, one table:
+//! `makepad_hal::WindowControls`): in a macOS-like family the traffic lights at the strip's
+//! left (widgets' hosted lights: 20-point buttons on a 20-point pitch, 8 points in, in a strip
+//! 28 high), in a Windows-like one the buttons at the right, in a tiling one none (and no strip,
+//! as an app without caption content has none there).
 use crate::{
     document::Line,
     text::{Shaped, Text},
     Action, TextLine,
 };
-use makepad_hal::window_state;
+use makepad_hal::{window_state, WindowControls};
 use std::sync::Arc;
 
 /// The size of one app-drawn window button, in points (widgets' `DesktopButton`).
 pub const BUTTON: [f32; 2] = [46.0, 29.0];
+/// The traffic lights under a macOS-like WM (widgets' `draw_hosted_controls`): each button's
+/// square, their pitch, the inset of the first, and the strip's height (`hosted_controls_gap`).
+pub const LIGHT: f32 = 20.0;
+pub const LIGHT_PITCH: f32 = 20.0;
+pub const LIGHT_LEFT: f32 = 8.0;
+pub const LIGHT_STRIP: f32 = 28.0;
 /// The space kept between the title and the buttons (widgets' `CAPTION_TITLE_SPACING`).
 pub const TITLE_SPACING: f32 = 6.0;
 /// The title's colour: the field's soft ink, as the stock caption's label is its theme's.
@@ -33,6 +46,9 @@ pub struct Chrome {
     pub client: bool,
     /// The window's `window_state`.
     pub state: u32,
+    /// A makepad window manager hosts the window: its family's controls (from its style
+    /// sheet), drawn by the window; they replace `native` and `client`.
+    pub hosted: Option<WindowControls>,
 }
 
 /// The caption strip at the window's top.
@@ -44,6 +60,8 @@ pub struct Caption {
     pub gap: [f32; 2],
     /// The app-drawn window buttons: their action and rect.
     pub buttons: Vec<(Action, [f32; 4])>,
+    /// The buttons are traffic lights (else the Windows-style buttons).
+    pub lights: bool,
 }
 
 impl Chrome {
@@ -51,7 +69,22 @@ impl Chrome {
         if touch || self.state == window_state::FULLSCREEN || width <= 0.0 {
             return Caption::default();
         }
-        if self.client {
+        let client = match self.hosted {
+            Some(WindowControls::Buttons) => true,
+            Some(WindowControls::Lights) => {
+                let top = ((LIGHT_STRIP - LIGHT) * 0.5).max(0.0);
+                let buttons = [Action::Close, Action::Minimize, Action::Maximize]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, action)| (action, [LIGHT_LEFT + i as f32 * LIGHT_PITCH, top, LIGHT, LIGHT]))
+                    .collect();
+                let room = LIGHT_LEFT * 2.0 + LIGHT_PITCH * 3.0;
+                return Caption { height: LIGHT_STRIP, gap: [room.min(width), width], buttons, lights: true };
+            }
+            Some(WindowControls::None) => return Caption::default(),
+            None => self.client,
+        };
+        if client {
             let row = BUTTON[0] * 3.0;
             let x0 = (width - row).max(0.0);
             let buttons = [Action::Minimize, Action::Maximize, Action::Close]
@@ -59,7 +92,7 @@ impl Chrome {
                 .enumerate()
                 .map(|(i, action)| (action, [x0 + i as f32 * BUTTON[0], 0.0, BUTTON[0], BUTTON[1]]))
                 .collect();
-            return Caption { height: BUTTON[1], gap: [0.0, x0], buttons };
+            return Caption { height: BUTTON[1], gap: [0.0, x0], buttons, lights: false };
         }
         let [x, y, w, h] = self.native;
         if !(w > 0.0 && h > 0.0) {
@@ -68,7 +101,7 @@ impl Chrome {
         // the buttons sit at one end of the strip (the left on macOS, the right in a
         // right-to-left layout): the title has the rest
         let gap = if x + w * 0.5 < width * 0.5 { [x + w, width] } else { [0.0, x] };
-        Caption { height: (y.max(0.0) * 2.0 + h).round(), gap, buttons: Vec::new() }
+        Caption { height: (y.max(0.0) * 2.0 + h).round(), gap, buttons: Vec::new(), lights: false }
     }
 }
 
@@ -155,7 +188,7 @@ mod tests {
 
     #[test]
     fn traffic_lights_keep_their_room_and_centre_the_strip() {
-        let chrome = Chrome { native: [7.0, 6.0, 54.0, 16.0], client: false, state: 0 };
+        let chrome = Chrome { native: [7.0, 6.0, 54.0, 16.0], client: false, state: 0, hosted: None };
         let caption = chrome.caption(900.0, false);
         assert_eq!(caption.height, 28.0);
         assert_eq!(caption.gap, [61.0, 900.0]);
@@ -167,7 +200,7 @@ mod tests {
 
     #[test]
     fn app_drawn_buttons_sit_at_the_right() {
-        let chrome = Chrome { native: [0.0; 4], client: true, state: 0 };
+        let chrome = Chrome { native: [0.0; 4], client: true, state: 0, hosted: None };
         let caption = chrome.caption(800.0, false);
         assert_eq!(caption.height, 29.0);
         assert_eq!(caption.buttons.len(), 3);
@@ -176,9 +209,29 @@ mod tests {
         assert_eq!(caption.button_at([600.0, 10.0]), None);
     }
 
+    /// Under the WM the WM's family decides, whatever the shell reports (its client draws
+    /// its own chrome): as the app's caption will (widgets' `resolve_chrome`).
+    #[test]
+    fn under_the_wm_the_controls_follow_its_family() {
+        let wm = |c| Chrome { native: [0.0; 4], client: true, state: 0, hosted: Some(c) };
+        let lights = wm(WindowControls::Lights).caption(900.0, false);
+        assert!(lights.lights);
+        assert_eq!(lights.height, 28.0);
+        assert_eq!(lights.gap, [76.0, 900.0]);
+        assert_eq!(lights.buttons.iter().map(|b| b.0).collect::<Vec<_>>(), [Action::Close, Action::Minimize, Action::Maximize]);
+        assert_eq!(lights.buttons[0].1, [8.0, 4.0, 20.0, 20.0]);
+        assert_eq!(lights.button_at([50.0, 14.0]), Some(Action::Maximize));
+        let buttons = wm(WindowControls::Buttons).caption(800.0, false);
+        assert!(!buttons.lights);
+        assert_eq!(buttons.buttons[2], (Action::Close, [754.0, 0.0, 46.0, 29.0]));
+        assert_eq!(wm(WindowControls::None).caption(900.0, false), Caption::default());
+        let full = Chrome { state: window_state::FULLSCREEN, ..wm(WindowControls::Lights) };
+        assert_eq!(full.caption(900.0, false).height, 0.0);
+    }
+
     #[test]
     fn no_caption_on_touch_fullscreen_or_without_chrome() {
-        let lights = Chrome { native: [7.0, 6.0, 54.0, 16.0], client: false, state: 0 };
+        let lights = Chrome { native: [7.0, 6.0, 54.0, 16.0], client: false, state: 0, hosted: None };
         assert_eq!(lights.caption(900.0, true).height, 0.0);
         let full = Chrome { state: window_state::FULLSCREEN, ..lights };
         assert_eq!(full.caption(900.0, false).height, 0.0);

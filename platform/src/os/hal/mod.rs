@@ -167,6 +167,9 @@ pub struct HalClient {
     pub(crate) audio_ctx: [Vec<Option<media::AudioCtx>>; 2],
     /// entries the HAL has replaced: freed once the batch that replaced them is submitted
     pub(crate) retired_ctx: Vec<media::AudioCtx>,
+    /// entries whose real-time code Relax still compiles: they go to the HAL once it is ready
+    #[cfg(relax)]
+    pub(crate) audio_waiting: Vec<media::AudioWaiting>,
     #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
     pub(crate) game: media::GameClient,
     pub(crate) camera: camera::CameraClient,
@@ -225,6 +228,8 @@ impl Default for HalClient {
             midi_senders: Vec::new(),
             audio_ctx: [Vec::new(), Vec::new()],
             retired_ctx: Vec::new(),
+            #[cfg(relax)]
+            audio_waiting: Vec::new(),
             #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
             game: Default::default(),
             camera: Default::default(),

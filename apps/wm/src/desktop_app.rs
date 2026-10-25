@@ -88,6 +88,7 @@ impl App {
         self.stylesheet = Some(sheet);
         // New child processes pick the style before their widget definitions load.
         host::set_child_env("MAKEPAD_WIDGET_STYLE", std::ffi::OsStr::new(&sheet_name));
+        host::set_child_env("MAKEPAD_WIDGET_STYLE_FAMILY", std::ffi::OsStr::new(style.id()));
         let omarchy_source = if style == DesktopStyle::Omarchy {
             theme::load_theme_source(&self.state_mut().theme_name)
         } else { String::new() };

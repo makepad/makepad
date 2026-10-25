@@ -245,6 +245,8 @@ pub struct Boot {
     ring: ring::Ring,
     /// the window's chrome as the platform reports it: the caption strip follows it
     chrome: caption::Chrome,
+    /// the window has focus (the caption's traffic lights grey without it)
+    focused: bool,
 }
 
 impl Boot {
@@ -282,8 +284,13 @@ impl Boot {
             ring: ring::Ring::new(),
             chrome: caption::Chrome {
                 client: info.flags & info_flags::CLIENT_CHROME != 0,
+                // under a makepad WM the window's controls are its family's, as the app's caption
+                // draws them (`turn` follows the WM's style changes)
+                hosted: (info.flags & info_flags::WM_HOSTED != 0)
+                    .then(|| makepad_hal::host_window_controls().unwrap_or(makepad_hal::WindowControls::None)),
                 ..Default::default()
             },
+            focused: true,
         };
         if let Some(chrome) = boot.dump.as_ref().and_then(|d| d.chrome) {
             boot.chrome = chrome;
@@ -673,6 +680,15 @@ impl Boot {
             environment.dark = Some(dark);
             self.environment(environment);
         }
+        if self.chrome.hosted.is_some() && !self.dump.as_ref().is_some_and(|d| d.chrome.is_some()) {
+            let controls = Some(makepad_hal::host_window_controls().unwrap_or(makepad_hal::WindowControls::None));
+            if self.chrome.hosted != controls {
+                self.chrome.hosted = controls;
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.dirty = true;
+                }
+            }
+        }
         let hal = Hal::global();
         // Pump backend completions, then take session 0's owned queue. A zero-cap
         // pump leaves the events queued. Taking the arena avoids truncating large
@@ -739,6 +755,15 @@ impl Boot {
                 | HalEvent::Focus { window, .. }
                     if Some(window) == self.window =>
                 {
+                    if let HalEvent::Focus { focused, .. } = &event {
+                        let focused = *focused;
+                        if self.focused != focused {
+                            self.focused = focused;
+                            if let Some(renderer) = &mut self.renderer {
+                                renderer.redraw = true;
+                            }
+                        }
+                    }
                     self.events.push(Event::Input(raw, payload.to_vec()));
                 }
                 HalEvent::MouseDown { window, .. }
@@ -949,6 +974,7 @@ impl Boot {
             return;
         }
         let caption = self.chrome.caption(self.geometry[2], self.environment.touch);
+        let focus = self.focused as u8 as f32;
         if renderer.dirty {
             renderer.layout(
                 &self.state,
@@ -1008,7 +1034,8 @@ impl Boot {
                     (id!(clip_rect), &bounds),
                     (id!(selected), &[selected as u8 as f32]),
                     (id!(accent), &[card.accent]),
-                    (id!(action), &[button_glyph(card.action)]),
+                    (id!(action), &[button_glyph(card.action, caption.lights)]),
+                    (id!(block), &[if card.accent == CAPTION_BUTTON { focus } else { 0.0 }]),
                     (
                         id!(pressed),
                         &[(renderer.pressed == Some(card.action)) as u8 as f32],
@@ -1462,6 +1489,7 @@ impl Boot {
         let dpi = self.dpi;
         let reduce_motion = self.environment.reduce_motion;
         let caption = self.caption();
+        let focus = self.focused as u8 as f32;
         let build_start_ns = makepad_hal::clock_ns();
         let renderer = self.renderer.as_mut().unwrap();
         let program = renderer.active.as_ref().unwrap();
@@ -1566,7 +1594,8 @@ impl Boot {
                     (id!(rect), &card.rect),
                     (id!(selected), &[(renderer.hovered == Some(card.action)) as u8 as f32]),
                     (id!(accent), &[card.accent]),
-                    (id!(action), &[button_glyph(card.action)]),
+                    (id!(action), &[button_glyph(card.action, caption.lights)]),
+                    (id!(block), &[focus]),
                     (id!(pressed), &[(renderer.pressed == Some(card.action)) as u8 as f32]),
                 ],
                 &mut buttons,
@@ -1809,12 +1838,15 @@ fn next_badge(slot: &mut Option<Id>) -> Id {
 }
 
 /// The glyph a window button of the caption shows (document `error_band.action`): 0 minimise,
-/// 1 maximise / restore, 2 close.
-fn button_glyph(action: Action) -> f32 {
-    match action {
-        Action::Minimize => 0.0,
-        Action::Maximize => 1.0,
-        _ => 2.0,
+/// 1 maximise / restore, 2 close; as traffic lights (`lights`) 3 close, 4 minimise, 5 maximise.
+fn button_glyph(action: Action, lights: bool) -> f32 {
+    match (action, lights) {
+        (Action::Minimize, false) => 0.0,
+        (Action::Maximize, false) => 1.0,
+        (_, false) => 2.0,
+        (Action::Minimize, true) => 4.0,
+        (Action::Maximize, true) => 5.0,
+        (_, true) => 3.0,
     }
 }
 

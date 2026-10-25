@@ -150,6 +150,32 @@ let caption_button_px = fn(p: vec2, s: vec2, glyph: float, hover: float, down: f
     alpha = alpha * (1.0 - g) + g
     return vec4(col + vec3(dither(px) * step(0.001, alpha)), alpha)
 }
+// a traffic light of the caption under a macOS-like window manager, drawn as the app's own
+// caption draws it there (widgets' DesktopButton MacClose / MacMin / MacMax in a 20-point
+// square): a disc of radius 6 in its colour, darker pressed, grey in a window without focus
+// unless hovered; its glyph (1.1-point strokes) shows on hover. glyph: 3 close, 4 minimise,
+// 5 maximise. focus: the window has focus. Premultiplied.
+let caption_light_px = fn(p: vec2, s: vec2, glyph: float, hover: float, down: float, focus: float, dp: float) -> vec4 {
+    let d = p - s * 0.5
+    // the soft edge of Sdf2d with `aa * 3` (widgets' DesktopButton)
+    let aa = dp * 2.12132034
+    let disc = clamp((6.0 - length(d)) * aa, 0.0, 1.0)
+    let close = 1.0 - step(3.5, glyph)
+    let maxi = step(4.5, glyph)
+    let mini = 1.0 - close - maxi
+    let lit = mix(#ff5f57, #e0443e, down) * close + mix(#febc2e, #d9a020, down) * mini + mix(#28c840, #1fa733, down) * maxi
+    let face = mix(#b5b5b5, lit, max(focus, hover))
+    let ink = #4d0000 * close + #985700 * mini + #006500 * maxi
+    let r = vec2(d.x + d.y, d.x - d.y) * 0.70710678
+    let l = 2.6 * 1.41421356
+    let cross = min(length(vec2(r.x - clamp(r.x, -l, l), r.y)), length(vec2(r.y - clamp(r.y, -l, l), r.x)))
+    let dash = length(vec2(d.x - clamp(d.x, -3.2, 3.2), d.y))
+    let plus = min(length(vec2(d.x - clamp(d.x, -3.0, 3.0), d.y)), length(vec2(d.y - clamp(d.y, -3.0, 3.0), d.x)))
+    let e = cross * close + dash * mini + plus * maxi
+    let g = clamp((1.1 - e) * aa, 0.0, 1.0) * hover
+    let col = ink.rgb * g + face.rgb * disc * (1.0 - g)
+    return vec4(col, g + disc * (1.0 - g))
+}
 // the JIT ring in the running app's caption (makepad run; ring.rs), in its 24 pt badge: a ring
 // 14 pt across that moves whenever the JIT builds. A head with a fading tail turns around it
 // (spin: its turn so far) over a faint track; under it a progress arc from the top covers `fill`
@@ -291,7 +317,8 @@ let Quad = {
     }
     // a card of the halted view, a row of a collapsed group, a touch button, or a window button
     // of the caption. accent: 0 follow-on card, 1 root cause / panic card, 2 member row, 3 button,
-    // 4 caption window button (action: its glyph, selected: hover), 5 the JIT ring (selected:
+    // 4 caption window button (action: its glyph, 3..5 a traffic light; selected: hover;
+    // block: the window has focus), 5 the JIT ring (selected:
     // its fill, block: its mode, pressed: opacity, action: its spin, beat: hover, ink: on a dark
     // caption), 6 the ring's tooltip plate (pressed: opacity, ink)
     error_band: Quad{
@@ -316,6 +343,9 @@ let Quad = {
                 return jit_ring_px(p, s, self.selected, self.block, self.pressed, self.action, self.beat, self.ink, dp, px)
             }
             if self.accent > 3.5 {
+                if self.action > 2.5 {
+                    return caption_light_px(p, s, self.action, self.selected, self.pressed, self.block, dp)
+                }
                 return caption_button_px(p, s, self.action, self.selected, self.pressed, dp, px)
             }
             let row = step(1.5, self.accent) * (1.0 - step(2.5, self.accent))

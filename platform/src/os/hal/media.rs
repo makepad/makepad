@@ -96,6 +96,37 @@ fn audio_entry_buffer() -> AudioBuffer {
     { AudioBuffer::default() }
 }
 
+/// When an audio entry's real-time code is compiled (Relax; nothing to wait for in a rustc build).
+#[cfg(relax)]
+type RealtimeReady = std::relax::Realtime;
+#[cfg(not(relax))]
+type RealtimeReady = ();
+
+/// An audio entry whose real-time code Relax still compiles (`Cx::hal_audio_entry`).
+#[cfg(relax)]
+pub(crate) struct AudioWaiting {
+    dir: u32,
+    index: u32,
+    entry: u64,
+    ptr: u64,
+    ready: std::relax::Realtime,
+    /// the state of the entry the HAL calls for this slot until it has this one
+    live: Option<AudioCtx>,
+}
+
+/// The entry the HAL calls on the device's real-time thread and the app's function it calls:
+/// under Relax everything they reach is compiled before the entry goes to the HAL, in the
+/// background (a first call there would stall the device: a glitch), within a bounded wait. The UI
+/// thread is woken when it is ready.
+#[cfg(relax)]
+fn realtime_entry<F: ?Sized>(entry: &extern "C" fn(*mut c_void, *mut media::AudioBlock), f: &F) -> std::relax::Realtime {
+    extern "C" fn wake() {
+        crate::thread::SignalToUI::set_internal_signal();
+    }
+    let _ = std::relax::realtime(entry, None);
+    std::relax::realtime(f, Some(wake))
+}
+
 fn block_info(b: &media::AudioBlock) -> AudioInfo {
     AudioInfo {
         device_id: AudioDeviceId(LiveId(b.device)),
@@ -232,28 +263,79 @@ impl Cx {
         self.hal.frames.w.audio_use(dir, options, &media::pack_u64s(&ids));
     }
 
-    fn hal_set_audio_ctx(&mut self, dir: u32, index: usize, ctx: Option<AudioCtx>) {
-        let list = &mut self.hal.audio_ctx[dir as usize];
-        if list.len() <= index {
-            list.resize_with(index + 1, || None);
-        }
-        if let Some(old) = std::mem::replace(&mut list[index], ctx) {
-            self.hal.retired_ctx.push(old);
-        }
-    }
-
     pub(crate) fn hal_audio_output(&mut self, index: usize, f: AudioOutputFn) {
         let mut ctx = Box::new(OutputCtx { f, buffer: audio_entry_buffer() });
         let ptr = &mut *ctx as *mut OutputCtx as u64;
-        self.hal_set_audio_ctx(media::audio_dir::OUTPUT, index, Some(AudioCtx { _owner: ctx }));
-        self.hal.frames.w.audio_entry(media::audio_dir::OUTPUT, index as u32, audio_output_entry as *const () as usize as u64, ptr);
+        let entry: extern "C" fn(*mut c_void, *mut media::AudioBlock) = audio_output_entry;
+        #[cfg(relax)]
+        let ready = realtime_entry(&entry, &*ctx.f);
+        #[cfg(not(relax))]
+        let ready = ();
+        self.hal_audio_entry(media::audio_dir::OUTPUT, index, entry as usize as u64, ptr, AudioCtx { _owner: ctx }, ready);
     }
 
     pub(crate) fn hal_audio_input(&mut self, index: usize, f: AudioInputFn) {
         let mut ctx = Box::new(InputCtx { f, buffer: audio_entry_buffer() });
         let ptr = &mut *ctx as *mut InputCtx as u64;
-        self.hal_set_audio_ctx(media::audio_dir::INPUT, index, Some(AudioCtx { _owner: ctx }));
-        self.hal.frames.w.audio_entry(media::audio_dir::INPUT, index as u32, audio_input_entry as *const () as usize as u64, ptr);
+        let entry: extern "C" fn(*mut c_void, *mut media::AudioBlock) = audio_input_entry;
+        #[cfg(relax)]
+        let ready = realtime_entry(&entry, &*ctx.f);
+        #[cfg(not(relax))]
+        let ready = ();
+        self.hal_audio_entry(media::audio_dir::INPUT, index, entry as usize as u64, ptr, AudioCtx { _owner: ctx }, ready);
+    }
+
+    /// Registers an audio entry with the HAL; under Relax once the code it runs on the device's
+    /// thread is compiled, or after a bounded wait (a few hundred ms at most: audio starts
+    /// promptly). The state of the entry the HAL calls now stays alive until the HAL has the new one.
+    fn hal_audio_entry(&mut self, dir: u32, index: usize, entry: u64, ptr: u64, ctx: AudioCtx, ready: RealtimeReady) {
+        let list = &mut self.hal.audio_ctx[dir as usize];
+        if list.len() <= index {
+            list.resize_with(index + 1, || None);
+        }
+        let old = std::mem::replace(&mut list[index], Some(ctx));
+        #[cfg(relax)]
+        {
+            // a waiting entry of this slot never reached the HAL: its state goes, the state the
+            // HAL calls stays with the new one
+            let mut live = None;
+            if let Some(i) = self.hal.audio_waiting.iter().position(|w| w.dir == dir && w.index == index as u32) {
+                live = self.hal.audio_waiting.remove(i).live;
+                self.hal.retired_ctx.extend(old);
+            } else if ready.ready() {
+                self.hal.retired_ctx.extend(old);
+            } else {
+                live = old;
+            }
+            if !ready.ready() {
+                self.hal.audio_waiting.push(AudioWaiting { dir, index: index as u32, entry, ptr, ready, live });
+                return;
+            }
+            self.hal.retired_ctx.extend(live);
+        }
+        #[cfg(not(relax))]
+        {
+            let () = ready;
+            self.hal.retired_ctx.extend(old);
+        }
+        self.hal.frames.w.audio_entry(dir, index as u32, entry, ptr);
+    }
+
+    /// The waiting audio entries whose code is compiled go to the HAL (with the next batch).
+    #[cfg(relax)]
+    pub(crate) fn hal_audio_waiting_ready(&mut self) {
+        if self.hal.audio_waiting.is_empty() {
+            return;
+        }
+        let waiting = std::mem::take(&mut self.hal.audio_waiting);
+        for w in waiting {
+            if w.ready.ready() {
+                self.hal.frames.w.audio_entry(w.dir, w.index, w.entry, w.ptr);
+                self.hal.retired_ctx.extend(w.live);
+            } else {
+                self.hal.audio_waiting.push(w);
+            }
+        }
     }
 
     /// A texture whose storage the HAL makes: its HAL id.

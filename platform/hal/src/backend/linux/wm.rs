@@ -544,6 +544,11 @@ impl App {
                 // Every other WM message is the app's, as a WM-hosted Cx hears it (`Event::Custom`):
                 // the WM's style sheet (its window controls' family), fullscreen, parked, ...
                 if let Some(name) = wm_state_name(&json) {
+                    // The style sheet's family gives the window controls; the run's load screen
+                    // draws its caption by them (`host_window_controls`) on its next turn.
+                    if name == "makepad_style" && crate::window_controls::set_host_sheet(&json) {
+                        self.state.shared.push((session::HOST, Id::NONE), |q, _| q.wake());
+                    }
                     match self.wm_state.iter_mut().find(|(n, _)| n == name) {
                         Some(entry) => entry.1 = json.clone(),
                         None => self.wm_state.push((name.to_string(), json.clone())),

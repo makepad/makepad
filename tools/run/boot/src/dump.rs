@@ -17,9 +17,9 @@ pub struct Dump {
     target: Option<[u32; 2]>,
     /// `MAKEPAD_RUN_BOOT_HOLD=1`: keep drawing (into a texture) after the app has the window
     pub hold: bool,
-    /// `MAKEPAD_RUN_BOOT_CHROME=client|<x>,<y>,<w>,<h>`: the window chrome a hidden run (which has
-    /// no window system, so no window buttons) lays its caption out for: app-drawn buttons, or
-    /// native ones at that rect (points)
+    /// `MAKEPAD_RUN_BOOT_CHROME=client|wm:<family>|<x>,<y>,<w>,<h>`: the window chrome a hidden run
+    /// (which has no window system, so no window buttons) lays its caption out for: app-drawn
+    /// buttons, a makepad WM's controls in that desktop family, or native ones at that rect (points)
     pub chrome: Option<crate::caption::Chrome>,
     /// `MAKEPAD_RUN_RING_HOVER=1`: the JIT ring is drawn hovered, its tooltip showing (a hidden
     /// run has no pointer); `MAKEPAD_RUN_RING_ALERT=stale|panic`: its dot shows
@@ -48,9 +48,14 @@ impl Dump {
                 if spec == "client" {
                     return Some(crate::caption::Chrome { client: true, ..Default::default() });
                 }
+                // a makepad WM's family's controls (`wm:macos`, `wm:windows`, `wm:omarchy`)
+                if let Some(family) = spec.strip_prefix("wm:") {
+                    let hosted = Some(makepad_hal::WindowControls::of_family(family));
+                    return Some(crate::caption::Chrome { client: true, hosted, ..Default::default() });
+                }
                 let v: Vec<f32> = spec.split(',').filter_map(|v| v.trim().parse().ok()).collect();
                 let native: [f32; 4] = v.try_into().ok()?;
-                Some(crate::caption::Chrome { native, client: false, state: 0 })
+                Some(crate::caption::Chrome { native, ..Default::default() })
             }),
             ring_hover: std::env::var("MAKEPAD_RUN_RING_HOVER").as_deref() == Ok("1"),
             ring_alert: match std::env::var("MAKEPAD_RUN_RING_ALERT").as_deref() {

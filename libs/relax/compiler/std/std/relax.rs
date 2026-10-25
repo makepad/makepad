@@ -31,19 +31,34 @@ extern "C" {
 }
 
 extern "C" {
-    fn __relax_realtime(root: usize, data: usize, meta: usize);
+    fn __relax_realtime(root: usize, data: usize, meta: usize, wake: usize) -> u64;
+    fn __relax_realtime_ready(ticket: u64) -> bool;
 }
 
 /// The type whose code `realtime` names (its address is the root's identity, not a call).
 fn __realtime_root<T: ?Sized>(_: &T) {}
 
+/// What `realtime` marked is compiled once `ready` says so.
+#[derive(Clone, Copy, Debug)]
+pub struct Realtime(u64);
+
+impl Realtime {
+    /// Hand the code to the real-time thread now: everything the mark reaches is compiled, or the
+    /// wait for it reached its bound (a few hundred ms: audio starts promptly, what is still
+    /// missing compiles on its first call there).
+    pub fn ready(&self) -> bool {
+        self.0 == 0 || unsafe { __relax_realtime_ready(self.0) }
+    }
+}
+
 /// The code reachable from `x` runs on a real-time thread (an audio device's callback, a
 /// thread with a real-time policy): it must never wait for a compile. Under Relax everything
 /// it can reach -- the closure or fn's body, what that calls, the methods of the trait objects
-/// it calls through, now and as new ones are made -- is compiled now, before the first call.
-/// Pass the closure or fn pointer itself, or `&*boxed` for a trait object. Call it where the
-/// callback is installed, before the device or thread starts.
-pub fn realtime<T: ?Sized>(x: &T) {
+/// it calls through, now and as new ones are made -- is compiled ahead of the first call, in the
+/// background: the caller does not wait. Hand the code to the real-time thread once the ticket
+/// is `ready`; `wake` (if any) is called on a thread of its own then. Pass the closure or fn
+/// itself, or `&*boxed` for a trait object; `x` is only read during this call.
+pub fn realtime<T: ?Sized>(x: &T, wake: Option<extern "C" fn()>) -> Realtime {
     let p: *const T = x;
     // a trait object's (or slice's) metadata is the word after the data pointer
     let meta = if crate::mem::size_of::<*const T>() == 2 * crate::mem::size_of::<usize>() {
@@ -52,7 +67,8 @@ pub fn realtime<T: ?Sized>(x: &T) {
         0
     };
     let root = __realtime_root::<T> as fn(&T) as usize;
-    unsafe { __relax_realtime(root, p as *const u8 as usize, meta) }
+    let wake = wake.map_or(0, |w| w as usize);
+    Realtime(unsafe { __relax_realtime(root, p as *const u8 as usize, meta, wake) })
 }
 
 extern "C" {

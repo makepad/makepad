@@ -6006,6 +6006,9 @@ impl MatchEvent for App {
         // Children inherit the system stylesheet at spawn; makepad_style
         // events carry subsequent sheet changes to their running windows.
         host::set_child_env("MAKEPAD_WIDGET_STYLE", std::ffi::OsStr::new(&sheet.name));
+        // Its family, for what reads the WM's window controls without the sheet catalogue
+        // (`makepad_hal::host_window_controls`: `makepad run`'s load screen).
+        host::set_child_env("MAKEPAD_WIDGET_STYLE_FAMILY", std::ffi::OsStr::new(sheet.family.id()));
         self.module_host.apply_style(cx, &sheet);
         self.stylesheet = Some(sheet);
         let source = theme::load_theme_source(&theme_name);

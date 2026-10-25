@@ -93,18 +93,20 @@ pub enum ResolvedChrome {
 /// The chrome a window draws: what the theme declares, and for `Follow` the host's style
 /// (`host`: the WM's family under a window manager, `None` natively, where the OS path
 /// keeps its own rules and draws no lights of ours).
+/// The family's controls are the platform's table (`makepad_hal::WindowControls`), which
+/// `makepad run`'s load screen draws its caption by too.
 pub fn resolve_chrome(declared: WindowChrome, has_drag_region: bool, host: Option<crate::desktop_style::DesktopStyle>) -> ResolvedChrome {
-    use crate::desktop_style::DesktopStyle as S;
+    use makepad_platform::makepad_hal::WindowControls;
     match declared {
         WindowChrome::None => ResolvedChrome::None,
         WindowChrome::Custom => ResolvedChrome::Custom,
         _ if has_drag_region => ResolvedChrome::Custom,
         WindowChrome::Lights => ResolvedChrome::Lights,
         WindowChrome::Buttons => ResolvedChrome::Buttons,
-        WindowChrome::Follow => match host {
-            Some(S::Macos | S::NextStep) => ResolvedChrome::Lights,
-            Some(style) if style.floating() => ResolvedChrome::Buttons,
-            _ => ResolvedChrome::Bare,
+        WindowChrome::Follow => match host.map(|style| WindowControls::of_family(style.id())) {
+            Some(WindowControls::Lights) => ResolvedChrome::Lights,
+            Some(WindowControls::Buttons) => ResolvedChrome::Buttons,
+            Some(WindowControls::None) | None => ResolvedChrome::Bare,
         },
     }
 }

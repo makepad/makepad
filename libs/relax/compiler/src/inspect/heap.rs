@@ -270,7 +270,7 @@ mod imp {
 
 // ------------------------------------------------------------------ tracking state
 
-const DEPTH: usize = 24;
+pub(crate) const DEPTH: usize = 24;
 const MAX_STACKS: usize = 1 << 16;
 /// A sample's weight bits in the live table's record (the stack id is above bit 40).
 const WEIGHT: u64 = (1 << 39) - 1;
@@ -508,7 +508,7 @@ pub(crate) fn stack_changed() {
 /// on macOS arm64, CFI on Linux x86_64 (never refreshing the module index here: a dlopen in
 /// progress may hold the loader lock and be allocating). Return addresses only.
 #[inline(never)]
-fn capture_host(out: &mut [u64; DEPTH]) -> u8 {
+pub(crate) fn capture_host(out: &mut [u64; DEPTH]) -> u8 {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
         let mut f: u64;

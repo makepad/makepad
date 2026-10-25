@@ -459,6 +459,8 @@ impl Cx {
 
     /// One batch to the HAL, then the memory its slices pointed at is ours again.
     pub(super) fn hal_submit_batch(&mut self) {
+        #[cfg(relax)]
+        self.hal_audio_waiting_ready();
         #[cfg(target_os = "linux")]
         {
             self.hal.direct_display.flush(&mut self.hal.frames.w);

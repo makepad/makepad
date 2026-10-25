@@ -9902,15 +9902,6 @@ impl<'a> Lcx<'a> {
         let args = instance.compact_args(&self.u.tcx);
         match instance.def {
             InstanceKind::Virtual(d, index) => {
-                // the trait-object type called through (real-time reach: jit.rs realtime)
-                let dy = match self.kind(vals[0].1) {
-                    TyKind::Ref(_, t, _) | TyKind::Ptr(_, t) => t,
-                    _ => vals[0].1,
-                };
-                let dy = self.u.tcx.tys.erase_regions(dy);
-                if matches!(self.kind(dy), TyKind::Dyn(..)) && !self.f.dyn_calls.contains(&dy.0) {
-                    self.f.dyn_calls.push(dy.0);
-                }
                 let receiver = self.to_leaves(vals[0].0.clone(), vals[0].1);
                 assert_eq!(receiver.len(), 2, "virtual receiver metadata");
                 let ptr = self.f.vreg(Cls::I);
