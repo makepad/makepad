@@ -21,6 +21,7 @@
 
 pub use makepad_widgets;
 
+mod login;
 mod serve;
 mod settings;
 mod tray;
@@ -280,7 +281,7 @@ impl App {
         if let Some((_, conf)) = &hub.node {
             settings.compute = conf.compute;
         }
-        let state = ViewState { settings, off_at: hub.off_at(&p), published: p, snapshot, now_ms: now_ms() };
+        let state = ViewState { settings, off_at: hub.off_at(&p), published: p, snapshot, now_ms: now_ms(), login: login::state() };
         // only what shows draws; opening either refreshes it first
         if self.dropdown.open {
             if let Some(mut v) = self.ui.widget(cx, ids!(drop_view)).borrow_mut::<HubAppView>() {
@@ -345,6 +346,7 @@ impl App {
 
     fn quit(&mut self, cx: &mut Cx) {
         selftest_note("quit from the tray");
+        login::clear_pid();
         if let Some(mut hub) = self.hub.take() {
             // A node's Quit is deliberate: `enabled = off` in the node's settings is what the WM
             // reads, so it does not start the hub again until the person starts it.
@@ -383,6 +385,7 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
+        login::write_pid();
         let hub = Hub::start(cx);
         self.hub = Some(hub);
         // sets the tray
@@ -410,6 +413,10 @@ impl MatchEvent for App {
                     hub.settings.service_mut(b).idle_off = idle;
                     hub.save_and_plan();
                 }
+                HubAppAction::SetLogin(on) => match login::set(on) {
+                    Ok(()) => selftest_note(&format!("open at login {}", if on { "on" } else { "off" })),
+                    Err(e) => log!("aihub: open at login: {e}"),
+                },
                 HubAppAction::Hub(command) => self.hub_command(command),
                 HubAppAction::None => continue,
             }
@@ -480,6 +487,7 @@ impl AppMain for App {
                 selftest_note("window closed: hidden, the hub stays in the tray");
             }
             Event::Shutdown => {
+                login::clear_pid();
                 if let Some(mut hub) = self.hub.take() {
                     hub.serve.quit();
                 }

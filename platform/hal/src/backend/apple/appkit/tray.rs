@@ -102,6 +102,7 @@ pub(super) fn set(sid: u32, id: u64, w: u32, h: u32, flags: u32, alpha: &[u8], t
             release(nil, &[old_click]);
         }
         if created && selftest_on() {
+            eprintln!("tray selftest: activation policy {}", super::app::activation_policy_name());
             if dropdown {
                 if !selftest_clicks(click_target, button) {
                     selftest_click(sid, id, item);

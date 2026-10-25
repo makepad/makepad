@@ -30,6 +30,8 @@ pub enum HubAppAction {
     SetEnabled(bool),
     SetService(Backend, bool),
     SetIdleOff(Backend, IdleOff),
+    /// "Open at login" (where the app offers it)
+    SetLogin(bool),
     Hub(HubCommand),
     #[default]
     None,
@@ -40,6 +42,7 @@ enum Hit {
     Enabled,
     Service(Backend),
     IdleOff(Backend, IdleOff),
+    Login,
 }
 
 /// What the window shows, set by the app from its settings and the hub owner.
@@ -52,6 +55,8 @@ pub struct ViewState {
     pub now_ms: u64,
     /// When each backend's inactivity turn-off fires, if it is on and has a limit.
     pub off_at: Vec<(Backend, u64)>,
+    /// "Open at login": None = not offered here, else the switch's state.
+    pub login: Option<bool>,
 }
 
 const PAD: f64 = 16.0;
@@ -88,6 +93,9 @@ pub struct HubAppView {
     scroll: f64,
     #[rust]
     content_h: f64,
+    /// the last selftest line about the login switch
+    #[rust]
+    noted: String,
     #[rust]
     view_h: f64,
     #[redraw]
@@ -172,6 +180,20 @@ impl HubAppView {
                 self.hits.push((hit, r));
             }
             rest = cut_top(rest, 8.0).1;
+        }
+
+        // Open at login (an installed bundle only).
+        if let Some(on) = st.login {
+            let (row, r2) = cut_top(rest, 30.0);
+            rest = r2;
+            let sw = self.d.toggle_switch(cx, dvec2(row.pos.x + row.size.x - 48.0, row.pos.y + 6.0), &tok, on, fg);
+            self.hits.push((Hit::Login, inset(sw, -6.0)));
+            self.d.label_elided(cx, rect(row.pos.x, row.pos.y, row.size.x - 64.0, row.size.y), false, tok.font.body, fg, HAlign::Left, "Open at login");
+            let note = format!("login switch at ({}, {}) in the window, {}", sw.pos.x + sw.size.x * 0.5 - window.pos.x, sw.pos.y + sw.size.y * 0.5 - window.pos.y, if on { "on" } else { "off" });
+            if self.noted != note {
+                crate::selftest_note(&note);
+                self.noted = note;
+            }
         }
 
         // The fleet as this hub hears it.
@@ -322,6 +344,7 @@ impl Widget for HubAppView {
                     Some(Hit::Enabled) => HubAppAction::SetEnabled(!st.enabled),
                     Some(Hit::Service(b)) => HubAppAction::SetService(b, !st.service(b).on),
                     Some(Hit::IdleOff(b, i)) => HubAppAction::SetIdleOff(b, i),
+                    Some(Hit::Login) => HubAppAction::SetLogin(!self.state.login.unwrap_or(false)),
                     None => return,
                 };
                 cx.widget_action(self.uid, action);

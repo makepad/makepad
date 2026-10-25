@@ -1104,7 +1104,10 @@ impl Cx {
         let build_start = makepad_hal::clock_ns();
         let Some(list_id) = self.passes[pass_id].main_draw_list_id else {
             // a frozen texture: its producer detached and dropped its list
-            if matches!(self.passes[pass_id].parent, CxDrawPassParent::None) {
+            // a window not created yet (`create_on_start: false`) has nothing to draw: its pass
+            // waits quietly, and creating the window asks for a full redraw (`hal_create_window`)
+            let uncreated = matches!(self.passes[pass_id].parent, CxDrawPassParent::Window(w) if !self.windows[w].is_created);
+            if uncreated || matches!(self.passes[pass_id].parent, CxDrawPassParent::None) {
                 self.passes[pass_id].paint_dirty = false;
                 self.passes[pass_id].incomplete = false;
             } else {

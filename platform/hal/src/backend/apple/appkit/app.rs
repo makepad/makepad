@@ -348,7 +348,10 @@ unsafe fn init() {
     let no_open: ObjcId = msg_send![class!(NSDictionary), dictionaryWithObject: str_to_nsstring("NO") forKey: str_to_nsstring("NSTreatUnknownArgumentsAsOpen")];
     let () = msg_send![defaults, registerDefaults: no_open];
     let () = msg_send![ns_app, setDelegate: delegate];
-    let () = msg_send![ns_app, setActivationPolicy: NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular as i64];
+    // a bundle whose Info.plist says LSUIElement is an agent app (a menu-bar app): no Dock icon and
+    // no menu bar from the first moment; `ShowInDock` turns the Dock icon on while it has a window
+    let policy = if bundle_flag("LSUIElement") { NSApplicationActivationPolicy::NSApplicationActivationPolicyAccessory } else { NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular };
+    let () = msg_send![ns_app, setActivationPolicy: policy as i64];
     a.pulse.set(msg_send![classes.pulse, new]);
     a.menu_delegate.set(msg_send![classes.menu_delegate, new]);
     a.pasteboard.set(msg_send![class!(NSPasteboard), generalPasteboard]);
@@ -1373,6 +1376,35 @@ pub fn resize_loop(win: &Win, start: bool) {
 }
 
 // ------------------------------------------------------------------ menu
+
+/// A boolean key of the running bundle's Info.plist (false when unbundled or absent).
+fn bundle_flag(key: &str) -> bool {
+    unsafe {
+        let bundle: ObjcId = msg_send![class!(NSBundle), mainBundle];
+        if bundle == nil {
+            return false;
+        }
+        let value: ObjcId = msg_send![bundle, objectForInfoDictionaryKey: str_to_nsstring(key)];
+        if value == nil {
+            return false;
+        }
+        let on: BOOL = msg_send![value, boolValue];
+        on != NO
+    }
+}
+
+/// The activation policy now: "regular" (Dock icon, menu bar), "accessory" (neither), "prohibited".
+pub(super) fn activation_policy_name() -> &'static str {
+    unsafe {
+        let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+        let policy: i64 = msg_send![ns_app, activationPolicy];
+        match policy {
+            0 => "regular",
+            1 => "accessory",
+            _ => "prohibited",
+        }
+    }
+}
 
 fn install_quit_menu() {
     // the running app's CFBundleName is what macOS shows as the application menu title; none
