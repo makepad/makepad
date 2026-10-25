@@ -1,7 +1,7 @@
 //! Smart HTTP, upload-pack side only (git's http-protocol.txt / pack-protocol.txt, protocol v0/v1):
 //! the ref advertisement, the want/have request, and the pack out of the answer.
 use super::{GitError, ObjectId};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::str;
 
 const USER_AGENT: &str = "makepad-run/0.1";
@@ -48,13 +48,51 @@ pub fn build_info_refs_request(remote_url: &str) -> Request {
     }
 }
 
-/// The advertised commit of `branch` (a branch name or a full `refs/...` name); without one the
-/// ref HEAD points at, else main, master, HEAD, the first ref.
-pub fn parse_info_refs_response(response: &Response, branch: Option<&str>) -> Result<RemoteHead, GitError> {
+/// A remote's ref advertisement: every ref (an annotated tag also as `<name>^{}`, the commit it
+/// peels to), the ref HEAD points at (`symref=HEAD:`), and the capabilities.
+#[derive(Debug, Clone, Default)]
+pub struct Advertisement {
+    pub refs: BTreeMap<String, ObjectId>,
+    pub head: Option<String>,
+    pub capabilities: Vec<String>,
+}
+
+impl Advertisement {
+    /// The commit `name` names: an annotated tag's peeled commit, else the ref's own id.
+    pub fn commit(&self, name: &str) -> Option<ObjectId> {
+        self.refs.get(&format!("{name}^{{}}")).or_else(|| self.refs.get(name)).copied()
+    }
+
+    /// The commit of `branch` (a branch name or a full `refs/...` name); without one the ref HEAD
+    /// points at, else main, master, HEAD, the first ref.
+    pub fn select(&self, branch: Option<&str>) -> Result<RemoteHead, GitError> {
+        let refs = &self.refs;
+        let capabilities = self.capabilities.clone();
+        let (oid, ref_name) = if let Some(branch) = branch {
+            let want = if branch.starts_with("refs/") { branch.to_string() } else { format!("refs/heads/{branch}") };
+            (self.commit(&want).ok_or_else(|| GitError::RefNotFound(want.clone()))?, Some(want))
+        } else if let Some(symref) = &self.head {
+            (*refs.get(symref).or_else(|| refs.get("HEAD")).ok_or_else(|| GitError::RefNotFound("HEAD".into()))?, Some(symref.clone()))
+        } else if let Some(oid) = refs.get("refs/heads/main") {
+            (*oid, Some("refs/heads/main".to_string()))
+        } else if let Some(oid) = refs.get("refs/heads/master") {
+            (*oid, Some("refs/heads/master".to_string()))
+        } else if let Some(oid) = refs.get("HEAD") {
+            (*oid, None)
+        } else {
+            let (first, oid) = refs.iter().next().ok_or_else(|| GitError::RefNotFound("no advertised refs".into()))?;
+            (*oid, Some(first.clone()))
+        };
+        Ok(RemoteHead { oid, ref_name, capabilities })
+    }
+}
+
+/// The ref advertisement of an info/refs answer.
+pub fn parse_advertisement(response: &Response) -> Result<Advertisement, GitError> {
     if response.status_code != 200 {
         return Err(GitError::InvalidRef(format!("info/refs request failed with HTTP {}", response.status_code)));
     }
-    let mut refs = HashMap::<String, ObjectId>::new();
+    let mut refs = BTreeMap::<String, ObjectId>::new();
     let mut caps_seen = HashSet::<String>::new();
     let mut capabilities = Vec::<String>::new();
     let mut reader = PktLineReader::new(&response.body);
@@ -92,30 +130,21 @@ pub fn parse_info_refs_response(response: &Response, branch: Option<&str>) -> Re
     if refs.is_empty() {
         return Err(GitError::InvalidRef("no refs found in info/refs response".into()));
     }
-    let head_symref = capabilities.iter().find_map(|c| c.strip_prefix("symref=HEAD:")).map(str::to_string);
-    let (oid, ref_name) = if let Some(branch) = branch {
-        let want = if branch.starts_with("refs/") { branch.to_string() } else { format!("refs/heads/{branch}") };
-        (*refs.get(&want).ok_or_else(|| GitError::RefNotFound(want.clone()))?, Some(want))
-    } else if let Some(symref) = head_symref {
-        (*refs.get(&symref).or_else(|| refs.get("HEAD")).ok_or_else(|| GitError::RefNotFound("HEAD".into()))?, Some(symref))
-    } else if let Some(oid) = refs.get("refs/heads/main") {
-        (*oid, Some("refs/heads/main".to_string()))
-    } else if let Some(oid) = refs.get("refs/heads/master") {
-        (*oid, Some("refs/heads/master".to_string()))
-    } else if let Some(oid) = refs.get("HEAD") {
-        (*oid, None)
-    } else {
-        let first = refs.keys().min().cloned().ok_or_else(|| GitError::RefNotFound("no advertised refs".into()))?;
-        (refs[&first], Some(first))
-    };
-    Ok(RemoteHead { oid, ref_name, capabilities })
+    let head = capabilities.iter().find_map(|c| c.strip_prefix("symref=HEAD:")).map(str::to_string);
+    Ok(Advertisement { refs, head, capabilities })
 }
 
-/// POST <url>/git-upload-pack: want `target` (with the capabilities we use that the remote has),
-/// `deepen <depth>` when asked (needs `shallow`), a `have` per commit we hold, done.
-pub fn build_upload_pack_request(remote_url: &str, target: ObjectId, capabilities: &[String], have: &[ObjectId], depth: Option<u32>) -> Result<Request, GitError> {
+/// The advertised commit of `branch` (Advertisement::select).
+pub fn parse_info_refs_response(response: &Response, branch: Option<&str>) -> Result<RemoteHead, GitError> {
+    parse_advertisement(response)?.select(branch)
+}
+
+/// POST <url>/git-upload-pack: a want per `targets` (the first with the capabilities we use that
+/// the remote has), a `shallow` line per commit we hold without its parents and `deepen <depth>`
+/// when asked (both need `shallow`), a `have` per commit we hold, done.
+pub fn build_upload_pack_request(remote_url: &str, targets: &[ObjectId], capabilities: &[String], have: &[ObjectId], shallow: &[ObjectId], depth: Option<u32>) -> Result<Request, GitError> {
     let has_cap = |name: &str| capabilities.iter().any(|c| c == name || c.strip_prefix(name).is_some_and(|r| r.starts_with('=')));
-    if depth.is_some() && !has_cap("shallow") {
+    if (depth.is_some() || !shallow.is_empty()) && !has_cap("shallow") {
         return Err(GitError::InvalidRef("remote does not advertise shallow capability".into()));
     }
     let mut want_caps = Vec::new();
@@ -130,9 +159,17 @@ pub fn build_upload_pack_request(remote_url: &str, target: ObjectId, capabilitie
         }
     }
     let mut body = Vec::new();
-    let want = if want_caps.is_empty() { format!("want {}\n", target.to_hex()) } else { format!("want {} {}\n", target.to_hex(), want_caps.join(" ")) };
-    write_pkt_line(&mut body, want.as_bytes())?;
+    if targets.is_empty() {
+        return Err(GitError::InvalidRef("an upload-pack request wants at least one commit".into()));
+    }
+    for (i, target) in targets.iter().enumerate() {
+        let want = if i > 0 || want_caps.is_empty() { format!("want {}\n", target.to_hex()) } else { format!("want {} {}\n", target.to_hex(), want_caps.join(" ")) };
+        write_pkt_line(&mut body, want.as_bytes())?;
+    }
     // part of the want list: before the first flush
+    for oid in shallow {
+        write_pkt_line(&mut body, format!("shallow {}\n", oid.to_hex()).as_bytes())?;
+    }
     if let Some(depth) = depth {
         write_pkt_line(&mut body, format!("deepen {depth}\n").as_bytes())?;
     }
@@ -313,7 +350,7 @@ mod tests {
     fn upload_pack_request_wants_deepens_then_haves() {
         let oid = ObjectId::from_hex("0123456789012345678901234567890123456789").unwrap();
         let caps = ["shallow".to_string(), "ofs-delta".to_string(), "side-band-64k".to_string()];
-        let req = build_upload_pack_request("https://example.com/repo/", oid, &caps, &[oid], Some(1)).unwrap();
+        let req = build_upload_pack_request("https://example.com/repo/", &[oid], &caps, &[oid], &[oid], Some(1)).unwrap();
         assert_eq!(req.url, "https://example.com/repo/git-upload-pack");
         let want = format!("want {oid} side-band-64k ofs-delta\n");
         let mut rd = PktLineReader::new(&req.body);
@@ -324,7 +361,7 @@ mod tests {
                 PktLine::Data(d) => String::from_utf8(d.to_vec()).unwrap(),
             });
         }
-        assert_eq!(lines, [want, "deepen 1\n".into(), "<flush>".into(), format!("have {oid}\n"), "done\n".into()]);
-        assert!(build_upload_pack_request("https://example.com/repo", oid, &[], &[], Some(1)).is_err());
+        assert_eq!(lines, [want, format!("shallow {oid}\n"), "deepen 1\n".into(), "<flush>".into(), format!("have {oid}\n"), "done\n".into()]);
+        assert!(build_upload_pack_request("https://example.com/repo", &[oid], &[], &[], &[], Some(1)).is_err());
     }
 }

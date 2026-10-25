@@ -13,86 +13,13 @@
 //!
 //! `<home>` is $MAKEPAD_RUN_HOME, else `~/.makepad-run` (`%USERPROFILE%\.makepad-run`). Requests carry a plain
 //! User-Agent and nothing that identifies the person.
-use relax_compiler::git::{
-    self, build_info_refs_request, build_upload_pack_request, extract_pack_from_response, parse_info_refs_response,
-    Method, ObjectId, ObjectKind, Request, Response,
-};
+pub use relax_compiler::git::fetch::Repo;
+use relax_compiler::git::fetch::fetch_repo;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 /// Relax's own folder.
 pub fn home() -> PathBuf {
     relax_compiler::gitstore::relax_home()
-}
-
-fn http(req: &Request, timeout: Duration) -> Result<Response, String> {
-    let method = match req.method {
-        Method::Get => "GET",
-        Method::Post => "POST",
-    };
-    let headers: Vec<(&str, &str)> = req.headers.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
-    let r = relax_light_http::Request {
-        method,
-        url: &req.url,
-        headers: &headers,
-        body: &req.body,
-        timeout,
-        max_body: 4 << 30,
-    };
-    let mut body = Vec::new();
-    // one progress channel (relax_compiler::progress): the runner's bar, else a terminal line
-    let label = repo_label(&req.url);
-    let resp = relax_light_http::send(&r, &mut body, &mut |n, total| {
-        if n >= 1 << 20 {
-            relax_compiler::progress::progress(&label, n, total);
-        }
-    })
-    .map_err(|e| format!("{}: {}", host(&req.url), e))?;
-    Ok(Response { status_code: resp.status, body })
-}
-
-/// "makepad from host" for a git URL `https://host/.../makepad.git/...`.
-fn repo_label(url: &str) -> String {
-    let path = url.split('?').next().unwrap_or(url);
-    let name = path.split('/').find(|s| s.ends_with(".git")).map(|s| s.trim_end_matches(".git")).unwrap_or("repository");
-    format!("{} from {}", name, host(url))
-}
-
-fn host(url: &str) -> &str {
-    url.split("://").nth(1).and_then(|r| r.split('/').next()).unwrap_or(url)
-}
-
-/// A repository at a ref: `https://host/path[#ref][@commit]` (no ref: the remote's HEAD). A
-/// pinned commit (40 hex) is what the ref is taken to name: the store or a pack already in
-/// cache/incoming answers it without asking the remote.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Repo {
-    pub url: String,
-    pub reference: Option<String>,
-    pub commit: Option<String>,
-}
-
-impl Repo {
-    pub fn parse(s: &str) -> Result<Repo, String> {
-        let (s, commit) = match s.rsplit_once('@') {
-            Some((rest, c)) if c.len() == 40 && c.bytes().all(|b| b.is_ascii_hexdigit()) => (rest, Some(c.to_ascii_lowercase())),
-            _ => (s, None),
-        };
-        let (url, reference) = match s.split_once('#') {
-            Some((u, r)) => (u, Some(r.to_string()).filter(|r| !r.is_empty())),
-            None => (s, None),
-        };
-        if !url.starts_with("https://") && !url.starts_with("http://127.0.0.1") && !url.starts_with("http://localhost") {
-            return Err(format!("not an https repository URL: {s}"));
-        }
-        Ok(Repo { url: url.trim_end_matches('/').to_string(), reference, commit })
-    }
-    /// The last path segment without `.git` (folder names).
-    pub fn name(&self) -> String {
-        let last = self.url.rsplit('/').next().unwrap_or("repo");
-        let name: String = last.trim_end_matches(".git").chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
-        if name.is_empty() { "repo".into() } else { name }
-    }
 }
 
 /// What to run: a repository, and repositories mounted at subfolders of it.
@@ -128,21 +55,6 @@ impl Spec {
     }
 }
 
-/// The remote's commit for the repo's ref (or HEAD), with the capabilities.
-/// How long asking a remote which commit a ref names may take before the stores answer instead
-/// (MAKEPAD_RUN_FETCH_TIMEOUT_S overrides it).
-const HEAD_TIMEOUT: Duration = Duration::from_secs(5);
-
-fn head_timeout() -> Duration {
-    std::env::var("MAKEPAD_RUN_FETCH_TIMEOUT_S").ok().and_then(|v| v.parse().ok()).map(Duration::from_secs).unwrap_or(HEAD_TIMEOUT)
-}
-
-fn head(repo: &Repo) -> Result<git::RemoteHead, String> {
-    // short: an unreachable or blackholed host must not hold a launch up (the stores answer then)
-    let resp = http(&build_info_refs_request(&repo.url), head_timeout())?;
-    parse_info_refs_response(&resp, repo.reference.as_deref()).map_err(|e| format!("{}: {}", repo.url, e))
-}
-
 /// A spec's repositories at commits: (folder inside the root, "" for the root; store file; commit).
 pub struct Snapshot {
     /// stable per spec shape (the repositories and folders, not the commits)
@@ -153,138 +65,6 @@ pub struct Snapshot {
 /// Where the git stores live: `<home>/cache` (a run's cache and build files do not: dirs.rs).
 pub fn cache_dir(home: &Path) -> PathBuf {
     home.join("cache")
-}
-
-fn ref_key(repo: &Repo) -> String {
-    repo.reference.clone().unwrap_or_else(|| "HEAD".into())
-}
-
-/// Keeps per ref key the two newest fetches (the snapshot policy); everything else goes from the
-/// index (its bytes at the next compaction).
-fn keep_two(refs: &[relax_compiler::gitstore::Ref]) -> Vec<relax_compiler::gitstore::Ref> {
-    let mut by_key: std::collections::BTreeMap<&str, Vec<&relax_compiler::gitstore::Ref>> = Default::default();
-    for r in refs {
-        by_key.entry(r.key.as_str()).or_default().push(r);
-    }
-    let mut out = Vec::new();
-    for (_, mut v) in by_key {
-        v.sort_by(|a, b| b.time.cmp(&a.time));
-        out.extend(v.into_iter().take(2).cloned());
-    }
-    out
-}
-
-fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
-}
-
-/// One repository at its ref into its store: fetched when the store does not hold that commit
-/// (new objects only where the server negotiates); returns the commit. Offline: the newest kept
-/// commit of the ref.
-fn fetch_repo(cache: &Path, repo: &Repo) -> Result<relax_compiler::gitstore::Oid, String> {
-    use relax_compiler::gitstore as store;
-    let path = store::store_path(cache, &repo.url);
-    let existing = store::Store::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let key = ref_key(repo);
-    // a pinned commit already in the store, or its pack already downloaded: no remote request
-    if let Some(pinned) = repo.commit.as_deref().and_then(store::from_hex) {
-        if let Some(s) = &existing {
-            if s.index.table(&pinned).is_some() {
-                if !s.index.refs.iter().filter(|r| r.key == key).max_by_key(|r| r.time).is_some_and(|r| r.commit == pinned) {
-                    store::append(&path, store::Append { objects: &[], reference: store::Ref { key, commit: pinned, time: now() } }, &keep_two)?;
-                }
-                return Ok(pinned);
-            }
-        }
-        let incoming = cache.join("incoming").join(format!("{}.pack", store::hex(&pinned)));
-        if let Ok(body) = std::fs::read(&incoming) {
-            let _ = std::fs::remove_file(&incoming);
-            let pack = extract_pack_from_response(&Response { status_code: 200, body }).map_err(|e| e.to_string())?.ok_or("the downloaded pack is empty")?;
-            append_pack(&path, existing.as_ref(), &pack, store::Ref { key, commit: pinned, time: now() }, &repo.url)?;
-            return Ok(pinned);
-        }
-    }
-    match fetch_remote(cache, repo, existing.as_ref(), &path, key.clone()) {
-        Ok(c) => Ok(c),
-        // offline, unreachable or failing: what the stores have runs (never a failed launch while
-        // a usable commit is kept), and the run says so
-        Err(e) => {
-            let s = existing.as_ref().ok_or_else(|| e.clone())?;
-            let newest = s.index.refs.iter().filter(|r| r.key == key).max_by_key(|r| r.time).or_else(|| s.index.refs.iter().max_by_key(|r| r.time)).map(|r| r.commit);
-            let c = newest.ok_or(e.clone())?;
-            let wanted = repo.commit.as_deref().map(|w| format!(" (wanted {})", &w[..w.len().min(12)])).unwrap_or_default();
-            relax_compiler::progress::note(&format!("{} unreachable ({e}): running {} from the store{wanted}", host(&repo.url), &store::hex(&c)[..12]));
-            Ok(c)
-        }
-    }
-}
-
-/// The remote's answer for `repo`: its commit for the ref (or the pin), fetched into the store
-/// unless the store has it already.
-fn fetch_remote(cache: &Path, repo: &Repo, existing: Option<&relax_compiler::gitstore::Store>, path: &Path, key: String) -> Result<relax_compiler::gitstore::Oid, String> {
-    use relax_compiler::gitstore as store;
-    let h = head(repo)?;
-    // a pinned commit is what is wanted, whatever the ref names now
-    let mut h = h;
-    if let Some(pinned) = repo.commit.as_deref().and_then(|c| ObjectId::from_hex(c).ok()) {
-        h.oid = pinned;
-    }
-    let commit = h.oid.0;
-    if let Some(s) = existing {
-        if s.index.refs.iter().filter(|r| r.key == key).max_by_key(|r| r.time).is_some_and(|r| r.commit == commit) {
-            // the ref's newest fetch already is this commit: nothing to write (a --cached start
-            // checks every time; rewriting the index each start would only grow the file)
-            return Ok(commit);
-        }
-        if s.index.table(&commit).is_some() {
-            // here under another ref (or older): record the ref so the policy keeps it
-            let r = store::Ref { key, commit, time: now() };
-            store::append(path, store::Append { objects: &[], reference: r }, &keep_two)?;
-            return Ok(commit);
-        }
-    }
-    let haves: Vec<ObjectId> = existing
-        .map(|s| s.index.refs.iter().map(|r| ObjectId(r.commit)).collect())
-        .unwrap_or_default();
-    let shallow = h.capabilities.iter().any(|c| c == "shallow");
-    let req = build_upload_pack_request(&repo.url, h.oid, &h.capabilities, &haves, shallow.then_some(1)).map_err(|e| e.to_string())?;
-    eprintln!("makepad: fetching {} ({})", repo.url, &h.oid.to_hex()[..12]);
-    let t0 = std::time::Instant::now();
-    // a pack the entry script downloaded while Relax was being built (incoming/<commit>.pack:
-    // the upload-pack answer for this commit, renamed into place when complete)
-    let incoming = cache.join("incoming").join(format!("{}.pack", h.oid.to_hex()));
-    let body = match std::fs::read(&incoming) {
-        Ok(b) => {
-            let _ = std::fs::remove_file(&incoming);
-            b
-        }
-        Err(_) => http(&req, Duration::from_secs(600))?.body,
-    };
-    let pack = extract_pack_from_response(&Response { status_code: 200, body }).map_err(|e| e.to_string())?.ok_or("the server sent no pack")?;
-    let t_dl = t0.elapsed();
-    let (n, t_unpack, t_store) = append_pack(path, existing, &pack, store::Ref { key, commit, time: now() }, &repo.url)?;
-    if std::env::var_os("MAKEPAD_RUN_FETCH_TIMES").is_some() {
-        eprintln!("makepad: {}: download {:.2} s, unpack {:.2} s ({} objects), store {:.2} s", repo.url, t_dl.as_secs_f64(), t_unpack, n, t_store);
-    }
-    Ok(commit)
-}
-
-/// A pack's objects (deltas resolved against the pack and the store) appended to the store with
-/// `reference`: (objects, unpack s, store s).
-fn append_pack(path: &Path, existing: Option<&relax_compiler::gitstore::Store>, pack: &[u8], reference: relax_compiler::gitstore::Ref, url: &str) -> Result<(usize, f64, f64), String> {
-    use relax_compiler::gitstore as store;
-    let mut external = |oid: &ObjectId| -> Option<git::Object> {
-        let (kind, data) = existing?.object(&oid.0).ok().flatten()?;
-        Some(git::Object { kind: ObjectKind::from_type_num(kind).ok()?, data })
-    };
-    let t1 = std::time::Instant::now();
-    let objects = git::unpack_pack(pack, &mut external).map_err(|e| format!("{url}: {e}"))?;
-    let t_unpack = t1.elapsed().as_secs_f64();
-    // the store's kind numbers are the pack's (store::COMMIT..TAG = ObjectKind)
-    let objects: Vec<(store::Oid, u8, Vec<u8>)> = objects.into_iter().map(|(oid, o)| (oid.0, o.kind as u8, o.data)).collect();
-    let t2 = std::time::Instant::now();
-    store::append(path, store::Append { objects: &objects, reference }, &keep_two)?;
-    Ok((objects.len(), t_unpack, t2.elapsed().as_secs_f64()))
 }
 
 fn label(spec: &Spec) -> String {
@@ -298,6 +78,7 @@ fn label(spec: &Spec) -> String {
 /// Fetches the spec's repositories at their refs into their stores (offline: the newest kept
 /// commits) and returns the snapshot to mount.
 pub fn fetch(home: &Path, spec: &Spec) -> Result<Snapshot, String> {
+    relax_compiler::registry_net::install();
     let cache = cache_dir(home);
     let mut parts = Vec::new();
     for (dir, repo) in std::iter::once((String::new(), &spec.root)).chain(spec.mounts.iter().map(|(d, r)| (d.clone(), r))) {
@@ -320,10 +101,8 @@ fn newest(home: &Path, spec: &Spec) -> Option<Snapshot> {
             parts.push((dir, path, pinned));
             continue;
         }
-        let key = ref_key(repo);
         // the newest fetch of this ref; any ref of the repository when that one was never fetched
-        let r = s.index.refs.iter().filter(|r| r.key == key).max_by_key(|r| r.time).or_else(|| s.index.refs.iter().max_by_key(|r| r.time))?;
-        parts.push((dir, path, r.commit));
+        parts.push((dir, path, relax_compiler::git::fetch::newest(&s, &repo.ref_key())?));
     }
     Some(Snapshot { label: label(spec), parts })
 }
@@ -464,12 +243,23 @@ mod tests {
     /// A loopback smart-HTTP git service: the bare repository `repo` served by
     /// `git upload-pack --stateless-rpc` (what git http-backend runs), one request per connection.
     fn serve(repo: PathBuf) -> u16 {
+        serve_switch(repo).0
+    }
+
+    /// `serve` with a switch: while it is on, every request gets HTTP 503 (the remote is down).
+    fn serve_switch(repo: PathBuf) -> (u16, std::sync::Arc<std::sync::atomic::AtomicBool>) {
         use std::io::{Read, Write};
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
+        let down = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let is_down = down.clone();
         std::thread::spawn(move || {
             for c in l.incoming() {
                 let Ok(mut c) = c else { continue };
+                if is_down.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = c.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    continue;
+                }
                 let mut got = Vec::new();
                 let mut b = [0u8; 65536];
                 let head_end = loop {
@@ -509,7 +299,7 @@ mod tests {
                 let _ = c.write_all(&out);
             }
         });
-        port
+        (port, down)
     }
 
     fn git(dir: &Path, args: &[&str]) -> Vec<u8> {
@@ -596,6 +386,178 @@ mod tests {
         let size = std::fs::metadata(path).unwrap().len();
         fetch(&home, &spec).unwrap();
         assert_eq!(std::fs::metadata(path).unwrap().len(), size);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn write(dir: &Path, files: &[(&str, &str)]) {
+        for (p, text) in files {
+            let f = dir.join(p);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, text).unwrap();
+        }
+    }
+
+    fn rev(dir: &Path, r: &str) -> String {
+        String::from_utf8(git(dir, &["rev-parse", r])).unwrap().trim().to_string()
+    }
+
+    /// A bare repository made from the work tree `work` (committed by the caller).
+    fn bare(work: &Path, bare: &Path) {
+        let o = std::process::Command::new("git").args(["clone", "-q", "--bare"]).arg(work).arg(bare).output().unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    }
+
+    /// Cargo git dependencies through Relax's resolver (resolve.rs): served over loopback smart
+    /// HTTP into the stores, mounted on the VFS, the package found in the repository as cargo
+    /// finds it, pinned by Cargo.lock or by relax's own git.lock.
+    #[test]
+    fn git_dependencies_resolve_from_the_stores() {
+        use relax_compiler::resolve::{unit_graph_with, GitPlaces};
+        if std::process::Command::new("git").arg("--version").output().is_err() {
+            eprintln!("no git: skipped");
+            return;
+        }
+        relax_compiler::registry_net::install();
+        let sess = &std::sync::Arc::new(relax_compiler::Session::default());
+        let dir = std::env::temp_dir().join(format!("relax-gitdeps-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // the inner repository: one package at its root
+        let iw = dir.join("innerw");
+        write(&iw, &[("Cargo.toml", "[package]\nname = \"ginner\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"), ("src/lib.rs", "pub fn ginner() {}\n")]);
+        git(&iw, &["init", "-q", "-b", "main"]);
+        git(&iw, &["add", "-A"]);
+        git(&iw, &["commit", "-q", "-m", "inner"]);
+        bare(&iw, &dir.join("inner.git"));
+        let inner = format!("http://127.0.0.1:{}/inner.git", serve(dir.join("inner.git")));
+        // the dependency repository: a workspace whose member inherits from it, a path dependency
+        // inside it, a git dependency of its own, decoys in a hidden folder and a target folder
+        let dw = dir.join("depw");
+        write(&dw, &[
+            ("Cargo.toml", &format!("[workspace]\nmembers = [\"crates/*\"]\n[workspace.package]\nversion = \"0.3.0\"\nedition = \"2021\"\n[workspace.dependencies]\nginner = {{ git = \"{inner}\" }}\n")),
+            ("crates/gdep/Cargo.toml", "[package]\nname = \"gdep\"\nversion.workspace = true\nedition.workspace = true\n[dependencies]\nghelper = { path = \"../ghelper\" }\nginner = { workspace = true }\n"),
+            ("crates/gdep/src/lib.rs", "pub fn gdep() -> u32 { 1 }\n"),
+            ("crates/ghelper/Cargo.toml", "[package]\nname = \"ghelper\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+            ("crates/ghelper/src/lib.rs", "pub fn ghelper() {}\n"),
+            (".hidden/gdep/Cargo.toml", "[package]\nname = \"gdep\"\nversion = \"9.9.9\"\n"),
+            (".hidden/gdep/src/lib.rs", "decoy\n"),
+            ("crates/gdep/target/gdep/Cargo.toml", "[package]\nname = \"gdep\"\nversion = \"8.8.8\"\n"),
+            ("crates/gdep/target/gdep/src/lib.rs", "decoy\n"),
+        ]);
+        git(&dw, &["init", "-q", "-b", "main"]);
+        git(&dw, &["add", "-A"]);
+        git(&dw, &["commit", "-q", "-m", "c1"]);
+        git(&dw, &["tag", "-a", "v1", "-m", "v1"]);
+        let c1 = rev(&dw, "HEAD");
+        git(&dw, &["checkout", "-q", "-b", "dev"]);
+        write(&dw, &[("crates/gdep/src/lib.rs", "pub fn gdep() -> u32 { 2 }\n")]);
+        git(&dw, &["commit", "-q", "-am", "c2"]);
+        let c2 = rev(&dw, "HEAD");
+        // the served repository's HEAD (its default branch) is main
+        git(&dw, &["checkout", "-q", "main"]);
+        let dep_bare = dir.join("dep.git");
+        bare(&dw, &dep_bare);
+        let (port, down) = serve_switch(dep_bare.clone());
+        let dep = format!("http://127.0.0.1:{port}/dep.git");
+
+        let app = dir.join("app");
+        let home = dir.join("home");
+        let lock = dir.join("relax").join("git.lock");
+        let manifest = |deps: &str| format!("[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n{deps}");
+        let set_app = |deps: &str| write(&app, &[("Cargo.toml", &manifest(deps)), ("src/lib.rs", "")]);
+        let places = || GitPlaces { home: home.clone(), lock: Some(lock.clone()) };
+        let graph = |flags: &[&str]| {
+            let flags: Vec<String> = flags.iter().map(|f| f.to_string()).collect();
+            unit_graph_with(sess, &app.display().to_string(), "app", &flags, places())
+        };
+        let unit = |g: &relax_compiler::resolve::Units, name: &str| -> (String, String) {
+            let us: Vec<_> = g.units.iter().filter(|u| u.name == name).collect();
+            assert_eq!(us.len(), 1, "one unit {name}: {:?}", g.units.iter().map(|u| &u.pkg_id).collect::<Vec<_>>());
+            (us[0].pkg_id.clone(), us[0].src_path.clone())
+        };
+        let body = |src: &str| String::from_utf8(relax_compiler::vfs::read(src).unwrap()).unwrap();
+
+        // a branch, a crates-io dependency patched to a git source, a dev-dependency on a tag
+        let deps = format!("[dependencies]\ngdep = {{ git = \"{dep}\", branch = \"dev\" }}\nginner = \"0.1\"\n[dev-dependencies]\nghelper = {{ git = \"{dep}\", tag = \"v1\" }}\n[patch.crates-io]\nginner = {{ git = \"{inner}\" }}\n");
+        set_app(&deps);
+        let g = graph(&[]).unwrap();
+        let (id, src) = unit(&g, "gdep");
+        assert_eq!(id, format!("git+{dep}?branch=dev#gdep@0.3.0"));
+        assert!(src.contains("/vfs/git/dep-") && src.ends_with(&format!("{}/crates/gdep/src/lib.rs", &c2[..12])), "{src}");
+        assert_eq!(body(&src), "pub fn gdep() -> u32 { 2 }\n");
+        // the path dependency inside the repository shares its source; the patched and the
+        // inherited git dependency are one package
+        assert_eq!(unit(&g, "ghelper").0, format!("git+{dep}?branch=dev#ghelper@0.1.0"));
+        assert_eq!(unit(&g, "ginner").0, format!("git+{inner}#ginner@0.1.0"));
+        let pins = std::fs::read_to_string(&lock).unwrap();
+        assert!(pins.contains(&format!("git+{dep}?branch=dev\t{c2}\n")), "{pins}");
+        assert!(!app.join("Cargo.lock").exists());
+        // the lib's tests: the dev-dependency at the tag (another source of the same repository)
+        let gt = graph(&["--lib"]).unwrap();
+        let tagged: Vec<_> = gt.units.iter().filter(|u| u.name == "ghelper").map(|u| u.pkg_id.clone()).collect();
+        assert!(tagged.contains(&format!("git+{dep}?tag=v1#ghelper@0.1.0")), "{tagged:?}");
+        assert!(std::fs::read_to_string(&lock).unwrap().contains(&format!("git+{dep}?tag=v1\t{c1}\n")));
+
+        // the branch moves: relax's pin holds (no Cargo.lock written, cargo's behaviour with one)
+        git(&dw, &["checkout", "-q", "dev"]);
+        write(&dw, &[("crates/gdep/src/lib.rs", "pub fn gdep() -> u32 { 3 }\n")]);
+        git(&dw, &["commit", "-q", "-am", "c3"]);
+        let c3 = rev(&dw, "HEAD");
+        git(&dw, &["push", "-q", dep_bare.to_str().unwrap(), "dev"]);
+        assert_eq!(body(&unit(&graph(&[]).unwrap(), "gdep").1), "pub fn gdep() -> u32 { 2 }\n");
+        // Cargo.lock names the source: the lockfile wins (fetched incrementally), relax's pin stays
+        let cargo_lock = |commit: &str| format!("version = 4\n\n[[package]]\nname = \"gdep\"\nversion = \"0.3.0\"\nsource = \"git+{dep}?branch=dev#{commit}\"\n");
+        write(&app, &[("Cargo.lock", &cargo_lock(&c3))]);
+        assert_eq!(body(&unit(&graph(&[]).unwrap(), "gdep").1), "pub fn gdep() -> u32 { 3 }\n");
+        assert!(std::fs::read_to_string(&lock).unwrap().contains(&format!("git+{dep}?branch=dev\t{c2}\n")));
+
+        // the remote down: locked and pinned sources come from the store
+        down.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(body(&unit(&graph(&[]).unwrap(), "gdep").1), "pub fn gdep() -> u32 { 3 }\n");
+        // ... and an unpinned ref is the store's newest fetch of it
+        std::fs::remove_file(app.join("Cargo.lock")).unwrap();
+        std::fs::remove_file(&lock).unwrap();
+        assert_eq!(body(&unit(&graph(&[]).unwrap(), "gdep").1), "pub fn gdep() -> u32 { 3 }\n");
+        // ... an abbreviated rev the store holds too; a commit it does not hold cannot come from a
+        // remote that is down
+        set_app(&format!("[dependencies]\ngdep = {{ git = \"{dep}\", rev = \"{}\" }}\n", &c2[..10]));
+        assert_eq!(body(&unit(&graph(&[]).unwrap(), "gdep").1), "pub fn gdep() -> u32 { 2 }\n");
+        set_app(&format!("[dependencies]\ngdep = {{ git = \"{dep}\", rev = \"0123456789\" }}\n"));
+        let e = graph(&[]).unwrap_err();
+        assert!(e.contains("503"), "{e}");
+        down.store(false, std::sync::atomic::Ordering::Relaxed);
+
+        // a fresh store and a locked commit that is no ref's tip (wanted by its id)
+        let home2 = dir.join("home2");
+        let places2 = || GitPlaces { home: home2.clone(), lock: Some(dir.join("relax2").join("git.lock")) };
+        set_app(&format!("[dependencies]\ngdep = {{ git = \"{dep}\", branch = \"dev\" }}\n"));
+        write(&app, &[("Cargo.lock", &cargo_lock(&c2))]);
+        let g = unit_graph_with(sess, &app.display().to_string(), "app", &[], places2()).unwrap();
+        assert_eq!(body(&unit(&g, "gdep").1), "pub fn gdep() -> u32 { 2 }\n");
+        std::fs::remove_file(app.join("Cargo.lock")).unwrap();
+        // an abbreviated rev that is no tip, in a fresh store: found in the fetched history (cargo
+        // resolves it so too)
+        set_app(&format!("[dependencies]\ngdep = {{ git = \"{dep}\", rev = \"{}\" }}\n", &c2[..10]));
+        let places3 = GitPlaces { home: dir.join("home3"), lock: Some(dir.join("relax3").join("git.lock")) };
+        let g = unit_graph_with(sess, &app.display().to_string(), "app", &[], places3).unwrap();
+        assert_eq!(unit(&g, "gdep").0, format!("git+{dep}?rev={}#gdep@0.3.0", &c2[..10]));
+        assert_eq!(body(&unit(&g, "gdep").1), "pub fn gdep() -> u32 { 2 }\n");
+        // the default branch (main: c1) and a full commit id
+        set_app(&format!("[dependencies]\ngdep = {{ git = \"{dep}\" }}\n"));
+        assert_eq!(body(&unit(&graph(&[]).unwrap(), "gdep").1), "pub fn gdep() -> u32 { 1 }\n");
+        set_app(&format!("[dependencies]\ngdep = {{ git = \"{dep}\", rev = \"{c3}\" }}\n"));
+        assert_eq!(body(&unit(&graph(&[]).unwrap(), "gdep").1), "pub fn gdep() -> u32 { 3 }\n");
+
+        // [patch."<url>"] with a path: the repository is not fetched for it
+        write(&dir, &[("local/gdep/Cargo.toml", "[package]\nname = \"gdep\"\nversion = \"0.3.0\"\nedition = \"2021\"\n"), ("local/gdep/src/lib.rs", "pub fn gdep() -> u32 { 4 }\n")]);
+        set_app(&format!("[dependencies]\ngdep = {{ git = \"{dep}\", branch = \"dev\" }}\n[patch.\"{dep}\"]\ngdep = {{ path = \"../local/gdep\" }}\n"));
+        let (id, src) = unit(&graph(&[]).unwrap(), "gdep");
+        assert!(id.starts_with("path+file://"), "{id}");
+        assert_eq!(body(&src), "pub fn gdep() -> u32 { 4 }\n");
+        // a package the repository lacks, and a version it does not meet
+        set_app(&format!("[dependencies]\nnope = {{ git = \"{dep}\" }}\n"));
+        assert!(graph(&[]).unwrap_err().contains("no package named `nope`"));
+        set_app(&format!("[dependencies]\ngdep = {{ git = \"{dep}\", version = \"1\" }}\n"));
+        assert!(graph(&[]).unwrap_err().contains("does not satisfy"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

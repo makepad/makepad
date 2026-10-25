@@ -8,6 +8,8 @@
 //!   cache/                  the store files (code, front images, graph certificates,
 //!                           the collected program image): store.rs
 //!   registry/               crates.io packages downloaded for this workspace (registry.rs)
+//!   git.lock                the commits git dependencies were pinned to when Cargo.lock does not
+//!                           list them (resolve.rs; their stores are the run home's, gitstore.rs)
 //!   startup/<pkg>.startup   the startup manifest of `makepad run --ahead=aot-max|aot-min`
 //!   build-scripts/<hex>/, build/<crate>-<hex>/out   build script units and OUT_DIRs (as deep
 //!                           as cargo's: scripts find the workspace 5 folders above OUT_DIR)

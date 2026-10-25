@@ -7,8 +7,9 @@
 //! cargo's path was deleted (2026-10-06).
 //!
 //! Rules followed (cargo, resolver 2; https://doc.rust-lang.org/cargo/reference/):
-//! - packages: path dependencies (relative to the manifest), `[patch.crates-io]` of the
-//!   workspace root, registry packages from a vendored directory when `.cargo/config.toml`
+//! - packages: path dependencies (relative to the manifest), git dependencies (below),
+//!   `[patch.crates-io]` and `[patch."<git url>"]` of the workspace root (path or git
+//!   replacements), registry packages from a vendored directory when `.cargo/config.toml`
 //!   replaces crates-io with one (`[source.crates-io] replace-with`, `[source.<x>] directory`;
 //!   the config files of the start folder and every folder above it, the nearest first, as cargo
 //!   reads them), else from Cargo.lock (sources under $CARGO_HOME/registry/src);
@@ -28,7 +29,22 @@
 //! - registry packages neither vendored nor in $CARGO_HOME: fetched from crates.io (registry.rs:
 //!   sparse index, SHA-256, a cache under the Relax cache root, offline-first); with Cargo.lock its
 //!   version, without, the newest the requirement accepts (one version per package);
-//! Unsupported (an error naming it): git dependencies, registry packages missing from the vendored
+//! - git dependencies (`git = <url>` with `branch`, `tag` or `rev`, else the default branch; also
+//!   from `[workspace.dependencies]`, in dev-dependencies, in git packages' own manifests and as
+//!   `[patch]` replacements): the repository is fetched by Relax's own git client into its ONE store
+//!   file (git/fetch.rs, gitstore.rs: `<run home>/cache`, shared with `makepad run <git url>`) and
+//!   mounted read-only on the VFS at `<run home>/vfs/git/<name>-<url hash>/<commit>` (never
+//!   checked out). The commit: Cargo.lock's `git+<url>?<ref>#<commit>` source when it lists the
+//!   source (the lockfile wins); else the pin Relax recorded in `<relax dir>/git.lock` (the user's
+//!   Cargo.lock is never written); else the commit the remote's ref names now, recorded there.
+//!   Offline (MAKEPAD_RUN_OFFLINE or no answer), a pinned commit comes from the store (an error
+//!   when the store lost it), an unpinned ref from the store's newest fetch of it. The package is
+//!   found in the repository as cargo does it: every Cargo.toml of the tree (not under hidden
+//!   folders, a package's `target` folder or a nested repository), the root first, the first
+//!   `[package]` of that name; `workspace = true` fields inherit from the repository's own
+//!   workspace; a path dependency inside the repository is part of the same git source. Package
+//!   ids are cargo's `git+<url>[?<ref>]#<name>@<version>`.
+//! Unsupported (an error naming it): ssh and file git URLs, registry packages missing from the vendored
 //! directory (never looked up anywhere else, never fetched, then), registry packages that compile C
 //! (a cc/cmake build-dependency), unknown command-line flags.
 
@@ -50,8 +66,10 @@ struct Dep {
     features: Vec<String>,
     /// the platform predicate (`cfg(..)` or a triple); None = every platform
     platform: Option<String>,
-    /// a path package directory, or None for a registry package
+    /// a path package directory, or None for a registry or git package
     path: Option<String>,
+    /// a git package's source
+    git: Option<GitSrc>,
     /// the version requirement (`version = ..`; "*" when none)
     req: String,
 }
@@ -65,6 +83,120 @@ struct Target {
     required_features: Vec<String>,
     /// a test target built with the libtest harness (`harness = false`: its own `main`)
     harness: bool,
+}
+
+/// A git dependency's source: its repository (as the manifest spells the URL) and reference.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct GitSrc {
+    url: String,
+    reference: crate::git::fetch::GitRef,
+}
+
+impl GitSrc {
+    /// cargo's source id without the commit, `git+<url>[?<ref query>]` (Cargo.lock's spelling
+    /// before `#<commit>`; the key of relax's own pins).
+    fn id(&self) -> String {
+        match self.reference.query() {
+            Some(q) => format!("git+{}?{}", self.url, q),
+            None => format!("git+{}", self.url),
+        }
+    }
+    /// Same repository and reference as `o` (cargo compares canonical URLs).
+    fn same(&self, o: &GitSrc) -> bool {
+        self.reference == o.reference && canonical_url(&self.url) == canonical_url(&o.url)
+    }
+}
+
+/// cargo's CanonicalUrl: no trailing `/`, no `.git` suffix; github.com's paths in lower case.
+fn canonical_url(url: &str) -> String {
+    let mut u = url.trim_end_matches('/').to_string();
+    if let Some(rest) = u.strip_prefix("https://github.com/").or_else(|| u.strip_prefix("http://github.com/")) {
+        u = format!("https://github.com/{}", rest.to_ascii_lowercase());
+    }
+    if let Some(x) = u.strip_suffix(".git") {
+        u = x.to_string();
+    }
+    u
+}
+
+/// `%XX` escapes and `+` decoded (a Cargo.lock query value is form-urlencoded).
+fn url_decode(v: &str) -> String {
+    let b = v.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |x: &[u8]| std::str::from_utf8(x).ok().and_then(|h| u8::from_str_radix(h, 16).ok());
+        match b[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 3 <= b.len() && hex(&b[i + 1..i + 3]).is_some() => {
+                out.push(hex(&b[i + 1..i + 3]).unwrap());
+                i += 3;
+                continue;
+            }
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// A git source of Cargo.lock, `git+<url>[?branch=|tag=|rev=<x>]#<commit>`: the source and commit.
+fn parse_git_source(src: &str) -> Option<(GitSrc, crate::gitstore::Oid)> {
+    use crate::git::fetch::GitRef;
+    let rest = src.strip_prefix("git+")?;
+    let (url_q, commit) = rest.rsplit_once('#')?;
+    let commit = crate::gitstore::from_hex(&commit.to_ascii_lowercase())?;
+    let (url, query) = match url_q.split_once('?') {
+        Some((u, q)) => (u, Some(q)),
+        None => (url_q, None),
+    };
+    let mut reference = GitRef::DefaultBranch;
+    for pair in query.unwrap_or("").split('&').filter(|p| !p.is_empty()) {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        let v = url_decode(v);
+        match k {
+            "branch" => reference = GitRef::Branch(v),
+            "tag" => reference = GitRef::Tag(v),
+            "rev" => reference = GitRef::Rev(v),
+            _ => {}
+        }
+    }
+    Some((GitSrc { url: url.to_string(), reference }, commit))
+}
+
+/// A dependency entry's git source: `git` with at most one of `branch`, `tag`, `rev`.
+/// `at`: the file holding the entry (errors name it).
+fn git_src(st: &TomlTable, at: &str, key: &str) -> Result<Option<GitSrc>, String> {
+    use crate::git::fetch::GitRef;
+    let Some(url) = s(st, "git") else { return Ok(None) };
+    if st.contains_key("path") {
+        return Err(format!("{}: dependency ({}) specification is ambiguous. Only one of `git` or `path` is allowed.", at, key));
+    }
+    let mut refs: Vec<GitRef> = Vec::new();
+    if let Some(b) = s(st, "branch") {
+        refs.push(GitRef::Branch(b));
+    }
+    if let Some(t) = s(st, "tag") {
+        refs.push(GitRef::Tag(t));
+    }
+    if let Some(r) = s(st, "rev") {
+        refs.push(GitRef::Rev(r));
+    }
+    if refs.len() > 1 {
+        return Err(format!("{}: dependency ({}) specification is ambiguous. Only one of `branch`, `tag` or `rev` is allowed.", at, key));
+    }
+    if crate::git::fetch::check_url(&url).is_err() {
+        return Err(format!("{}: `{}` is a git dependency on {}: makepad run fetches git repositories over https only", at, key, url));
+    }
+    Ok(Some(GitSrc { url, reference: refs.pop().unwrap_or(GitRef::DefaultBranch) }))
+}
+
+/// Where a package comes from (its package id's kind).
+#[derive(Clone, Debug, PartialEq)]
+enum Source {
+    Path,
+    Registry,
+    Git(GitSrc),
 }
 
 #[derive(Debug)]
@@ -82,13 +214,15 @@ struct Manifest {
     features: BTreeMap<String, Vec<String>>,
     deps: Vec<Dep>,
     proc_macro: bool,
-    registry: bool,
+    source: Source,
 }
 
 impl Manifest {
     fn pkg_id(&self) -> String {
-        if self.registry {
-            return format!("registry+https://github.com/rust-lang/crates.io-index#{}@{}", self.name, self.version);
+        match &self.source {
+            Source::Registry => return format!("registry+https://github.com/rust-lang/crates.io-index#{}@{}", self.name, self.version),
+            Source::Git(g) => return format!("{}#{}@{}", g.id(), self.name, self.version),
+            Source::Path => {}
         }
         let last = self.dir.rsplit('/').next().unwrap_or("");
         // a file URL's path starts with `/`: a Windows drive path is `/C:/..` (RFC 8089), as cargo spells it
@@ -143,29 +277,67 @@ fn table<'a>(t: &'a TomlTable, k: &str) -> Option<&'a TomlTable> {
     t.get(k).and_then(|v| v.as_table())
 }
 
+/// A `[patch]` replacement: a path package or a git source.
+#[derive(Clone, Debug)]
+enum Patch {
+    Path(String),
+    Git(GitSrc),
+}
+
 /// The workspace: root manifest dir, `[workspace.dependencies]`, `[workspace.package]`,
-/// `[patch.crates-io]`, Cargo.lock's registry versions.
+/// `[patch.crates-io]` / `[patch."<git url>"]`, Cargo.lock's registry versions and git commits.
 struct Workspace {
     root: String,
     ws_deps: TomlTable,
     ws_package: TomlTable,
-    patches: HashMap<String, String>,
+    /// (`crates-io` or the patched repository's canonical URL, package name) -> replacement
+    patches: HashMap<(String, String), Patch>,
     lock: HashMap<String, Vec<String>>,
+    /// Cargo.lock's git sources with their commits
+    lock_git: Vec<(GitSrc, crate::gitstore::Oid)>,
     members: Vec<String>,
     excludes: Vec<String>,
     /// the root manifest has a `[package]`: cargo makes the root package a member
     root_package: bool,
 }
 
+/// Where git dependencies live: the stores and their mounts (`home`: `<home>/cache`, `<home>/vfs/git`)
+/// and relax's own pins for sources Cargo.lock does not list (`lock`; None: `<relax dir>/git.lock`,
+/// computed when first needed).
+pub struct GitPlaces {
+    pub home: std::path::PathBuf,
+    pub lock: Option<std::path::PathBuf>,
+}
+
+impl GitPlaces {
+    /// A run's: the run home (gitstore::relax_home) and the workspace's relax dir.
+    pub fn run() -> GitPlaces {
+        GitPlaces { home: crate::gitstore::relax_home(), lock: None }
+    }
+}
+
+/// The git sources a resolution reached.
+struct GitDeps {
+    places: GitPlaces,
+    /// relax's pins (source id -> commit), read when first needed
+    pins: Option<BTreeMap<String, String>>,
+    /// mounted sources: (source, mount root, commit, the folders holding a Cargo.toml in cargo's
+    /// discovery order)
+    mounts: Vec<(GitSrc, String, crate::gitstore::Oid, Vec<String>)>,
+    /// (source, package) -> the package's folder
+    found: HashMap<(GitSrc, String), String>,
+}
+
 pub struct Resolver {
     ws: std::rc::Rc<Workspace>,
+    git: std::cell::RefCell<GitDeps>,
     /// the workspaces that path packages outside `ws` (or excluded from it) inherit from: cargo
     /// resolves `workspace = true` against the package's OWN workspace root (find_root), not the
     /// root of the graph being built; by root dir
     owners: HashMap<String, std::rc::Rc<Workspace>>,
-    /// crates-io's replacement directory (`cargo vendor`'s layout: `<name>` or `<name>-<version>`)
-    /// and the config file that names it
-    vendor: Option<(String, String)>,
+    /// crates-io's replacement (a vendored directory or a git repository) and the config file
+    /// that names it
+    vendor: Option<(Vendor, String)>,
     /// registry packages fetched for a program with neither a vendored directory nor a locked
     /// version: name -> (version, sources, the requirements that chose it)
     fetched: std::cell::RefCell<HashMap<String, (String, String, Vec<String>)>>,
@@ -187,20 +359,41 @@ impl Workspace {
         let t = read_toml(&format!("{}/Cargo.toml", root))?;
         let w = table(&t, "workspace").cloned().unwrap_or_default();
         let mut patches = HashMap::new();
-        if let Some(p) = table(&t, "patch").and_then(|p| table(p, "crates-io")) {
-            for (k, v) in p {
-                if let Some(path) = v.as_table().and_then(|v| s(v, "path")) {
-                    patches.insert(k.clone(), join(&root, &path));
+        if let Some(p) = table(&t, "patch") {
+            for (src, entries) in p {
+                // crates-io or a git repository's URL (another registry's name: not resolved here)
+                let skey = if src == "crates-io" {
+                    src.clone()
+                } else if src.contains("://") {
+                    canonical_url(src)
+                } else {
+                    continue;
+                };
+                let Some(entries) = entries.as_table() else { continue };
+                for (k, v) in entries {
+                    let Some(v) = v.as_table() else { continue };
+                    let target = match (s(v, "path"), git_src(v, &format!("{}/Cargo.toml", root), k)?) {
+                        (_, Some(g)) => Patch::Git(g),
+                        (Some(path), None) => Patch::Path(join(&root, &path)),
+                        (None, None) => continue,
+                    };
+                    patches.insert((skey.clone(), s(v, "package").unwrap_or_else(|| k.clone())), target);
                 }
             }
         }
         let mut lock: HashMap<String, Vec<String>> = HashMap::new();
+        let mut lock_git = Vec::new();
         if let Ok(l) = read_toml(&format!("{}/Cargo.lock", root)) {
             if let Some(pkgs) = l.get("package").and_then(|p| p.as_array_of_tables()) {
                 for p in pkgs {
-                    if s(p, "source").is_some_and(|x| x.starts_with("registry+")) {
+                    let src = s(p, "source");
+                    if src.as_deref().is_some_and(|x| x.starts_with("registry+")) {
                         if let (Some(n), Some(v)) = (s(p, "name"), s(p, "version")) {
                             lock.entry(n).or_default().push(v);
+                        }
+                    } else if let Some(g) = src.as_deref().and_then(parse_git_source) {
+                        if !lock_git.iter().any(|x: &(GitSrc, crate::gitstore::Oid)| x.0.same(&g.0)) {
+                            lock_git.push(g);
                         }
                     }
                 }
@@ -215,6 +408,7 @@ impl Workspace {
             root,
             patches,
             lock,
+            lock_git,
         })
     }
 
@@ -311,12 +505,21 @@ impl Resolver {
     /// `dir` is where `makepad run` starts (the current folder, a git run's workspace): the
     /// workspace is found as cargo finds it (find_root).
     pub fn new(sess: &std::sync::Arc<crate::Session>, dir: &str) -> Result<Resolver, String> {
-        Ok(Resolver { ws: std::rc::Rc::new(Workspace::load(&find_root(dir)?)?), owners: HashMap::new(), vendor: vendor_dir(dir)?, fetched: Default::default(), manifests: Vec::new(), by_dir: HashMap::new(), cfg: crate::cfg::CfgSet::host(sess, &[]), allow_c: sess.options.allow_c })
+        Resolver::with(sess, dir, GitPlaces::run())
+    }
+
+    /// `new` with git dependencies kept in `git` (tests).
+    pub fn with(sess: &std::sync::Arc<crate::Session>, dir: &str, git: GitPlaces) -> Result<Resolver, String> {
+        let git = std::cell::RefCell::new(GitDeps { places: git, pins: None, mounts: Vec::new(), found: HashMap::new() });
+        Ok(Resolver { ws: std::rc::Rc::new(Workspace::load(&find_root(dir)?)?), git, owners: HashMap::new(), vendor: vendor_dir(dir)?, fetched: Default::default(), manifests: Vec::new(), by_dir: HashMap::new(), cfg: crate::cfg::CfgSet::host(sess, &[]), allow_c: sess.options.allow_c })
     }
 
     fn registry_dir(&self, name: &str, req: &str) -> Result<String, String> {
-        if let Some((vdir, config)) = &self.vendor {
-            return self.vendored_dir(vdir, config, name);
+        match &self.vendor {
+            Some((Vendor::Dir(vdir), config)) => return self.vendored_dir(vdir, config, name),
+            // the repository's package of that name (cargo's discovery, as for a git dependency)
+            Some((Vendor::Git(src), config)) => return self.git_dir(src, name).map_err(|e| format!("{} (crates-io's replacement, {})", e, config)),
+            None => {}
         }
         let Some(vers) = self.ws.lock.get(name) else {
             return self.fetched_dir(name, req);
@@ -404,9 +607,20 @@ impl Resolver {
     /// The workspace whose `[workspace.package]` / `[workspace.dependencies]` the package at `dir`
     /// inherits from: the graph's own unless the package lies outside its root or is excluded
     /// (a fixture workspace's path dependency on an in-tree makepad crate). Registry packages are
-    /// published normalized (nothing left to inherit).
-    fn inherits_from(&mut self, dir: &str, registry: bool) -> Result<std::rc::Rc<Workspace>, String> {
-        if registry || (dir == self.ws.root || dir.starts_with(&format!("{}/", self.ws.root))) && !self.ws.excluded(dir) {
+    /// published normalized (nothing left to inherit); a git package inherits from the workspace
+    /// of its own repository (found as cargo finds it, not above the repository's root).
+    fn inherits_from(&mut self, dir: &str, source: &Source) -> Result<std::rc::Rc<Workspace>, String> {
+        if let Source::Git(_) = source {
+            let ceiling = self.git.borrow().mounts.iter().find(|m| dir == m.1 || dir.starts_with(&format!("{}/", m.1))).map(|m| m.1.clone());
+            let root = find_root_in(dir, ceiling.as_deref())?;
+            if let Some(w) = self.owners.get(&root) {
+                return Ok(w.clone());
+            }
+            let w = std::rc::Rc::new(Workspace::load(&root)?);
+            self.owners.insert(root, w.clone());
+            return Ok(w);
+        }
+        if *source == Source::Registry || (dir == self.ws.root || dir.starts_with(&format!("{}/", self.ws.root))) && !self.ws.excluded(dir) {
             return Ok(self.ws.clone());
         }
         // a workspace already found that holds `dir` (cargo's ws_roots shortcut)
@@ -420,14 +634,15 @@ impl Resolver {
     }
 
     /// The manifest of the package at `dir` (loaded once).
-    fn load(&mut self, dir: &str, registry: bool) -> Result<usize, String> {
+    fn load(&mut self, dir: &str, source: Source) -> Result<usize, String> {
         let dir = normalize(dir);
         if let Some(&i) = self.by_dir.get(&dir) {
             return Ok(i);
         }
         let t = read_toml(&format!("{}/Cargo.toml", dir))?;
         let pkg = table(&t, "package").ok_or_else(|| format!("{}/Cargo.toml: no [package]", dir))?;
-        let ws = self.inherits_from(&dir, registry)?;
+        let ws = self.inherits_from(&dir, &source)?;
+        let registry = source != Source::Path;
         let inherit = |k: &str| -> Option<String> {
             match pkg.get(k) {
                 Some(Toml::Str(v, _)) => Some(v.clone()),
@@ -607,19 +822,21 @@ impl Resolver {
                     st = merged;
                     base_dir = ws.root.clone();
                 }
-                // a dev-dependency is built only for the root package's tests: a git one (which
-                // makepad run cannot resolve) is left out here, and a test that names it fails to resolve it
-                if dev && st.contains_key("git") {
-                    continue;
-                }
-                if st.contains_key("git") {
-                    return Err(format!("{}/Cargo.toml: `{}` is a git dependency; makepad run resolves path and registry packages only", dir, key));
-                }
                 let package = s(&st, "package").unwrap_or_else(|| key.clone());
-                let path = match s(&st, "path") {
-                    Some(p) => Some(join(&base_dir, &p)),
-                    None => self.ws.patches.get(&package).cloned(),
-                };
+                let mut git = git_src(&st, &format!("{}/Cargo.toml", dir), key)?;
+                let mut path = s(&st, "path").map(|p| join(&base_dir, &p));
+                // the root workspace's [patch] of the dependency's source (crates-io or its repository)
+                if path.is_none() && (git.is_some() || !st.contains_key("registry")) {
+                    let src = git.as_ref().map_or_else(|| "crates-io".to_string(), |g| canonical_url(&g.url));
+                    match self.ws.patches.get(&(src, package.clone())) {
+                        Some(Patch::Path(p)) => {
+                            path = Some(p.clone());
+                            git = None;
+                        }
+                        Some(Patch::Git(g)) => git = Some(g.clone()),
+                        None => {}
+                    }
+                }
                 deps.push(Dep {
                     key: key.clone(),
                     package,
@@ -630,6 +847,7 @@ impl Resolver {
                     features: strs(&st, "features"),
                     platform: platform.clone(),
                     path,
+                    git,
                     req: s(&st, "version").unwrap_or_else(|| "*".to_string()),
                 });
             }
@@ -653,7 +871,7 @@ impl Resolver {
             }
         }
         let i = self.manifests.len();
-        self.manifests.push(Manifest { dir: dir.clone(), name, version, edition, links, build, lib, bins, tests, features, deps, proc_macro, registry });
+        self.manifests.push(Manifest { dir: dir.clone(), name, version, edition, links, build, lib, bins, tests, features, deps, proc_macro, source });
         self.by_dir.insert(dir, i);
         Ok(i)
     }
@@ -667,12 +885,125 @@ impl Resolver {
         }
     }
 
-    /// The package directory a dependency entry names.
-    fn dep_dir(&self, d: &Dep) -> Result<(String, bool), String> {
-        match &d.path {
-            Some(p) => Ok((p.clone(), false)),
-            None => self.registry_dir(&d.package, &d.req).map(|r| (r, true)),
+    /// The package directory a dependency entry names, and the package's source. A path inside a
+    /// mounted repository is part of that git source (cargo: a git package's path dependencies
+    /// in its repository share its source id).
+    fn dep_dir(&self, d: &Dep) -> Result<(String, Source), String> {
+        if let Some(p) = &d.path {
+            let g = self.git.borrow();
+            return Ok(match g.mounts.iter().find(|m| *p == m.1 || p.starts_with(&format!("{}/", m.1))) {
+                Some(m) => (p.clone(), Source::Git(m.0.clone())),
+                None => (p.clone(), Source::Path),
+            });
         }
+        if let Some(src) = &d.git {
+            return self.git_dir(src, &d.package).map(|r| (r, Source::Git(src.clone())));
+        }
+        self.registry_dir(&d.package, &d.req).map(|r| (r, Source::Registry))
+    }
+
+    /// The folder of package `package` in the git source `src` (fetched and mounted once).
+    fn git_dir(&self, src: &GitSrc, package: &str) -> Result<String, String> {
+        if let Some(d) = self.git.borrow().found.get(&(src.clone(), package.to_string())) {
+            return Ok(d.clone());
+        }
+        let (root, commit, manifests) = self.git_mount(src)?;
+        let mut found: Option<String> = None;
+        for rel in &manifests {
+            let dir = if rel.is_empty() { root.clone() } else { format!("{}/{}", root, rel) };
+            let path = format!("{}/Cargo.toml", dir);
+            // parsed only when the text names the package
+            let Ok(text) = crate::vfs::read_to_string(&path) else { continue };
+            if !text.contains(package) {
+                continue;
+            }
+            let Ok(t) = parse_toml(&text).map(|d| d.root) else { continue };
+            let Some(pkg) = table(&t, "package") else { continue };
+            if s(pkg, "name").as_deref() == Some(package) {
+                found = Some(dir);
+                break;
+            }
+        }
+        let at = format!("{} at {}", src.id(), &crate::gitstore::hex(&commit)[..12]);
+        let dir = found.ok_or_else(|| format!("no package named `{}` in the git repository {}", package, at))?;
+        self.git.borrow_mut().found.insert((src.clone(), package.to_string()), dir.clone());
+        Ok(dir)
+    }
+
+    /// The git source `src` mounted: its root, commit and manifest folders. The commit is
+    /// Cargo.lock's, else relax's pin, else the remote's (then pinned).
+    fn git_mount(&self, src: &GitSrc) -> Result<(String, crate::gitstore::Oid, Vec<String>), String> {
+        if let Some(m) = self.git.borrow().mounts.iter().find(|m| m.0 == *src) {
+            return Ok((m.1.clone(), m.2, m.3.clone()));
+        }
+        let locked = self.ws.lock_git.iter().find(|(g, _)| g.same(src)).map(|(_, c)| *c);
+        let pinned = if locked.is_some() { None } else { self.git_pin(src)? };
+        let home = self.git.borrow().places.home.clone();
+        let cache = home.join("cache");
+        let commit = crate::git::fetch::fetch_source(&cache, &src.url, &src.reference, locked.or(pinned))?;
+        if locked.is_none() && pinned.is_none() {
+            self.set_git_pin(src, &commit)?;
+        }
+        let store_path = crate::gitstore::store_path(&cache, &src.url);
+        let stem = store_path.file_stem().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+        let stem = stem.strip_prefix("git-").unwrap_or(&stem).to_string();
+        let root = normalize(&home.join("vfs").join("git").join(stem).join(&crate::gitstore::hex(&commit)[..12]).display().to_string());
+        let manifests = {
+            // the mounted store (index, file tables) is process state: kept heap, never the compiler zone
+            let _k = crate::zone_alloc::kept();
+            let store = crate::gitstore::Store::open(&store_path).map_err(|e| format!("{}: {e}", store_path.display()))?.ok_or_else(|| format!("{}: no store", store_path.display()))?;
+            let table = store.index.table(&commit).ok_or_else(|| format!("{}: commit {} is not kept", store_path.display(), crate::gitstore::hex(&commit)))?;
+            let manifests = manifest_dirs(table);
+            crate::vfs::mount(&root, std::sync::Arc::new(store), &commit)?;
+            manifests
+        };
+        self.git.borrow_mut().mounts.push((src.clone(), root.clone(), commit, manifests.clone()));
+        Ok((root, commit, manifests))
+    }
+
+    fn git_lock_path(&self) -> std::path::PathBuf {
+        let mut g = self.git.borrow_mut();
+        g.places.lock.get_or_insert_with(|| crate::dirs::relax_dir().join("git.lock")).clone()
+    }
+
+    /// relax's pin of `src` (`<relax dir>/git.lock`: `<source id>\t<commit>` lines).
+    fn git_pin(&self, src: &GitSrc) -> Result<Option<crate::gitstore::Oid>, String> {
+        if self.git.borrow().pins.is_none() {
+            let path = self.git_lock_path();
+            let mut pins = BTreeMap::new();
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                for line in text.lines() {
+                    if let Some((id, c)) = line.split_once('\t') {
+                        pins.insert(id.to_string(), c.trim().to_string());
+                    }
+                }
+            }
+            self.git.borrow_mut().pins = Some(pins);
+        }
+        let g = self.git.borrow();
+        Ok(g.pins.as_ref().and_then(|p| p.get(&src.id())).and_then(|c| crate::gitstore::from_hex(c)))
+    }
+
+    /// Records `commit` as relax's pin of `src` (the file rewritten whole, renamed into place).
+    fn set_git_pin(&self, src: &GitSrc, commit: &crate::gitstore::Oid) -> Result<(), String> {
+        let path = self.git_lock_path();
+        let text = {
+            let mut g = self.git.borrow_mut();
+            let pins = g.pins.get_or_insert_with(BTreeMap::new);
+            pins.insert(src.id(), crate::gitstore::hex(commit));
+            let mut text = String::from("# makepad run's pins of git dependencies Cargo.lock does not list: <source id>\t<commit>\n");
+            for (id, c) in pins.iter() {
+                text.push_str(&format!("{}\t{}\n", id, c));
+            }
+            text
+        };
+        let err = |e: std::io::Error| format!("{}: {}", path.display(), e);
+        if let Some(d) = path.parent() {
+            std::fs::create_dir_all(d).map_err(err)?;
+        }
+        let tmp = path.with_extension(format!("lock.{}", std::process::id()));
+        std::fs::write(&tmp, text).map_err(err)?;
+        std::fs::rename(&tmp, &path).map_err(err)
     }
 
     /// The workspace member named `package` (members, and path dependencies under the root).
@@ -683,7 +1014,7 @@ impl Resolver {
         for d in &queue {
             let path = format!("{}/Cargo.toml", d);
             if crate::vfs::read_to_string(&path).is_ok_and(|t| t.contains(&needle)) {
-                if let Ok(i) = self.load(d, false) {
+                if let Ok(i) = self.load(d, Source::Path) {
                     if self.manifests[i].name == package {
                         return Ok(i);
                     }
@@ -696,7 +1027,7 @@ impl Resolver {
             if !seen.insert(d.clone()) || !crate::vfs::is_file(format!("{}/Cargo.toml", d)) {
                 continue;
             }
-            let Ok(i) = self.load(&d, false) else { continue };
+            let Ok(i) = self.load(&d, Source::Path) else { continue };
             if self.manifests[i].name == package {
                 return Ok(i);
             }
@@ -758,6 +1089,41 @@ pub fn run_env(manifest: &str) -> Vec<(String, String)> {
     out
 }
 
+/// The folders of a repository's tree (a commit's path table) whose Cargo.toml cargo's package
+/// discovery in a git checkout reads, in its order: the root first, then depth-first; no folder
+/// under a hidden one (`.x`), a `target` folder beside a Cargo.toml, or a nested repository (a
+/// folder with its own `.git`).
+fn manifest_dirs(table: &[crate::gitstore::Entry]) -> Vec<String> {
+    let files: std::collections::HashSet<&str> = table.iter().map(|e| e.path.as_str()).collect();
+    let has = |dir: &str, name: &str| files.contains(if dir.is_empty() { name.to_string() } else { format!("{}/{}", dir, name) }.as_str());
+    let mut out: Vec<String> = Vec::new();
+    'entries: for e in table {
+        let dir = match e.path.strip_suffix("Cargo.toml") {
+            Some("") => "",
+            Some(d) if d.ends_with('/') => &d[..d.len() - 1],
+            _ => continue,
+        };
+        let mut parent = "";
+        if !dir.is_empty() {
+            for (i, part) in dir.split('/').enumerate() {
+                let me = &dir[..parent.len() + if i == 0 { 0 } else { 1 } + part.len()];
+                if part.starts_with('.') || (part == "target" && has(parent, "Cargo.toml")) || has(me, ".git") {
+                    continue 'entries;
+                }
+                parent = me;
+            }
+        }
+        out.push(dir.to_string());
+    }
+    // depth-first from the root: a folder's own manifest before its subfolders', siblings by name
+    out.sort_by(|a, b| {
+        let ka: Vec<&str> = if a.is_empty() { Vec::new() } else { a.split('/').collect() };
+        let kb: Vec<&str> = if b.is_empty() { Vec::new() } else { b.split('/').collect() };
+        ka.cmp(&kb)
+    });
+    out
+}
+
 /// The workspace root for a start folder, as cargo finds it: the nearest folder at or above
 /// `dir` with a Cargo.toml (the current manifest); then the nearest manifest at or above that
 /// one with a `[workspace]` table whose members include it (or it is the root) and whose
@@ -767,8 +1133,10 @@ pub fn run_env(manifest: &str) -> Vec<(String, String)> {
 /// `.cargo/config`) files of `dir` and every folder above it, the nearest first; the first that
 /// sets `[source.crates-io] replace-with = "<x>"` names the source, the first that sets
 /// `[source.<x>] directory` gives its path (relative to the folder holding that `.cargo`).
-/// Another replacement kind (a registry or git source) is an error: Relax reads local sources only.
-fn vendor_dir(dir: &str) -> Result<Option<(String, String)>, String> {
+/// A `git` source (with `branch`, `tag` or `rev`) serves the packages of that repository, fetched
+/// and mounted as git dependencies are (their package ids stay crates-io's, as cargo keeps the
+/// replaced source's ids). Another replacement kind (a registry) is an error.
+fn vendor_dir(dir: &str) -> Result<Option<(Vendor, String)>, String> {
     let mut configs: Vec<(String, TomlTable)> = Vec::new();
     let mut cur = Some(normalize(dir));
     while let Some(d) = cur {
@@ -786,10 +1154,20 @@ fn vendor_dir(dir: &str) -> Result<Option<(String, String)>, String> {
     let Some((d, src)) = source(&with) else {
         return Err(format!("cargo config: crates-io is replaced with `{}`, which no [source.{}] defines", with, with));
     };
-    match s(src, "directory") {
-        Some(p) => Ok(Some((join(d, &p), format!("{}/.cargo", d)))),
-        None => Err(format!("{}/.cargo: [source.{}] is not a `directory` source: makepad run reads vendored crates only", d, with)),
+    let config = format!("{}/.cargo", d);
+    if let Some(g) = git_src(src, &config, &format!("source.{}", with))? {
+        return Ok(Some((Vendor::Git(g), config)));
     }
+    match s(src, "directory") {
+        Some(p) => Ok(Some((Vendor::Dir(join(d, &p)), config))),
+        None => Err(format!("{}/.cargo: [source.{}] is neither a `directory` nor a `git` source: makepad run reads vendored crates and git repositories only", d, with)),
+    }
+}
+
+/// crates-io's replacement source.
+enum Vendor {
+    Dir(String),
+    Git(GitSrc),
 }
 
 /// cargo's target directory for a start folder (what `cargo metadata` reports as
@@ -838,6 +1216,12 @@ pub fn target_dir(dir: &str) -> Result<String, String> {
 }
 
 pub fn find_root(dir: &str) -> Result<String, String> {
+    find_root_in(dir, None)
+}
+
+/// `find_root` looking no higher than `ceiling` (a mounted repository's root).
+fn find_root_in(dir: &str, ceiling: Option<&str>) -> Result<String, String> {
+    let up = |d: &str| if ceiling == Some(d) { None } else { parent(d) };
     let start = normalize(dir);
     let mut cur = Some(start.clone());
     let mut current: Option<String> = None;
@@ -846,7 +1230,7 @@ pub fn find_root(dir: &str) -> Result<String, String> {
             current = Some(d);
             break;
         }
-        cur = parent(&d);
+        cur = up(&d);
     }
     let current = current.ok_or_else(|| format!("no Cargo.toml in {} or any folder above it", start))?;
     let mut cur = Some(current.clone());
@@ -868,7 +1252,7 @@ pub fn find_root(dir: &str) -> Result<String, String> {
                 }
             }
         }
-        cur = parent(&d);
+        cur = up(&d);
     }
     Ok(current)
 }
@@ -1067,16 +1451,23 @@ impl<'a> Feat<'a> {
         // optional `cc` behind a feature that is off (objc-sys's `unstable-exception`, rav1e's and
         // av-scenechange's `asm`, signal-hook's `cc`) builds no C; and before the dependency is
         // looked up (a vendored tree need not hold `cc` to say so)
-        if d.build && self.r.manifests[k.0].registry && !self.r.allow_c {
+        if d.build && self.r.manifests[k.0].source != Source::Path && !self.r.allow_c {
             if let Some(c) = crate::registry::c_build_dep(std::slice::from_ref(&d.package)) {
                 let m = &self.r.manifests[k.0];
                 return Err(format!("registry package `{}` {} compiles C or C++ (build-dependency `{}`): it {}", m.name, m.version, c, relax_session::options::C_GATE));
             }
         }
-        let (dir, registry) = self.r.dep_dir(d)?;
-        let t = self.r.load(&dir, registry)?;
+        let (dir, source) = self.r.dep_dir(d)?;
+        let t = self.r.load(&dir, source)?;
         if self.r.manifests[t].name != d.package {
             return Err(format!("{}/Cargo.toml: dependency `{}` names package `{}`, but {} holds `{}`", self.r.manifests[k.0].dir, d.key, d.package, dir, self.r.manifests[t].name));
+        }
+        // a git package must meet the entry's version requirement (cargo's resolution checks it)
+        if let (Some(g), true) = (&d.git, d.req != "*") {
+            let m = &self.r.manifests[t];
+            if crate::registry::Version::parse(&m.version).is_some_and(|v| !crate::registry::matches(&d.req, &v)) {
+                return Err(format!("{}/Cargo.toml: git package `{}` {} ({}) does not satisfy the requirement `{}`", self.r.manifests[k.0].dir, m.name, m.version, g.id(), d.req));
+            }
         }
         let host = k.1 || d.build || self.r.manifests[t].proc_macro;
         let tk = (t, host);
@@ -1270,8 +1661,13 @@ pub fn package_meta_env(dir: &str) -> Vec<(String, String)> {
 
 /// The unit graph of `package` in the workspace at `workspace` (see the module comment).
 pub fn unit_graph(sess: &std::sync::Arc<crate::Session>, workspace: &str, package: &str, flags: &[String]) -> Result<Units, String> {
+    unit_graph_with(sess, workspace, package, flags, GitPlaces::run())
+}
+
+/// `unit_graph` with git dependencies kept in `git` (tests: a private home and pin file).
+pub fn unit_graph_with(sess: &std::sync::Arc<crate::Session>, workspace: &str, package: &str, flags: &[String], git: GitPlaces) -> Result<Units, String> {
     let o = parse_flags(flags)?;
-    let mut r = Resolver::new(sess, workspace)?;
+    let mut r = Resolver::with(sess, workspace, git)?;
     let root = r.find_member(package)?;
     let rk = (root, false);
     let mut f = Feat { r: &mut r, dev_of: o.test.as_ref().map(|_| rk), nodes: HashMap::new(), work: Vec::new(), order: Vec::new() };
@@ -1541,6 +1937,31 @@ mod root_tests {
         assert!(units(sess, &format!("{root}/solo"), "solo").iter().any(|n| n == "solo"));
         let _ = std::fs::remove_dir_all(&root);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn git_sources_as_cargo_spells_them() {
+    use crate::git::fetch::GitRef;
+    assert_eq!(canonical_url("https://github.com/Foo/Bar.git/"), "https://github.com/foo/bar");
+    assert_eq!(canonical_url("https://example.com/Foo/bar.git"), "https://example.com/Foo/bar");
+    let c = "0123456789abcdef0123456789abcdef01234567";
+    let (g, commit) = parse_git_source(&format!("git+https://github.com/a/b?branch=feature%2Fx#{c}")).unwrap();
+    assert_eq!((g.reference.clone(), crate::gitstore::hex(&commit)), (GitRef::Branch("feature/x".into()), c.to_string()));
+    assert!(g.same(&GitSrc { url: "https://github.com/A/b.git".into(), reference: GitRef::Branch("feature/x".into()) }));
+    assert_eq!(parse_git_source(&format!("git+https://h/r#{c}")).unwrap().0.reference, GitRef::DefaultBranch);
+    assert_eq!(parse_git_source(&format!("git+https://h/r?rev=abc#{c}")).unwrap().0.id(), "git+https://h/r?rev=abc");
+    assert!(parse_git_source("registry+https://github.com/rust-lang/crates.io-index").is_none());
+    let t = |text: &str| parse_toml(text).unwrap().root;
+    assert!(git_src(&t("git = \"https://h/r\"\nbranch = \"a\"\ntag = \"b\"\n"), "x", "d").is_err());
+    assert!(git_src(&t("git = \"https://h/r\"\npath = \"p\"\n"), "x", "d").is_err());
+    assert!(git_src(&t("git = \"git@github.com:a/b\"\n"), "x", "d").unwrap_err().contains("https only"));
+    assert_eq!(git_src(&t("git = \"https://h/r\"\ntag = \"v1\"\n"), "x", "d").unwrap().unwrap().reference, GitRef::Tag("v1".into()));
+    // cargo's package discovery: root first, depth-first by name; hidden folders, target folders
+    // beside a manifest and nested repositories skipped
+    let e = |p: &str| crate::gitstore::Entry { path: p.into(), mode: 0o100644, oid: [0; 20] };
+    let table: Vec<_> = ["Cargo.toml", "a-b/Cargo.toml", "a/Cargo.toml", "a/target/x/Cargo.toml", "a/z/Cargo.toml", ".github/Cargo.toml", "n/.git", "n/m/Cargo.toml", "target/Cargo.toml", "xCargo.toml"].iter().map(|p| e(p)).collect();
+    assert_eq!(manifest_dirs(&table), vec!["", "a", "a/z", "a-b"]);
 }
 
 #[cfg(test)]

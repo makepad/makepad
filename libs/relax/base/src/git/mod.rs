@@ -1,16 +1,17 @@
-//! Relax's git client: exactly the read path `run <git url>` needs (bootloader fetch.rs into the
-//! store, gitstore.rs). Smart HTTP upload-pack (the ref advertisement from /info/refs, want/have
+//! Relax's git client: exactly the read path `run <git url>` and git dependencies need (fetch.rs
+//! into the store, gitstore.rs). Smart HTTP upload-pack (the ref advertisement from /info/refs, want/have
 //! negotiation, the pack out of the response), the pack's objects with ofs/ref deltas resolved in
 //! memory, object ids. The HTTP transport is the caller's (it turns a [`smart_http::Request`] into
 //! a [`smart_http::Response`]); inflate is crate::inflate. Nothing is written anywhere: no
 //! checkout, index, refs, push or local repository.
+pub mod fetch;
 pub mod sha1;
 pub mod smart_http;
 pub mod unpack;
 
 pub use smart_http::{
-    build_info_refs_request, build_upload_pack_request, extract_pack_from_response, parse_info_refs_response, Method,
-    RemoteHead, Request, Response,
+    build_info_refs_request, build_upload_pack_request, extract_pack_from_response, parse_advertisement, parse_info_refs_response,
+    Advertisement, Method, RemoteHead, Request, Response,
 };
 pub use unpack::unpack_pack;
 
