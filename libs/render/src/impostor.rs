@@ -109,6 +109,36 @@ struct Layer<'a> {
     uvs: Option<&'a [[f32; 2]]>,
     image: Option<ImageBuffer>,
     cutoff: Option<f32>,
+    /// The image's box-filtered mip chain (level 0 = the image): a view
+    /// texel reads the level that matches its footprint on the image.
+    mips: Vec<(usize, usize, Vec<u32>)>,
+}
+
+/// Box-filtered mips of a straight-alpha ARGB image, colour weighted by
+/// alpha (no dark fringes where leaves meet the cut-out), down to 1x1.
+fn image_mips(img: &ImageBuffer) -> Vec<(usize, usize, Vec<u32>)> {
+    let mut out = vec![(img.width, img.height, img.data[..img.width * img.height].to_vec())];
+    while let Some((w, h, d)) = out.last().filter(|(w, h, _)| *w > 1 || *h > 1) {
+        let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+        let mut nd = vec![0u32; nw * nh];
+        for y in 0..nh {
+            for x in 0..nw {
+                let mut acc = [0u32; 4];
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let p = d[(2 * y + dy).min(h - 1) * w + (2 * x + dx).min(w - 1)];
+                    let a = p >> 24;
+                    acc[0] += ((p >> 16) & 0xff) * a;
+                    acc[1] += ((p >> 8) & 0xff) * a;
+                    acc[2] += (p & 0xff) * a;
+                    acc[3] += a;
+                }
+                let a = acc[3].max(1);
+                nd[y * nw + x] = ((acc[3] / 4) << 24) | ((acc[0] / a) << 16) | ((acc[1] / a) << 8) | (acc[2] / a);
+            }
+        }
+        out.push((nw, nh, nd));
+    }
+    out
 }
 
 /// A triangle ready to rasterise into every frame: model-space corners, uvs,
@@ -118,6 +148,9 @@ struct Tri<'a> {
     uv: [[f32; 2]; 3],
     col: [[f32; 4]; 3],
     n: [f32; 3],
+    /// The corners' shading normals (the mesh's own, smooth where the
+    /// model is smooth).
+    vn: [[f32; 3]; 3],
     layer: &'a Layer<'a>,
 }
 
@@ -129,13 +162,13 @@ pub fn bake(glb: &[u8], cell: usize) -> Option<ImpostorBake> {
     let image = |png: &Option<Vec<u8>>| png.as_ref().and_then(|p| ImageBuffer::from_png(p).ok());
     let mut layers = Vec::new();
     if model.draw_layers.is_empty() {
-        layers.push(Layer { vertices: &model.vertices, indices: &model.indices, uvs: None, image: image(&model.texture_png), cutoff: None });
+        layers.push(Layer { vertices: &model.vertices, indices: &model.indices, uvs: None, image: image(&model.texture_png), cutoff: None, mips: Vec::new() });
     } else {
         for l in &model.draw_layers {
             let surface = l.pbr.surface.as_ref();
             if surface.is_some_and(|s| s.impostor > 0.0) { continue; }
             let cutoff = surface.filter(|s| s.alpha_mode == 1).map(|s| s.alpha_cutoff);
-            layers.push(Layer { vertices: &l.vertices, indices: &l.indices, uvs: Some(&l.uvs), image: image(&l.texture_png), cutoff });
+            layers.push(Layer { vertices: &l.vertices, indices: &l.indices, uvs: Some(&l.uvs), image: image(&l.texture_png), cutoff, mips: Vec::new() });
         }
     }
     const F: usize = crate::model::MODEL_VERTEX_FLOATS;
@@ -165,14 +198,20 @@ pub fn bake(glb: &[u8], cell: usize) -> Option<ImpostorBake> {
     let crown = if clo[0] <= chi[0] { [(clo[0] + chi[0]) * 0.5, (clo[1] + chi[1]) * 0.5, (clo[2] + chi[2]) * 0.5] } else { center };
 
     // Triangles once; every frame reuses them.
+    for l in &mut layers {
+        if let Some(img) = &l.image { l.mips = image_mips(img); }
+    }
     let mut tris = Vec::new();
     for l in &layers {
         for tri in l.indices.chunks_exact(3) {
-            let mut t = Tri { p: [[0.0; 3]; 3], uv: [[0.0; 2]; 3], col: [[1.0; 4]; 3], n: [0.0; 3], layer: l };
+            let mut t = Tri { p: [[0.0; 3]; 3], uv: [[0.0; 2]; 3], col: [[1.0; 4]; 3], n: [0.0; 3], vn: [[0.0; 3]; 3], layer: l };
             for k in 0..3 {
                 let i = tri[k] as usize;
                 let Some(v) = l.vertices.get(i * F..i * F + F) else { continue };
                 t.p[k] = [v[0], v[1], v[2]];
+                let (ox, oy) = crate::skin::unpack2f16_pub(v[3]);
+                let n = crate::skin::oct_decode_pub(ox, oy);
+                t.vn[k] = [n.x, n.y, n.z];
                 t.uv[k] = match l.uvs {
                     Some(uvs) => uvs.get(i).copied().unwrap_or([0.0, 0.0]),
                     None => { let b = v[4].to_bits(); [f16_to_f32(b as u16), f16_to_f32((b >> 16) as u16)] }
@@ -208,10 +247,23 @@ pub fn bake(glb: &[u8], cell: usize) -> Option<ImpostorBake> {
                 }
                 let area = (sp[1][0] - sp[0][0]) * (sp[2][1] - sp[0][1]) - (sp[1][1] - sp[0][1]) * (sp[2][0] - sp[0][0]);
                 if area.abs() < 1e-6 { continue; }
-                // The side the viewer sees; leaves bend toward "out of the
-                // crown" per texel (below) so a crown shades as a soft volume.
+                // The side the viewer sees (the face's; per texel the mesh's own
+                // interpolated normal on that side, below); leaves bend toward
+                // "out of the crown" per texel so a crown shades as a soft volume.
                 let n_side = if dot(t.n, f) < 0.0 { [-t.n[0], -t.n[1], -t.n[2]] } else { t.n };
                 let leaf = t.layer.cutoff.is_some();
+                // The image level whose texels match one view texel's footprint
+                // on it: a point read of the full image aliased a leaf card's
+                // texture into speckle, which a magnified stand-in shows as
+                // blotchy squares.
+                let level = t.layer.mips.first().map_or(0, |&(iw, ih, _)| {
+                    let (e1, e2) = ([sp[1][0] - sp[0][0], sp[1][1] - sp[0][1]], [sp[2][0] - sp[0][0], sp[2][1] - sp[0][1]]);
+                    let (d1, d2) = ([t.uv[1][0] - t.uv[0][0], t.uv[1][1] - t.uv[0][1]], [t.uv[2][0] - t.uv[0][0], t.uv[2][1] - t.uv[0][1]]);
+                    let dx = [(d1[0] * e2[1] - d2[0] * e1[1]) / area * iw as f32, (d1[1] * e2[1] - d2[1] * e1[1]) / area * ih as f32];
+                    let dy = [(d2[0] * e1[0] - d1[0] * e2[0]) / area * iw as f32, (d2[1] * e1[0] - d1[1] * e2[0]) / area * ih as f32];
+                    let fp = (dx[0] * dx[0] + dx[1] * dx[1]).max(dy[0] * dy[0] + dy[1] * dy[1]).sqrt();
+                    if fp > 1.0 { (fp.log2().floor() as usize).min(t.layer.mips.len() - 1) } else { 0 }
+                });
                 let minx = sp.iter().map(|p| p[0]).fold(f32::MAX, f32::min).floor().max(0.0) as usize;
                 let maxx = (sp.iter().map(|p| p[0]).fold(f32::MIN, f32::max).ceil().max(0.0) as usize).min(cell);
                 let miny = sp.iter().map(|p| p[1]).fold(f32::MAX, f32::min).floor().max(0.0) as usize;
@@ -229,10 +281,11 @@ pub fn bake(glb: &[u8], cell: usize) -> Option<ImpostorBake> {
                         let u = w0 * t.uv[0][0] + w1 * t.uv[1][0] + w2 * t.uv[2][0];
                         let v = w0 * t.uv[0][1] + w1 * t.uv[1][1] + w2 * t.uv[2][1];
                         let (mut r, mut g, mut bl, mut al) = (1.0f32, 1.0f32, 1.0f32, 1.0f32);
-                        if let Some(img) = &t.layer.image {
-                            let tx = ((u.rem_euclid(1.0) * img.width as f32) as usize).min(img.width - 1);
-                            let ty = ((v.rem_euclid(1.0) * img.height as f32) as usize).min(img.height - 1);
-                            let p = img.data[ty * img.width + tx];
+                        if let Some((iw, ih, data)) = t.layer.mips.get(level) {
+                            let (iw, ih) = (*iw, *ih);
+                            let tx = ((u.rem_euclid(1.0) * iw as f32) as usize).min(iw - 1);
+                            let ty = ((v.rem_euclid(1.0) * ih as f32) as usize).min(ih - 1);
+                            let p = data[ty * iw + tx];
                             r = ((p >> 16) & 0xff) as f32 / 255.0;
                             g = ((p >> 8) & 0xff) as f32 / 255.0;
                             bl = (p & 0xff) as f32 / 255.0;
@@ -254,7 +307,14 @@ pub fn bake(glb: &[u8], cell: usize) -> Option<ImpostorBake> {
                         // middle at its own position: bent once per card
                         // (at its centroid) each card lit flat, and a
                         // magnified stand-in showed the crown in squares.
-                        let mut n = n_side;
+                        // The interpolated vertex normal (a low-poly crown core
+                        // shaded with its face normals showed its facets as
+                        // squares on a magnified stand-in).
+                        let vi = [0, 1, 2].map(|d| w0 * t.vn[0][d] + w1 * t.vn[1][d] + w2 * t.vn[2][d]);
+                        let mut n = if dot(vi, vi) > 1e-6 {
+                            let vi = norm(vi);
+                            if dot(vi, n_side) < 0.0 { [-vi[0], -vi[1], -vi[2]] } else { vi }
+                        } else { n_side };
                         if leaf {
                             let m = [0, 1, 2].map(|d| w0 * t.p[0][d] + w1 * t.p[1][d] + w2 * t.p[2][d] - crown[d]);
                             if dot(m, m) > 1e-8 {

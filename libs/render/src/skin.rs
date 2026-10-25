@@ -3787,8 +3787,8 @@ const _: () = assert!(
 /// Octahedral normal encoding: a unit vector into two components in [-1, 1].
 /// Standard sphere->octahedron->square unfolding; ~1 degree of error at f16,
 /// far below what flat-shaded game geometry can show.
-/// f16-pair unpack, the shader's `unpack2f16` on the CPU (tests/oracles).
-#[allow(dead_code)]
+/// f16-pair unpack, the shader's `unpack2f16` on the CPU (tests/oracles,
+/// the impostor bake's vertex normals).
 pub(crate) fn unpack2f16_pub(f: f32) -> (f32, f32) {
     let half = |h: u32| -> f32 {
         let (s, e, m) = ((h >> 15) & 1, (h >> 10) & 0x1f, h & 0x3ff);
@@ -3803,8 +3803,8 @@ pub(crate) fn unpack2f16_pub(f: f32) -> (f32, f32) {
     (half(b & 0xffff), half(b >> 16))
 }
 
-/// Octahedral decode, the shader's `oct_decode` on the CPU (tests/oracles).
-#[allow(dead_code)]
+/// Octahedral decode, the shader's `oct_decode` on the CPU (tests/oracles,
+/// the impostor bake's vertex normals).
 pub(crate) fn oct_decode_pub(ox: f32, oy: f32) -> makepad_draw::makepad_math::Vec3f {
     let nz = 1.0 - ox.abs() - oy.abs();
     let t = (0.0 - nz).max(0.0);
