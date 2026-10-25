@@ -80,7 +80,7 @@ impl GameInput {
                 if changed {
                     let snapshot = Arc::new(Snapshot {
                         devices: pads.iter().map(|p| p.info.clone()).collect(),
-                        states: pads.iter().map(|p| GameState::Gamepad(p.published.clone())).collect(),
+                        states: pads.iter().map(|p| GameState::Gamepad(p.decoder.published.clone())).collect(),
                     });
                     // Only the pointer swap is shared, not allocation, scanning or I/O.
                     let old = lock(&output).replace(snapshot);
@@ -127,10 +127,7 @@ struct Pad {
     path: PathBuf,
     file: File,
     info: GameDevice,
-    axes: [Option<AbsInfo>; 64], // ABS_CNT, the evdev ABI (not a device limit).
-    state: GamepadState,
-    published: GamepadState,
-    dropped: bool,
+    decoder: Decoder,
 }
 impl Pad {
     fn open(path: PathBuf, id: u64) -> io::Result<Option<Self>> {
@@ -145,32 +142,105 @@ impl Pad {
         let mut supported = [0; 8];
         read_ioctl(&file, 0x23, &mut supported);
         let axes = std::array::from_fn(|code| if bit(&supported, code) { abs(&file, code as u16) } else { None });
-        let mut pad = Self {
-            path, file,
+        let mut decoder = Decoder::new(axes);
+        // A button already held when the pad (re)connects is not a press.
+        decoder.resync(&mut &file)?;
+        decoder.published = decoder.state.clone();
+        Ok(Some(Self {
+            path, file, decoder,
             info: GameDevice { id, name, announce: true, haptics: Default::default(),
                 vendor: u16::from_ne_bytes([ids[2], ids[3]]) as u32,
                 product: u16::from_ne_bytes([ids[4], ids[5]]) as u32, output: game_output::NONE },
-            axes, state: Default::default(), published: Default::default(), dropped: false,
-        };
-        pad.resync()?;
-        pad.published = pad.state.clone();
-        Ok(Some(pad))
+        }))
+    }
+    fn drain(&mut self) -> io::Result<bool> {
+        let mut changed = false;
+        let mut events = [InputEvent::default(); 64];
+        loop {
+            let bytes = unsafe {std::slice::from_raw_parts_mut(events.as_mut_ptr().cast::<u8>(), std::mem::size_of_val(&events))};
+            let count = match self.file.read(bytes) {
+                Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+                Ok(n) => n / std::mem::size_of::<InputEvent>(),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(changed),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            };
+            let fed = self.decoder.feed(&events[..count], &mut &self.file)?;
+            if fed.overran {
+                eprintln!("[hal-gamepad] {} overran; resynchronizing at the next report", self.info.name);
+            }
+            changed |= fed.changed;
+        }
+    }
+}
+
+/// The kernel's current state of a device, which a resync reads.
+trait Kernel {
+    /// EVIOCGKEY: the keys down now, one bit per code (KEY_CNT / 8 bytes).
+    fn keys(&mut self) -> io::Result<[u8; 96]>;
+    /// EVIOCGABS: an axis now.
+    fn abs(&mut self, code: u16) -> io::Result<AbsInfo>;
+}
+impl Kernel for &File {
+    fn keys(&mut self) -> io::Result<[u8; 96]> {
+        let mut keys = [0; 96];
+        if !read_ioctl(*self, 0x18, &mut keys) { return Err(io::Error::last_os_error()); }
+        Ok(keys)
+    }
+    fn abs(&mut self, code: u16) -> io::Result<AbsInfo> { abs(*self, code).ok_or_else(io::Error::last_os_error) }
+}
+
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+struct Fed { changed: bool, overran: bool }
+
+fn set_bit(bytes: &mut [u8; 96], code: u16, on: bool) {
+    let (byte, mask) = (code as usize / 8, 1u8 << (code % 8));
+    if let Some(b) = bytes.get_mut(byte) { if on { *b |= mask } else { *b &= !mask } }
+}
+
+/// One pad's evdev stream folded into its state, a report (SYN_REPORT) at a
+/// time. Only presses the stream delivered are presses: a button found down
+/// by a state query (at open, or resynchronizing after SYN_DROPPED) whose
+/// press was never seen reads as up until it is released. A resync takes
+/// axes and releases as they are, so nothing sticks, but it never invents a
+/// press edge: an overrun cannot open a menu or fire a weapon.
+struct Decoder {
+    axes: [Option<AbsInfo>; 64], // ABS_CNT, the evdev ABI (not a device limit).
+    /// Keys down as the kernel last told us.
+    down: [u8; 96],
+    /// Keys down whose press the stream never delivered.
+    unseen: [u8; 96],
+    state: GamepadState,
+    published: GamepadState,
+    dropped: bool,
+}
+impl Decoder {
+    fn new(axes: [Option<AbsInfo>; 64]) -> Self {
+        Self { axes, down: [0; 96], unseen: [0; 96], state: Default::default(), published: Default::default(), dropped: false }
+    }
+    fn button(state: &mut GamepadState, code: u16) -> Option<&mut f32> {
+        Some(match code {
+            0x130 => &mut state.a, 0x131 => &mut state.b,
+            0x133 => &mut state.x, 0x134 => &mut state.y,
+            0x136 => &mut state.left_shoulder, 0x137 => &mut state.right_shoulder,
+            0x138 => &mut state.left_trigger, 0x139 => &mut state.right_trigger,
+            0x13a => &mut state.select, 0x13b => &mut state.start,
+            0x13c => &mut state.home, 0x13d => &mut state.left_thumb,
+            0x13e => &mut state.right_thumb,
+            0x220 => &mut state.dpad_up, 0x221 => &mut state.dpad_down,
+            0x222 => &mut state.dpad_left, 0x223 => &mut state.dpad_right,
+            _ => return None,
+        })
+    }
+    fn apply_key(&mut self, code: u16) {
+        let held = bit(&self.down, code as usize) && !bit(&self.unseen, code as usize);
+        if let Some(slot) = Self::button(&mut self.state, code) { *slot = held as u8 as f32; }
     }
     fn key(&mut self, code: u16, value: i32) {
-        let value = if value == 0 {0.0} else {1.0};
-        let slot = match code {
-            0x130 => &mut self.state.a, 0x131 => &mut self.state.b,
-            0x133 => &mut self.state.x, 0x134 => &mut self.state.y,
-            0x136 => &mut self.state.left_shoulder, 0x137 => &mut self.state.right_shoulder,
-            0x138 => &mut self.state.left_trigger, 0x139 => &mut self.state.right_trigger,
-            0x13a => &mut self.state.select, 0x13b => &mut self.state.start,
-            0x13c => &mut self.state.home, 0x13d => &mut self.state.left_thumb,
-            0x13e => &mut self.state.right_thumb,
-            0x220 => &mut self.state.dpad_up, 0x221 => &mut self.state.dpad_down,
-            0x222 => &mut self.state.dpad_left, 0x223 => &mut self.state.dpad_right,
-            _ => return,
-        };
-        *slot = value;
+        let down = value != 0;
+        set_bit(&mut self.down, code, down);
+        if !down { set_bit(&mut self.unseen, code, false); }
+        self.apply_key(code);
     }
     fn axis(&mut self, code: u16, value: i32) {
         let Some(a) = self.axes.get(code as usize).copied().flatten() else { return; };
@@ -190,43 +260,128 @@ impl Pad {
             _ => {}
         }
     }
-    fn resync(&mut self) -> io::Result<()> {
-        let mut keys = [0; 96];
-        if !read_ioctl(&self.file, 0x18, &mut keys) { return Err(io::Error::last_os_error()); }
+    /// Take the kernel's state as it is now (open, or the report after SYN_DROPPED).
+    fn resync(&mut self, kernel: &mut impl Kernel) -> io::Result<()> {
+        let keys = kernel.keys()?;
+        for code in 0..768u16 {
+            let now = bit(&keys, code as usize);
+            let seen = bit(&self.down, code as usize) && !bit(&self.unseen, code as usize);
+            set_bit(&mut self.unseen, code, now && !seen);
+            set_bit(&mut self.down, code, now);
+        }
         self.state = Default::default();
-        for code in 0..768 { self.key(code, bit(&keys, code as usize) as i32); }
+        for code in 0..768 { self.apply_key(code); }
         for code in 0..self.axes.len() {
             if self.axes[code].is_some() {
-                let a = abs(&self.file, code as u16).ok_or_else(io::Error::last_os_error)?;
+                let a = kernel.abs(code as u16)?;
                 self.axes[code] = Some(a);
                 self.axis(code as u16, a.value);
             }
         }
         Ok(())
     }
-    fn drain(&mut self) -> io::Result<bool> {
-        let mut changed = false;
-        let mut events = [InputEvent::default(); 64];
-        loop {
-            let bytes = unsafe {std::slice::from_raw_parts_mut(events.as_mut_ptr().cast::<u8>(), std::mem::size_of_val(&events))};
-            let count = match self.file.read(bytes) {
-                Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
-                Ok(n) => n / std::mem::size_of::<InputEvent>(),
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(changed),
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e),
-            };
-            for event in &events[..count] {
-                if event.kind == 0 && event.code == 3 {
-                    self.dropped = true;
-                    eprintln!("[hal-gamepad] {} overran; resynchronizing at the next report", self.info.name);
-                } else if event.kind == 0 && event.code == 0 {
-                    if self.dropped { self.resync()?; self.dropped = false; }
-                    if self.state != self.published { self.published = self.state.clone(); changed = true; }
-                } else if !self.dropped {
-                    match event.kind { 1 => self.key(event.code, event.value), 3 => self.axis(event.code, event.value), _ => {} }
-                }
+    /// Fold a batch of events. Events between SYN_DROPPED and the next
+    /// SYN_REPORT are incomplete and dropped; that report resynchronizes.
+    fn feed(&mut self, events: &[InputEvent], kernel: &mut impl Kernel) -> io::Result<Fed> {
+        let mut fed = Fed::default();
+        for event in events {
+            if event.kind == 0 && event.code == 3 {
+                self.dropped = true;
+                fed.overran = true;
+            } else if event.kind == 0 && event.code == 0 {
+                if self.dropped { self.resync(kernel)?; self.dropped = false; }
+                if self.state != self.published { self.published = self.state.clone(); fed.changed = true; }
+            } else if !self.dropped {
+                match event.kind { 1 => self.key(event.code, event.value), 3 => self.axis(event.code, event.value), _ => {} }
             }
         }
+        Ok(fed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BTN_A: u16 = 0x130;
+    const BTN_START: u16 = 0x13b;
+    const ABS_X: u16 = 0;
+
+    /// What the kernel answers a state query with.
+    struct Fake { keys: [u8; 96], x: i32 }
+    impl Default for Fake {
+        fn default() -> Self { Self { keys: [0; 96], x: 0 } }
+    }
+    impl Kernel for Fake {
+        fn keys(&mut self) -> io::Result<[u8; 96]> { Ok(self.keys) }
+        fn abs(&mut self, _code: u16) -> io::Result<AbsInfo> { Ok(AbsInfo { value: self.x, minimum: -32768, maximum: 32767, ..Default::default() }) }
+    }
+    impl Fake {
+        fn hold(mut self, code: u16) -> Self { set_bit(&mut self.keys, code, true); self }
+    }
+    fn ev(kind: u16, code: u16, value: i32) -> InputEvent { InputEvent { kind, code, value, ..Default::default() } }
+    fn key(code: u16, value: i32) -> InputEvent { ev(1, code, value) }
+    fn syn() -> InputEvent { ev(0, 0, 0) }
+    fn dropped() -> InputEvent { ev(0, 3, 0) }
+    fn decoder() -> Decoder {
+        let mut axes = [None; 64];
+        axes[ABS_X as usize] = Some(AbsInfo { minimum: -32768, maximum: 32767, ..Default::default() });
+        Decoder::new(axes)
+    }
+
+    #[test]
+    fn a_press_inside_an_overrun_is_no_press_until_pressed_again() {
+        let mut d = decoder();
+        let mut k = Fake::default();
+        d.feed(&[key(BTN_A, 1), syn()], &mut k).unwrap();
+        assert_eq!(d.published.a, 1.0);
+        // The ring overflowed while Start went down; the kernel kept the newest event.
+        let mut k = Fake { x: 32767, ..Default::default() }.hold(BTN_A).hold(BTN_START);
+        let fed = d.feed(&[dropped(), key(BTN_START, 1), syn()], &mut k).unwrap();
+        assert!(fed.overran && fed.changed, "the stick moved");
+        assert_eq!(d.published.start, 0.0, "a resync never invents a press edge");
+        assert_eq!(d.published.a, 1.0, "a button held across the overrun stays held, no flicker");
+        assert!(d.published.left_stick[0] > 0.99, "axes take the resync's values");
+        // Start keeps reading up while held, then a real press counts.
+        d.feed(&[ev(3, ABS_X, 0), syn()], &mut k).unwrap();
+        assert_eq!(d.published.start, 0.0);
+        d.feed(&[key(BTN_START, 0), syn(), key(BTN_START, 1), syn()], &mut k).unwrap();
+        assert_eq!(d.published.start, 1.0);
+    }
+
+    #[test]
+    fn a_release_inside_an_overrun_releases_at_the_resync() {
+        let mut d = decoder();
+        let mut k = Fake::default();
+        d.feed(&[key(BTN_A, 1), syn()], &mut k).unwrap();
+        // Released during the overrun: nothing may stick.
+        let fed = d.feed(&[dropped(), key(BTN_A, 0), syn()], &mut Fake::default()).unwrap();
+        assert!(fed.changed);
+        assert_eq!(d.published.a, 0.0);
+        assert!(!d.dropped);
+    }
+
+    #[test]
+    fn events_after_the_resync_report_apply_normally() {
+        let mut d = decoder();
+        let mut k = Fake::default();
+        // A whole batch as one read: overrun, its report, then two live reports.
+        d.feed(&[dropped(), key(BTN_START, 1), syn(), key(BTN_START, 1), syn(), key(BTN_START, 0), syn()], &mut k).unwrap();
+        assert_eq!(d.published.start, 0.0);
+        d.feed(&[key(BTN_START, 1), syn()], &mut k).unwrap();
+        assert_eq!(d.published.start, 1.0, "the next real press is a press");
+    }
+
+    #[test]
+    fn a_button_held_at_connect_is_no_press() {
+        let mut d = decoder();
+        d.resync(&mut Fake::default().hold(BTN_START)).unwrap();
+        d.published = d.state.clone();
+        assert_eq!(d.published.start, 0.0, "a reconnect never produces a press");
+        let mut k = Fake::default();
+        d.feed(&[key(BTN_START, 2), syn()], &mut k).unwrap();
+        assert_eq!(d.published.start, 0.0, "autorepeat of the unseen press is no press");
+        d.feed(&[key(BTN_START, 0), syn(), key(BTN_START, 1), syn()], &mut k).unwrap();
+        assert_eq!(d.published.start, 1.0);
     }
 }

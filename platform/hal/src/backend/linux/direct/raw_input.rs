@@ -208,6 +208,16 @@ fn has_bit(bytes: &[u8], bit: u16) -> bool {
     bytes.get(bit as usize / 8).is_some_and(|byte| byte & (1 << (bit % 8)) != 0)
 }
 
+/// A gamepad or joystick node (BTN_GAMEPAD / BTN_JOYSTICK) that is neither a
+/// keyboard nor a pointer: its buttons would arrive as unknown key presses
+/// and every stick report would wake the UI loop. A pad's own touchpad or a
+/// keyboard-in-a-controller is a separate node with keys or BTN_LEFT.
+fn is_game_controller(keys: &[u8]) -> bool {
+    (has_bit(keys, 0x130) || has_bit(keys, 0x120))
+        && !has_bit(keys, EvKeyCodes::KEY_A)
+        && !has_bit(keys, EvKeyCodes::BTN_LEFT)
+}
+
 #[derive(Default, Clone)]
 struct Contact {
     id: Option<i32>,
@@ -460,6 +470,9 @@ pub struct RawInput {
     next_device_id: u64,
     modifier_keys: HashSet<(u64, u16)>,
     denied: HashSet<PathBuf>,
+    /// Gamepads and joysticks: their buttons are not keys (each app reads
+    /// them through its own gamepad reader), so they are never opened here.
+    pads: HashSet<PathBuf>,
     next_scan: f64,
     width: f64,
     height: f64,
@@ -482,6 +495,7 @@ impl RawInput {
             next_device_id: 0,
             modifier_keys: HashSet::new(),
             denied: HashSet::new(),
+            pads: HashSet::new(),
             next_scan: 1.0,
             width,
             height,
@@ -540,8 +554,9 @@ impl RawInput {
         }).collect();
         paths.sort();
         self.denied.retain(|path| paths.contains(path));
+        self.pads.retain(|path| paths.contains(path));
         for path in paths {
-            if self.devices.iter().any(|device| device.path == path) {
+            if self.pads.contains(&path) || self.devices.iter().any(|device| device.path == path) {
                 continue;
             }
             match OpenOptions::new().read(true).custom_flags(libc_sys::O_NONBLOCK).open(&path) {
@@ -551,6 +566,10 @@ impl RawInput {
                     let mut keys = [0u8; 96];
                     evdev_read(&file, 0x09, &mut props); // EVIOCGPROP
                     evdev_read(&file, 0x21, &mut keys); // EVIOCGBIT(EV_KEY)
+                    if is_game_controller(&keys) {
+                        self.pads.insert(path);
+                        continue;
+                    }
                     let touchpad = Touchpad::open(&file, &props, &keys);
                     let mut absolute_mt = false;
                     let absolute_axes = if touchpad.is_none() && (has_bit(&props, 1)
@@ -999,6 +1018,21 @@ impl RawInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gamepads_are_not_keyboards() {
+        let with = |codes: &[u16]| {
+            let mut keys = [0u8; 96];
+            for c in codes { keys[*c as usize / 8] |= 1 << (c % 8); }
+            is_game_controller(&keys)
+        };
+        // An Xbox Series pad: face buttons, Start/View/Guide and Share (KEY_RECORD).
+        assert!(with(&[0x130, 0x131, 0x13a, 0x13b, 0x13c, 167]));
+        assert!(with(&[0x120]), "a joystick");
+        assert!(!with(&[EvKeyCodes::KEY_A, 0x130]), "a keyboard with gamepad keys stays a keyboard");
+        assert!(!with(&[EvKeyCodes::BTN_LEFT, 0x130]), "a pointer stays a pointer");
+        assert!(!with(&[EvKeyCodes::KEY_A]));
+    }
 
     fn axis(maximum: i32) -> AbsInfo {
         AbsInfo { maximum, resolution: 32, ..Default::default() }
