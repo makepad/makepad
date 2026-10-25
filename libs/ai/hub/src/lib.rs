@@ -65,6 +65,7 @@ pub mod kernel_compute;
 pub mod gpu;
 pub mod gpu_yield;
 pub mod home;
+pub mod node_conf;
 pub mod hub;
 pub mod hub_chat;
 pub mod machine;

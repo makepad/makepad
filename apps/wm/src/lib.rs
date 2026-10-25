@@ -50,12 +50,14 @@ mod dock_layout;
 mod dock_autohide;
 mod hub_link;
 #[cfg(not(target_arch = "wasm32"))]
-mod hub_child;
+mod hub_app;
+mod trays;
 mod gpu_yield;
 mod local_use;
 mod scroll_gesture;
 use scroll_gesture::Gesture as ScrollGesture;
 use hub_link::HubLink;
+use trays::WmTrays;
 use makepad_ai_hub_panel::hub_control;
 use desk_link::DeskLink;
 use gpu_yield::YieldPolicy;
@@ -585,9 +587,12 @@ pub struct App {
     shot_pointer: Vec2d,
     #[rust]
     shot_thumb_screen: Rect,
-    /// The AI hub the top-bar panel controls.
+    /// This node's AI hub: the AI Hub app the WM starts, and what the WM tells it.
     #[rust]
     hub_link: HubLink,
+    /// The apps' tray icons in the bar's tray area (`trays`).
+    #[rust]
+    trays: WmTrays,
     /// The remote desktop server (desk_link): off unless its settings enable it.
     #[rust]
     desk_link: DeskLink,
@@ -2143,6 +2148,9 @@ impl App {
         self.forget_domain(client);
         log!("wm: removing client {}", client);
         self.relay.forget_client(cx, client);
+        if self.trays.client_gone(client) {
+            self.trays_changed(cx);
+        }
         if let Some(mut p) = self.ui.widget(cx, ids!(file_picker)).borrow_mut::<shell::file_picker::ShellFilePicker>() {
             p.forget_client(cx, client);
         }
@@ -3524,6 +3532,22 @@ impl App {
                     log!("wm: relay from unknown client {} ignored", client);
                     return;
                 }
+                // A tray: the WM's tray area shows it (trays.rs).
+                match relay {
+                    ChildRelay::SetTray(tray) => {
+                        if self.trays.set(cx, client, tray) {
+                            self.trays_changed(cx);
+                        }
+                        return;
+                    }
+                    ChildRelay::RemoveTray { tray } => {
+                        if self.trays.remove(client, tray) {
+                            self.trays_changed(cx);
+                        }
+                        return;
+                    }
+                    _ => {}
+                }
                 // A file dialog: the WM draws the picker over the window that asked
                 // (a hosted app has no display of its own to open a system one on).
                 #[cfg(not(target_os = "android"))]
@@ -3596,6 +3620,7 @@ impl App {
                     match own_chrome::route_window_op(&op, state) {
                         Some(own_chrome::WindowAction::Close) => self.request_close(cx, client),
                         Some(own_chrome::WindowAction::Minimize) => self.minimize_desktop(cx, client),
+                        Some(own_chrome::WindowAction::Show) => self.restore_desktop(cx, client),
                         // The app's maximise button toggles maximise, as a double click on its
                         // caption does (the window keeps its caption; fullscreen is the app's
                         // own fullscreen request).
@@ -4139,6 +4164,13 @@ impl App {
         let Some(kind) = shell::panels::PanelKind::for_module(module) else {
             return;
         };
+        // A tray's flyout is its app's menu, as the app last set it.
+        if let shell::panels::PanelKind::Tray(i) = kind {
+            let menu = self.trays.menu(i);
+            if let Some(mut p) = self.ui.widget(cx, ids!(shell_panel)).borrow_mut::<shell::panels::ShellPanel>() {
+                p.data.tray_menu = menu;
+            }
+        }
         let anchor = {
             let bar = self.ui.widget(cx, ids!(shell_bar));
             let borrowed = bar.borrow::<shell::bar::ShellBar>();
@@ -4168,13 +4200,11 @@ impl App {
         if opened_network {
             self.wifi_panel_opened(cx);
         }
-        self.hub_poll(cx);
         self.update_bar(cx);
     }
 
-    /// The AI hub: while its panel is open the whole snapshot is read into
-    /// it; otherwise only the cheap activity flag, which pulses the bar's
-    /// icon. Once a second (the status tick) and on every panel command.
+    /// This node's AI hub: the app's start and restart, the yield report, and whether a game
+    /// is being played. Once a second (the status tick).
     fn hub_poll(&mut self, cx: &mut Cx) {
         let processes = self.processes();
         let pool = cx.task_pool();
@@ -4189,27 +4219,21 @@ impl App {
         });
         let gaming = self.local_use.tick(host::now(), play, cx.game_input_states());
         self.hub_link.set_gaming(processes, gaming);
-        let admission = self.hub_link.get(processes).admission().map(|a| (a.open, a.line()));
-        if self.bar_sample.hub_admission != admission {
-            self.bar_sample.hub_admission = admission;
-            self.update_bar(cx);
-        }
+    }
+
+    /// An app set or removed a tray (`ChildRelay::SetTray` / `RemoveTray`) or went away: the
+    /// bar's tray area and an open tray menu follow.
+    fn trays_changed(&mut self, cx: &mut Cx) {
+        self.bar_sample.tray = self.trays.bar();
         let panel = self.ui.widget(cx, ids!(shell_panel));
-        let open = panel.borrow::<shell::panels::ShellPanel>().is_some_and(|p| p.open == Some(shell::panels::PanelKind::Hub));
-        let active = if open {
-            let snap = self.hub_link.get(processes).snapshot();
-            let busy = snap.busy();
-            if let Some(mut p) = panel.borrow_mut::<shell::panels::ShellPanel>() {
-                p.hub_update(cx, snap);
+        if let Some(mut p) = panel.borrow_mut::<shell::panels::ShellPanel>() {
+            if matches!(p.open, Some(shell::panels::PanelKind::Tray(_))) {
+                let menu = p.data.tray_menu.as_ref().and_then(|m| self.trays.menu_by(m.client, m.tray));
+                p.tray_menu_update(cx, menu);
+                self.shell_panel_open = p.open.map(|k| k.module());
             }
-            busy
-        } else {
-            self.hub_link.get(processes).active()
-        };
-        if self.bar_sample.hub_active != active {
-            self.bar_sample.hub_active = active;
-            self.update_bar(cx);
         }
+        self.update_bar(cx);
     }
 
     /// The HAL says the GPU is short of memory for the UI: ask the AI hub for room, in
@@ -4231,7 +4255,7 @@ impl App {
         match self.yield_policy.on_pressure(e.wanted_mb, e.reserve_mb, now) {
             Some(ask) if ask.mb == 0 => {
                 log!("wm: GPU memory for the UI is back ({} MB free): the AI hub may grow its model back", e.free_mb);
-                self.hub_link.get(processes).send(hub_control::HubCommand::Yield { mb: 0, unload: false, reserve_mb: ask.reserve_mb });
+                self.hub_link.send(processes, hub_control::HubCommand::Yield { mb: 0, unload: false, reserve_mb: ask.reserve_mb });
             }
             Some(ask) => {
                 log!(
@@ -4239,7 +4263,7 @@ impl App {
                     e.wanted_mb, e.free_mb, e.reserve_mb, if e.failed { ", a texture create failed" } else { "" },
                     ask.mb, if ask.unload { ", the model may be unloaded" } else { "" }
                 );
-                self.hub_link.get(processes).send(hub_control::HubCommand::Yield { mb: ask.mb, unload: ask.unload, reserve_mb: ask.reserve_mb });
+                self.hub_link.send(processes, hub_control::HubCommand::Yield { mb: ask.mb, unload: ask.unload, reserve_mb: ask.reserve_mb });
             }
             None if e.wanted_mb == 0 => log!("wm: GPU memory for the UI is back ({} MB free)", e.free_mb),
             None if self.yield_policy.exhausted() && !was_exhausted => {
@@ -4252,7 +4276,7 @@ impl App {
     /// The hub's answer to a yield: logged, and shown when the user loses something.
     fn gpu_yield_report(&mut self, cx: &mut Cx) {
         let processes = self.processes();
-        let Some(report) = self.hub_link.get(processes).take_report() else { return };
+        let Some(report) = self.hub_link.take_report(processes) else { return };
         log!("wm: AI hub: {report}");
         if let Some(notice) = gpu_yield::notice_for(&report) {
             self.notify(cx, "GPU memory", notice);
@@ -6350,10 +6374,8 @@ impl MatchEvent for App {
             match wa.cast::<ShellPanelAction>() {
                 ShellPanelAction::SetVolume(v) => self.set_volume(cx, v),
                 ShellPanelAction::DeskLinkDisconnect(session) => self.desk_link.disconnect(session),
-                ShellPanelAction::Hub(command) => {
-                    let pool = cx.task_pool();
-                    self.hub_link.command(command, host::now(), &pool);
-                    self.hub_poll(cx);
+                ShellPanelAction::TrayMenu { client, tray, item } => {
+                    self.send_relays(vec![(client, makepad_widgets::makepad_platform::studio::HostRelay::TrayMenu { tray, item })]);
                 }
                 ShellPanelAction::ToggleMute => {
                     self.toggle_output_mute(cx);
@@ -6938,7 +6960,7 @@ impl App {
             }
         }
         if let Event::Shutdown = event {
-            // The WM's AI hub ends with it (hub_child).
+            // The node's AI Hub app keeps running for the next WM (hub_app; Windows: it ends).
             let pool = cx.task_pool();
             self.hub_link.shutdown(&pool);
             if self.state.is_some() {

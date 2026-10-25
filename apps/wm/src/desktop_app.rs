@@ -594,7 +594,7 @@ impl App {
             }
         }
     }
-    fn restore_desktop(&mut self, cx: &mut Cx, client: ClientId) {
+    pub(super) fn restore_desktop(&mut self, cx: &mut Cx, client: ClientId) {
         if let Some(w) = self.state_mut().layout_of_mut(client).desktop.get_mut(client) {
             w.minimized = false;
         }

@@ -194,10 +194,11 @@ impl Shared {
         std::mem::take(&mut *lock(&self.ops))
     }
     pub fn command(&self, sid: u32, cmd: OsCmd) {
-        // Trays go to our WM's tray host (phase 2); until then they are dropped, said once.
-        if matches!(cmd, OsCmd::TraySet { .. } | OsCmd::TrayRemove { .. }) {
+        // Trays: a makepad WM shows them in its tray area (wm.rs relays them); another desktop
+        // has none for us (no StatusNotifierItem host here), so they are dropped, said once.
+        if matches!(cmd, OsCmd::TraySet { .. } | OsCmd::TrayRemove { .. }) && !self.window_manager() {
             static SAID: std::sync::Once = std::sync::Once::new();
-            SAID.call_once(|| eprintln!("tray: not supported on this desktop yet"));
+            SAID.call_once(|| eprintln!("tray: this desktop has no tray for makepad apps (only the makepad WM shows them)"));
             return;
         }
         if log_enabled() {

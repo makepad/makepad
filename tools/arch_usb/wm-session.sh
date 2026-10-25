@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# The WM starts the AI hub as its own child and stops it when it ends
-# (apps/wm/src/hub_child.rs, settings ~/.makepad/wm/ai-hub.conf): restarting the
-# WM restarts the hub, and its chat model loads again (about a minute for a 27B).
+# The WM starts the AI Hub app (under makepad run) at session start and keeps it running
+# (apps/wm/src/hub_app.rs, settings ~/.makepad/wm/ai-hub.conf): a WM restart keeps the app,
+# its loaded models and its tray, which comes back on the next WM.
 set -Eeuo pipefail
 if test -f /etc/makepad/wm.env; then
     set -a

@@ -170,9 +170,8 @@ impl DeskLinkSettings {
         if let Some(dir) = &self.fleet_dir {
             return dir.clone();
         }
-        let hub = crate::hub_child::HubSettings::load();
-        let cache = hub.cache_dir.map(PathBuf::from).unwrap_or_else(|| crate::theme::makepad_home().join("weights"));
-        cache.join("fleet")
+        let (_, hub) = crate::hub_app::load_conf();
+        hub.cache_dir.map(PathBuf::from).unwrap_or_else(|| crate::theme::makepad_home().join("weights")).join("fleet")
     }
 }
 

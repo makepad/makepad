@@ -360,6 +360,9 @@ impl HostRelayServer {
                 self.clipboard_reads.insert(host_id, (client, request_id));
             }
             ChildRelay::SetPrimarySelection { text } => cx.set_primary_selection(&text),
+            // Trays are a window manager's (the makepad WM takes them before this server sees
+            // them); any other host has no tray area for its children.
+            ChildRelay::SetTray(_) | ChildRelay::RemoveTray { .. } => {}
         }
         Vec::new()
     }
@@ -518,6 +521,12 @@ impl Cx {
                     files: Vec::new(),
                 };
                 self.call_event_handler(&Event::Clipboard(ClipboardEvent { request: request_id, content: std::sync::Arc::new(content) }));
+            }
+            HostRelay::TrayMenu { tray, item } => {
+                self.call_event_handler(&Event::TrayMenu(crate::tray::TrayMenuEvent { tray: LiveId(tray), item: LiveId(item) }));
+            }
+            HostRelay::TrayClick { tray } => {
+                self.call_event_handler(&Event::TrayClick(crate::tray::TrayClickEvent { tray: LiveId(tray) }));
             }
         }
     }

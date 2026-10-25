@@ -26,7 +26,6 @@
 use makepad_widgets::*;
 
 use super::bar::BarModule;
-use makepad_ai_hub_panel::HubPanel;
 use super::ui::{contains, cut_top, inset, rect, DrawShellFill, Ico, ShellDraw};
 #[cfg(target_os = "linux")]
 use super::wifi_linux::{
@@ -150,7 +149,8 @@ pub enum PanelKind {
     Network,
     Bluetooth,
     Gamepad,
-    Hub,
+    /// An app's tray icon (the bar's `Tray(i)`): its menu (`PanelData::tray_menu`).
+    Tray(usize),
     /// Who is viewing this desktop over Desk Link, each with Disconnect.
     DeskLink,
 }
@@ -165,7 +165,7 @@ impl PanelKind {
             BarModule::Network => PanelKind::Network,
             BarModule::Bluetooth => PanelKind::Bluetooth,
             BarModule::Gamepad => PanelKind::Gamepad,
-            BarModule::Hub => PanelKind::Hub,
+            BarModule::Tray(i) => PanelKind::Tray(i),
             BarModule::DeskLink => PanelKind::DeskLink,
             _ => return None,
         })
@@ -180,15 +180,16 @@ impl PanelKind {
             PanelKind::Network => BarModule::Network,
             PanelKind::Bluetooth => BarModule::Bluetooth,
             PanelKind::Gamepad => BarModule::Gamepad,
-            PanelKind::Hub => BarModule::Hub,
+            PanelKind::Tray(i) => BarModule::Tray(i),
             PanelKind::DeskLink => BarModule::DeskLink,
         }
     }
 
-    /// `contentWidth` — 560 for the calendar, 380 for the rest.
+    /// `contentWidth` — 560 for the calendar, 300 for a tray menu, 380 for the rest.
     pub fn content_width(self) -> f64 {
         match self {
             PanelKind::Clock => 560.0,
+            PanelKind::Tray(_) => 300.0,
             _ => 380.0,
         }
     }
@@ -212,8 +213,8 @@ pub struct PanelData {
     /// The month the calendar is showing.
     pub view: (i64, u32),
     pub today: (i64, u32, u32),
-    /// The AI hub, as last read (only while its panel is open).
-    pub hub: makepad_ai_hub_panel::hub_control::HubSnapshot,
+    /// The open tray menu: whose tray it is and what it shows (`crate::trays`).
+    pub tray_menu: Option<TrayMenu>,
     /// Desk Link viewers connected right now.
     pub desk_link: Vec<crate::desk_link::DeskLinkViewer>,
 }
@@ -236,7 +237,7 @@ impl Default for PanelData {
             game_controllers: Default::default(),
             view: (y, m),
             today: (y, m, d),
-            hub: Default::default(),
+            tray_menu: None,
             desk_link: Vec::new(),
         }
     }
@@ -266,7 +267,7 @@ impl PanelData {
             game_controllers: Default::default(),
             view: (y, m),
             today: (y, m, d),
-            hub: Default::default(),
+            tray_menu: None,
             desk_link: Vec::new(),
         }
     }
@@ -288,6 +289,22 @@ impl PanelData {
         }
     }
 }
+
+/// An app's tray menu as its flyout shows it: the owning client and tray (where a choice
+/// goes), the glyph and tooltip, and the rows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrayMenu {
+    pub client: u64,
+    pub tray: u64,
+    pub glyph: Option<Texture>,
+    pub tooltip: String,
+    pub items: Vec<makepad_widgets::makepad_platform::studio::RelayTrayItem>,
+}
+
+/// A tray menu's item row and separator heights.
+const TRAY_ROW: f64 = 30.0;
+const TRAY_LINE: f64 = 9.0;
+const TRAY_HEAD: f64 = 34.0;
 
 /// `omarchy-display-text-size`'s curated stops.
 pub const TEXT_SIZE_STOPS: [f64; 7] = [9.0, 10.0, 11.0, 12.0, 14.0, 16.0, 20.0];
@@ -311,8 +328,8 @@ pub enum ShellPanelAction {
     ToggleMute,
     SetTextSize(f64),
     Close,
-    /// A command for the AI hub.
-    Hub(makepad_ai_hub_panel::hub_control::HubCommand),
+    /// An item of an app's tray menu was chosen: tell the app (`HostRelay::TrayMenu`).
+    TrayMenu { client: u64, tray: u64, item: u64 },
     /// End this Desk Link viewer's session.
     DeskLinkDisconnect(u32),
     /// The Wi-Fi dropdown's intent (Linux). The WM turns it into a worker
@@ -338,6 +355,8 @@ enum Hit {
     Today,
     /// A Desk Link viewer's Disconnect button (its session).
     DeskLinkDisconnect(u32),
+    /// An enabled item of the open tray menu (its id).
+    TrayItem(u64),
     #[cfg(target_os = "linux")]
     PairXbox(usize),
     /// The BlackShark headset's row and settings view.
@@ -473,9 +492,6 @@ pub struct ShellPanel {
     dragging: Option<Hit>,
     #[rust]
     pub inert: bool,
-    /// The AI hub panel (glow, hover, hits): `makepad-ai-hub-panel`.
-    #[rust]
-    hub_panel: HubPanel,
     /// The Wi-Fi dropdown's state (Linux): the iwd snapshot, the password
     /// prompt, the notice line. Fed by the WM from the worker's events.
     #[cfg(target_os = "linux")]
@@ -662,16 +678,20 @@ impl ShellPanel {
         self.redraw(cx);
     }
 
-    /// A new hub snapshot: the glow follows it, and the panel redraws when something
-    /// changed, glows, or a "used Ns ago" note moved. An idle hub redraws nothing.
-    pub fn hub_update(&mut self, cx: &mut Cx, snap: makepad_ai_hub_panel::hub_control::HubSnapshot) {
-        let glow = self.hub_panel.update(cx, &snap);
-        let changed = self.data.hub != snap;
-        if changed {
-            self.data.hub = snap;
+    /// The tray menu the open tray flyout shows, as the app last set it; `None` (the tray went
+    /// away) closes a tray flyout.
+    pub fn tray_menu_update(&mut self, cx: &mut Cx, menu: Option<TrayMenu>) {
+        let open = matches!(self.open, Some(PanelKind::Tray(_)));
+        if open && menu.is_none() {
+            self.data.tray_menu = None;
+            self.close(cx);
+            return;
         }
-        if changed || glow {
-            self.redraw(cx);
+        if self.data.tray_menu != menu {
+            self.data.tray_menu = menu;
+            if open {
+                self.redraw(cx);
+            }
         }
     }
 
@@ -892,7 +912,7 @@ impl ShellPanel {
             PanelKind::Gamepad => 136.0 + 68.0 * (self.data.game_controllers.controllers.len()
                 + self.data.game_controllers.batteries.len() + self.data.game_controllers.receivers.len()
                 + self.headset_list_rows()) as f64,
-            PanelKind::Hub => self.hub_panel.height(&self.data.hub),
+            PanelKind::Tray(_) => self.tray_menu_height(),
             PanelKind::DeskLink => 52.0 + DESK_LINK_ROW * self.data.desk_link.len().max(1) as f64,
         } + pad * 2.0;
         // The body is inset by the padding AND the popup border. The
@@ -944,7 +964,7 @@ impl ShellPanel {
                     "Wi-Fi scanning and DNS switching need NetworkManager.",
                 );
             }
-            PanelKind::Hub => self.hub_panel.draw(cx, &mut self.d, &tok, &self.data.hub, body),
+            PanelKind::Tray(_) => self.draw_tray_menu(cx, body),
             PanelKind::DeskLink => self.draw_desk_link(cx, body),
             PanelKind::Gamepad => self.draw_game_controllers(cx, body),
             PanelKind::Bluetooth => {
@@ -1357,6 +1377,52 @@ impl ShellPanel {
 
     /// Who is viewing this desktop: a row per viewer (name, address, how long, watching or
     /// paused) with its Disconnect button.
+    fn tray_menu_height(&self) -> f64 {
+        let rows = self.data.tray_menu.as_ref().map_or(0.0, |m| m.items.iter().map(|i| if i.line { TRAY_LINE } else { TRAY_ROW }).sum());
+        TRAY_HEAD + TRAY_LINE + rows
+    }
+
+    /// An app's tray menu: its glyph and tooltip, then its items as the app listed them (a
+    /// check mark where an item is checked, disabled ones dimmed, separator lines).
+    fn draw_tray_menu(&mut self, cx: &mut Cx2d, body: Rect) {
+        use super::ui::HAlign;
+        let tok = self.tokens;
+        let fg = tok.popups.text;
+        let Some(menu) = self.data.tray_menu.clone() else { return };
+        let (head, mut rest) = cut_top(body, TRAY_HEAD);
+        let glyph = rect(head.pos.x + 2.0, head.pos.y + (head.size.y - 20.0) * 0.5, 20.0, 20.0);
+        match &menu.glyph {
+            Some(texture) => self.d.glyph(cx, texture, glyph, fg),
+            None => self.d.icon(cx, Ico::Dot, glyph, fg),
+        }
+        let title = rect(head.pos.x + 30.0, head.pos.y, head.size.x - 30.0, head.size.y);
+        self.d.label_elided(cx, title, true, tok.font.body, fg, HAlign::Left, &menu.tooltip);
+        let (sep, next) = cut_top(rest, TRAY_LINE);
+        rest = next;
+        self.d.separator(cx, rect(sep.pos.x, sep.pos.y + 4.0, sep.size.x, 1.0), fg, 0.12);
+        for item in &menu.items {
+            if item.line {
+                let (sep, next) = cut_top(rest, TRAY_LINE);
+                rest = next;
+                self.d.separator(cx, rect(sep.pos.x, sep.pos.y + 4.0, sep.size.x, 1.0), fg, 0.12);
+                continue;
+            }
+            let (row, next) = cut_top(rest, TRAY_ROW);
+            rest = next;
+            let hit = Hit::TrayItem(item.id);
+            if item.enabled {
+                self.d.cursor_surface(cx, row, &tok.controls, self.hot == Some(hit), false);
+                self.hits.push((hit, row));
+            }
+            let ink = if item.enabled { fg } else { alpha(fg, 0.5) };
+            if item.checked == Some(true) {
+                self.d.icon_centered(cx, Ico::Check, rect(row.pos.x + 4.0, row.pos.y, 16.0, row.size.y), 14.0, ink);
+            }
+            let text = rect(row.pos.x + 26.0, row.pos.y, row.size.x - 30.0, row.size.y);
+            self.d.label_elided(cx, text, false, tok.font.body, ink, HAlign::Left, &item.label);
+        }
+    }
+
     fn draw_desk_link(&mut self, cx: &mut Cx2d, body: Rect) {
         use super::ui::HAlign;
         let tok = self.tokens;
@@ -2438,9 +2504,6 @@ impl Widget for ShellPanel {
         if self.inert || self.open.is_none() {
             return;
         }
-        if self.hub_panel.is_glow_frame(event) {
-            self.redraw(cx);
-        }
         match event {
             Event::MouseMove(e) => {
                 if let Some(hit) = self.dragging {
@@ -2468,8 +2531,7 @@ impl Widget for ShellPanel {
                     return;
                 }
                 let hot = self.hit_at(e.abs);
-                let hub_hot = self.open == Some(PanelKind::Hub) && self.hub_panel.hover(e.abs);
-                if hot != self.hot || hub_hot {
+                if hot != self.hot {
                     self.hot = hot;
                     self.redraw(cx);
                 }
@@ -2479,13 +2541,6 @@ impl Widget for ShellPanel {
                     // A click outside closes the flyout.
                     self.close(cx);
                     cx.widget_action(self.uid, ShellPanelAction::Close);
-                    return;
-                }
-                if self.open == Some(PanelKind::Hub) && self.hub_panel.hit_at_point(e.abs) {
-                    if let Some(command) = self.hub_panel.click(e.abs, &self.data.hub) {
-                        cx.widget_action(self.uid, ShellPanelAction::Hub(command));
-                    }
-                    self.redraw(cx);
                     return;
                 }
                 match self.hit_at(e.abs) {
@@ -2545,6 +2600,15 @@ impl Widget for ShellPanel {
                     }
                     Some(Hit::DeskLinkDisconnect(session)) => {
                         cx.widget_action(self.uid, ShellPanelAction::DeskLinkDisconnect(session));
+                    }
+                    // A tray menu choice goes to its app, and the menu closes (as a menu does).
+                    Some(Hit::TrayItem(item)) => {
+                        if let Some(menu) = &self.data.tray_menu {
+                            let (client, tray) = (menu.client, menu.tray);
+                            self.close(cx);
+                            cx.widget_action(self.uid, ShellPanelAction::TrayMenu { client, tray, item });
+                            cx.widget_action(self.uid, ShellPanelAction::Close);
+                        }
                     }
                     Some(Hit::MuteToggle) => {
                         cx.widget_action(self.uid, ShellPanelAction::ToggleMute);

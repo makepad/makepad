@@ -5,6 +5,11 @@
 //! on, and the Claude backend turns itself off after an hour without a request. An
 //! inactivity turn-off is saved like a switch by hand, so a restart never brings a
 //! service back on its own.
+//!
+//! Started by a makepad WM as its node's hub (`MAKEPAD_AI_HUB_NODE_CONF`), the app serves
+//! what the node's `ai-hub.conf` says (where, the cache, the chat model, the compute mode:
+//! [`makepad_ai_hub::node_conf::NodeConf`]); this file keeps only the person's switches, and
+//! a node's first start has its local models on, with no inactivity turn-off.
 
 use std::path::PathBuf;
 
@@ -128,8 +133,17 @@ impl Settings {
         }
     }
 
-    pub fn load() -> Settings {
-        std::fs::read_to_string(Self::path()).map(|t| Self::parse(&t)).unwrap_or_default()
+    /// The saved switches; without a file, the defaults (`node`: a WM node's hub serves its
+    /// local models from the start).
+    pub fn load(node: bool) -> Settings {
+        std::fs::read_to_string(Self::path()).map(|t| Self::parse(&t)).unwrap_or_else(|_| if node { Self::node_defaults() } else { Settings::default() })
+    }
+
+    /// A WM node's hub: its local models on and never turned off for idleness; Claude off.
+    pub fn node_defaults() -> Settings {
+        let mut s = Settings::default();
+        s.local = Service { on: true, idle_off: IdleOff::Never, auto_off_at: None };
+        s
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -275,6 +289,14 @@ mod tests {
         assert!(s.offered().is_empty());
         assert_eq!(s.claude.idle_off, IdleOff::Hour1);
         assert_eq!(s.port, DEFAULT_PORT);
+    }
+
+    #[test]
+    fn a_wm_nodes_first_start_serves_its_local_models_and_never_idles_them_off() {
+        let s = Settings::node_defaults();
+        assert!(s.enabled && s.local.on && !s.claude.on);
+        assert_eq!(s.local.idle_off, IdleOff::Never);
+        assert_eq!(s.offered(), vec![Backend::Local]);
     }
 
     #[test]

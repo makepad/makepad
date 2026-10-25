@@ -4,6 +4,7 @@
 //! commands; it reads what the owner publishes.
 
 use crate::settings::{Backend, Settings};
+use makepad_ai_hub::node_conf::NodeConf;
 use makepad_ai_hub::registry::Registry;
 use makepad_ai_hub::server::{start_service, ServiceConfig, ServiceHandle};
 use std::net::SocketAddr;
@@ -11,7 +12,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// What the hub should serve now (from the settings).
+/// What the hub should serve now (from the settings, and on a WM node from its `ai-hub.conf`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plan {
     pub offered: Vec<Backend>,
@@ -20,22 +21,36 @@ pub struct Plan {
     pub cache_dir: std::path::PathBuf,
     /// Sent to the running hub; a change alone does not restart it.
     pub compute: makepad_ai_hub::activity::ComputeMode,
+    /// A WM node's hub: every local model of the node's registry is served (prefetch and
+    /// downloads follow the node's settings), and this chat model (empty: none) loads at start.
+    pub node_model: Option<String>,
 }
 
 impl Plan {
-    pub fn of(settings: &Settings) -> Plan {
-        Plan { offered: settings.offered(), host: settings.host.clone(), port: settings.port, cache_dir: settings.cache_dir(), compute: settings.compute }
+    pub fn of(settings: &Settings, node: Option<&NodeConf>) -> Plan {
+        match node {
+            Some(n) => Plan {
+                offered: settings.offered(),
+                host: n.serve_host().unwrap_or_default(),
+                port: n.port,
+                cache_dir: n.cache_dir(),
+                compute: n.compute,
+                node_model: Some(n.model.clone()),
+            },
+            None => Plan { offered: settings.offered(), host: settings.host.clone(), port: settings.port, cache_dir: settings.cache_dir(), compute: settings.compute, node_model: None },
+        }
     }
 
     /// Whether the hub `self` describes serves the same as `other` (all but the compute mode).
     fn same_service(&self, other: &Plan) -> bool {
-        (&self.offered, &self.host, self.port, &self.cache_dir) == (&other.offered, &other.host, other.port, &other.cache_dir)
+        (&self.offered, &self.host, self.port, &self.cache_dir, &self.node_model) == (&other.offered, &other.host, other.port, &other.cache_dir, &other.node_model)
     }
 }
 
-/// `POST /control/local-use` for the compute mode (no game is being played here).
+/// `POST /control/local-use` for the compute mode. Only the mode: whether a game is being
+/// played is the hosting WM's to say.
 fn local_use(handle: &ServiceHandle, mode: makepad_ai_hub::activity::ComputeMode) {
-    let body = format!("{{\"mode\":\"{}\",\"use\":\"\"}}", mode.name());
+    let body = format!("{{\"mode\":\"{}\"}}", mode.name());
     if let Err(e) = makepad_ai_hub::server::control_post(&handle.shared, "/control/local-use", body.as_bytes()) {
         eprintln!("aihub: compute mode {}: {e}", mode.name());
     }
@@ -156,14 +171,6 @@ impl Drop for Serve {
     }
 }
 
-/// The address to serve on: the setting, else this machine's first private IPv4 address.
-pub fn lan_host(setting: &str) -> Option<String> {
-    if !setting.trim().is_empty() {
-        return Some(setting.trim().to_string());
-    }
-    makepad_ai_hub::discovery::network_addresses().into_iter().find(|ip| ip.is_private()).map(|ip| ip.to_string())
-}
-
 /// The registry entries of the local models this build can run on this machine and has
 /// on disk (nothing is downloaded on its own).
 pub fn local_models(cache_dir: &std::path::Path) -> Vec<makepad_ai_hub::registry::ModelSpec> {
@@ -255,6 +262,7 @@ fn owner(rx: Receiver<Msg>, published: Arc<Mutex<Published>>) {
                         Ok((handle, serving, notes)) => {
                             let addr = handle.addr;
                             local_use(&handle, plan.compute);
+                            load_chat_model(&handle, &plan);
                             publish(&mut |p| {
                                 p.phase = Phase::Serving;
                                 p.addr = Some(addr);
@@ -296,11 +304,40 @@ fn owner(rx: Receiver<Msg>, published: Arc<Mutex<Published>>) {
     }
 }
 
+/// A WM node's chat model loads at start (it is pinned through the node's environment, so a
+/// GPU yield may unload it and it loads again when there is room).
+fn load_chat_model(handle: &ServiceHandle, plan: &Plan) {
+    let Some(model) = plan.node_model.as_deref().filter(|m| !m.is_empty()) else { return };
+    if !plan.offered.contains(&Backend::Local) {
+        return;
+    }
+    let body = makepad_strict_json::obj(vec![("model", makepad_strict_json::s(model)), ("action", makepad_strict_json::s("load"))]).to_json();
+    match makepad_ai_hub::server::control_post(&handle.shared, "/control/model", body.as_bytes()) {
+        Ok(_) => eprintln!("aihub: loading {model} (this node's chat model)"),
+        Err(e) => eprintln!("aihub: {model} did not load: {e}"),
+    }
+}
+
+/// The models a WM node's hub serves: the node's registry (`registry.json` in its cache, else
+/// the embedded one), the Claude backend's row apart.
+pub fn node_registry(cache_dir: &std::path::Path) -> Vec<makepad_ai_hub::registry::ModelSpec> {
+    let path = cache_dir.join("registry.json");
+    let registry = if path.is_file() { Registry::load_file(&path) } else { Registry::embedded() };
+    match registry {
+        Ok(r) => r.models.into_iter().filter(|spec| spec.backend != makepad_ai_hub::claude_cli::BACKEND).collect(),
+        Err(e) => {
+            eprintln!("aihub: the node's registry: {e}");
+            Vec::new()
+        }
+    }
+}
+
 /// Starts the hub for `plan`: Ok with what serves and the notes of what does not; Err with
 /// the reason ("" when nothing could serve at all, which reads as Off with its notes).
 fn start(plan: &Plan) -> Result<(ServiceHandle, Vec<Backend>, Vec<(Backend, String)>), (String, Vec<(Backend, String)>)> {
     let mut notes = Vec::new();
-    let Some(host) = lan_host(&plan.host) else {
+    // The setting, else this machine's first private IPv4 address.
+    let Some(host) = makepad_ai_hub::node_conf::lan_host(&plan.host) else {
         return Err(("this machine has no private LAN address to serve on".to_string(), notes));
     };
     let bind: SocketAddr = match format!("{host}:{}", plan.port).parse() {
@@ -323,7 +360,7 @@ fn start(plan: &Plan) -> Result<(ServiceHandle, Vec<Backend>, Vec<(Backend, Stri
                 Err(e) => notes.push((Backend::Claude, e)),
             },
             Backend::Local => {
-                let local = local_models(&plan.cache_dir);
+                let local = if plan.node_model.is_some() { node_registry(&plan.cache_dir) } else { local_models(&plan.cache_dir) };
                 if local.is_empty() {
                     notes.push((Backend::Local, "no local model this machine can run is on disk".to_string()));
                 } else {

@@ -258,6 +258,9 @@ pub struct ServiceShared {
     /// every request it authenticated ([`crate::front`]). None on a
     /// loopback-only node, whose callers are all machine-local.
     front_secret: Option<String>,
+    /// The LAN address the TLS front listens on: a request from it comes from this machine
+    /// (the hosting WM's control client reaches a LAN-only hub there). None on a loopback node.
+    front_ip: Option<std::net::IpAddr>,
     /// Which client submitted each job (cancel and leases are owner-only).
     job_owners: Mutex<HashMap<String, String>>,
     /// Random per-start id shared by /health and the discovery beacon.
@@ -429,6 +432,7 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
         gpu: GpuCache::new(),
         vram_usable: residency::UsableVram::new(startup_usable_mb),
         front_secret: fleet_mode.as_ref().map(|m| m.front_secret.clone()),
+        front_ip: fleet_mode.as_ref().map(|_| addr.ip()),
         job_owners: Mutex::new(HashMap::new()),
         node_id,
         node_key,
@@ -968,8 +972,9 @@ pub fn control_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> Res
     if ok { Ok(text) } else { Err(text) }
 }
 
-/// A request that comes from this machine: a loopback-only hub takes no other,
-/// and behind the TLS front the front's peer stamp (it strips a client's own) is loopback.
+/// A request that comes from this machine: a loopback-only hub takes no other, and behind
+/// the TLS front the front's peer stamp (it strips a client's own) is loopback or the front's
+/// own LAN address (a connection from an address to itself never leaves the machine).
 fn same_machine(shared: &ServiceShared, headers: &HttpServerHeaders) -> bool {
     if shared.front_secret.is_none() {
         return true;
@@ -978,7 +983,7 @@ fn same_machine(shared: &ServiceShared, headers: &HttpServerHeaders) -> bool {
         let (n, v) = l.trim_end().split_once(':')?;
         n.trim().eq_ignore_ascii_case(makepad_network::fleet::front::HEADER_PEER).then(|| v.trim().parse::<std::net::IpAddr>().ok()).flatten()
     });
-    peer.is_some_and(|ip| ip.is_loopback())
+    peer.is_some_and(|ip| ip.is_loopback() || Some(ip) == shared.front_ip)
 }
 
 /// `POST /control/local-use {"mode": "auto"|"ui-first"|"ai-first"|"unavailable", "use": "gaming"|""}`:
@@ -4299,6 +4304,7 @@ mod lifecycle_tests {
             gpu: GpuCache::new(),
             vram_usable: residency::UsableVram::new(None),
             front_secret: front_secret.map(str::to_string),
+            front_ip: front_secret.map(|_| std::net::IpAddr::from([10, 0, 0, 217])),
             job_owners: Mutex::new(HashMap::new()),
             node_id: 1,
             node_key: "f".repeat(32),
@@ -4367,6 +4373,12 @@ mod lifecycle_tests {
         assert!(route_post_request(&shared, &wm, br#"{"mode":"auto","use":"gaming"}"#).header.starts_with("HTTP/1.1 200"));
         assert_eq!(shared.activity.refusal().as_deref(), Some("local-use: gaming"));
         assert!(route_post_request(&shared, &wm, br#"{"mode":"nope"}"#).header.starts_with("HTTP/1.1 400"));
+        // The hosting WM over the front at the hub's own LAN address (a LAN-only hub): this machine.
+        let mut lan_wm = request_headers("POST", "/control/local-use", Some(("s3cret", "wm")));
+        lan_wm.lines.push("X-Makepad-Peer: 10.0.0.217\r\n".to_string());
+        assert!(route_post_request(&shared, &lan_wm, br#"{"use":""}"#).header.starts_with("HTTP/1.1 200"));
+        assert!(!shared.activity.gaming(), "the game ended");
+        assert_eq!(shared.activity.mode(), crate::activity::ComputeMode::Automatic, "only `use` changed: the mode stayed");
     }
 
     #[test]

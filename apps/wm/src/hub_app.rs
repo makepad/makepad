@@ -1,0 +1,550 @@
+//! This node's AI hub: the AI Hub app (apps/aihub), started by the window manager as an
+//! ordinary process at session start, the same app a Mac or Windows desktop runs, with its tray
+//! icon in the WM's tray area (`trays`) and its window as the hub's control panel. The WM keeps
+//! it running:
+//!
+//! - it runs under the JIT (`makepad run makepad-app-aihub --features node --allow-c`, the standing
+//!   default) or as the built binary (`runner = native`), with the node's settings
+//!   (`~/.makepad/wm/ai-hub.conf`, [`NodeConf`]): the app reads the same file
+//!   (`MAKEPAD_AI_HUB_NODE_CONF`) for where it serves (port, this node's LAN address, cache) and
+//!   which chat model it loads at start; the WM hands it the environment the file gives (the
+//!   chat model and pins, context, prefetch, the CUDA toolkit for the JIT's kernel build);
+//! - an app that exits (a crash, a kill, its Quit) is started again, after a pause that doubles
+//!   with each exit in a row (2 s .. 5 min) and starts over once it stayed up for two minutes;
+//! - a WM restart does not cost it (Unix). It runs outside the WM's life: its output goes to its
+//!   log file, on Linux under systemd in a scope of the user's manager (the WM's unit stops its
+//!   whole control group), and `~/.makepad/wm/ai-hub.state` names its pid and what it was
+//!   started as. Its windows and its tray wait for the next WM and come back on it (the HAL's
+//!   WM shell re-attaches a tray app). The next WM keeps a live app with the same start (its
+//!   models stay loaded, its jobs keep running); one started from another binary or other
+//!   settings is replaced;
+//! - a stop is SIGTERM: the app's hub closes admission (the fleet routes jobs elsewhere), hands
+//!   its running jobs back to their clients and quits. Windows: it ends with the WM.
+//!
+//! A hidden WM (`MAKEPAD_HIDE_WINDOWS`, the test runs) starts no hub unless
+//! `MAKEPAD_WM_AI_HUB_CONF` names its settings: test desktops must not take the GPU or the port
+//! of the real one. Its output goes to `~/.makepad/wm/ai-hub.log`.
+
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+
+use makepad_ai_hub::node_conf::{NodeConf, Runner, CONF_ENV, NODE_CONF_ENV};
+use makepad_app_registry as registry;
+
+/// The app's registry id and its package (the name its command line carries).
+const APP_ID: &str = "aihub";
+
+/// The node's settings as the WM reads them: the file, or the defaults; a hidden WM without its
+/// own settings file starts no hub.
+pub fn load_conf() -> (PathBuf, NodeConf) {
+    let path = NodeConf::path();
+    let mut conf = NodeConf::load_from(&path);
+    if std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() && std::env::var_os(CONF_ENV).is_none() {
+        conf.enabled = false;
+    }
+    (path, conf)
+}
+
+/// Seconds before the `n`th restart in a row (n >= 1).
+pub fn backoff_s(n: u32) -> u32 {
+    (1u32 << n.min(9)).min(300)
+}
+
+/// An app that stayed up this long starts the crash count over.
+const STEADY_S: f64 = 120.0;
+const TAIL: usize = 24;
+/// How long the first start waits for the WM's socket (the app finds the WM by it): the
+/// adoption socket is published at the WM's start, before its first second.
+const SOCKET_WAIT_S: f64 = 10.0;
+
+/// The app this WM watches: its own child, or one an earlier WM started and this one kept
+/// (`ai-hub.state`).
+enum Running {
+    Child(Child),
+    Adopted(u32),
+}
+
+impl Running {
+    fn pid(&self) -> u32 {
+        match self {
+            Running::Child(child) => child.id(),
+            Running::Adopted(pid) => *pid,
+        }
+    }
+}
+
+/// What the app was started as: the program (path, size, modification time) and everything the
+/// settings hand it. A WM that finds a live app with the same identity keeps it.
+fn identity(program: &Path, conf: &NodeConf) -> String {
+    let meta = std::fs::metadata(program).ok();
+    let size = meta.as_ref().map_or(0, |m| m.len());
+    let modified = meta
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    format!("{} {size} {modified} nice={} args={:?} env={:?}", program.display(), conf.nice, app_args(conf), conf.hub_env())
+}
+
+/// The program's arguments: `run <package> --features <set> --allow-c` under the JIT, none
+/// natively. The hub links native AI libraries (ggml's CUDA kernels, built by their build
+/// scripts where a CUDA toolkit is named): the JIT builds those with cargo and links them in.
+fn app_args(conf: &NodeConf) -> Vec<String> {
+    match conf.runner {
+        Runner::Native => Vec::new(),
+        Runner::Jit => {
+            let package = registry::find(APP_ID).map_or("makepad-app-aihub", |e| e.package);
+            let mut args = vec!["run".to_string(), package.to_string()];
+            if !conf.features.trim().is_empty() {
+                args.extend(["--features".to_string(), conf.features.trim().to_string()]);
+            }
+            args.push("--allow-c".to_string());
+            args
+        }
+    }
+}
+
+/// `ai-hub.state`: the pid of the app this WM (or an earlier one) started and its identity.
+fn read_state(path: &Path) -> Option<(u32, String)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut pid = None;
+    let mut id = None;
+    for line in text.lines() {
+        match line.split_once(" = ") {
+            Some(("pid", v)) => pid = v.trim().parse().ok(),
+            Some(("identity", v)) => id = Some(v.to_string()),
+            _ => {}
+        }
+    }
+    Some((pid?, id?))
+}
+
+/// Whether `pid` is still the AI Hub app: alive, and (Linux) its command line names the app
+/// (its binary, or the package `makepad run` runs), so a reused pid is never taken for it.
+fn app_alive(pid: u32) -> bool {
+    if !makepad_app_host::launch::process_alive(pid) {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let name = registry::find(APP_ID).map_or("makepad-app-aihub", |e| e.bin);
+        return std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|cmd| cmd.windows(name.len()).any(|w| w == name.as_bytes()));
+    }
+    #[cfg(not(target_os = "linux"))]
+    true
+}
+
+/// Linux under systemd: the WM's own unit stops its whole control group, so an app that is to
+/// outlive a WM restart runs in a scope of the user's manager (`systemd-run --user --scope`,
+/// which execs it: the child's pid is the app's).
+#[cfg(target_os = "linux")]
+fn user_scope() -> Option<PathBuf> {
+    let run = PathBuf::from("/usr/bin/systemd-run");
+    let bus = std::env::var_os("XDG_RUNTIME_DIR").map(|d| PathBuf::from(d).join("bus"));
+    (run.is_file() && bus.is_some_and(|b| b.exists())).then_some(run)
+}
+
+pub struct HubApp {
+    pub conf: NodeConf,
+    conf_path: PathBuf,
+    running: Option<Running>,
+    /// Its output's log (`~/.makepad/wm/ai-hub.log`): the reason of an exit is in its tail.
+    log: PathBuf,
+    /// `~/.makepad/wm/ai-hub.state`.
+    state: PathBuf,
+    /// Exits in a row without a steady run between them.
+    crashes: u32,
+    restart_at: Option<f64>,
+    /// Stopped on purpose: start again as soon as it is gone.
+    restart_pending: bool,
+    /// The first start looks for an app an earlier WM left running.
+    first_start: bool,
+    /// An adopted app being replaced gets SIGKILL at this time if it is still there.
+    kill_at: Option<f64>,
+    started_at: f64,
+    /// When the first start began waiting for the WM's socket.
+    socket_wait: Option<f64>,
+}
+
+impl HubApp {
+    pub fn new(conf_path: PathBuf, conf: NodeConf) -> HubApp {
+        let wm = crate::theme::makepad_home().join("wm");
+        HubApp {
+            conf,
+            conf_path,
+            running: None,
+            log: wm.join("ai-hub.log"),
+            state: wm.join("ai-hub.state"),
+            crashes: 0,
+            restart_at: Some(0.0),
+            restart_pending: false,
+            first_start: true,
+            kill_at: None,
+            started_at: 0.0,
+            socket_wait: None,
+        }
+    }
+
+    /// What starts the app: the `makepad` tool (JIT) or the built app (the deploy builds
+    /// either). Starting takes seconds; the JIT compiles what runs.
+    fn program(&self) -> Result<PathBuf, String> {
+        let root = registry::repo_root();
+        match self.conf.runner {
+            Runner::Jit => registry::built_binary(&registry::MAKEPAD_RUN, root.as_deref())
+                .filter(|b| b.is_file())
+                .ok_or_else(|| "makepad is not built (the deploy builds it: cargo build --release -p makepad-run)".to_string()),
+            Runner::Native => {
+                let entry = registry::find(APP_ID).ok_or("the registry has no aihub")?;
+                let target = entry.target();
+                let bin = match (&self.conf.target_dir, &root) {
+                    (Some(dir), Some(root)) => Some(registry::checkout_binary(&target, root, Some(std::ffi::OsStr::new(dir)))),
+                    _ => registry::built_binary(&target, root.as_deref()),
+                };
+                bin.filter(|b| b.is_file())
+                    .ok_or_else(|| "the AI Hub app is not built (the deploy builds it: cargo build --release -p makepad-app-aihub --features node)".to_string())
+            }
+        }
+    }
+
+    fn command(&self, program: &Path) -> Command {
+        let mut argv: Vec<std::ffi::OsString> = Vec::new();
+        #[cfg(target_os = "linux")]
+        if let Some(run) = user_scope() {
+            let unit = format!("makepad-ai-hub-{}-{}", self.conf.port, std::process::id());
+            argv.extend([run.into_os_string(), "--user".into(), "--scope".into(), "--quiet".into(), "--collect".into(), format!("--unit={unit}").into()]);
+        }
+        if cfg!(unix) && self.conf.nice > 0 {
+            argv.extend(["nice".into(), "-n".into(), self.conf.nice.to_string().into()]);
+        }
+        argv.push(program.as_os_str().to_owned());
+        argv.extend(app_args(&self.conf).into_iter().map(Into::into));
+        let mut cmd = Command::new(&argv[0]);
+        cmd.args(&argv[1..]);
+        registry::child_env::scrub(&mut cmd);
+        if let Some(root) = registry::repo_root() {
+            cmd.current_dir(root);
+        }
+        if self.conf.runner == Runner::Jit {
+            // How this machine debugs its JIT apps (`~/.makepad/wm/jit.env`), as for every JIT app.
+            if let Ok(text) = std::fs::read_to_string(crate::theme::makepad_home().join("wm/jit.env")) {
+                for (key, value) in crate::clients::jit_env(&text) {
+                    if key == "TMPDIR" {
+                        let _ = std::fs::create_dir_all(&value);
+                    }
+                    cmd.env(key, value);
+                }
+            }
+        }
+        for (k, v) in self.conf.hub_env() {
+            cmd.env(k, v);
+        }
+        // The app serves as this node's hub: from this file, not its own settings.
+        cmd.env(NODE_CONF_ENV, &self.conf_path);
+        cmd
+    }
+
+    /// The first start: a live app an earlier WM started with this identity is kept (a WM
+    /// restart no longer costs the hub, its loaded models or its running jobs). One started
+    /// from another binary or other settings is stopped, and a new one starts once it is gone.
+    fn adopt_or_replace(&mut self, now: f64, program: &Path) -> bool {
+        let Some((pid, id)) = read_state(&self.state) else { return false };
+        if !app_alive(pid) {
+            return false;
+        }
+        if id == identity(program, &self.conf) {
+            makepad_widgets::log!("wm: AI Hub: kept pid {pid}, started by an earlier WM with this program and these settings");
+            self.running = Some(Running::Adopted(pid));
+            self.restart_at = None;
+            self.started_at = now;
+            return true;
+        }
+        makepad_widgets::log!("wm: AI Hub: pid {pid} runs another program or other settings; replacing it");
+        #[cfg(unix)]
+        makepad_app_host::launch::signal_group(pid, false);
+        self.kill_at = Some(now + STOP_GRACE.as_secs_f64());
+        self.running = Some(Running::Adopted(pid));
+        self.restart_pending = true;
+        true
+    }
+
+    fn spawn(&mut self, now: f64) {
+        self.restart_at = None;
+        self.restart_pending = false;
+        // A restart starts with the settings as they are now.
+        self.conf = NodeConf::load_or(&self.conf_path, &self.conf);
+        if !self.conf.enabled {
+            makepad_widgets::log!("wm: AI Hub: off in {}; not started", self.conf_path.display());
+            return;
+        }
+        let program = match self.program() {
+            Ok(program) => program,
+            Err(reason) => {
+                makepad_widgets::log!("wm: AI Hub: {reason}");
+                self.retry_later(now, reason);
+                return;
+            }
+        };
+        if std::mem::take(&mut self.first_start) && self.adopt_or_replace(now, &program) {
+            return;
+        }
+        let mut cmd = self.command(&program);
+        #[cfg(unix)]
+        makepad_app_host::launch::own_process_group(&mut cmd);
+        crate::host::no_console_window(&mut cmd);
+        if let Some(dir) = self.log.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        // Its output goes to the log file, not a pipe: it outlives this WM.
+        let out = std::fs::File::create(&self.log).ok();
+        let err = out.as_ref().and_then(|f| f.try_clone().ok());
+        cmd.stdin(Stdio::null())
+            .stdout(out.map_or(Stdio::null(), Stdio::from))
+            .stderr(err.map_or(Stdio::null(), Stdio::from));
+        let child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                let reason = format!("could not start {:?}: {e}", cmd.get_program());
+                makepad_widgets::log!("wm: AI Hub: {reason}");
+                self.retry_later(now, reason);
+                return;
+            }
+        };
+        // Windows: no keeping; the app ends with the WM's job object.
+        #[cfg(windows)]
+        makepad_app_host::launch::exit_with_parent(&child);
+        #[cfg(unix)]
+        if let Err(e) = std::fs::write(&self.state, format!("pid = {}\nidentity = {}\n", child.id(), identity(&program, &self.conf))) {
+            makepad_widgets::log!("wm: AI Hub: {}: {e}", self.state.display());
+        }
+        makepad_widgets::log!(
+            "wm: AI Hub: started pid {} ({} {}, port {}{})",
+            child.id(),
+            program.display(),
+            app_args(&self.conf).join(" "),
+            self.conf.port,
+            if self.conf.model.is_empty() { String::new() } else { format!(", model {}", self.conf.model) }
+        );
+        self.running = Some(Running::Child(child));
+        self.started_at = now;
+    }
+
+    /// A start that failed (not built yet, say) is tried again like an exit.
+    fn retry_later(&mut self, now: f64, reason: String) {
+        self.crashes += 1;
+        let wait = backoff_s(self.crashes);
+        makepad_widgets::log!("wm: AI Hub did not start ({reason}); trying again in {wait} s");
+        self.restart_at = Some(now + wait as f64);
+    }
+
+    /// The last lines of its log.
+    fn tail(&self) -> Vec<String> {
+        let text = std::fs::read_to_string(&self.log).unwrap_or_default();
+        let lines: Vec<String> = text.lines().map(str::to_string).collect();
+        lines[lines.len().saturating_sub(TAIL)..].to_vec()
+    }
+
+    /// Why it ended: its exit status, with the app's last error or panic line when it said one.
+    fn exit_reason(&self, status: &str) -> String {
+        let tail = self.tail();
+        let said = tail.iter().rev().find(|l| l.contains("panicked") || l.contains("error") || l.contains("Error"));
+        match said {
+            Some(line) => format!("{status}: {line}"),
+            None => status.to_string(),
+        }
+    }
+
+    /// Once a second from the WM's tick: exit, restart.
+    pub fn tick(&mut self, now: f64) {
+        if let (Some(Running::Adopted(pid)), Some(at)) = (&self.running, self.kill_at) {
+            if now >= at && app_alive(*pid) {
+                makepad_widgets::log!("wm: AI Hub: pid {pid} outlived its stop; SIGKILL");
+                #[cfg(unix)]
+                makepad_app_host::launch::signal_group(*pid, true);
+                self.kill_at = None;
+            }
+        }
+        let exited = match self.running.as_mut() {
+            Some(Running::Child(child)) => match child.try_wait() {
+                Ok(Some(status)) => Some(status.to_string()),
+                Ok(None) => None,
+                Err(e) => {
+                    makepad_widgets::log!("wm: AI Hub: {e}");
+                    None
+                }
+            },
+            Some(Running::Adopted(pid)) => (!app_alive(*pid)).then(|| "exited".to_string()),
+            None => None,
+        };
+        if let Some(status) = exited {
+            let adopted = matches!(self.running, Some(Running::Adopted(_)));
+            self.running = None;
+            self.kill_at = None;
+            if self.restart_pending {
+                makepad_widgets::log!("wm: AI Hub stopped ({status}) for a restart");
+                self.crashes = 0;
+                if adopted {
+                    // Not our child: gone from its command line, it may still hold its port until
+                    // its own parent reaps it. The new one starts on the next tick.
+                    self.restart_pending = false;
+                    self.restart_at = Some(now + 1.0);
+                } else {
+                    self.spawn(now);
+                }
+            } else {
+                if now - self.started_at >= STEADY_S {
+                    self.crashes = 0;
+                }
+                self.crashes += 1;
+                let wait = backoff_s(self.crashes);
+                makepad_widgets::log!("wm: AI Hub exited ({}); restart {} in {wait} s", self.exit_reason(&status), self.crashes);
+                self.restart_at = Some(now + wait as f64);
+            }
+            return;
+        }
+        if self.running.is_none() {
+            if self.restart_at.is_some_and(|at| now >= at) && self.socket_ready(now) {
+                self.spawn(now);
+            }
+        }
+    }
+
+    /// The app finds this WM by its socket (`MAKEPAD_WM_SOCKET`, set once the WM publishes it):
+    /// the first start waits a moment for it.
+    fn socket_ready(&mut self, now: f64) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            use makepad_widgets::makepad_platform::makepad_hal::wm_socket::SOCKET_ENV;
+            if std::env::var_os(SOCKET_ENV).is_none() {
+                let since = *self.socket_wait.get_or_insert(now);
+                if now - since < SOCKET_WAIT_S {
+                    return false;
+                }
+            }
+        }
+        let _ = now;
+        true
+    }
+
+    /// The WM quits. Unix: the app keeps running, and the next WM keeps it. Windows: it ends
+    /// with the WM.
+    pub fn stop(&mut self, pool: &makepad_widgets::makepad_platform::thread::TaskPool) {
+        self.restart_at = None;
+        self.restart_pending = false;
+        let Some(running) = self.running.as_mut() else { return };
+        if cfg!(unix) {
+            makepad_widgets::log!("wm: the AI Hub (pid {}) keeps running for the next WM", running.pid());
+        } else if let Running::Child(child) = running {
+            makepad_widgets::log!("wm: shutdown stops the AI Hub (pid {})", child.id());
+            makepad_app_host::launch::kill_child_group(child, STOP_GRACE, pool);
+        }
+    }
+}
+
+/// The node's hub is off (`enabled = off`): one an earlier WM left running stops.
+pub fn stop_leftover(pool: &makepad_widgets::makepad_platform::thread::TaskPool) {
+    let state = crate::theme::makepad_home().join("wm/ai-hub.state");
+    if let Some((pid, _)) = read_state(&state).filter(|(pid, _)| app_alive(*pid)) {
+        makepad_widgets::log!("wm: the AI Hub is off: stopping pid {pid}, left by an earlier WM");
+        #[cfg(unix)]
+        makepad_app_host::launch::kill_group_pid(pid, STOP_GRACE, pool);
+        #[cfg(not(unix))]
+        let _ = pool;
+    }
+}
+
+/// From SIGTERM to SIGKILL when stopping it: the hub drains (admission closed, running jobs
+/// handed back) and the app quits.
+const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(7);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restarts_back_off_and_cap() {
+        assert_eq!((1..=10).map(backoff_s).collect::<Vec<_>>(), [2, 4, 8, 16, 32, 64, 128, 256, 300, 300]);
+    }
+
+    #[test]
+    fn the_app_runs_under_the_jit_with_the_node_features_or_natively() {
+        let jit = NodeConf::default();
+        assert_eq!(app_args(&jit), ["run", "makepad-app-aihub", "--features", "node", "--allow-c"]);
+        let native = NodeConf { runner: Runner::Native, ..Default::default() };
+        assert!(app_args(&native).is_empty());
+        let plain = NodeConf { features: String::new(), ..Default::default() };
+        assert_eq!(app_args(&plain), ["run", "makepad-app-aihub", "--allow-c"]);
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("wm-hub-app-test-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn app(name: &str) -> HubApp {
+        let dir = scratch(name);
+        let mut h = HubApp::new(dir.join("ai-hub.conf"), NodeConf::default());
+        h.log = dir.join("ai-hub.log");
+        h.state = dir.join("ai-hub.state");
+        h.first_start = false;
+        h.restart_at = None;
+        h
+    }
+
+    #[test]
+    fn an_exit_restarts_after_its_backoff_and_a_steady_run_starts_the_count_over() {
+        let mut h = app("exit");
+        std::fs::write(&h.log, "listening\nthread 'main' panicked at serve.rs:1: no such hub flag\n").unwrap();
+        let mut child = Command::new("false").spawn().unwrap();
+        let _ = child.wait();
+        h.running = Some(Running::Child(child));
+        h.started_at = 0.0;
+        h.tick(10.0);
+        assert_eq!((h.crashes, h.restart_at), (1, Some(12.0)));
+        assert!(h.exit_reason("exit status: 1").contains("no such hub flag"), "its last error is the reason");
+        // A run that lasted past STEADY_S: the count starts over.
+        let mut child = Command::new("false").spawn().unwrap();
+        let _ = child.wait();
+        h.running = Some(Running::Child(child));
+        h.started_at = 20.0;
+        h.tick(20.0 + STEADY_S + 1.0);
+        assert_eq!(h.crashes, 1);
+    }
+
+    #[test]
+    fn the_state_file_names_the_app_and_its_identity_follows_program_and_settings() {
+        let dir = scratch("state");
+        let state = dir.join("ai-hub.state");
+        std::fs::write(&state, "pid = 4242\nidentity = /x/makepad 10 20 nice=10 args=[] env=[]\n").unwrap();
+        assert_eq!(read_state(&state), Some((4242, "/x/makepad 10 20 nice=10 args=[] env=[]".to_string())));
+        std::fs::write(&state, "pid = nope\n").unwrap();
+        assert_eq!(read_state(&state), None);
+        let program = dir.join("makepad");
+        std::fs::write(&program, b"one").unwrap();
+        let conf = NodeConf::default();
+        let first = identity(&program, &conf);
+        assert_eq!(first, identity(&program, &conf), "the same app is kept");
+        assert_ne!(first, identity(&program, &NodeConf { model: "qwen3.8-27b".into(), ..Default::default() }), "other settings replace it");
+        assert_ne!(first, identity(&program, &NodeConf { runner: Runner::Native, ..Default::default() }), "another runner replaces it");
+        std::fs::write(&program, b"rebuilt").unwrap();
+        assert_ne!(first, identity(&program, &conf), "a new build replaces it");
+        // Keeping needs a live app: a gone pid is never taken.
+        let mut h = app("adopt");
+        h.state = state.clone();
+        std::fs::write(&state, format!("pid = {}\nidentity = {}\n", u32::MAX - 7, identity(&program, &h.conf))).unwrap();
+        assert!(!h.adopt_or_replace(0.0, &program));
+        assert!(h.running.is_none());
+    }
+
+    #[test]
+    fn a_kept_app_is_watched_by_pid() {
+        let mut h = app("kept");
+        let mut sleeper = Command::new("sleep").arg("30").spawn().unwrap();
+        h.running = Some(Running::Adopted(sleeper.id()));
+        h.tick(1.0);
+        // (app_alive checks the command line on Linux: a sleep is not the app, so it reads as
+        // gone there and a restart is due; elsewhere it is alive.)
+        assert_eq!(h.running.is_none(), cfg!(target_os = "linux"));
+        let _ = sleeper.kill();
+        let _ = sleeper.wait();
+    }
+}

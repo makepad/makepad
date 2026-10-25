@@ -387,7 +387,11 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
     let mut native_seeds: Vec<usize> = Vec::new();
     for (i, bs) in g.build_scripts.iter().enumerate() {
         let (_, pname, _) = &g.pkg[bs.krate];
-        if noop::script(bs, &g.raw) || !matches!(script_role(pname, &bs.features), ScriptRole::ToRemove) {
+        // A kept GPU-kernel script (`Artefact`) that links native code (makepad-ai-cuda's nvcc
+        // archives, `links =`) is cargo's too with `--allow-c`: its archives join the run's
+        // native library. Without the flag it runs under Relax as before.
+        let kept_native = native.is_some() && matches!(script_role(pname, &bs.features), ScriptRole::Artefact);
+        if noop::script(bs, &g.raw) || !(kept_native || matches!(script_role(pname, &bs.features), ScriptRole::ToRemove)) {
             continue;
         }
         if let Some(why) = crate::native::native_reason(g, bs) {

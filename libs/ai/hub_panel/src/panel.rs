@@ -1,7 +1,8 @@
 //! The AI hub control panel: what the hub holds and does, drawn with the shell kit into a
-//! body rect, plus the hits that turn clicks into [`HubCommand`]s. The WM's top-bar flyout
-//! and the AI Hub app draw this very panel. The caller owns the window, the snapshot
-//! source (a [`HubControl`](crate::hub_control::HubControl)) and what it does with a command.
+//! body rect, plus the hits that turn clicks into [`HubCommand`]s. The AI Hub app's window
+//! draws it (on a Mac, on Windows and as a makepad WM node's hub). The caller owns the window,
+//! the snapshot (`hub_control::parse_snapshot` of the hub's `GET /control`) and what it does
+//! with a command.
 
 use crate::hub_control::{compute_label, ComputeMode, HubCommand, HubSnapshot, KvPrecision, ModelKind, ModelState};
 use crate::hub_glow::GlowTracker;
@@ -19,18 +20,11 @@ pub enum HubHit {
     Kv(bool),
     /// The context size's step: true is the next size up.
     Context(bool),
-    /// The hub child: stop and start it again.
-    Restart,
-    /// Open or close the list of chat models.
-    PickOpen,
-    /// A chat model of that list (index into the snapshot's `chat_models`).
-    Pick(usize),
     /// A compute mode of the picker (index into `ComputeMode::ALL`).
     Compute(usize),
 }
 
-/// The panel's own state: the glow of working models, the hover, the hits of the last draw
-/// and whether the chat model list is open.
+/// The panel's own state: the glow of working models, the hover and the hits of the last draw.
 #[derive(Default)]
 pub struct HubPanel {
     /// Which hub models light up (see `hub_glow`).
@@ -40,8 +34,6 @@ pub struct HubPanel {
     glow_frame: NextFrame,
     hot: Option<HubHit>,
     hits: Vec<(HubHit, Rect)>,
-    /// The chat model list is open (the hub child: a pick restarts it).
-    pick: bool,
 }
 
 impl HubPanel {
@@ -82,8 +74,7 @@ impl HubPanel {
         self.hits.iter().find(|(_, r)| contains(*r, p)).map(|(h, _)| *h)
     }
 
-    /// A press at `p`: the command it asks for, if any. The chat model list toggles here
-    ///.
+    /// A press at `p`: the command it asks for, if any.
     pub fn click(&mut self, p: Vec2d, snap: &HubSnapshot) -> Option<HubCommand> {
         match self.hit_at(p)? {
             HubHit::Model(i) => {
@@ -99,16 +90,6 @@ impl HubPanel {
                 let next = if up { hub_context_up(snap) } else { snap.context_options.iter().rev().copied().find(|c| *c < now) };
                 next.map(HubCommand::SetContext)
             }
-            HubHit::Restart => Some(HubCommand::Restart),
-            HubHit::PickOpen => {
-                self.pick = !self.pick;
-                None
-            }
-            HubHit::Pick(i) => {
-                let picked = hub_chat_models(snap).get(i).cloned();
-                self.pick = false;
-                picked.filter(|m| snap.process.as_ref().is_some_and(|p| p.model != *m)).map(HubCommand::SetModel)
-            }
             HubHit::Compute(i) => {
                 let mode = ComputeMode::ALL[i];
                 snap.admission.as_ref().is_some_and(|a| a.mode != mode).then_some(HubCommand::SetCompute(mode))
@@ -122,16 +103,6 @@ impl HubPanel {
         self.hit_at(p).is_some()
     }
 
-    /// The hub child's Restart button at the right of `row`; its width.
-    fn restart_button(&mut self, cx: &mut Cx2d, d: &mut ShellDraw, tok: &ShellTokens, row: Rect) -> f64 {
-        let w = d.button_width(cx, tok, false, "Restart", tok.font.body_small);
-        let r = rect(row.pos.x + row.size.x - w, row.pos.y + 3.0, w, row.size.y - 6.0);
-        let state = if self.hot == Some(HubHit::Restart) { CtrlState::Hover } else { CtrlState::Normal };
-        d.button(cx, r, tok, state, None, "Restart", tok.font.body_small, tok.popups.text, true);
-        self.hits.push((HubHit::Restart, r));
-        w
-    }
-
     /// The panel's height for `snap`, hero included.
     pub fn height(&self, snap: &HubSnapshot) -> f64 {
         fn hub_compute_height(h: &HubSnapshot) -> f64 {
@@ -142,20 +113,16 @@ impl HubPanel {
         }
         let h = snap;
         if !h.available {
-            return match &h.process {
-                Some(p) => 40.0 + 12.0 + p.phase.reason().map_or(0.0, |r| r.lines().take(HUB_REASON_LINES).count() as f64 * 16.0 + 6.0) + 34.0,
-                None => 40.0 + 12.0 + 40.0,
-            };
+            return 40.0 + 12.0 + 40.0;
         }
         let policy = if h.policy.is_some() { 18.0 } else { 0.0 } + hub_compute_height(h);
-        let process = if h.process.is_some() { 30.0 + if self.pick { hub_chat_models(h).len() as f64 * 26.0 } else { 0.0 } } else { 0.0 };
         let activity = h.activity.len().max(1) as f64 * 20.0;
         let recent = h.recent.len().min(3) as f64 * 16.0;
         let context = if h.models.iter().any(|m| Some(&m.id) == h.chat_model.as_ref()) { 30.0 } else { 0.0 };
-        40.0 + 12.0 + 38.0 + policy + process + 22.0 + h.models.len() as f64 * 34.0 + context + 12.0 + 22.0 + activity + 20.0 + recent
+        40.0 + 12.0 + 38.0 + policy + 22.0 + h.models.len() as f64 * 34.0 + context + 12.0 + 22.0 + activity + 20.0 + recent
     }
 
-    /// Draw the panel into `body` (hero, separator, sections), the way the WM flyout does.
+    /// Draw the panel into `body` (hero, separator, sections).
     pub fn draw(&mut self, cx: &mut Cx2d, d: &mut ShellDraw, tok: &ShellTokens, snap: &HubSnapshot, body: Rect) {
         self.hits.clear();
         let tok = *tok;
@@ -171,23 +138,7 @@ impl HubPanel {
         let (sep, rest) = cut_top(rest, 12.0);
         d.separator(cx, rect(sep.pos.x, sep.pos.y + 6.0, sep.size.x, 1.0), fg, 0.12);
         if !hub.available {
-            match &hub.process {
-                // The WM's own hub on its way up, or down: why, and Restart.
-                Some(p) => {
-                    let mut rest = rest;
-                    if let Some(reason) = p.phase.reason() {
-                        for line in reason.lines().take(HUB_REASON_LINES) {
-                            let (row, r2) = cut_top(rest, 16.0);
-                            rest = r2;
-                            d.label_elided(cx, row, false, tok.font.caption, darker(fg, 1.2), HAlign::Left, line);
-                        }
-                        rest = cut_top(rest, 6.0).1;
-                    }
-                    let (row, _) = cut_top(rest, 34.0);
-                    self.restart_button(cx, d, &tok, row);
-                }
-                None => unavailable(cx, d, &tok, rest, "Start the AI hub to see its models."),
-            }
+            unavailable(cx, d, &tok, rest, "Start the AI hub to see its models.");
             return;
         }
         // GPU memory.
@@ -232,33 +183,6 @@ impl HubPanel {
                     let (row, r2) = cut_top(rest, 18.0);
                     rest = r2;
                     d.label_elided(cx, row, false, tok.font.caption, darker(fg, 1.2), HAlign::Left, AI_FIRST_WARNING);
-                }
-                rest
-            }
-            None => rest,
-        };
-        // The WM's own hub: the chat model it loads at start (a pick restarts it), and Restart.
-        let rest = match &hub.process {
-            Some(p) => {
-                let (row, mut rest) = cut_top(rest, 30.0);
-                let restart_w = self.restart_button(cx, d, &tok, row);
-                let pick_w = d.button_width(cx, &tok, false, "Change", tok.font.body_small);
-                let pick = rect(row.pos.x + row.size.x - restart_w - 6.0 - pick_w, row.pos.y + 3.0, pick_w, row.size.y - 6.0);
-                let state = if self.pick { CtrlState::Selected } else if self.hot == Some(HubHit::PickOpen) { CtrlState::Hover } else { CtrlState::Normal };
-                d.button(cx, pick, &tok, state, None, "Change", tok.font.body_small, fg, true);
-                self.hits.push((HubHit::PickOpen, pick));
-                d.label(cx, rect(row.pos.x, row.pos.y, 80.0, row.size.y), false, tok.font.caption, darker(fg, 1.4), HAlign::Left, "Chat model");
-                let name = if p.model.is_empty() { "none at start" } else { p.model.as_str() };
-                d.label_elided(cx, rect(row.pos.x + 80.0, row.pos.y, (pick.pos.x - 8.0 - row.pos.x - 80.0).max(0.0), row.size.y), false, tok.font.body_small, fg, HAlign::Left, name);
-                if self.pick {
-                    for (i, id) in hub_chat_models(hub).iter().enumerate() {
-                        let (row, r2) = cut_top(rest, 26.0);
-                        rest = r2;
-                        let r = rect(row.pos.x + 80.0, row.pos.y + 2.0, row.size.x - 80.0, row.size.y - 4.0);
-                        let state = if *id == p.model { CtrlState::Selected } else if self.hot == Some(HubHit::Pick(i)) { CtrlState::Hover } else { CtrlState::Normal };
-                        d.button(cx, r, &tok, state, None, id, tok.font.body_small, fg, false);
-                        self.hits.push((HubHit::Pick(i), r));
-                    }
                 }
                 rest
             }
@@ -449,15 +373,8 @@ fn hub_context_up(hub: &HubSnapshot) -> Option<u32> {
     hub.context_options.iter().copied().find(|c| *c > hub.context && fit.is_none_or(|f| *c <= f))
 }
 
-/// Lines of a hub crash's or failed build's reason the panel shows.
-const HUB_REASON_LINES: usize = 6;
 /// Under the AI First option: it never gives GPU memory back to the desktop.
 const AI_FIRST_WARNING: &str = "AI keeps its GPU memory: the desktop and games may slow down or fail.";
-
-/// The chat models of the hub's registry, for the hub child's chat model pick.
-fn hub_chat_models(hub: &HubSnapshot) -> Vec<String> {
-    hub.chat_models.clone()
-}
 
 /// 49152 -> "48k".
 fn kilo(tokens: u32) -> String {
@@ -498,9 +415,6 @@ mod tests {
         assert_eq!(p.click(at, &snap), Some(HubCommand::Unload("q".into())));
         p.hits = vec![(HubHit::Context(true), rect(0.0, 0.0, 10.0, 10.0))];
         assert_eq!(p.click(at, &snap), Some(HubCommand::SetContext(49152)));
-        p.hits = vec![(HubHit::PickOpen, rect(0.0, 0.0, 10.0, 10.0))];
-        assert_eq!(p.click(at, &snap), None);
-        assert!(p.pick, "the pick list opens");
         assert!(p.hover(at) && !p.hover(at), "hover reports a change once");
         assert_eq!(p.click(dvec2(50.0, 50.0), &snap), None, "outside every target");
     }

@@ -747,6 +747,9 @@ pub mod window_op {
     pub const MAXIMIZE: u8 = 2;
     /// Leave the maximised state; nothing when not maximised.
     pub const RESTORE: u8 = 3;
+    /// Bring the window back and give it focus (`WindowHandle::set_visible(true)`: a tray
+    /// app opening its window again after a close hid it).
+    pub const SHOW: u8 = 4;
 }
 
 /// App to host: the app's window was asked to close, minimise or

@@ -277,6 +277,9 @@ impl Cx {
                 CxOsOp::MinimizeWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::MINIMIZE),
                 CxOsOp::MaximizeWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::MAXIMIZE),
                 CxOsOp::RestoreWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::RESTORE),
+                // A hosted app's hidden window is a minimised one on its host; shown, it comes back.
+                CxOsOp::HideWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::MINIMIZE),
+                CxOsOp::ShowWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::SHOW),
                 CxOsOp::CloseWindow(window_id) if self.hal_is_embedded() => {
                     self.hal.frames.w.window_state(hal_window_id(window_id), window_state::CLOSE);
                 }
@@ -434,8 +437,9 @@ impl Cx {
                     fb.w.menu_set(items.len() as u32, &bytes);
                 }
                 CxOsOp::SetTray(tray) => {
+                    // A hosted app's tray is its host's to show (the makepad WM's tray area).
                     if self.hal.hosted.is_some() {
-                        self.hal.frames.gap("a hosted app has no system tray");
+                        Self::send_studio_message(crate::studio::AppToStudio::Relay(crate::studio::ChildRelay::SetTray(crate::tray::relay_tray(&tray))));
                         continue;
                     }
                     let fb = &mut self.hal.frames;
@@ -466,7 +470,11 @@ impl Cx {
                     fb.w.tray_set(tray.id.0, w, h, tooltip, count, &data);
                 }
                 CxOsOp::RemoveTray(id) => {
-                    if self.hal.hosted.is_none() { self.hal.frames.w.tray_remove(id.0); }
+                    if self.hal.hosted.is_some() {
+                        Self::send_studio_message(crate::studio::AppToStudio::Relay(crate::studio::ChildRelay::RemoveTray { tray: id.0 }));
+                    } else {
+                        self.hal.frames.w.tray_remove(id.0);
+                    }
                 }
                 // program-side networking, as every backend does it
                 CxOsOp::HttpRequest { request_id, request } => {

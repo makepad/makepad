@@ -3,9 +3,14 @@
 //! It runs the hub in-process (the same `makepad-ai-hub` library as the headless
 //! `makepad-app-ai-hub`): LAN-only bind, fleet-credential TLS front, the sandboxed,
 //! tool-less Claude backend and the local models this machine has on disk, each with
-//! its own switch and inactivity turn-off. The window is the hub's control panel (the
-//! same panel as the WM's top bar); the tray icon keeps it running with the window
-//! closed. Quitting stops serving: no port, no beacon.
+//! its own switch and inactivity turn-off. The window is the hub's control panel; the tray
+//! icon keeps it running with the window closed. Quitting stops serving: no port, no beacon.
+//!
+//! On a makepad WM node the WM starts it at session start as the node's hub
+//! (`MAKEPAD_AI_HUB_NODE_CONF` names the node's `ai-hub.conf`): it serves on the node's LAN
+//! address and port with every local model of the node's registry, loads the node's chat
+//! model, keeps the compute mode in that file, starts with its window hidden (its tray icon in
+//! the WM's tray area opens it) and has no Quit: the WM keeps it running.
 
 pub use makepad_widgets;
 
@@ -14,7 +19,9 @@ mod settings;
 mod tray;
 mod view;
 
+use makepad_ai_hub::node_conf::{NodeConf, NODE_CONF_ENV};
 use makepad_ai_hub_panel::hub_control::{parse_snapshot, HubCommand};
+use std::path::PathBuf;
 use makepad_widgets::*;
 use serve::{Phase, Plan, Published, Serve};
 use settings::{apply_idle_offs, Backend, Settings};
@@ -55,6 +62,8 @@ struct Hub {
     last_seq: u64,
     pulse: bool,
     tray_key: String,
+    /// A WM node's hub: its `ai-hub.conf` (path and what it said at start).
+    node: Option<(PathBuf, NodeConf)>,
 }
 
 fn now_ms() -> u64 {
@@ -63,18 +72,47 @@ fn now_ms() -> u64 {
 
 impl Hub {
     fn start(cx: &mut Cx) -> Hub {
-        let settings = Settings::load();
+        let node = std::env::var_os(NODE_CONF_ENV).filter(|p| !p.is_empty()).map(PathBuf::from).map(|path| {
+            let conf = NodeConf::load_from(&path);
+            log!("aihub: this node's hub ({}): port {}, model {:?}", path.display(), conf.port, conf.model);
+            (path, conf)
+        });
+        let settings = Settings::load(node.is_some());
         let serve = Serve::start();
-        serve.plan(Plan::of(&settings));
+        serve.plan(Plan::of(&settings, node.as_ref().map(|(_, c)| c)));
         let now = now_ms();
-        Hub { settings, serve, timer: cx.start_interval(0.5), on_since: [(Backend::Claude, now), (Backend::Local, now)], last_seq: u64::MAX, pulse: false, tray_key: String::new() }
+        Hub { settings, serve, timer: cx.start_interval(0.5), on_since: [(Backend::Claude, now), (Backend::Local, now)], last_seq: u64::MAX, pulse: false, tray_key: String::new(), node }
+    }
+
+    fn plan(&self) -> Plan {
+        Plan::of(&self.settings, self.node.as_ref().map(|(_, c)| c))
     }
 
     fn save_and_plan(&mut self) {
         if let Err(e) = self.settings.save() {
             log!("aihub: settings not saved: {e}");
         }
-        self.serve.plan(Plan::of(&self.settings));
+        self.serve.plan(self.plan());
+    }
+
+    /// The panel's compute mode: on a WM node it is the node's (`ai-hub.conf` `compute`, the
+    /// file as it is now with only this key changed), else the app's own setting.
+    fn set_compute(&mut self, mode: makepad_ai_hub::activity::ComputeMode) {
+        match self.node.as_mut() {
+            Some((path, conf)) => {
+                let mut now = NodeConf::load_or(path, conf);
+                now.compute = mode;
+                if let Err(e) = now.save_to(path) {
+                    log!("aihub: {e}");
+                }
+                *conf = now;
+                self.serve.plan(self.plan());
+            }
+            None => {
+                self.settings.compute = mode;
+                self.save_and_plan();
+            }
+        }
     }
 
     fn switched_on(&mut self, backend: Backend) {
@@ -175,16 +213,19 @@ impl App {
         let key = format!("{glyph:?}|{status}|{}", hub.settings.render());
         if key != hub.tray_key {
             hub.tray_key = key;
-            cx.set_tray(tray::icon(&hub.settings, glyph, &status));
+            cx.set_tray(tray::icon(&hub.settings, glyph, &status, hub.node.is_none()));
         }
         if !(force || turned_off || p.seq != hub.last_seq || glyph == tray::Glyph::Working) {
             return;
         }
         hub.last_seq = p.seq;
-        let mut snapshot = p.control.as_ref().map(parse_snapshot).unwrap_or_default();
-        // The hub's own chat-model pick and Restart belong to a WM's hub child: none here.
-        snapshot.process = None;
-        let state = ViewState { settings: hub.settings.clone(), off_at: hub.off_at(&p), published: p, snapshot, now_ms: now_ms() };
+        let snapshot = p.control.as_ref().map(parse_snapshot).unwrap_or_default();
+        // A WM node's compute mode is its file's (the hub's admission says the same).
+        let mut settings = hub.settings.clone();
+        if let Some((_, conf)) = &hub.node {
+            settings.compute = conf.compute;
+        }
+        let state = ViewState { settings, off_at: hub.off_at(&p), published: p, snapshot, now_ms: now_ms() };
         let view = self.ui.widget(cx, ids!(hub_view));
         if let Some(mut v) = view.borrow_mut::<HubAppView>() {
             v.set_state(cx, state);
@@ -202,12 +243,9 @@ impl App {
     fn hub_command(&mut self, command: HubCommand) {
         let Some(hub) = self.hub.as_mut() else { return };
         match command {
-            HubCommand::SetCompute(mode) => {
-                hub.settings.compute = mode;
-                hub.save_and_plan();
-            }
-            // A WM's hub child only: nothing to restart or re-pick here.
-            HubCommand::Restart | HubCommand::SetModel(_) | HubCommand::LocalUse { .. } => {}
+            HubCommand::SetCompute(mode) => hub.set_compute(mode),
+            // The hosting WM's report: never the panel's.
+            HubCommand::LocalUse { .. } => {}
             other => {
                 if let Some((path, body)) = makepad_ai_hub_panel::hub_control::command_request("", &other) {
                     hub.serve.control(&path, body.to_json().into_bytes());
@@ -219,8 +257,14 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
-        self.hub = Some(Hub::start(cx));
+        let hub = Hub::start(cx);
+        let node = hub.node.is_some();
+        self.hub = Some(hub);
         self.refresh(cx, true);
+        // A WM node's hub starts in its tray (at session start, nobody asked for its window).
+        if node && cx.has_tray() {
+            self.ui.window(cx, ids!(main_window)).set_visible(cx, false);
+        }
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {

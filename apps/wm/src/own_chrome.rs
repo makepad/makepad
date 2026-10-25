@@ -19,6 +19,9 @@ pub enum WindowAction {
     Close,
     /// Minimise to the dock.
     Minimize,
+    /// Back from the dock (or wherever it was), raised and focused: a tray app opening its
+    /// window again.
+    Show,
     /// Maximise in place (fill the space's usable area, the centre band while
     /// something is parked) or restore; never the whole screen.
     Maximise(bool),
@@ -56,6 +59,7 @@ pub fn route_window_op(op: &HostedWindowOp, state: WindowState) -> Option<Window
     match op.op {
         window_op::CLOSE => Some(WindowAction::Close),
         window_op::MINIMIZE => Some(WindowAction::Minimize),
+        window_op::SHOW => Some(WindowAction::Show),
         window_op::MAXIMIZE if state.fullscreen => Some(WindowAction::LeaveFullscreen),
         window_op::MAXIMIZE => Some(WindowAction::Maximise(!state.maximised)),
         window_op::RESTORE if state.fullscreen => Some(WindowAction::LeaveFullscreen),
@@ -156,6 +160,7 @@ mod tests {
         assert_eq!(route_window_op(&op(window_op::CLOSE), plain), Some(WindowAction::Close));
         assert_eq!(route_window_op(&op(window_op::CLOSE), st(true, false)), Some(WindowAction::Close));
         assert_eq!(route_window_op(&op(window_op::MINIMIZE), plain), Some(WindowAction::Minimize));
+        assert_eq!(route_window_op(&op(window_op::SHOW), plain), Some(WindowAction::Show));
         // The maximise button toggles in place: it never asks for fullscreen.
         assert_eq!(route_window_op(&op(window_op::MAXIMIZE), plain), Some(WindowAction::Maximise(true)));
         assert_eq!(route_window_op(&op(window_op::MAXIMIZE), st(true, false)), Some(WindowAction::Maximise(false)));

@@ -93,6 +93,33 @@ pub struct RelayFileDialogResult {
     pub paths: Vec<String>,
 }
 
+/// One row of a tray's menu (`RelayTray::items`): an item, or a separator line.
+#[derive(Clone, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
+pub struct RelayTrayItem {
+    /// The item's id (`LiveId.0`), echoed by `HostRelay::TrayMenu`; 0 on a line.
+    pub id: u64,
+    pub label: String,
+    pub enabled: bool,
+    /// A check mark: `None` for a plain item, `Some(on)` for a checkable one.
+    pub checked: Option<bool>,
+    /// A separator line (`id`, `label` unused).
+    pub line: bool,
+}
+
+/// A tray icon the child wants its host to show (`Cx::set_tray`): the host draws the glyph,
+/// the tooltip and the menu and answers a choice with `HostRelay::TrayMenu`.
+#[derive(Clone, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
+pub struct RelayTray {
+    /// The tray's id (`LiveId.0`): set again with the same id updates it in place.
+    pub tray: u64,
+    /// The glyph: one alpha byte per pixel, rows top-down (a monochrome template the host tints).
+    pub width: u32,
+    pub height: u32,
+    pub alpha: Vec<u8>,
+    pub tooltip: String,
+    pub items: Vec<RelayTrayItem>,
+}
+
 /// Child → host.
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson, PartialEq)]
 pub enum ChildRelay {
@@ -120,6 +147,10 @@ pub enum ChildRelay {
     /// The child selected text: it becomes the host's primary selection
     /// (Linux middle-click paste). APPENDED LAST.
     SetPrimarySelection { text: String },
+    /// Show or update a tray icon (the makepad WM's tray area). APPENDED LAST.
+    SetTray(RelayTray),
+    /// Remove tray `tray`. APPENDED LAST.
+    RemoveTray { tray: u64 },
 }
 
 /// Host → child.
@@ -137,6 +168,11 @@ pub enum HostRelay {
     /// The host clipboard's text and PNG image (empty when it has none).
     /// APPENDED LAST.
     Clipboard { request_id: u64, text: String, png: Vec<u8> },
+    /// Menu item `item` of the child's tray `tray` was chosen. APPENDED LAST.
+    TrayMenu { tray: u64, item: u64 },
+    /// The child's tray `tray` was clicked (a host whose convention has a primary action;
+    /// the makepad WM opens the menu instead and never sends it). APPENDED LAST.
+    TrayClick { tray: u64 },
 }
 
 #[cfg(test)]
@@ -160,6 +196,22 @@ mod relay_tag_tests {
         assert_eq!(tag(&ChildRelay::ReadClipboard { request_id: 0 }), 8);
         assert_eq!(tag(&ChildRelay::SetPrimarySelection { text: String::new() }), 9);
         assert_eq!(tag(&HostRelay::Clipboard { request_id: 0, text: String::new(), png: Vec::new() }), 3);
+        assert_eq!(tag(&ChildRelay::SetTray(RelayTray::default())), 10);
+        assert_eq!(tag(&ChildRelay::RemoveTray { tray: 0 }), 11);
+        assert_eq!(tag(&HostRelay::TrayMenu { tray: 0, item: 0 }), 4);
+        assert_eq!(tag(&HostRelay::TrayClick { tray: 0 }), 5);
+        let tray = ChildRelay::SetTray(RelayTray {
+            tray: 7,
+            width: 2,
+            height: 1,
+            alpha: vec![0, 255],
+            tooltip: "AI Hub · serving".into(),
+            items: vec![
+                RelayTrayItem { id: 3, label: "Enabled".into(), enabled: true, checked: Some(true), line: false },
+                RelayTrayItem { line: true, ..Default::default() },
+            ],
+        });
+        assert_eq!(ChildRelay::deserialize_bin(&tray.serialize_bin()).unwrap(), tray);
         let clip = HostRelay::Clipboard { request_id: 9, text: "pasted ✓".into(), png: vec![137, 80] };
         assert_eq!(HostRelay::deserialize_bin(&clip.serialize_bin()).unwrap(), clip);
 

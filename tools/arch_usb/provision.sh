@@ -161,7 +161,7 @@ install -d /etc/makepad
 install -m 0755 "$seed/wm-session.sh" /usr/local/bin/makepad-wm-session
 install -m 0644 "$seed/wm.env" /etc/makepad/wm.env
 install -m 0644 "$seed/makepad-wm.service" /etc/systemd/system/makepad-wm.service
-# The AI hub is the WM's own child (apps/wm/src/hub_child.rs): its settings, no unit.
+# The AI hub is the AI Hub app the WM starts and keeps running (apps/wm/src/hub_app.rs): its settings, no unit.
 install -d -o arch -g arch /home/arch/.makepad /home/arch/.makepad/wm
 test -f /home/arch/.makepad/wm/ai-hub.conf || install -o arch -g arch -m 0644 "$seed/ai-hub.conf" /home/arch/.makepad/wm/ai-hub.conf
 systemctl daemon-reload

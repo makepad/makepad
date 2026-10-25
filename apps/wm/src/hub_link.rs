@@ -1,223 +1,126 @@
-//! The WM's link to its AI hub: the hub child it owns plus the control client, the stub, or
-//! a hub elsewhere. The snapshot, commands and clients are `makepad_ai_hub_panel::hub_control`.
+//! The WM's link to this node's AI hub: the AI Hub app it starts and keeps running
+//! (`hub_app`) and a thin control client for what only the WM knows (`hub_panel::hub_control::
+//! FleetHub`): whether a game is being played (`POST /control/local-use`, `local_use`) and the
+//! GPU memory the UI needs back (`POST /control/yield`, `gpu_yield`). The hub's panel is the
+//! app's own window now; the compute mode is the app's (its picker, saved in `ai-hub.conf`):
+//! the WM reads it from the hub's admission and never sets it.
 
-use makepad_ai_hub_panel::hub_control::{compute_label, Admission, ComputeMode, FleetHub, HubCommand, HubControl, HubSnapshot, StubHub};
+use makepad_ai_hub_panel::hub_control::{ComputeMode, FleetHub, HubCommand};
 
-/// The hub the WM talks to, made at first use: the stub when asked for; a hub
-/// elsewhere at `MAKEPAD_WM_HUB`; else the WM's own hub child (`hub_child`, unless its
-/// settings turn it off or this build hosts no processes) and the control client
-/// pointed at it.
 #[derive(Default)]
 pub struct HubLink {
-    link: Option<Link>,
-    /// This node's compute mode (`ai-hub.conf` `compute`) and whether a game is being
-    /// played (`local_use`): what the hub was last told.
-    local: Option<(ComputeMode, bool)>,
-    /// The settings turn the WM's hub off: a hub an earlier WM left running is stopped.
+    /// Decided at first use: `Some(None)` when this WM runs no hub.
+    link: Option<Option<Link>>,
+    /// Whether a game is being played (`local_use`): what the hub was last told.
+    gaming: Option<bool>,
+    /// The settings turn the WM's hub off: an app an earlier WM left running is stopped.
     stop_leftover: bool,
 }
 
-enum Link {
-    Stub(StubHub),
-    Fleet {
-        hub: FleetHub,
-        #[cfg(not(target_arch = "wasm32"))]
-        child: Option<crate::hub_child::HubChild>,
-    },
+/// This WM's own hub: the app and the control client pointed at it. None: the settings turn
+/// it off, or this is a hidden or in-process WM (a hub elsewhere takes local use from its own
+/// machine only, so there is nothing to tell).
+struct Link {
+    #[cfg(not(target_arch = "wasm32"))]
+    app: crate::hub_app::HubApp,
+    hub: FleetHub,
 }
 
 impl HubLink {
-    /// `processes`: this build can start child processes (`App::processes`).
-    fn link(&mut self, processes: bool) -> &mut Link {
-        self.link.get_or_insert_with(|| {
-            if std::env::var_os("MAKEPAD_WM_HUB_STUB").is_some() {
-                return Link::Stub(StubHub::default());
-            }
-            if let Ok(base) = std::env::var("MAKEPAD_WM_HUB") {
-                return Link::Fleet {
-                    hub: FleetHub::start(base),
-                    #[cfg(not(target_arch = "wasm32"))]
-                    child: None,
-                };
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                let settings = crate::hub_child::HubSettings::load();
-                let base = settings.base_url();
-                let child = (processes && settings.enabled).then(|| crate::hub_child::HubChild::new(settings));
-                // The apps the WM starts chat with the model its hub loads.
-                if let Some(model) = child.as_ref().map(|c| c.settings.model.as_str()).filter(|m| !m.is_empty()) {
-                    crate::host::set_child_env("MAKEPAD_AI_MODEL", std::ffi::OsStr::new(model));
-                }
-                if child.is_none() {
-                    makepad_widgets::log!("wm: the WM starts no AI hub (off in {}, or a hidden or in-process WM)", crate::hub_child::HubSettings::path().display());
-                    // Only the settings' own `enabled = off`: a hidden test WM leaves the real one alone.
-                    self.stop_leftover = processes && std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_none();
-                }
-                Link::Fleet { hub: FleetHub::start(base), child }
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                let _ = processes;
-                Link::Fleet { hub: FleetHub::start("https://127.0.0.1:8123".to_string()) }
-            }
-        })
-    }
-
-    pub fn get(&mut self, processes: bool) -> &mut dyn HubControl {
-        self.link(processes);
-        self
-    }
-
-    /// Once a second: the hub child's exit, restart and start-up (a no-op without one).
-    pub fn tick(&mut self, processes: bool, now: f64, pool: &makepad_widgets::makepad_platform::thread::TaskPool) {
-        #[cfg(not(target_arch = "wasm32"))]
-        if std::mem::take(&mut self.stop_leftover) {
-            crate::hub_child::stop_leftover(pool);
+    /// `processes`: this build can start child processes (`App::processes`). Decided at first
+    /// use.
+    fn link(&mut self, processes: bool) -> Option<&mut Link> {
+        if self.link.is_none() {
+            let made = self.make(processes);
+            self.link = Some(made);
         }
+        self.link.as_mut().and_then(Option::as_mut)
+    }
+
+    fn make(&mut self, processes: bool) -> Option<Link> {
         #[cfg(not(target_arch = "wasm32"))]
-        if let Link::Fleet { hub, child: Some(child) } = self.link(processes) {
-            let (answers, model) = hub.peek(&child.settings.model);
-            if child.tick(now, answers, model) {
-                makepad_widgets::log!("wm: AI hub answers: loading {}", child.settings.model);
-                hub.send(HubCommand::Load(child.settings.model.clone()));
+        {
+            let (path, conf) = crate::hub_app::load_conf();
+            if !(processes && conf.enabled) {
+                makepad_widgets::log!("wm: the WM starts no AI Hub (off in {}, or a hidden or in-process WM)", path.display());
+                // Only the settings' own `enabled = off`: a hidden test WM leaves the real one alone.
+                self.stop_leftover = processes && std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_none();
+                return None;
             }
+            let Some(base) = conf.base_url() else {
+                makepad_widgets::log!("wm: this machine has no LAN address for the AI Hub to serve on: starting none");
+                return None;
+            };
+            // The apps the WM starts chat with the model its hub loads.
+            if !conf.model.is_empty() {
+                crate::host::set_child_env("MAKEPAD_AI_MODEL", std::ffi::OsStr::new(&conf.model));
+            }
+            Some(Link { hub: FleetHub::start(base), app: crate::hub_app::HubApp::new(path, conf) })
         }
         #[cfg(target_arch = "wasm32")]
-        let _ = (processes, now, pool);
+        {
+            let _ = processes;
+            None
+        }
     }
 
-    /// The WM quits: the hub keeps running for the next WM (Unix), or stops (Windows).
-    pub fn shutdown(&mut self, pool: &makepad_widgets::makepad_platform::thread::TaskPool) {
+    /// Once a second: the app's exit and restart (a no-op without one).
+    pub fn tick(&mut self, processes: bool, now: f64, pool: &makepad_widgets::makepad_platform::thread::TaskPool) {
+        let link = self.link(processes);
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(Link::Fleet { child: Some(child), .. }) = self.link.as_mut() {
-            child.stop(pool);
+        if let Some(link) = link {
+            link.app.tick(now);
+            return;
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = (link, now);
+        #[cfg(not(target_arch = "wasm32"))]
+        if std::mem::take(&mut self.stop_leftover) {
+            crate::hub_app::stop_leftover(pool);
         }
         #[cfg(target_arch = "wasm32")]
         let _ = pool;
     }
 
-    /// A command for the hub child (Restart, SetModel) or the hub. Restart needs the
-    /// task pool to stop the old process.
-    pub fn command(&mut self, command: HubCommand, now: f64, pool: &makepad_widgets::makepad_platform::thread::TaskPool) {
-        match (command, self.link.as_mut()) {
-            #[cfg(not(target_arch = "wasm32"))]
-            (HubCommand::Restart, Some(Link::Fleet { child: Some(child), .. })) => {
-                let settings = crate::hub_child::HubSettings::load_or(&child.settings);
-                child.restart(settings, now, pool);
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            (HubCommand::SetModel(model), Some(Link::Fleet { child: Some(child), .. })) => {
-                let mut settings = crate::hub_child::HubSettings::load_or(&child.settings);
-                settings.model = model;
-                if let Err(e) = settings.save() {
-                    makepad_widgets::log!("wm: AI hub settings not saved: {e}");
-                }
-                crate::host::set_child_env("MAKEPAD_AI_MODEL", std::ffi::OsStr::new(&settings.model));
-                child.restart(settings, now, pool);
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            (HubCommand::SetCompute(mode), Some(Link::Fleet { child: Some(child), .. })) => {
-                let mut settings = crate::hub_child::HubSettings::load_or(&child.settings);
-                settings.compute = mode;
-                if let Err(e) = settings.save() {
-                    makepad_widgets::log!("wm: AI hub settings not saved: {e}");
-                }
-                child.settings.compute = mode;
-                let gaming = self.local.map_or(false, |(_, g)| g);
-                self.report_local(mode, gaming);
-            }
-            (HubCommand::SetCompute(mode), _) => {
-                let gaming = self.local.map_or(false, |(_, g)| g);
-                self.report_local(mode, gaming);
-            }
-            (HubCommand::Restart | HubCommand::SetModel(_), _) => {}
-            (command, _) => self.send(command),
+    /// The WM quits: the app keeps running for the next WM (Unix), or stops (Windows).
+    pub fn shutdown(&mut self, pool: &makepad_widgets::makepad_platform::thread::TaskPool) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(Some(link)) = self.link.as_mut() {
+            link.app.stop(pool);
         }
+        #[cfg(target_arch = "wasm32")]
+        let _ = pool;
     }
 
-    /// The compute mode the hub runs under: the WM's own hub's setting, else Automatic.
+    /// The compute mode the hub runs under (the app's), as last read; Automatic until it answers.
     pub fn compute_mode(&mut self, processes: bool) -> ComputeMode {
-        if let Some((mode, _)) = self.local {
-            return mode;
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Link::Fleet { child: Some(child), .. } = self.link(processes) {
-            return child.settings.compute;
-        }
-        let _ = processes;
-        ComputeMode::Automatic
+        self.link(processes).and_then(|l| l.hub.admission()).map_or(ComputeMode::Automatic, |a| a.mode)
     }
 
-    /// Once a second: whether a game is being played (`local_use`). The hub hears of a
-    /// change (and of the mode at the start).
+    /// Once a second: whether a game is being played (`local_use`). The hub hears of a change
+    /// (and of the state at the start; the control client tells a restarted hub again).
     pub fn set_gaming(&mut self, processes: bool, gaming: bool) {
-        let mode = self.compute_mode(processes);
-        if self.local != Some((mode, gaming)) {
-            if self.local.map_or(gaming, |(_, was)| was != gaming) {
-                makepad_widgets::log!(
-                    "wm: {} ({} mode): telling the AI hub",
-                    if gaming { "a game is being played" } else { "play ended" },
-                    compute_label(mode)
-                );
-            }
-            self.report_local(mode, gaming);
-        }
-    }
-
-    /// Only to the WM's own hub (or the stub): a hub elsewhere takes local use from its
-    /// own machine only.
-    fn report_local(&mut self, mode: ComputeMode, gaming: bool) {
-        self.local = Some((mode, gaming));
-        #[cfg(not(target_arch = "wasm32"))]
-        if matches!(self.link, Some(Link::Fleet { child: None, .. })) {
+        let was = self.gaming;
+        if was == Some(gaming) {
             return;
         }
-        self.send(HubCommand::LocalUse { mode, gaming });
+        let Some(link) = self.link(processes) else { return };
+        if was.is_some() {
+            makepad_widgets::log!("wm: {}: telling the AI hub", if gaming { "a game is being played" } else { "play ended" });
+        }
+        link.hub.send(HubCommand::LocalUse { gaming });
+        self.gaming = Some(gaming);
     }
-}
 
-impl HubControl for HubLink {
-    fn active(&mut self) -> bool {
-        match &mut self.link {
-            Some(Link::Stub(h)) => h.active(),
-            Some(Link::Fleet { hub, .. }) => hub.active(),
-            None => false,
+    /// Give GPU memory back to the UI (`gpu_yield`).
+    pub fn send(&mut self, processes: bool, command: HubCommand) {
+        if let Some(link) = self.link(processes) {
+            link.hub.send(command);
         }
     }
-    fn snapshot(&mut self) -> HubSnapshot {
-        match &mut self.link {
-            Some(Link::Stub(h)) => h.snapshot(),
-            #[cfg(not(target_arch = "wasm32"))]
-            Some(Link::Fleet { hub, child }) => {
-                let mut snap = hub.snapshot();
-                snap.process = child.as_ref().map(|c| c.process());
-                snap
-            }
-            #[cfg(target_arch = "wasm32")]
-            Some(Link::Fleet { hub }) => hub.snapshot(),
-            None => HubSnapshot::default(),
-        }
-    }
-    fn send(&mut self, command: HubCommand) {
-        match &mut self.link {
-            Some(Link::Stub(h)) => h.send(command),
-            Some(Link::Fleet { hub, .. }) => hub.send(command),
-            None => {}
-        }
-    }
-    fn take_report(&mut self) -> Option<String> {
-        match &mut self.link {
-            Some(Link::Stub(h)) => h.take_report(),
-            Some(Link::Fleet { hub, .. }) => hub.take_report(),
-            None => None,
-        }
-    }
-    fn admission(&mut self) -> Option<Admission> {
-        match &mut self.link {
-            Some(Link::Stub(h)) => h.admission(),
-            Some(Link::Fleet { hub, .. }) => hub.admission(),
-            None => None,
-        }
+
+    /// The hub's report of the last finished yield, once.
+    pub fn take_report(&mut self, processes: bool) -> Option<String> {
+        self.link(processes).and_then(|l| l.hub.take_report())
     }
 }

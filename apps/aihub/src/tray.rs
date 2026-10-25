@@ -84,8 +84,9 @@ pub const CLAUDE: LiveId = live_id!(claude);
 pub const LOCAL: LiveId = live_id!(local);
 pub const QUIT: LiveId = live_id!(quit_hub);
 
-/// The tray icon for the hub as it stands.
-pub fn icon(settings: &Settings, glyph: Glyph, status: &str) -> TrayIcon {
+/// The tray icon for the hub as it stands. `quit`: the menu offers Quit (not on a WM node,
+/// whose WM keeps its hub running; Enabled turns it off there).
+pub fn icon(settings: &Settings, glyph: Glyph, status: &str, quit: bool) -> TrayIcon {
     let svc = |b: Backend, id: LiveId| {
         let s = settings.service(b);
         let label = match (s.on, s.auto_off_at) {
@@ -94,26 +95,32 @@ pub fn icon(settings: &Settings, glyph: Glyph, status: &str) -> TrayIcon {
         };
         TrayMenuItem::Item { id, label, enabled: settings.enabled, checked: Some(s.on) }
     };
-    TrayIcon {
-        id: TRAY,
-        image: image(glyph),
-        tooltip: format!("AI Hub \u{b7} {status}"),
-        menu: vec![
-            TrayMenuItem::Item { id: live_id!(status), label: status.to_string(), enabled: false, checked: None },
-            TrayMenuItem::Line,
-            TrayMenuItem::check(ENABLED, "Enabled", settings.enabled),
-            svc(Backend::Claude, CLAUDE),
-            svc(Backend::Local, LOCAL),
-            TrayMenuItem::Line,
-            TrayMenuItem::item(OPEN, "Open AI Hub"),
-            TrayMenuItem::item(QUIT, "Quit AI Hub (stops serving)"),
-        ],
+    let mut menu = vec![
+        TrayMenuItem::Item { id: live_id!(status), label: status.to_string(), enabled: false, checked: None },
+        TrayMenuItem::Line,
+        TrayMenuItem::check(ENABLED, "Enabled", settings.enabled),
+        svc(Backend::Claude, CLAUDE),
+        svc(Backend::Local, LOCAL),
+        TrayMenuItem::Line,
+        TrayMenuItem::item(OPEN, "Open AI Hub"),
+    ];
+    if quit {
+        menu.push(TrayMenuItem::item(QUIT, "Quit AI Hub (stops serving)"));
     }
+    TrayIcon { id: TRAY, image: image(glyph), tooltip: format!("AI Hub \u{b7} {status}"), menu }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wm_nodes_menu_has_no_quit() {
+        let s = Settings::default();
+        let has_quit = |t: TrayIcon| t.menu.iter().any(|i| matches!(i, TrayMenuItem::Item { id, .. } if *id == QUIT));
+        assert!(has_quit(icon(&s, Glyph::Serving, "Serving", true)));
+        assert!(!has_quit(icon(&s, Glyph::Serving, "Serving", false)));
+    }
 
     #[test]
     fn every_glyph_is_a_distinct_full_size_mask() {

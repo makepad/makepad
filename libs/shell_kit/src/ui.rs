@@ -40,6 +40,18 @@ script_mod! {
         }
     }
 
+    // A monochrome glyph (an app's tray icon): the texture's alpha tinted with
+    // the caller's colour, premultiplied like the fill.
+    set_type_default() do #(DrawShellGlyph::script_shader(vm)) {
+        ..mod.draw.DrawQuad
+        tex: texture_2d(float)
+        color: #ffffff
+        pixel: fn() {
+            let a = self.tex.sample(self.pos).w * self.color.w
+            return vec4(self.color.rgb * a, a)
+        }
+    }
+
     // `BorderSurface`: a fill plus a hard square ring measured straight off
     // the quad edges. The ring takes two stops and an angle so a theme's
     // hyprland `active-border` gradient (what `[popups] border` resolves to)
@@ -342,6 +354,30 @@ pub struct DrawShellFill {
     pub color: Vec4f,
 }
 
+/// An alpha glyph from a texture, tinted (`ShellDraw::glyph`).
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawShellGlyph {
+    #[deref]
+    pub draw_super: DrawQuad,
+    #[live]
+    pub color: Vec4f,
+}
+
+/// A glyph texture from one alpha byte per pixel (rows top-down): white with that alpha, what
+/// `DrawShellGlyph` tints. None for an empty or short mask.
+pub fn glyph_texture(cx: &mut Cx, width: u32, height: u32, alpha: &[u8]) -> Option<Texture> {
+    let pixels = width as usize * height as usize;
+    if pixels == 0 || alpha.len() < pixels {
+        return None;
+    }
+    let data = alpha[..pixels].iter().map(|a| ((*a as u32) << 24) | 0x00ff_ffff).collect();
+    Some(Texture::new_with_format(
+        cx,
+        TextureFormat::VecBGRAu8_32 { width: width as usize, height: height as usize, data: Some(data), updated: TextureUpdated::Full },
+    ))
+}
+
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawShellChrome {
@@ -591,6 +627,8 @@ pub struct ShellDraw {
     system_slider: DrawSystemSlider,
     #[live]
     pub fill: DrawShellFill,
+    #[live]
+    pub glyph: DrawShellGlyph,
     #[live]
     pub chrome: DrawShellChrome,
     #[live]
@@ -911,6 +949,16 @@ impl ShellDraw {
         let svg = self.icons.get(ico);
         svg.color = color;
         svg.draw_abs(cx, r);
+    }
+
+    /// A texture glyph (`glyph_texture`), fitted into `r` and tinted.
+    pub fn glyph(&mut self, cx: &mut Cx2d, texture: &Texture, r: Rect, color: Vec4f) {
+        if r.size.x <= 0.0 || r.size.y <= 0.0 || color.w <= 0.0 {
+            return;
+        }
+        self.glyph.color = color;
+        self.glyph.draw_vars.set_texture(0, texture);
+        self.glyph.draw_abs(cx, r);
     }
 
     /// An icon centered in a slot at `size` px square (the bar's

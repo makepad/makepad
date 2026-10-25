@@ -1,4 +1,5 @@
-//! The AI hub control panel, shared by the WM's top-bar flyout and the AI Hub app.
+//! The AI hub control panel (the AI Hub app draws it) and the control API client a makepad WM
+//! node uses to tell its hub what only the WM knows (`hub_control::FleetHub`).
 
 pub mod hub_control;
 pub mod hub_glow;

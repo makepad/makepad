@@ -1,8 +1,15 @@
-//! The system tray (macOS status item, Windows notification area): an icon with a tooltip and a
-//! menu that lives outside the app's windows. `Cx::set_tray` creates or updates one in place,
-//! `Cx::remove_tray` removes it; a chosen item arrives as `Event::TrayMenu`, a primary click
-//! (Windows) as `Event::TrayClick`. While a tray exists, closing the last window does not end
-//! the app: it keeps running from the tray until it quits.
+//! The system tray (macOS status item, Windows notification area, the makepad WM's tray area on
+//! Linux): an icon with a tooltip and a menu that lives outside the app's windows.
+//! `Cx::set_tray` creates or updates one in place, `Cx::remove_tray` removes it; a chosen item
+//! arrives as `Event::TrayMenu`, a primary click (Windows) as `Event::TrayClick`. While a tray
+//! exists, closing the last window does not end the app: it keeps running from the tray until it
+//! quits.
+//!
+//! On the makepad WM the tray travels as a hosted relay (`ChildRelay::SetTray`, from the HAL's
+//! WM shell or a hosted child): the WM draws the glyph in its bar's tray area tinted with its
+//! shell tokens, shows the tooltip, and opens the menu on a primary click (as macOS does; it
+//! sends no `TrayClick`). A tray app outlives a WM restart: its windows and trays come back on
+//! the next WM.
 
 use crate::{cx::Cx, cx_api::CxOsOp, makepad_live_id::LiveId};
 
@@ -57,14 +64,16 @@ pub struct TrayClickEvent {
 }
 
 impl Cx {
-    /// Creates tray `tray.id`, or updates it in place. Where the desktop has no tray yet (Linux,
-    /// until our WM hosts trays; mobile; web) the shell drops it and `has_tray` stays false, so
-    /// the app still ends with its last window.
+    /// Creates tray `tray.id`, or updates it in place. Where the desktop has no tray (Linux
+    /// outside the makepad WM; mobile; web) the shell drops it and `has_tray` stays false, so the
+    /// app still ends with its last window.
     pub fn set_tray(&mut self, tray: TrayIcon) {
         if self.script_data.std.host_io_only() {
             return;
         }
-        if cfg!(any(target_os = "macos", target_os = "windows")) && !self.trays.contains(&tray.id) {
+        let shown = cfg!(any(target_os = "macos", target_os = "windows"))
+            || (cfg!(target_os = "linux") && crate::app_main::hosted_by_window_manager());
+        if shown && !self.trays.contains(&tray.id) {
             self.trays.push(tray.id);
         }
         self.platform_ops.push_back(CxOsOp::SetTray(tray));
@@ -78,5 +87,30 @@ impl Cx {
     /// Whether the app has a tray the desktop shows (it then outlives its last window).
     pub fn has_tray(&self) -> bool {
         !self.trays.is_empty()
+    }
+}
+
+/// The tray as a hosted relay carries it to the host (`ChildRelay::SetTray`).
+pub(crate) fn relay_tray(tray: &TrayIcon) -> crate::studio::RelayTray {
+    use crate::studio::RelayTrayItem;
+    let items = tray
+        .menu
+        .iter()
+        .map(|item| match item {
+            TrayMenuItem::Item { id, label, enabled, checked } => {
+                RelayTrayItem { id: id.0, label: label.clone(), enabled: *enabled, checked: *checked, line: false }
+            }
+            TrayMenuItem::Line => RelayTrayItem { line: true, ..Default::default() },
+        })
+        .collect();
+    let pixels = tray.image.width as usize * tray.image.height as usize;
+    let (width, height) = if tray.image.alpha.len() >= pixels { (tray.image.width, tray.image.height) } else { (0, 0) };
+    crate::studio::RelayTray {
+        tray: tray.id.0,
+        width,
+        height,
+        alpha: tray.image.alpha[..width as usize * height as usize].to_vec(),
+        tooltip: tray.tooltip.clone(),
+        items,
     }
 }
