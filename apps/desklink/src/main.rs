@@ -6,10 +6,12 @@
 //! it. The picture is the remote screen at its own resolution, scaled to the window
 //! (aspect-locked, letterboxed) or shown 1:1; input is mapped back through the same placement.
 //! Keyboard input goes to the desktop once the picture was clicked, until the panel is.
+//! Fullscreen hides the panel (the picture is the whole screen, 1:1); Cmd+Shift+P (Ctrl+Shift+P
+//! off macOS) shows or hides it in any window.
 //!
 //! Dev flags: `--connect host[:port]` (repeatable), `--select N`, `--stats` (latency lines on
 //! stderr once a second), `--dump-check <file.h264>` (decode an Annex-B dump with the hardware
-//! decoder, print what came out, exit), `--dump-play <file.h264>[,<tile.h264>...]` (show a dump, or the tiles of one, as a desktop, at
+//! decoder, print what came out, exit), `--dump-play <dump dir | file.h264[@x0,y0],...>` (show a dump, or the tiles of one, as a desktop, at
 //! 60 pictures a second, looping; `--cpu-decode` takes the CPU NV12 path instead of GPU pictures, `--still N` stops at picture N),
 //! `--decode-bench <dir>` (the tile streams of a `desk-link-probe --dump`: each on its own decoder
 //! thread as the viewer runs them, every picture's tiles at once; prints the decode time of a
@@ -37,12 +39,10 @@ script_mod! {
                 pass +: {clear_color: #x101114}
                 body +: {
                     padding: 0 spacing: 0
-                    split := Splitter{
-                        width: Fill height: Fill
-                        axis: SplitterAxis.Horizontal
-                        align: SplitterAlign.FromA(250.0)
-                        a: View{
-                            width: Fill height: Fill flow: Down spacing: 6
+                    split := View{
+                        width: Fill height: Fill flow: Right
+                        panel := View{
+                            width: 250 height: Fill flow: Down spacing: 6
                             padding: Inset{left: 8 right: 8 top: 10 bottom: 10}
                             show_bg: true
                             draw_bg +: { color: #x18191d }
@@ -56,7 +56,7 @@ script_mod! {
                             screen_next := Button{width: Fill text: "Next screen"}
                             split_mode := Button{width: Fill text: "Engines: tiles"}
                         }
-                        b: View{
+                        View{
                             width: Fill height: Fill
                             remote := RemoteView{}
                         }
@@ -98,8 +98,8 @@ pub struct App {
     vsync: NextFrame,
     #[rust]
     vsync_times: Vec<f64>,
-    /// The window is fullscreen: the panel hides (the picture gets the whole screen) and shows
-    /// while the pointer is at the screen's left edge.
+    /// The window is fullscreen: the panel goes (the picture is the whole screen, 1:1) and comes
+    /// back on leaving fullscreen or with the panel toggle (Cmd+Shift+P).
     #[rust]
     fullscreen: bool,
     #[rust]
@@ -437,6 +437,7 @@ impl App {
                     }
                 }
             }
+            Event::KeyDown(e) | Event::KeyUp(e) if is_panel_toggle(e) => {}
             Event::KeyDown(e) if self.keyboard => conn.send(ClientMsg::Key { down: true, keycode: e.key_code.to_index(), mods: mods_of(&e.modifiers) }),
             Event::KeyUp(e) if self.keyboard => conn.send(ClientMsg::Key { down: false, keycode: e.key_code.to_index(), mods: mods_of(&e.modifiers) }),
             _ => {}
@@ -473,14 +474,18 @@ impl App {
     }
 }
 
-/// The side panel's width (points).
-const PANEL_W: f64 = 250.0;
+/// The panel toggle: Cmd+Shift+P on macOS, Ctrl+Shift+P elsewhere (never sent to the desktop).
+fn is_panel_toggle(e: &KeyEvent) -> bool {
+    e.key_code == KeyCode::KeyP && e.modifiers.shift && if cfg!(target_os = "macos") { e.modifiers.logo } else { e.modifiers.control }
+}
 
 impl App {
+    /// The side panel shown or gone (gone: the picture has the whole window, fullscreen the
+    /// whole screen at 1:1).
     fn show_panel(&mut self, cx: &mut Cx, on: bool) {
         self.panel_shown = on;
-        self.ui.splitter(cx, ids!(split)).set_align(cx, SplitterAlign::FromA(if on { PANEL_W } else { 0.0 }));
-        self.remote(cx).redraw(cx);
+        self.ui.view(cx, ids!(panel)).set_visible(cx, on);
+        self.ui.redraw(cx);
     }
 
     /// Starts measuring the display's refresh: [`Self::vsync_frame`] over the next frames.
@@ -781,6 +786,12 @@ impl AppMain for App {
             self.conns.clear();
             return;
         }
+        if let Event::KeyDown(e) = event {
+            if is_panel_toggle(e) && !e.is_repeat {
+                let on = !self.panel_shown;
+                self.show_panel(cx, on);
+            }
+        }
         self.pointer_event(cx, event);
         if let Event::GameInputConnected(_) = event {
             self.pad_poll = cx.new_next_frame();
@@ -796,15 +807,6 @@ impl AppMain for App {
             if g.is_fullscreen != self.fullscreen {
                 self.fullscreen = g.is_fullscreen;
                 self.show_panel(cx, !self.fullscreen);
-            }
-        }
-        if let (Event::MouseMove(e), true) = (event, self.fullscreen) {
-            // fullscreen: the panel shows at the left edge and hides once the pointer is back
-            // over the picture
-            if e.abs.x <= 2.0 && !self.panel_shown {
-                self.show_panel(cx, true);
-            } else if e.abs.x > PANEL_W + 40.0 && self.panel_shown {
-                self.show_panel(cx, false);
             }
         }
         if self.pad_poll.is_event(event).is_some() {

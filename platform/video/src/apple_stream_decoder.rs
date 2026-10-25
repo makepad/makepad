@@ -39,7 +39,17 @@ struct DecoderShared {
     /// Frames stay the decoder's IOSurface-backed pixel buffers (no CPU copy).
     gpu: bool,
     frames: Vec<DecodedFrame>,
+    /// A picture the decoder reported as failed (its status): the caller hears it (and asks for a
+    /// key frame) instead of decoding on from a damaged reference.
+    failed: Option<OSStatus>,
 }
+
+/// One session of this process decodes at a time. Apple Silicon has one hardware decode engine
+/// (Pro/Max chips included); VideoToolbox time-slices concurrent sessions on it, and an M3 Max
+/// loses whole wavefront steps of a 4:4:4 picture when another session's picture preempts it
+/// (green macroblocks on anti-diagonals x + 2y = c, the picture's tail unwritten, damage carried
+/// on by the P pictures). Decoding in turn costs no throughput on one engine.
+static DECODE_IN_TURN: Mutex<()> = Mutex::new(());
 
 #[link(name = "CoreVideo", kind = "framework")]
 extern "C" {
@@ -77,7 +87,14 @@ unsafe extern "C" fn decode_output_callback(
     presentation_time_stamp: CMTime,
     _presentation_duration: CMTime,
 ) {
-    if status != 0 || image_buffer.is_null() {
+    if status != 0 {
+        let shared = &*(decompression_output_ref_con as *const Mutex<DecoderShared>);
+        if let Ok(mut guard) = shared.lock() {
+            guard.failed = Some(status);
+        }
+        return;
+    }
+    if image_buffer.is_null() {
         return;
     }
     let width = CVPixelBufferGetWidth(image_buffer) as u32;
@@ -145,7 +162,7 @@ impl AppleStreamDecoder {
             session: std::ptr::null_mut(),
             format_desc: std::ptr::null_mut(),
             gpu,
-            shared: Box::new(Mutex::new(DecoderShared { gpu, frames: Vec::new() })),
+            shared: Box::new(Mutex::new(DecoderShared { gpu, frames: Vec::new(), failed: None })),
             codec,
             sps: None,
             pps: None,
@@ -342,6 +359,7 @@ impl AppleStreamDecoder {
             }
 
             let mut info_flags: VTDecodeInfoFlags = 0;
+            let turn = DECODE_IN_TURN.lock().unwrap_or_else(|e| e.into_inner());
             let decode_status =
                 VTDecompressionSessionDecodeFrame(self.session, sample, 0, std::ptr::null_mut(), &mut info_flags);
             CFRelease(sample as *const c_void);
@@ -349,6 +367,7 @@ impl AppleStreamDecoder {
                 return Err(VideoFileError::with_code("VTDecompressionSessionDecodeFrame", decode_status));
             }
             VTDecompressionSessionWaitForAsynchronousFrames(self.session);
+            drop(turn);
         }
         self.drain()
     }
@@ -358,6 +377,10 @@ impl AppleStreamDecoder {
             .shared
             .lock()
             .map_err(|_| VideoFileError::new("stream decoder output queue poisoned"))?;
+        if let Some(status) = guard.failed.take() {
+            guard.frames.clear();
+            return Err(VideoFileError::with_code("VTDecompressionSession decode (picture)", status));
+        }
         Ok(guard
             .frames
             .drain(..)

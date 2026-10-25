@@ -27,6 +27,8 @@ use std::sync::Arc;
 const SLOTS: usize = 1;
 /// The bitstream buffer of one picture (an IDR of a 4K desktop is well under this at LAN rates).
 const BITSTREAM_BYTES: u64 = 16 << 20;
+/// Picture images (source and references) round their size up to this (see `video_image`).
+const IMAGE_ALIGN: [u32; 2] = [256, 64];
 const LOG2_MAX_FRAME_NUM: u32 = 16;
 
 /// The video profile and its chained infos, at a fixed address for the stream's life: every
@@ -192,6 +194,12 @@ struct PictureFormat {
 
 unsafe fn video_image(dev: &Device, profile: &Profile, pf: PictureFormat, extent: [u32; 2], usage: vk::ImageUsageFlags, families: &[u32]) -> Result<VideoImage, String> {
     let format = pf.format;
+    // the image is larger than any coded extent it holds (the pictures stay `coded`, cropped by
+    // the SPS): NVIDIA's 4:4:4 encoder (RTX PRO 6000, driver 610) reads past the end of a
+    // picture image sized to the coded extent (NVENC MMU fault, Xid 31, then the device is lost),
+    // at sizes that depend on width and height (3080x608, 1696x1440, 3040x632...); the same
+    // layout with twice the memory, or the image rounded up to 256 x 64, encodes every one
+    let extent = [extent[0].div_ceil(IMAGE_ALIGN[0]) * IMAGE_ALIGN[0], extent[1].div_ceil(IMAGE_ALIGN[1]) * IMAGE_ALIGN[1]];
     let mut list = profile.list;
     list.p_next = std::ptr::null_mut();
     let mut info = vk::ImageCreateInfo::default()

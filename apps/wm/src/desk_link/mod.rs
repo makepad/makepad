@@ -158,6 +158,9 @@ mod native {
         tl_congested_s: f64,
         /// The active viewer's window as last handed out (`take_viewer_window`).
         viewer_window: Option<super::ViewerWindow>,
+        /// Stream sizes whose 4:4:4 encode lost the GPU device: they stream 4:2:0 from then on
+        /// (the same configuration again would only lose the new device too).
+        lost_full_chroma: Vec<[u32; 2]>,
     }
 
     impl DeskLink {
@@ -438,7 +441,8 @@ mod native {
             let screen = screens.get(self.screen).or(screens.first()).cloned();
             let want = match (self.watching(), screen.filter(|s| s.width >= 16 && s.height >= 16)) {
                 (true, Some(s)) => {
-                    let (stream, full_chroma) = (Self::stream_size_of(&s), self.full_chroma());
+                    let stream = Self::stream_size_of(&s);
+                    let full_chroma = self.full_chroma() && !self.lost_full_chroma.contains(&stream);
                     let split = self.settings.as_ref().map_or(super::settings::Split::Tiles, |s| s.split);
                     let auto = TilePlan::new(stream, fps, split, VideoStreamEncoder::engines(), VideoStreamEncoder::max_size(full_chroma));
                     // a `tiles = CxR` setting, never fewer than the encoder's size needs
@@ -766,10 +770,19 @@ mod native {
                     // a new GPU device: the picture texture is exported again from the new one,
                     // and the encoder opened again there (its next picture a key frame)
                     super::note("desk link: the GPU device was replaced; the stream starts again on the new one");
+                    // a 4:4:4 stream that lost the device: that size goes 4:2:0 (never the same
+                    // configuration again: it would lose the new device as well)
+                    if let Some(want) = cx.global::<CaptureState>().want.filter(|w| w.full_chroma) {
+                        if !self.lost_full_chroma.contains(&want.stream) {
+                            super::note(&format!("desk link: 4:4:4 at {}x{} ({}x{} tiles) lost the GPU device: this size streams 4:2:0 from now on", want.stream[0], want.stream[1], want.plan.cols, want.plan.rows));
+                            self.lost_full_chroma.push(want.stream);
+                        }
+                    }
                     self.release_picture();
                     if let Some(e) = &self.encoder {
                         e.send(Job::Reset);
                     }
+                    self.update_capture(cx);
                     cx.redraw_all();
                 }
                 Event::Shutdown => {

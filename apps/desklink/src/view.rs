@@ -278,7 +278,8 @@ impl Widget for RemoteView {
         // the picture area in device pixels and the scale: a desktop that follows its viewer
         // takes this size (fullscreen = the screen, 1:1)
         let dpi = cx.current_dpi_factor();
-        crate::conn::set_view_window((view.size.x * dpi).round() as u32, (view.size.y * dpi).round() as u32, (dpi * 100.0).round() as u32);
+        let (w, h, scale) = view_window_px(view, dpi);
+        crate::conn::set_view_window(w, h, scale);
         // whole device-pixel blocks (1:1, 2x, ...): each remote pixel as it is (nearest); scaled
         // otherwise: a sharper (bicubic) resample keeps text crisp
         self.draw_nv12.sharp = if whole { 2.0 } else { 1.0 };
@@ -320,6 +321,13 @@ impl Widget for RemoteView {
         }
         DrawStep::done()
     }
+}
+
+/// The picture area as a desktop that follows its viewer takes it: the view's size in whole
+/// device pixels (`Rect::device_round`, the one rounding rule) and the scale in hundredths.
+pub fn view_window_px(view: Rect, dpi: f64) -> (u32, u32, u32) {
+    let d = view.device_round(dpi);
+    ((d.size.x * dpi).round() as u32, (d.size.y * dpi).round() as u32, (dpi * 100.0).round() as u32)
 }
 
 /// One row of the side panel.
@@ -439,4 +447,19 @@ pub fn latency_line(l: &Latency) -> String {
 /// the decoder.
 pub fn flow_line(read_gap_ms: f64, decode_queue: usize) -> String {
     format!("read gap {:>5.1} ms · decode queue {:>3}", read_gap_ms.clamp(0.0, 9999.9), decode_queue.min(999))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn the_view_window_is_the_views_device_pixels() {
+        // a 7680x2160 screen at 2x, maximised with the side panel (250 pt) and the menu bar
+        let view = Rect { pos: dvec2(250.0, 25.0), size: dvec2(3590.0, 1030.5) };
+        assert_eq!(view_window_px(view, 2.0), (7180, 2061, 200));
+        // fractional scales round each side once
+        assert_eq!(view_window_px(Rect { pos: dvec2(0.0, 0.0), size: dvec2(1000.8, 600.0) }, 1.25), (1251, 750, 125));
+        // fullscreen without the panel: the screen
+        assert_eq!(view_window_px(Rect { pos: dvec2(0.0, 0.0), size: dvec2(3840.0, 1080.0) }, 2.0), (7680, 2160, 200));
+    }
 }

@@ -311,7 +311,7 @@ impl Net {
         let queued = Arc::new(AtomicUsize::new(0));
         let decoder = {
             let (latest, signal, shared, cmd, queued) = (self.latest.clone(), self.signal.clone(), self.shared.clone(), self.cmd.clone(), queued.clone());
-            std::thread::Builder::new().name(format!("desklink-dec-{}", self.host)).spawn(move || decode_loop(dec_rx, latest, signal, shared, cmd, queued)).map_err(|e| e.to_string())?
+            std::thread::Builder::new().name(format!("desklink-dec-{}", self.host)).spawn(move || decode_loop(dec_rx, latest, signal, shared, cmd, queued, true)).map_err(|e| e.to_string())?
         };
         let (mut read_gap, mut queue_max, mut last_read) = (Duration::ZERO, 0usize, Instant::now());
 
@@ -491,12 +491,34 @@ fn play_loop(path: String, gpu: bool, still: Option<u32>, shared: Arc<Mutex<Shar
         shared.lock().unwrap().state = Some(State::Offline(e));
         signal.set();
     };
+    // the tiles: a `desk-link-probe --dump` directory (tiles.txt: `<stream> <x0> <y0>` lines), or
+    // files `<file>[@<x0>,<y0>]` comma separated
+    let mut files: Vec<(String, u32, u32)> = Vec::new();
+    let dir = std::path::Path::new(&path);
+    if dir.is_dir() {
+        let tiles = match std::fs::read_to_string(dir.join("tiles.txt")) {
+            Ok(t) => t,
+            Err(e) => return fail(format!("{}: {e}", dir.join("tiles.txt").display())),
+        };
+        for line in tiles.lines() {
+            let v: Vec<u32> = line.split_whitespace().filter_map(|w| w.parse().ok()).collect();
+            if let [i, x0, y0] = v[..] {
+                files.push((dir.join(format!("stream-{i}.h264")).display().to_string(), x0, y0));
+            }
+        }
+    } else {
+        for item in path.split(',') {
+            let (file, at) = item.split_once('@').unwrap_or((item, "0,0"));
+            let (x0, y0) = at.split_once(',').map_or((0, 0), |(x, y)| (x.parse().unwrap_or(0), y.parse().unwrap_or(0)));
+            files.push((file.to_string(), x0, y0));
+        }
+    }
     // per tile: one access unit per coded picture, parameter sets with the picture after them
-    let mut tiles: Vec<Vec<Vec<u8>>> = Vec::new();
-    for path in path.split(',') {
-        let data = match std::fs::read(path) {
+    let mut tiles: Vec<(Vec<Vec<u8>>, u32, u32)> = Vec::new();
+    for (file, x0, y0) in files {
+        let data = match std::fs::read(&file) {
             Ok(d) => d,
-            Err(e) => return fail(format!("{path}: {e}")),
+            Err(e) => return fail(format!("{file}: {e}")),
         };
         let mut units = Vec::new();
         let mut unit = Vec::new();
@@ -507,47 +529,31 @@ fn play_loop(path: String, gpu: bool, still: Option<u32>, shared: Arc<Mutex<Shar
                 units.push(std::mem::take(&mut unit));
             }
         }
-        tiles.push(units);
+        tiles.push((units, x0, y0));
     }
-    let pictures = tiles.iter().map(Vec::len).min().unwrap_or(0);
+    let pictures = tiles.iter().map(|t| t.0.len()).min().unwrap_or(0);
+    let parts = tiles.len().min(255) as u8;
+    // the live path: each tile's packets to the viewer's decode loop (a decoder thread per stream,
+    // the parts of a picture put together), as they come off the network
+    let (cmd, _cmd_rx) = channel::<ClientMsg>();
     let mut frame = 0u32;
     while !stop.load(Ordering::Acquire) {
-        let mut decoders = Vec::new();
-        for _ in &tiles {
-            let decoder = if gpu { VideoStreamDecoder::new_gpu(StreamVideoCodec::H264) } else { VideoStreamDecoder::new(StreamVideoCodec::H264) };
-            match decoder {
-                Ok(d) => decoders.push(d),
-                Err(e) => return fail(format!("hardware decoder: {e:?}")),
-            }
+        let (dec_tx, dec_rx) = channel::<Packet>();
+        let queued = Arc::new(AtomicUsize::new(0));
+        let (l, sig, sh, c, q) = (latest.clone(), signal.clone(), shared.clone(), cmd.clone(), queued.clone());
+        if let Err(e) = std::thread::Builder::new().name("desklink-dump-dec".into()).spawn(move || decode_loop(dec_rx, l, sig, sh, c, q, gpu)) {
+            return fail(format!("thread: {e}"));
         }
         for at in 0..pictures {
             if stop.load(Ordering::Acquire) {
                 return;
             }
-            let start = now_ns();
-            let mut parts = Vec::new();
-            let mut y0 = 0;
-            for (decoder, units) in decoders.iter_mut().zip(&tiles) {
-                for f in decoder.push_packet(&units[at], frame as i64).unwrap_or_default() {
-                    parts.push(Part { x0: 0, y0, width: f.width, height: f.height, nv12: f.nv12, gpu: f.gpu });
-                    y0 += f.height;
-                }
-            }
-            let decoded_ns = now_ns();
-            if parts.len() == tiles.len() {
-                *latest.lock().unwrap() = Some(Picture {
-                    width: parts[0].width,
-                    height: y0,
-                    parts,
-                    frame,
-                    built_ns: start,
-                    encoded_ns: start,
-                    sent_ns: start,
-                    received_ns: start,
-                    decoded_ns,
-                    decode_ns: decoded_ns - start,
-                });
-                signal.set();
+            let now = now_ns();
+            for (stream, (units, x0, y0)) in tiles.iter().enumerate() {
+                let data = units[at].clone();
+                let key = annex_b::split_annex_b(&data).iter().any(|nal| annex_b::nal_unit_type(nal) == 5);
+                queued.fetch_add(1, Ordering::AcqRel);
+                let _ = dec_tx.send(Packet { frame, key, stream: stream as u8, parts, x0: *x0, y0: *y0, built_ns: now, encoded_ns: now, sent_ns: now, received_ns: now, data });
             }
             if still == Some(frame) {
                 // the decoders (and their pictures) stay alive while the view shows this one
@@ -562,10 +568,10 @@ fn play_loop(path: String, gpu: bool, still: Option<u32>, shared: Arc<Mutex<Shar
     }
 }
 
-fn decode_loop(rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal: SignalToUI, shared: Arc<Mutex<Shared>>, cmd: Sender<ClientMsg>, queued: Arc<AtomicUsize>) {
+fn decode_loop(rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal: SignalToUI, shared: Arc<Mutex<Shared>>, cmd: Sender<ClientMsg>, queued: Arc<AtomicUsize>, gpu: bool) {
     // one decoder per encoder stream (a tile, or an interleaved stream), each on a thread of its
-    // own: the tiles of a picture decode at once (a hardware decoder runs several sessions in
-    // parallel), so a picture of N tiles takes about one tile's decode, not N
+    // own. The hardware decode itself goes in turn where the platform needs it (macOS: one
+    // engine, see apple_stream_decoder's DECODE_IN_TURN); the threads overlap the rest
     let gathering: Arc<Mutex<Assembly>> = Arc::new(Mutex::new(Assembly::default()));
     let mut workers: Vec<Sender<Packet>> = Vec::new();
     // how many streams the desktop sends (a single one is checked for missing pictures)
@@ -585,7 +591,7 @@ fn decode_loop(rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal
             let (latest2, signal2, shared2, cmd2, gathering2, streams2) = (latest.clone(), signal.clone(), shared.clone(), cmd.clone(), gathering.clone(), streams.clone());
             let index = workers.len();
             streams.store(index + 1, Ordering::Release);
-            let spawned = std::thread::Builder::new().name(format!("desklink-dec-{index}")).spawn(move || decode_stream(index, wrx, latest2, signal2, shared2, cmd2, gathering2, streams2));
+            let spawned = std::thread::Builder::new().name(format!("desklink-dec-{index}")).spawn(move || decode_stream(index, wrx, latest2, signal2, shared2, cmd2, gathering2, streams2, gpu));
             if let Err(e) = spawned {
                 shared.lock().unwrap().warning = Some(format!("decoder thread: {e}"));
                 return;
@@ -623,7 +629,7 @@ impl Assembly {
 /// One encoder stream's decoder: waits for its key frame after a failure; a whole picture
 /// goes out at once, a tile once its picture's other tiles are here (never a torn picture; a
 /// tile of a newer picture drops an incomplete older one).
-fn decode_stream(s: usize, rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal: SignalToUI, shared: Arc<Mutex<Shared>>, cmd: Sender<ClientMsg>, gathering: Arc<Mutex<Assembly>>, streams: Arc<AtomicUsize>) {
+fn decode_stream(s: usize, rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal: SignalToUI, shared: Arc<Mutex<Shared>>, cmd: Sender<ClientMsg>, gathering: Arc<Mutex<Assembly>>, streams: Arc<AtomicUsize>, gpu: bool) {
     let mut decoder: Option<VideoStreamDecoder> = None;
     let mut waiting_key = false;
     // the last picture of a single-stream desktop: a picture missing in between means the next
@@ -646,7 +652,7 @@ fn decode_stream(s: usize, rx: Receiver<Packet>, latest: Arc<Mutex<Option<Pictur
         }
         last_frame = Some(packet.frame);
         if decoder.is_none() || packet.key && waiting_key {
-            match VideoStreamDecoder::new_gpu(StreamVideoCodec::H264) {
+            match if gpu { VideoStreamDecoder::new_gpu(StreamVideoCodec::H264) } else { VideoStreamDecoder::new(StreamVideoCodec::H264) } {
                 Ok(d) => decoder = Some(d),
                 Err(e) => {
                     shared.lock().unwrap().warning = Some(format!("hardware decoder: {e:?}"));
