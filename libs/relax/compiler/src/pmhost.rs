@@ -200,6 +200,10 @@ fn world_for(sess: &std::sync::Arc<crate::Session>, unit: usize) -> Option<std::
 
 /// The world, built by the first caller (again after free_world); None on the threads building it.
 fn world(sess: &std::sync::Arc<crate::Session>) -> Option<std::sync::Arc<Result<World, String>>> {
+    world_inner(sess, false)
+}
+
+fn world_inner(sess: &std::sync::Arc<crate::Session>, prewarm: bool) -> Option<std::sync::Arc<Result<World, String>>> {
     if in_world() {
         return None;
     }
@@ -207,15 +211,11 @@ fn world(sess: &std::sync::Arc<crate::Session>) -> Option<std::sync::Arc<Result<
         return Some(w);
     }
     let t = std::time::Instant::now();
-    let _b = match BUILDING.try_lock() {
-        Ok(b) => b,
-        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
-        Err(std::sync::TryLockError::WouldBlock) => {
-            // another thread builds it: from now on its std files must not wait for this one
-            let _wait = crate::program::WorldWait::begin();
-            BUILDING.lock().unwrap_or_else(|e| e.into_inner())
-        }
-    };
+    // Any non-prewarm caller is a macro expansion on a demand, parse, or loader thread waiting for
+    // the world. Even when it wins BUILDING before prewarm starts, its std files must not wait for
+    // the program's std load (which may be blocked behind this caller).
+    let _wait = (!prewarm).then(crate::program::WorldWait::begin);
+    let _b = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(w) = world_now() {
         tl_add(4, 1.0);
         tl_add(5, t.elapsed().as_secs_f64() * 1e3);
@@ -246,7 +246,7 @@ fn world(sess: &std::sync::Arc<crate::Session>) -> Option<std::sync::Arc<Result<
 /// free_world drops the macro world when no macro call holds it; true when it went.
 /// Is the proc-macro world alive (an auxiliary unit)?
 pub fn world_alive() -> bool {
-    WORLD.lock().map(|g| g.is_some()).unwrap_or(true)
+    WORLD.lock().map(|g| g.is_some()).unwrap_or(true) || BOOT_WORLD.lock().map(|g| g.is_some()).unwrap_or(true)
 }
 
 pub fn free_world() -> bool {
@@ -291,7 +291,7 @@ fn prewarm(sess: &std::sync::Arc<crate::Session>) -> Result<(), String> {
         let sess = sess.clone();
         { let _k = crate::zone_alloc::kept();
         let _ = std::thread::Builder::new().name("run-pm-world".to_string()).stack_size(64 << 20).spawn(move || { let _z = crate::zone_alloc::compiler_thread();
-            let _ = world(&sess);
+            let _ = world_inner(&sess, true);
         });
         }
     }
@@ -779,14 +779,16 @@ fn call(sess: &std::sync::Arc<crate::Session>, entry: &Entry, attr: Option<&Toke
 /// After the program's files are loaded (no more expansions): the world's newly compiled code
 /// goes to the disk cache.
 pub fn flush_cache() {
-    if let Some(Ok(w)) = world_now().as_deref() {
-        crate::owner::call(crate::owner::Class::Program, || {
-            let u = unsafe { &mut *w.u };
-            u.flush_cache_records();
-            if let Some(c) = u.cache.as_mut() {
-                let _ = c.flush();
-            }
-        });
+    for w in [BOOT_WORLD.lock().unwrap_or_else(|e| e.into_inner()).clone(), world_now()] {
+        if let Some(Ok(w)) = w.as_deref() {
+            crate::owner::call(crate::owner::Class::Program, || {
+                let u = unsafe { &mut *w.u };
+                u.flush_cache_records();
+                if let Some(c) = u.cache.as_mut() {
+                    let _ = c.flush();
+                }
+            });
+        }
     }
 }
 

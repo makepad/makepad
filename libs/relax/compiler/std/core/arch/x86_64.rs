@@ -68,6 +68,15 @@ pub struct __m512(pub [f32; 16]);
 #[derive(Copy, Clone)]
 #[repr(C, align(64))]
 pub struct __m512d(pub [f64; 8]);
+#[derive(Copy, Clone)]
+#[repr(C, align(16))]
+pub struct __m128bh(pub [u16; 8]);
+#[derive(Copy, Clone)]
+#[repr(C, align(32))]
+pub struct __m256bh(pub [u16; 16]);
+#[derive(Copy, Clone)]
+#[repr(C, align(64))]
+pub struct __m512bh(pub [u16; 32]);
 
 unsafe fn lanes128_i8(a: __m128i) -> [i8; 16] {
     crate::ptr::read_unaligned(&a as *const __m128i as *const [i8; 16])
@@ -583,6 +592,13 @@ pub unsafe fn _mm256_sub_epi32(a: __m256i, b: __m256i) -> __m256i {
 pub unsafe fn _mm256_cmpeq_epi8(a: __m256i, b: __m256i) -> __m256i {
     i_join(_mm_cmpeq_epi8(i_lo(&a), i_lo(&b)), _mm_cmpeq_epi8(i_hi(&a), i_hi(&b)))
 }
+pub unsafe fn _mm256_cmpgt_epi8(a: __m256i, b: __m256i) -> __m256i {
+    i_join(_mm_cmpgt_epi8(i_lo(&a), i_lo(&b)), _mm_cmpgt_epi8(i_hi(&a), i_hi(&b)))
+}
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+pub unsafe fn _mm256_alignr_epi8<const IMM8: i32>(a: __m256i, b: __m256i) -> __m256i {
+    i_join(_mm_alignr_epi8::<IMM8>(i_lo(&a), i_lo(&b)), _mm_alignr_epi8::<IMM8>(i_hi(&a), i_hi(&b)))
+}
 pub unsafe fn _mm256_madd_epi16(a: __m256i, b: __m256i) -> __m256i {
     i_join(_mm_madd_epi16(i_lo(&a), i_lo(&b)), _mm_madd_epi16(i_hi(&a), i_hi(&b)))
 }
@@ -643,6 +659,23 @@ pub unsafe fn _mm256_and_si256(a: __m256i, b: __m256i) -> __m256i {
 pub unsafe fn _mm256_or_si256(a: __m256i, b: __m256i) -> __m256i {
     i_join(_mm_or_si128(i_lo(&a), i_lo(&b)), _mm_or_si128(i_hi(&a), i_hi(&b)))
 }
+pub unsafe fn _mm256_xor_si256(a: __m256i, b: __m256i) -> __m256i {
+    i_join(_mm_xor_si128(i_lo(&a), i_lo(&b)), _mm_xor_si128(i_hi(&a), i_hi(&b)))
+}
+pub unsafe fn _mm256_subs_epu8(a: __m256i, b: __m256i) -> __m256i {
+    i_join(_mm_subs_epu8(i_lo(&a), i_lo(&b)), _mm_subs_epu8(i_hi(&a), i_hi(&b)))
+}
+pub unsafe fn _mm_testz_si128(a: __m128i, b: __m128i) -> i32 {
+    if (a.0[0] & b.0[0]) | (a.0[1] & b.0[1]) == 0 { 1 } else { 0 }
+}
+pub const _MM_HINT_T0: i32 = 3;
+pub const _MM_HINT_T1: i32 = 2;
+pub const _MM_HINT_T2: i32 = 1;
+pub const _MM_HINT_NTA: i32 = 0;
+pub const _MM_HINT_ET0: i32 = 7;
+pub const _MM_HINT_ET1: i32 = 6;
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+pub unsafe fn _mm_prefetch<const STRATEGY: i32>(_p: *const i8) {}
 #[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
 pub unsafe fn _mm256_slli_epi16<const IMM8: i32>(a: __m256i) -> __m256i {
     i_join(_mm_slli_epi16::<IMM8>(i_lo(&a)), _mm_slli_epi16::<IMM8>(i_hi(&a)))
@@ -658,6 +691,10 @@ pub unsafe fn _mm256_srai_epi16<const IMM8: i32>(a: __m256i) -> __m256i {
 #[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
 pub unsafe fn _mm256_srai_epi32<const IMM8: i32>(a: __m256i) -> __m256i {
     i_join(_mm_srai_epi32::<IMM8>(i_lo(&a)), _mm_srai_epi32::<IMM8>(i_hi(&a)))
+}
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+pub unsafe fn _mm256_srli_epi16<const IMM8: i32>(a: __m256i) -> __m256i {
+    i_join(_mm_srli_epi16::<IMM8>(i_lo(&a)), _mm_srli_epi16::<IMM8>(i_hi(&a)))
 }
 #[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
 pub unsafe fn _mm256_srli_epi32<const IMM8: i32>(a: __m256i) -> __m256i {
@@ -932,8 +969,45 @@ pub unsafe fn _mm_cvtsi128_si32(a: __m128i) -> i32 {
     a.0[0] as i32
 }
 
+pub unsafe fn _mm_cvtsi128_si64(a: __m128i) -> i64 {
+    a.0[0]
+}
+
+pub unsafe fn _mm_cvtsi128_si64x(a: __m128i) -> i64 {
+    a.0[0]
+}
+
 pub unsafe fn _mm_cvtsi32_si128(a: i32) -> __m128i {
     __m128i([a as u32 as i64, 0])
+}
+
+pub unsafe fn _mm_cvtsi64_si128(a: i64) -> __m128i {
+    __m128i([a, 0])
+}
+
+pub unsafe fn _mm_cvtsi64x_si128(a: i64) -> __m128i {
+    __m128i([a, 0])
+}
+
+pub unsafe fn _mm_mul_epu32(a: __m128i, b: __m128i) -> __m128i {
+    let a = lanes128_u32(a);
+    let b = lanes128_u32(b);
+    __m128i([
+        (a[0] as u64 * b[0] as u64) as i64,
+        (a[2] as u64 * b[2] as u64) as i64,
+    ])
+}
+
+pub unsafe fn _mm_mullo_epi16(a: __m128i, b: __m128i) -> __m128i {
+    let a = lanes128_u16(a);
+    let b = lanes128_u16(b);
+    let mut r = [0u16; 8];
+    let mut i = 0;
+    while i < 8 {
+        r[i] = a[i].wrapping_mul(b[i]);
+        i += 1;
+    }
+    from128_u16(r)
 }
 
 #[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
@@ -2433,7 +2507,7 @@ macro_rules! simd_debug {
         }
     )*};
 }
-simd_debug!(__m128i __m128 __m128d __m256 __m256d __m512 __m512d __m256i __m512i);
+simd_debug!(__m128i __m128 __m128d __m256 __m256d __m512 __m512d __m256i __m512i __m128bh __m256bh __m512bh);
 
 // ---------------------------------------------------------------- MXCSR, f16 conversions (F16C), AVX2 gaps
 

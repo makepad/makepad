@@ -1418,7 +1418,7 @@ pub mod obligations {
                         if nf == file && nce == start && no == owner {
                             return vec![prog.record_error(file, pos, "typeck", "E0733: recursion in an async fn requires boxing".to_string())];
                         }
-                        if !seen.contains(&(nf, nce)) { seen.push((nf, nce)); stack.push((nf, nce, no)); }
+                        if tcx.validates(prog, nf) && !seen.contains(&(nf, nce)) { seen.push((nf, nce)); stack.push((nf, nce, no)); }
                     }
                 }
                 let _ = f;

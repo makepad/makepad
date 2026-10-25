@@ -237,14 +237,29 @@ impl fmt::Debug for Stdout {
         f.debug_struct("Stdout").finish_non_exhaustive()
     }
 }
+impl fmt::Debug for StdoutLock<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("StdoutLock").finish_non_exhaustive()
+    }
+}
 impl fmt::Debug for Stderr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Stderr").finish_non_exhaustive()
     }
 }
+impl fmt::Debug for StderrLock<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("StderrLock").finish_non_exhaustive()
+    }
+}
 impl fmt::Debug for Stdin {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Stdin").finish_non_exhaustive()
+    }
+}
+impl fmt::Debug for StdinLock<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("StdinLock").finish_non_exhaustive()
     }
 }
 
@@ -275,7 +290,18 @@ pub trait IsTerminal {
     fn is_terminal(&self) -> bool;
 }
 
+impl<T: IsTerminal + ?Sized> IsTerminal for &T {
+    fn is_terminal(&self) -> bool {
+        (**self).is_terminal()
+    }
+}
+
 impl IsTerminal for Stdin {
+    fn is_terminal(&self) -> bool {
+        sys::stdio_is_terminal(0)
+    }
+}
+impl IsTerminal for StdinLock<'_> {
     fn is_terminal(&self) -> bool {
         sys::stdio_is_terminal(0)
     }
@@ -285,7 +311,17 @@ impl IsTerminal for Stdout {
         sys::stdio_is_terminal(1)
     }
 }
+impl IsTerminal for StdoutLock<'_> {
+    fn is_terminal(&self) -> bool {
+        sys::stdio_is_terminal(1)
+    }
+}
 impl IsTerminal for Stderr {
+    fn is_terminal(&self) -> bool {
+        sys::stdio_is_terminal(2)
+    }
+}
+impl IsTerminal for StderrLock<'_> {
     fn is_terminal(&self) -> bool {
         sys::stdio_is_terminal(2)
     }

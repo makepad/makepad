@@ -406,7 +406,7 @@ pub(crate) fn resolve_package(
             // `--allow-c`: cargo builds the native dependencies (front native.rs); a build
             // script's own child run never builds them again
             let triple = crate::cfg::CfgSet::host(sess, &[]).triple();
-            let native_request = (options.allow_c && !check_only && std::env::var_os("MAKEPAD_RUN_SCRIPT_DEPTH").is_none()).then(|| crate::native::Request { workspace, package, cargo_flags, relax_dir: target_dir, triple });
+            let native_request = (options.allow_c && std::env::var_os("MAKEPAD_RUN_SCRIPT_DEPTH").is_none()).then(|| crate::native::Request { workspace, package, cargo_flags, relax_dir: target_dir, triple });
             let scripts = unitgraph::run_build_scripts(sess, &mut g, target_dir, native_request.as_ref());
             let scripts_ms = t_scripts.elapsed().as_secs_f64() * 1e3;
             let t_wait = Instant::now();
@@ -1191,7 +1191,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         // provider Unit::new registers). A run checks coherence in the background; a check needs its errors now: the app
         // check its own crates' impls (cargo check), every other check all of them.
         let t = Instant::now();
-        if selftest || watch || root_only || session.is_some() { u.tcx.check_coherence(&u.prog); }
+        if selftest || watch || session.is_some() { u.tcx.check_coherence(&u.prog); }
         else { u.tcx.check_coherence_of(&u.prog, Some(&checked)); }
         phase("coherence", t);
         for k in checked {
@@ -1199,12 +1199,12 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
             pre.extend(crate::check::own_errors(&u.prog, k, &u.tcx.errors, "typeck"));
         }
         // every body is checked, so the files the selection skipped load first: all of them for
-        // selftest, a watch session or --root-only; the checked (app) crates' for the app check
+        // selftest or a watch session; the checked crates' for --root-only or the app check
         let t = Instant::now();
-        if selftest || watch || root_only || session.is_some() {
+        if selftest || watch || session.is_some() {
             unsafe { jit::load_all_skipped(&mut *u) };
         } else {
-            let crates = if workspace_check { crate::check::workspace_crates(&u.prog, root) } else { crate::check::app_crates(&u.prog, root) };
+            let crates = if root_only { vec![root] } else if workspace_check { crate::check::workspace_crates(&u.prog, root) } else { crate::check::app_crates(&u.prog, root) };
             unsafe { jit::load_skipped_of(&mut *u, &crates) };
         }
         phase("load checked files", t);

@@ -836,7 +836,7 @@ impl Options {
 /// Keep the front-end pool and the core's module index on the same default;
 /// explicit MAKEPAD_RUN_JOBS values continue to override both.
 pub fn default_parse_jobs() -> usize {
-    std::thread::available_parallelism().map_or(4, |n| n.get()).min(8)
+    std::thread::available_parallelism().map_or(4, |n| n.get()).min(32)
 }
 
 #[derive(Clone, Debug)]

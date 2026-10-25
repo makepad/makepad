@@ -459,6 +459,14 @@ mod tests {
 pub fn build_id() -> u128 {
     static ID: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
     *ID.get_or_init(|| {
+        if let Ok(s) = std::env::var("MAKEPAD_RUN_BUILD_ID") {
+            if !s.is_empty() {
+                let mut h = Sip128::new();
+                h.str("build-env");
+                h.str(&s);
+                return h.finish128();
+            }
+        }
         #[cfg(target_os = "macos")]
         {
             if let Some(cd) = macho_code_directory() {

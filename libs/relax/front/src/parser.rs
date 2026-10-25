@@ -642,8 +642,9 @@ impl<'a> Parser<'a> {
                         };
                     }
                 }
-                T::KwFn | T::KwImpl | T::KwStruct | T::KwEnum | T::KwTrait | T::KwMod | T::KwUse | T::KwStatic | T::KwExtern | T::KwType | T::Interp | T::Pound if k != T::Pound || self.toks.get(i + 1).map(|t| t.kind) == Some(T::Not) => return BodyOutline::Eager(if k == T::Interp { 5 } else { 2 }),
+                T::KwPub | T::KwFn | T::KwImpl | T::KwStruct | T::KwEnum | T::KwTrait | T::KwMod | T::KwUse | T::KwStatic | T::KwExtern | T::KwType | T::Interp | T::Pound if k != T::Pound || self.toks.get(i + 1).map(|t| t.kind) == Some(T::Not) => return BodyOutline::Eager(if k == T::Interp { 5 } else { 2 }),
                 T::KwConst if i + 2 < self.toks.len() && matches!(self.toks.kind_at(i + 1), T::Ident | T::RawIdent) && self.toks.kind_at(i + 2) == T::Colon => return BodyOutline::Eager(2),
+                T::Ident if i + 1 < self.toks.len() && matches!(self.toks.kind_at(i + 1), T::Ident | T::RawIdent) && matches!(self.bytes(self.toks.at(i).lo, self.toks.at(i).hi), b"union" | b"macro") => return BodyOutline::Eager(2),
                 T::Not if i > 0 && matches!(self.toks.kind_at(i - 1), T::Ident | T::RawIdent) && i + 1 < self.toks.len() && matches!(self.toks.kind_at(i + 1), T::OpenParen | T::OpenBracket | T::OpenBrace) => {
                     let t = self.toks.at(i - 1);
                     let name = std::str::from_utf8(self.bytes(t.lo, t.hi)).unwrap_or("").trim_start_matches("r#");

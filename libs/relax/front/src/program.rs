@@ -24,7 +24,7 @@ pub const BUILTIN_MACROS: &[&str] = &[
     "assert", "assert_eq", "assert_ne", "debug_assert", "debug_assert_eq", "debug_assert_ne", "matches",
     "unreachable", "todo", "unimplemented", "cfg", "concat", "stringify", "line", "file", "column",
     "module_path", "include_str", "include_bytes", "env", "option_env", "thread_local", "msg_send", "sel",
-    "class", "log", "error", "warning", "warn", "trace", "debug", "asm",
+    "class", "log", "error", "warning", "warn", "trace", "debug", "asm", "smallvec",
     // core::prelude::v1's other built-in macros (`use core::{compile_error, prelude::v1::derive}`)
     "compile_error", "include", "global_asm", "naked_asm", "derive", "test", "bench", "global_allocator",
     "test_case", "trace_macros", "log_syntax", "concat_idents", "cfg_accessible", "cfg_eval", "derive_const",
@@ -1354,6 +1354,7 @@ impl Program {
                 self.imports.push(Import { module: root_mod, global: true, segs: vec![(SegKind::Ident, inj)], bind: Some(inj), glob: false, is_pub: false, done: false, file, pos: 0, ext: true, bound: BOUND_INJECTED });
             }
         }
+        let r = r.map(|()| self.expand_pending(krate, edition));
         // files no module loads (cfg'd out in ways the scan does not see)
         let unused: Vec<String> = ahead.files.into_iter().filter(|p| self.pending.remove(&(ahead.idx, p.clone()))).collect();
         if let Some(pool) = &self.pool {
@@ -1368,12 +1369,11 @@ impl Program {
             }
             if self.demand_plan.as_ref().is_some_and(|p| p.counts().1 == 0) { self.demand_plan = None; }
         }
-        r?;
-        self.expand_pending(krate, edition);
-        std::sync::Arc::make_mut(&mut self.macros).seal_crate(&kname);
         // The image contract covers this boot load only. Later generated files and live
         // module loads must not inherit the last boot crate's no-parse assertion.
         self.cur_image = false;
+        r?;
+        std::sync::Arc::make_mut(&mut self.macros).seal_crate(&kname);
         Ok(krate)
     }
 
@@ -1982,7 +1982,8 @@ impl Program {
                 if im.glob || bound.contains(&(im.module, b)) {
                     continue;
                 }
-                if !(set.contains(last) || self.macros.defs.contains_key(self.syms.str(*last))) {
+                let last_str = self.syms.str(*last);
+                if !(set.contains(last) || self.macros.defs.contains_key(last_str) || BUILTIN_MACROS.contains(&last_str) || crate::builtins::is_macro_name(last_str) || crate::macro_reg::has_macro(last_str)) {
                     continue;
                 }
                 // a path through a module of a crate (not its root) names a macro only when that

@@ -416,9 +416,11 @@ pub fn wrapper() -> Option<i32> {
         }
         None
     };
+    let is_print = rest.iter().any(|a| a == "--print" || a.starts_with("--print=") || a == "-vV" || a == "--version");
     let name = value("--crate-name");
-    let real = match &name {
+    let real = is_print || match &name {
         None => true,
+        Some(n) if n == "___" => true,
         Some(n) => {
             let pkg = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
             let list = |v: &str| std::env::var(v).unwrap_or_default().split(',').any(|x| x == pkg);
