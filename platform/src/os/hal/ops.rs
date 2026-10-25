@@ -95,6 +95,11 @@ impl Cx {
     }
 
     fn hal_create_window(&mut self, window_id: WindowId, popup: Option<(WindowId, crate::makepad_math::Vec2d, crate::makepad_math::Vec2d)>) {
+        // A window made after the start (a tray dropdown, a second window, `create_on_start:
+        // false`): its widget drew nothing while it was not created yet (Window::draw_walk), and
+        // nothing else asks for a frame of it, so its pass would be presented without a draw list
+        // (solid black). One full redraw after the create draws it.
+        self.redraw_all();
         if self.hal.hosted.is_some() {
             self.hal_hosted_create_window(window_id);
             return;

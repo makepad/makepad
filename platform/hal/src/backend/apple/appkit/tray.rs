@@ -13,7 +13,8 @@
 //! dropdown tray instead gets a primary click, and the first `WindowAtTray` logs the dropdown's
 //! frame against the button's; with `MAKEPAD_TRAY_SELFTEST_ITEM=<label>` (and
 //! `MAKEPAD_TRAY_SELFTEST_DELAY=<s>`, default 20) the menu item with that label is chosen that
-//! long after, through its own target, as a click on it would.
+//! long after, through its own target, as a click on it would. `MAKEPAD_TRAY_SELFTEST_CLICKS=<s>,..`
+//! replaces the immediate click by the button's own action fired at those delays.
 
 use super::app::app;
 use super::window::Win;
@@ -102,7 +103,9 @@ pub(super) fn set(sid: u32, id: u64, w: u32, h: u32, flags: u32, alpha: &[u8], t
         }
         if created && selftest_on() {
             if dropdown {
-                selftest_click(sid, id, item);
+                if !selftest_clicks(click_target, button) {
+                    selftest_click(sid, id, item);
+                }
                 selftest_later(menu);
             } else {
                 selftest(item, menu);
@@ -358,6 +361,21 @@ unsafe fn selftest_click(sid: u32, tray: u64, item: ObjcId) {
         anchor.size.width, anchor.size.height, anchor.origin.x, anchor.origin.y, visible.size.width, visible.size.height, visible.origin.x, visible.origin.y
     );
     push_click(sid, tray, item);
+}
+
+/// `MAKEPAD_TRAY_SELFTEST_CLICKS=<s>,<s>,..`: instead of the immediate click, the button's own
+/// action (`trayClick:`, what a real click runs) fires that many seconds after the tray was made,
+/// once per entry, so a click arrives long after startup like a user's. False when not set.
+unsafe fn selftest_clicks(target: ObjcId, button: ObjcId) -> bool {
+    let Ok(list) = std::env::var("MAKEPAD_TRAY_SELFTEST_CLICKS") else { return false };
+    if target == nil || button == nil {
+        return false;
+    }
+    for delay in list.split(',').filter_map(|d| d.trim().parse::<f64>().ok()) {
+        eprintln!("tray selftest: button click in {delay} s");
+        let () = msg_send![target, performSelector: sel!(trayClick:) withObject: button afterDelay: delay];
+    }
+    true
 }
 
 /// `MAKEPAD_TRAY_SELFTEST_ITEM`: the item with that label is chosen after the delay.

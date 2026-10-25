@@ -947,7 +947,8 @@ mod tests {
         let path = std::env::temp_dir().join(format!(
             "makepad-http-file-response-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            // a test thread is named by its path (`a::b::c`): no colons in a Windows file name
+            std::thread::current().name().unwrap_or("test").replace(':', "_")
         ));
         fs::write(&path, b"fixture").unwrap();
         let response = HttpServerResponse::from_file(String::new(), File::open(&path).unwrap(), 0, 7);

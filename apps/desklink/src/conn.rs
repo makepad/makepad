@@ -27,6 +27,9 @@ pub fn now_ns() -> u64 {
 pub enum State {
     Connecting,
     Connected,
+    /// A session that was up broke (a TLS error, a reset): connecting again at once, the last
+    /// picture stays; the reason goes to the log only.
+    Reconnecting,
     Offline(String),
 }
 
@@ -227,8 +230,12 @@ impl Net {
 
     fn run(self) {
         let mut backoff = Duration::from_secs(2);
+        // quick reconnects left after a session that was up broke
+        let mut quick = 0u32;
         while !self.stop.load(Ordering::Acquire) {
-            self.set_state(State::Connecting);
+            if quick == 0 {
+                self.set_state(State::Connecting);
+            }
             let started = Instant::now();
             let reason = match self.session() {
                 Ok(reason) => reason,
@@ -237,12 +244,25 @@ impl Net {
             if self.stop.load(Ordering::Acquire) {
                 return;
             }
+            let was_up = matches!(self.shared.lock().unwrap().state, Some(State::Connected));
+            let refused = reason.starts_with("refused");
+            if was_up && !refused {
+                quick = 5;
+            }
+            if quick > 0 {
+                // silently: a short status, the reason in the log, a new try in 200 ms
+                quick -= 1;
+                eprintln!("desklink: {}:{}: {reason}; reconnecting", self.host, self.port);
+                self.set_state(State::Reconnecting);
+                std::thread::sleep(Duration::from_millis(200));
+                while self.rx.try_recv().is_ok() {}
+                continue;
+            }
             self.set_state(State::Offline(reason.clone()));
             // a session that ran a while starts the backoff over
             if started.elapsed() > Duration::from_secs(30) {
                 backoff = Duration::from_secs(2);
             }
-            let refused = reason.starts_with("refused");
             let wait = if refused { Duration::from_secs(30) } else { backoff };
             let until = Instant::now() + wait;
             while Instant::now() < until && !self.stop.load(Ordering::Acquire) {

@@ -970,18 +970,57 @@ impl Read for ServerStream {
 }
 
 impl ServerStream {
-    /// Sends what an earlier write left of its encrypted record. A send timeout keeps the rest
-    /// (`pending_pos` marks how far it got) and returns `WouldBlock`; call again to resume.
+    /// Sends what an earlier write left of its encrypted record. Past the socket's write timeout
+    /// the rest is kept (`pending_pos` marks how far it got) and `WouldBlock` returned; call
+    /// again to resume.
+    ///
+    /// The timeout is kept here, not by Winsock: a blocking send that runs into SO_SNDTIMEO
+    /// leaves the socket "indeterminate" (bytes of it may have gone out although it reports
+    /// none), and sending them again duplicated TLS bytes on the wire: the peer's next record
+    /// failed to decrypt (macOS: errSSLDecryptionFail, -9845) and the connection broke. So with a
+    /// timeout the socket sends non-blocking, where WouldBlock means nothing was taken.
     fn drain_pending(&mut self) -> io::Result<()> {
-        while self.pending_pos < self.pending.len() {
+        if self.pending_pos >= self.pending.len() {
+            self.pending.clear();
+            self.pending_pos = 0;
+            return Ok(());
+        }
+        let Some(limit) = self.tcp.write_timeout()? else {
+            while self.pending_pos < self.pending.len() {
+                match self.tcp.write(&self.pending[self.pending_pos..]) {
+                    Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "TLS record not sent")),
+                    Ok(n) => self.pending_pos += n,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            self.pending.clear();
+            self.pending_pos = 0;
+            return Ok(());
+        };
+        let deadline = std::time::Instant::now() + limit;
+        self.tcp.set_nonblocking(true)?;
+        let result = loop {
+            if self.pending_pos >= self.pending.len() {
+                break Ok(());
+            }
             match self.tcp.write(&self.pending[self.pending_pos..]) {
-                Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "TLS record not sent")),
+                Ok(0) => break Err(io::Error::new(io::ErrorKind::WriteZero, "TLS record not sent")),
                 Ok(n) => self.pending_pos += n,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) if e.kind() == io::ErrorKind::TimedOut => return Err(io::Error::new(io::ErrorKind::WouldBlock, "TLS send timed out")),
-                Err(e) => return Err(e),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= deadline {
+                        break Err(io::Error::new(io::ErrorKind::WouldBlock, "TLS send timed out"));
+                    }
+                    // the send buffer is full: the peer reads slower than we write
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(e) => break Err(e),
             }
-        }
+        };
+        let restored = self.tcp.set_nonblocking(false);
+        result?;
+        restored?;
         self.pending.clear();
         self.pending_pos = 0;
         Ok(())

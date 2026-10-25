@@ -5636,6 +5636,8 @@ impl<'a> Fcx<'a> {
                         },
                     }
                 }
+                // expr.rs check_expr_field: a base that is already an error reports nothing more
+                if matches!(self.tcx.tys.kind(cur), TyKind::Error) { return error; }
                 let s = self.ty_str(t);
                 self.err(lo, format!("E0609: no field `{}` on type `{}`", idx, s));
                 error
@@ -6410,6 +6412,9 @@ impl<'a> Fcx<'a> {
                 None => break,
             }
         }
+        // expr.rs check_expr_field: the autoderef's final type is an error type (an earlier error
+        // made it): no further error, as rustc (`if let ty::Error(_) = final_ty.kind()`)
+        if matches!(self.tcx.tys.kind(cur), TyKind::Error) { return self.tcx.tys.error; }
         let ts = self.ty_str(t);
         // expr.rs check_expr_field: a method of that name is E0615, a primitive has no fields (E0610)
         if !self.tcx.tys.has_error(cur) && matches!(self.pick_all_method(e, t, s, lo), Ok(Some(_))) {

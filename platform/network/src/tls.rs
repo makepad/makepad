@@ -765,6 +765,65 @@ mod server_tests {
         assert_eq!(x509::ecdsa_sig_from_raw(&raw), sig);
     }
 
+    /// A server that writes with a short send timeout to a client that reads slowly, retrying
+    /// each `WouldBlock`/`TimedOut` as Desk Link's `write_all` does: every byte arrives once, in
+    /// order (Windows: a send that ran into SO_SNDTIMEO had sent part of a record that was then
+    /// sent again, and the client's next record failed to decrypt).
+    #[test]
+    fn send_timeouts_keep_the_stream_intact() {
+        let dir = temp_dir("timeouts");
+        let identity = TlsIdentity::load_or_create(&dir, "makepad tunnel test").unwrap();
+        let server = TlsServer::new(identity).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port().to_string();
+        const TOTAL: usize = 48 << 20;
+        let pattern = |i: usize| (i as u32).wrapping_mul(2654435761).to_le_bytes()[1];
+        let handle = std::thread::spawn(move || {
+            let (tcp, _) = listener.accept().unwrap();
+            tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            let mut s = server.accept(tcp).unwrap();
+            s.set_write_timeout(Some(Duration::from_millis(1))).unwrap();
+            let chunk: Vec<u8> = (0..TOTAL).map(pattern).collect();
+            let (mut done, mut stalls) = (0usize, 0u64);
+            while done < TOTAL {
+                let end = (done + 300_000).min(TOTAL);
+                match s.write(&chunk[done..end]) {
+                    Ok(n) => done += n,
+                    Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => stalls += 1,
+                    Err(e) => panic!("write: {e}"),
+                }
+            }
+            loop {
+                match s.flush() {
+                    Ok(()) => break,
+                    Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => stalls += 1,
+                    Err(e) => panic!("flush: {e}"),
+                }
+            }
+            stalls
+        });
+        let (mut client, _) = crate::SocketStream::connect_capture("127.0.0.1", &port).unwrap();
+        let mut got = 0usize;
+        let mut buf = vec![0u8; 64 << 10];
+        let mut reads = 0u64;
+        while got < TOTAL {
+            let n = client.read(&mut buf).unwrap();
+            assert!(n > 0, "closed after {got} bytes");
+            for (k, b) in buf[..n].iter().enumerate() {
+                assert_eq!(*b, pattern(got + k), "byte {} differs", got + k);
+            }
+            got += n;
+            reads += 1;
+            // a reader that falls behind now and then: the server's socket fills up
+            if reads % 64 == 0 {
+                std::thread::sleep(Duration::from_millis(15));
+            }
+        }
+        let stalls = handle.join().unwrap();
+        assert!(stalls > 0, "the server never ran into its send timeout: the test proves nothing");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// The OS server stack against the OS client stack, with the pin.
     #[test]
     fn pinned_round_trip_and_wrong_pin() {

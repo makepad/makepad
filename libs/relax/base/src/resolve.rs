@@ -158,7 +158,11 @@ struct Workspace {
 }
 
 pub struct Resolver {
-    ws: Workspace,
+    ws: std::rc::Rc<Workspace>,
+    /// the workspaces that path packages outside `ws` (or excluded from it) inherit from: cargo
+    /// resolves `workspace = true` against the package's OWN workspace root (find_root), not the
+    /// root of the graph being built; by root dir
+    owners: HashMap<String, std::rc::Rc<Workspace>>,
     /// crates-io's replacement directory (`cargo vendor`'s layout: `<name>` or `<name>-<version>`)
     /// and the config file that names it
     vendor: Option<(String, String)>,
@@ -307,7 +311,7 @@ impl Resolver {
     /// `dir` is where `makepad run` starts (the current folder, a git run's workspace): the
     /// workspace is found as cargo finds it (find_root).
     pub fn new(sess: &std::sync::Arc<crate::Session>, dir: &str) -> Result<Resolver, String> {
-        Ok(Resolver { ws: Workspace::load(&find_root(dir)?)?, vendor: vendor_dir(dir)?, fetched: Default::default(), manifests: Vec::new(), by_dir: HashMap::new(), cfg: crate::cfg::CfgSet::host(sess, &[]), allow_c: sess.options.allow_c })
+        Ok(Resolver { ws: std::rc::Rc::new(Workspace::load(&find_root(dir)?)?), owners: HashMap::new(), vendor: vendor_dir(dir)?, fetched: Default::default(), manifests: Vec::new(), by_dir: HashMap::new(), cfg: crate::cfg::CfgSet::host(sess, &[]), allow_c: sess.options.allow_c })
     }
 
     fn registry_dir(&self, name: &str, req: &str) -> Result<String, String> {
@@ -397,6 +401,24 @@ impl Resolver {
         }
     }
 
+    /// The workspace whose `[workspace.package]` / `[workspace.dependencies]` the package at `dir`
+    /// inherits from: the graph's own unless the package lies outside its root or is excluded
+    /// (a fixture workspace's path dependency on an in-tree makepad crate). Registry packages are
+    /// published normalized (nothing left to inherit).
+    fn inherits_from(&mut self, dir: &str, registry: bool) -> Result<std::rc::Rc<Workspace>, String> {
+        if registry || (dir == self.ws.root || dir.starts_with(&format!("{}/", self.ws.root))) && !self.ws.excluded(dir) {
+            return Ok(self.ws.clone());
+        }
+        // a workspace already found that holds `dir` (cargo's ws_roots shortcut)
+        if let Some(w) = self.owners.values().find(|w| dir.starts_with(&format!("{}/", w.root)) && !w.excluded(dir)) { return Ok(w.clone()); }
+        let root = find_root(dir)?;
+        if root == self.ws.root { return Ok(self.ws.clone()); }
+        if let Some(w) = self.owners.get(&root) { return Ok(w.clone()); }
+        let w = std::rc::Rc::new(Workspace::load(&root)?);
+        self.owners.insert(root, w.clone());
+        Ok(w)
+    }
+
     /// The manifest of the package at `dir` (loaded once).
     fn load(&mut self, dir: &str, registry: bool) -> Result<usize, String> {
         let dir = normalize(dir);
@@ -405,10 +427,11 @@ impl Resolver {
         }
         let t = read_toml(&format!("{}/Cargo.toml", dir))?;
         let pkg = table(&t, "package").ok_or_else(|| format!("{}/Cargo.toml: no [package]", dir))?;
+        let ws = self.inherits_from(&dir, registry)?;
         let inherit = |k: &str| -> Option<String> {
             match pkg.get(k) {
                 Some(Toml::Str(v, _)) => Some(v.clone()),
-                Some(Toml::Table(x)) if b(x, "workspace") == Some(true) => s(&self.ws.ws_package, k),
+                Some(Toml::Table(x)) if b(x, "workspace") == Some(true) => s(&ws.ws_package, k),
                 _ => None,
             }
         };
@@ -565,7 +588,7 @@ impl Resolver {
                 let mut base_dir = dir.clone();
                 if from_ws {
                     // [workspace.dependencies] entry, member's features added, optional from the member
-                    let w = match self.ws.ws_deps.get(key) {
+                    let w = match ws.ws_deps.get(key) {
                         Some(Toml::Str(v, _)) => {
                             let mut t = TomlTable::new();
                             t.insert("version".to_string(), Toml::Str(v.clone(), Default::default()));
@@ -582,7 +605,7 @@ impl Resolver {
                         merged.insert("optional".to_string(), o.clone());
                     }
                     st = merged;
-                    base_dir = self.ws.root.clone();
+                    base_dir = ws.root.clone();
                 }
                 // a dev-dependency is built only for the root package's tests: a git one (which
                 // makepad run cannot resolve) is left out here, and a test that names it fails to resolve it

@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 #[path = "../build_sources.rs"]
 mod build_sources;
+#[path = "src/native_cfg.rs"]
+mod native_cfg;
 
 // Package, Makepad path, and (for proc-macro wrappers) the generated module.
 const PACKAGES: &[(&str, &str, Option<&str>)] = &[
@@ -72,15 +74,19 @@ fn bindings(source: &[u8], krate: &str, module: &str, entries: &mut String) -> S
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=../build_sources.rs");
+    println!("cargo:rerun-if-changed=src/native_cfg.rs");
     let makepad = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../../..").canonicalize().expect("Makepad checkout");
     let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
     let mut packages = String::from("pub static PACKAGES: &[(&str, &[(&str, &[u8])])] = &[\n");
     let mut wrappers = String::from("use super::{Entry, Function};\n");
     let mut entries = String::new();
+    let mut divergent = Vec::new();
     for (name, relative, module) in PACKAGES {
         let root = makepad.join(relative);
         packages.push_str(&format!("({name:?}, &[\n"));
-        for (path, data) in build_sources::package(&root) {
+        let files = build_sources::package(&root);
+        divergent.extend(native_cfg::check_package(name, &files));
+        for (path, data) in files {
             packages.push_str(&format!("({path:?}, include_bytes!({:?})),\n", root.join(&path)));
             if path == "src/lib.rs" {
                 if let Some(module) = module {
@@ -91,6 +97,8 @@ fn main() {
         packages.push_str("]),\n");
     }
     packages.push_str("];\n");
+    // source identity certifies behaviour only when no cfg differs between this copy and rustc's
+    assert!(divergent.is_empty(), "native proc-macro sources would expand differently under relax than under cargo:\n{}", divergent.join("\n"));
     wrappers.push_str(&format!("pub static ENTRIES: &[Entry] = &[\n{entries}];\n"));
     std::fs::write(out.join("sources.rs"), packages).expect("write native source identity");
     std::fs::write(out.join("bindings.rs"), wrappers).expect("write native wrappers");

@@ -551,7 +551,17 @@ fn activity(names: &[super::Frame]) -> &'static str {
     }
     match names.first() {
         // a thunk, lazy stub or veneer between a call and its callee: what calls cost to reach
-        Some(f) if f.module.starts_with("jit/glue") => "JIT call glue (thunks, stubs, veneers)",
+        // by kind (codever.rs names them): what each costs is a different fix
+        Some(f) if f.module == "jit/glue thunk" => "JIT call glue: thunks",
+        Some(f) if f.module == "jit/glue count" => "JIT call glue: count stubs",
+        Some(f) if f.module == "jit/glue stub" => "JIT call glue: lazy stubs",
+        Some(f) if f.module == "jit/glue veneer" => "JIT call glue: veneers",
+        Some(f) if f.module.starts_with("jit/glue") => "JIT call glue: other",
+        // program code by the tier it runs at (module "jit/<tier> <origin>", codever::label)
+        Some(f) if f.module.starts_with("jit/O3") || f.module.starts_with("jit/guarded") => "program O3",
+        Some(f) if f.module.starts_with("jit/O2") => "program O2",
+        Some(f) if f.module.starts_with("jit/O1") => "program O1",
+        Some(f) if f.module.starts_with("jit/baseline") => "program baseline",
         Some(f) if f.module.starts_with("jit") => "program",
         Some(f) if f.module == "makepad" => {
             if jit_seen {

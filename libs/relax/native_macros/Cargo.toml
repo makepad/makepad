@@ -21,3 +21,6 @@ makepad-relax-api-macro-impl = { workspace = true }
 [build-dependencies]
 relax-lex = { workspace = true }
 
+[dev-dependencies]
+relax-lex = { workspace = true }
+

@@ -2981,7 +2981,8 @@ impl Program {
                         } else if last == "compile_error" && m.toks.hi > m.toks.lo {
                             let lit = f.tok_text(m.toks.lo);
                             let msg = crate::lit::unescape_str(lit);
-                            let e = self.record_error(file,it.lo,"macro",msg);
+                            // rustc words it `error: <msg>` (no code), as for every compile_error!
+                            let e = self.record_uncoded_error(file, it.lo, "macro", msg);
                             self.errors.push(e);
                         } else if !BUILTIN_MACROS.contains(&last.as_str()) && crate::builtins::macro_def(&last).is_none() && !crate::macro_reg::has_macro(&last) {
                             // no macro at the parse: maybe one a later expansion makes

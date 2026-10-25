@@ -20,6 +20,55 @@ pub fn read() -> Option<(u64, u64)> {
     Some((b[0], b[1]))
 }
 
+/// The calling thread's (instructions, cycles) per CPU kind, `[performance, efficiency]`
+/// (macOS thread_selfcounts THSC_CPI_PER_PERF_LEVEL; a single-kind machine has zeros in the
+/// second): how much of a thread's run was on E cores, where the same code takes more cycles.
+/// None where the OS does not split them.
+#[cfg(target_os = "macos")]
+pub fn read_levels() -> Option<[(u64, u64); 2]> {
+    extern "C" {
+        fn thread_selfcounts(kind: i32, buf: *mut u64, nbytes: usize) -> i32;
+        fn sysctlbyname(n: *const u8, o: *mut u32, ol: *mut usize, nn: *const u8, nl: usize) -> i32;
+    }
+    static LEVELS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let n = *LEVELS.get_or_init(|| {
+        let (mut v, mut l) = (0u32, 4usize);
+        if unsafe { sysctlbyname(b"hw.nperflevels\0".as_ptr(), &mut v, &mut l, std::ptr::null(), 0) } == 0 { (v as usize).clamp(1, 2) } else { 1 }
+    });
+    let mut b = [0u64; 4];
+    if unsafe { thread_selfcounts(2, b.as_mut_ptr(), 16 * n) } != 0 {
+        return None;
+    }
+    Some([(b[0], b[1]), (b[2], b[3])])
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn read_levels() -> Option<[(u64, u64); 2]> {
+    None
+}
+
+/// The whole process's (instructions, cycles) so far, every thread (macOS proc_pid_rusage
+/// RUSAGE_INFO_V4 ri_instructions / ri_cycles): with `read`, what the other threads (a JIT's
+/// compile and owner threads, workers) ran beside the calling one. None elsewhere.
+#[cfg(target_os = "macos")]
+pub fn read_process() -> Option<(u64, u64)> {
+    extern "C" {
+        fn proc_pid_rusage(pid: i32, flavor: i32, buf: *mut u64) -> i32;
+        fn getpid() -> i32;
+    }
+    // rusage_info_v4: 16-byte uuid, then u64 fields; ri_instructions / ri_cycles are fields 29 / 30
+    let mut b = [0u64; 2 + 36];
+    if unsafe { proc_pid_rusage(getpid(), 4, b.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    Some((b[2 + 29], b[2 + 30]))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn read_process() -> Option<(u64, u64)> {
+    None
+}
+
 #[cfg(target_os = "linux")]
 pub fn read() -> Option<(u64, u64)> {
     linux::read()

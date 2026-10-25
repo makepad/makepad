@@ -315,6 +315,7 @@ impl App {
                 let detail = match &state {
                     State::Connected => format!("{}:{} · {}", c.host, c.port, s.rtt_ms.map(|r| format!("{r:.1} ms")).unwrap_or_else(|| "…".into())),
                     State::Connecting => format!("{}:{} · connecting", c.host, c.port),
+                    State::Reconnecting => format!("{}:{} · reconnecting", c.host, c.port),
                     State::Offline(why) => format!("offline · {why}"),
                 };
                 Row { name: c.name.clone(), detail, state }
@@ -348,6 +349,7 @@ impl App {
         view.note = match &state {
             State::Connected => None,
             State::Connecting => Some(format!("connecting to {}:{} …", c.host, c.port)),
+            State::Reconnecting => Some("reconnecting …".to_string()),
             State::Offline(why) => Some(why.clone()),
         };
         let mut lines = Vec::new();

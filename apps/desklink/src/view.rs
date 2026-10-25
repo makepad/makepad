@@ -407,7 +407,7 @@ impl Widget for ConnList {
             self.draw_row.draw_abs(cx, r);
             self.draw_dot.color = match row.state {
                 State::Connected => vec4(0.30, 0.85, 0.45, 1.0),
-                State::Connecting => vec4(0.95, 0.75, 0.25, 1.0),
+                State::Connecting | State::Reconnecting => vec4(0.95, 0.75, 0.25, 1.0),
                 State::Offline(_) => vec4(0.55, 0.55, 0.58, 1.0),
             };
             self.draw_dot.draw_abs(cx, Rect { pos: r.pos + dvec2(10.0, 16.0), size: dvec2(9.0, 9.0) });

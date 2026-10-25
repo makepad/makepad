@@ -1126,6 +1126,12 @@ fn launch_main(upn: usize, id: DomainId, base: u64, target: u64, arg: u64, packa
         crate::jit::ensure_altstack();
         if crate::run::app_domain() == Some(id) {
             crate::jit::MAIN_TID.store(crate::jit::current_thread_id(), std::sync::atomic::Ordering::Relaxed);
+            // the app's main thread at the QoS a native app's main thread has (macOS: user-
+            // interactive; AppKit gives it to the process main thread, which under makepad run
+            // is the HAL's). At the default QoS the scheduler moved the race's UI thread to the
+            // efficiency cores 20-25% of the time whenever the performance cores were busy
+            // (ARMIPC, mini); a native app's never goes there.
+            crate::os::thread::interactive();
         }
         let up = upn as *mut Unit;
         relax_domain_enter(base, token);
