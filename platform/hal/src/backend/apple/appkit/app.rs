@@ -38,6 +38,9 @@ unsafe impl Encode for CAFrameRateRange {
 /// How long a requested frame may wait for the display link before it is delivered anyway (a
 /// window that is occluded or in the Dock gets no vsync).
 const FALLBACK_SECS: f64 = 0.1;
+/// Display link callbacks without a frame asked for before the link pauses (an idle app costs
+/// nothing; an animating one keeps every vsync).
+const LINK_IDLE: u8 = 4;
 
 /// The system appearance as the main thread last read it: 0 unknown, 1 light, 2 dark.
 static APPEARANCE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
@@ -1255,7 +1258,8 @@ fn set_application_icon(w: u32, h: u32, rgba: &[u8]) {
 // ------------------------------------------------------------------ frame pacing
 
 /// The app has work for the window: a frame is announced at the next vsync. The display link is
-/// unpaused for it and paused again once the frame was announced, so an idle app costs nothing.
+/// unpaused for it and runs on while frames are asked for; it pauses after `LINK_IDLE` vsyncs
+/// with nothing asked, so an idle app costs nothing.
 fn request_frame(win: &'static Win) {
     unsafe {
         win.want_frame.set(true);
@@ -1314,11 +1318,11 @@ fn deliver_frame(win: &Win, next_ns: u64) {
         if timer != nil {
             let () = msg_send![timer, invalidate];
         }
-        let link = win.link.get();
-        if link != nil {
-            let () = msg_send![link, setPaused: YES];
-        }
     }
+    // the link keeps running while frames follow each other: pausing it after every frame and
+    // unpausing it at the next request lost vsyncs (a viewer showing ~115 pictures a second
+    // drew ~70 frames); it pauses once it found nothing to do `LINK_IDLE` times in a row
+    win.link_idle.set(0);
     if !win.retired.get() {
         Shared::global().push(win.sid.get(), |q| q.frame_ready(win.id.get(), next_ns));
     }
@@ -1327,6 +1331,16 @@ fn deliver_frame(win: &Win, next_ns: u64) {
 pub fn display_link_fired(link: ObjcId) {
     let win = app().windows.borrow().iter().copied().find(|w| w.link.get() == link);
     let Some(win) = win else { return };
+    if !win.want_frame.get() {
+        let idle = win.link_idle.get().saturating_add(1);
+        win.link_idle.set(idle);
+        if idle >= LINK_IDLE {
+            unsafe {
+                let () = msg_send![link, setPaused: YES];
+            }
+        }
+        return;
+    }
     let (target, media): (f64, f64) = unsafe { (msg_send![link, targetTimestamp], CACurrentMediaTime()) };
     let next_ns = crate::clock_ns() + ((target - media).clamp(0.0, 0.1) * 1e9) as u64;
     deliver_frame(win, next_ns);

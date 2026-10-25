@@ -44,13 +44,6 @@ struct DecoderShared {
     failed: Option<OSStatus>,
 }
 
-/// One session of this process decodes at a time. Apple Silicon has one hardware decode engine
-/// (Pro/Max chips included); VideoToolbox time-slices concurrent sessions on it, and an M3 Max
-/// loses whole wavefront steps of a 4:4:4 picture when another session's picture preempts it
-/// (green macroblocks on anti-diagonals x + 2y = c, the picture's tail unwritten, damage carried
-/// on by the P pictures). Decoding in turn costs no throughput on one engine.
-static DECODE_IN_TURN: Mutex<()> = Mutex::new(());
-
 #[link(name = "CoreVideo", kind = "framework")]
 extern "C" {
     fn CVPixelBufferGetIOSurface(buffer: CVPixelBufferRef) -> *mut c_void;
@@ -359,7 +352,6 @@ impl AppleStreamDecoder {
             }
 
             let mut info_flags: VTDecodeInfoFlags = 0;
-            let turn = DECODE_IN_TURN.lock().unwrap_or_else(|e| e.into_inner());
             let decode_status =
                 VTDecompressionSessionDecodeFrame(self.session, sample, 0, std::ptr::null_mut(), &mut info_flags);
             CFRelease(sample as *const c_void);
@@ -367,7 +359,6 @@ impl AppleStreamDecoder {
                 return Err(VideoFileError::with_code("VTDecompressionSessionDecodeFrame", decode_status));
             }
             VTDecompressionSessionWaitForAsynchronousFrames(self.session);
-            drop(turn);
         }
         self.drain()
     }

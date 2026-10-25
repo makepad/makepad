@@ -430,10 +430,34 @@ impl Widget for ConnList {
 /// never jitters as the digits change.
 /// Pictures shown a second and the rate, then what the desktop streams at (`stream`: its `Rate`)
 /// and this display's refresh (`display`, 0 = not measured yet).
-pub fn rate_line(fps: f64, mbps: f64, stream: Option<u16>, display: u32) -> String {
+/// `fps`: pictures that arrived a second; `shown`: (pictures drawn, decoded but never shown) a
+/// second, over the last second.
+pub fn rate_line(fps: f64, mbps: f64, stream: Option<u16>, display: u32, shown: (u32, u32)) -> String {
     let stream = stream.map_or("…".to_string(), |s| s.to_string());
     let display = if display == 0 { "…".to_string() } else { display.to_string() };
-    format!("{:>3.0} fps {:>6.1} Mbit/s · stream {stream}/s · display {display} Hz", fps.clamp(0.0, 999.0), mbps.clamp(0.0, 9999.9))
+    format!(
+        "{:>3.0} fps {:>6.1} Mbit/s · shown {:>3}/s (dropped {:>3}) · stream {stream}/s · display {display} Hz",
+        fps.clamp(0.0, 999.0),
+        mbps.clamp(0.0, 9999.9),
+        shown.0.min(999),
+        shown.1.min(999)
+    )
+}
+
+/// The desktop's stream rate (its `Rate`): the rate, the chroma, and what holds it.
+pub fn stream_rate_line((kbps, limit, full_chroma): (u32, u8, bool)) -> String {
+    use makepad_desk_link::limit;
+    let why = match limit {
+        limit::START => "starting",
+        limit::CLEAN => "clean: rising to its cap",
+        limit::LINK => "link-bound: lowered",
+        limit::ENCODER => "encoder-bound",
+        limit::CAP => "at its cap",
+        limit::FIXED => "fixed by the desktop",
+        _ => "",
+    };
+    let rate = if kbps == 0 { "by size".to_string() } else { format!("{} Mbit/s", kbps / 1000) };
+    format!("rate {rate} {} · {why}", if full_chroma { "4:4:4" } else { "4:2:0" })
 }
 
 /// The per-stage latency line ("Latency details"), fixed widths too.

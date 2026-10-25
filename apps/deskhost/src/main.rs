@@ -362,7 +362,7 @@ fn run(desktop: &mut dyn Desktop) {
                         // a physical screen streams its real size: the viewer's window size (v5,
                         // for desktops that follow their viewer) and who drives last change nothing
                         Control::Window { .. } | Control::Active => {}
-                        Control::Clipboard(_) | Control::Stats { .. } | Control::Split(_) => {}
+                        Control::Clipboard(_) | Control::Stats { .. } | Control::Split(_) | Control::RateCap(_) => {}
                     }
                 }
                 ToUi::Closed { session, reason } => {
@@ -402,7 +402,9 @@ fn run(desktop: &mut dyn Desktop) {
         }
         for v in viewers.iter_mut().filter(|v| !v.told_rate) {
             v.told_rate = true;
-            let _ = v.out.send(Out::Msg(ServerMsg::Rate { fps: fps as u16 }.encode()));
+            // a plain desktop's rate does not adapt: its setting, or by picture size (kbps 0)
+            let limit = if settings.kbps > 0 { proto::limit::FIXED } else { proto::limit::CAP };
+            let _ = v.out.send(Out::Msg(ServerMsg::Rate { fps: fps as u16, kbps: settings.kbps, limit, full_chroma: false }.encode()));
         }
         // the capture follows the viewers: on while one watches, on the screen they watch, at the stream's rate
         watching = viewers.iter().any(|v| !v.paused.load(Ordering::Acquire));

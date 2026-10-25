@@ -162,12 +162,20 @@ impl TilePlan {
         }
         least
     }
-    /// The (start, length) of each of `parts` cuts of `len` pixels: whole macroblocks (16) but
-    /// the last, which takes the rest.
-    pub fn edges(len: u32, parts: u32) -> Vec<(u32, u32)> {
+    /// The (start, length) of each of `parts` cuts of `len` pixels, every cut but the last a
+    /// whole number of `unit`s (the last takes the rest).
+    fn edges(len: u32, parts: u32, unit: u32) -> Vec<(u32, u32)> {
         let parts = parts.max(1);
-        let step = (len / parts) / 16 * 16;
+        let step = (len / parts) / unit * unit;
         (0..parts).map(|i| if i + 1 == parts { (step * i, len - step * i) } else { (step * i, step) }).collect()
+    }
+    /// The columns of `len` pixels: 64-pixel multiples but the last (which takes the rest).
+    pub fn columns(len: u32, parts: u32) -> Vec<(u32, u32)> {
+        Self::edges(len, parts, 64)
+    }
+    /// The bands of `len` rows: whole macroblock rows but the last.
+    pub fn bands(len: u32, parts: u32) -> Vec<(u32, u32)> {
+        Self::edges(len, parts, 16)
     }
 }
 
@@ -228,6 +236,9 @@ pub struct CaptureState {
     pub in_flight: [Arc<AtomicUsize>; 2],
     /// Frames held back for `hold` or `in_flight` (a subset of `held`), for the timeline.
     pub held_behind: u64,
+    /// Of those, the ones held only because the encoder still read the next texture (no viewer
+    /// behind): the adaptive rate's encoder-bound count.
+    pub held_encoder: u64,
 }
 
 /// A picture of one texture not encoded yet: the texture is not drawn over while one lives.
@@ -333,6 +344,7 @@ impl Widget for DeskCapture {
             st.owed = true;
             st.held += 1;
             st.held_behind += behind as u64;
+            st.held_encoder += (behind && !st.hold) as u64;
             *cx.global::<CaptureState>() = st;
             return DrawStep::done();
         }
@@ -351,7 +363,7 @@ impl Widget for DeskCapture {
         self.draw_chroma.extent = extent;
         self.draw_chroma.full = if want.full_chroma { 1.0 } else { 0.0 };
         // one draw per tile column: its chroma rows within its own texels
-        for (x0, cw) in TilePlan::edges(w, want.plan.cols) {
+        for (x0, cw) in TilePlan::columns(w, want.plan.cols) {
             self.draw_chroma.source = vec4(source.x + x0 as f32, source.y, cw as f32, h as f32);
             self.draw_chroma.draw_abs(cx, Rect { pos: dvec2((x0 / 4) as f64, h as f64), size: dvec2((cw / 4) as f64, chroma_rows as f64) });
         }
@@ -422,9 +434,12 @@ mod plan_tests {
     }
     #[test]
     fn tile_edges_are_whole_macroblocks_and_cover_the_picture_once() {
-        assert_eq!(TilePlan::edges(7680, 2), vec![(0, 3840), (3840, 3840)]);
-        assert_eq!(TilePlan::edges(7680, 3), vec![(0, 2560), (2560, 2560), (5120, 2560)]);
-        assert_eq!(TilePlan::edges(2160, 2), vec![(0, 1072), (1072, 1088)]);
-        assert_eq!(TilePlan::edges(1000, 1), vec![(0, 1000)]);
+        assert_eq!(TilePlan::columns(7680, 2), vec![(0, 3840), (3840, 3840)]);
+        assert_eq!(TilePlan::columns(7680, 3), vec![(0, 2560), (2560, 2560), (5120, 2560)]);
+        assert_eq!(TilePlan::bands(2160, 2), vec![(0, 1072), (1072, 1088)]);
+        assert_eq!(TilePlan::columns(1000, 1), vec![(0, 1000)]);
+        // a viewer-sized desktop: the first column a 64 multiple, the last takes the rest
+        assert_eq!(TilePlan::columns(6800, 2), vec![(0, 3392), (3392, 3408)]);
+        assert_eq!(TilePlan::columns(5776, 3), vec![(0, 1920), (1920, 1920), (3840, 1936)]);
     }
 }

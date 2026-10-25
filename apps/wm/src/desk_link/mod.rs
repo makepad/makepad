@@ -10,6 +10,7 @@ pub mod capture;
 pub mod encode;
 #[cfg(target_os = "linux")]
 pub mod inject;
+pub mod rate;
 pub mod settings;
 
 /// A Desk Link event: on the WM's log and in `~/.makepad/wm/desk-link.log` (the WM's own
@@ -33,6 +34,20 @@ pub fn script_mod(vm: &mut makepad_widgets::ScriptVm) {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::DeskLink;
+
+/// `limit::*` in words (the logs).
+pub fn limit_name(limit: u8) -> &'static str {
+    use makepad_desk_link::limit;
+    match limit {
+        limit::START => "start",
+        limit::CLEAN => "clean",
+        limit::LINK => "link-bound",
+        limit::ENCODER => "encoder-bound",
+        limit::CAP => "capped",
+        limit::FIXED => "fixed",
+        _ => "?",
+    }
+}
 
 /// The active viewer's picture area (device pixels), its display refresh (mHz) and scale
 /// (hundredths): what a desktop that follows its viewer (a virtual display) takes.
@@ -115,6 +130,12 @@ mod native {
         window: Option<(u32, u32, u16)>,
         /// When it last became the active viewer (it sent input, or it opened).
         active_at: std::time::Instant,
+        /// It sent input (a viewer someone uses outranks one that only opened later).
+        input: bool,
+        /// `caps::VIEW_ONLY`: its window never decides the desktop's size.
+        view_only: bool,
+        /// Its `RateCap` (Mbit/s; 0 = none).
+        cap_mbps: u16,
     }
 
 
@@ -161,6 +182,9 @@ mod native {
         /// Stream sizes whose 4:4:4 encode lost the GPU device: they stream 4:2:0 from then on
         /// (the same configuration again would only lose the new device too).
         lost_full_chroma: Vec<[u32; 2]>,
+        /// The adaptive stream rate (`rate`), and the `Rate` last told the viewers.
+        rate: super::rate::RateControl,
+        told_rate: Option<ServerMsg>,
     }
 
     impl DeskLink {
@@ -180,16 +204,23 @@ mod native {
 
         /// Ends a viewer's session from this desktop (the bar's panel): it is told why and
         /// closed; it leaves the list when the server reports it gone.
-        /// The active viewer's window when it changed since the last call: the watching viewer
-        /// that sent input last (else the last to come) and has said its window size.
+        /// The active viewer's window when it changed since the last call: of the watching
+        /// viewers that said their window size and are not view-only, the one that sent input
+        /// last, else the last to come.
         pub fn take_viewer_window(&mut self) -> Option<super::ViewerWindow> {
-            let v = self.viewers.iter().filter(|v| !v.paused.load(Ordering::Acquire) && v.window.is_some()).max_by_key(|v| v.active_at)?;
+            let v = self.viewers.iter().filter(|v| !v.paused.load(Ordering::Acquire) && !v.view_only && v.window.is_some()).max_by_key(|v| (v.input, v.active_at))?;
             let (width, height, scale) = v.window?;
             let refresh_mhz = if v.refresh_hz == 0 { 0 } else { v.refresh_hz as u32 * 1000 };
             let window = super::ViewerWindow { width, height, refresh_mhz, scale: scale as u32 };
             if self.viewer_window == Some(window) {
                 return None;
             }
+            let was = self.viewer_window.map(|w| w.scale);
+            super::note(&format!(
+                "desk link: the desktop follows {} ({}): {width}x{height} at {:.2}x{}",
+                v.name, v.peer, scale as f64 / 100.0,
+                match was { Some(s) if s != window.scale => format!(" (scale was {:.2}x)", s as f64 / 100.0), _ => String::new() }
+            ));
             self.viewer_window = Some(window);
             Some(window)
         }
@@ -298,7 +329,7 @@ mod native {
             });
             if spawned.is_ok() {
                 self.dump_gone = Some(gone);
-                self.viewers.push(Viewer { session: 0, name: "dump".into(), peer: String::new(), full_chroma: true, refresh_hz: 0, since: std::time::Instant::now(), out: tx, backlog, paused: Arc::new(AtomicBool::new(false)), shown: None, window: None, active_at: std::time::Instant::now() });
+                self.viewers.push(Viewer { session: 0, name: "dump".into(), peer: String::new(), full_chroma: true, refresh_hz: 0, since: std::time::Instant::now(), out: tx, backlog, paused: Arc::new(AtomicBool::new(false)), shown: None, window: None, active_at: std::time::Instant::now(), input: false, view_only: false, cap_mbps: 0 });
                 self.sync_subscribers();
             }
         }
@@ -373,6 +404,43 @@ mod native {
             self.settings.as_ref().is_some_and(|s| s.full_chroma) && self.viewers.iter().filter(|v| !v.paused.load(Ordering::Acquire)).all(|v| v.full_chroma)
         }
 
+        /// The most the stream may take (kbit/s): by its size (`stream_kbps`: the settings'
+        /// `max_mbps` included) and the watching viewers' own caps.
+        fn rate_ceiling(&self, size: [u32; 2], full_chroma: bool) -> u32 {
+            let by_size = self.settings.as_ref().map_or(super::rate::START_KBPS, |s| s.stream_kbps(size, self.fps, full_chroma));
+            self.viewers.iter().filter(|v| !v.paused.load(Ordering::Acquire) && v.cap_mbps > 0).map(|v| v.cap_mbps as u32 * 1000).fold(by_size, u32::min).max(1)
+        }
+
+        /// The whole stream's rate now (kbit/s, the encoder splits it over the tiles): the
+        /// settings' fixed `kbps`, else the adaptive rate under the ceiling.
+        fn stream_kbps(&self, size: [u32; 2], full_chroma: bool) -> u32 {
+            match self.settings.as_ref().map_or(0, |s| s.kbps) {
+                0 => self.rate.kbps(self.rate_ceiling(size, full_chroma)),
+                fixed => fixed,
+            }
+        }
+
+        /// The `Rate` the viewers are told: pictures a second, the rate, what holds it, chroma.
+        fn rate_msg(&self, cx: &mut Cx) -> ServerMsg {
+            // before the first capture: the screen the viewers watch, at its stream size
+            let want = cx.global::<CaptureState>().want;
+            let (screens, _) = self.screens(cx);
+            let screen = screens.get(self.screen).map(Self::stream_size_of).unwrap_or([0, 0]);
+            let (size, full_chroma) = want.map_or((screen, self.full_chroma()), |w| (w.stream, w.full_chroma));
+            let fixed = self.settings.as_ref().is_some_and(|s| s.kbps != 0);
+            let limit = if fixed { proto::limit::FIXED } else { self.rate.limit(self.rate_ceiling(size, full_chroma)) };
+            ServerMsg::Rate { fps: self.fps as u16, kbps: self.stream_kbps(size, full_chroma), limit, full_chroma }
+        }
+
+        /// The viewers hear the `Rate` when it changed since they last did (`all`: every one).
+        fn tell_rate(&mut self, cx: &mut Cx) {
+            let msg = self.rate_msg(cx);
+            if self.told_rate.as_ref() != Some(&msg) {
+                self.send_all(&msg);
+                self.told_rate = Some(msg);
+            }
+        }
+
         /// A viewer behind on pictures holds the pictures back (the capture, its texture and the
         /// stream stay: no key frame when it caught up, the owed picture follows).
         fn set_congested(&mut self, cx: &mut Cx, on: bool) {
@@ -399,8 +467,11 @@ mod native {
             }
             let held = std::mem::take(&mut cx.global::<CaptureState>().held);
             let behind = std::mem::take(&mut cx.global::<CaptureState>().held_behind);
+            let held_encoder = std::mem::take(&mut cx.global::<CaptureState>().held_encoder);
             let e = &self.encode_stats;
             let (encoded, refined, enc_max) = (e.pictures.swap(0, Ordering::Relaxed), e.refined.swap(0, Ordering::Relaxed), e.encode_us_max.swap(0, Ordering::Relaxed));
+            let (tile_us, tile_pictures) = (e.tile_us_sum.swap(0, Ordering::Relaxed), e.tile_pictures.swap(0, Ordering::Relaxed));
+            let tile_ms = if tile_pictures == 0 { 0.0 } else { tile_us as f64 / tile_pictures as f64 / 1000.0 };
             let (sent, bytes, write_max) = match &self.server {
                 Some(s) => (s.sent.pictures.swap(0, Ordering::Relaxed), s.sent.bytes.swap(0, Ordering::Relaxed), s.sent.write_us_max.swap(0, Ordering::Relaxed)),
                 None => (0, 0, 0),
@@ -408,11 +479,35 @@ mod native {
             let backlog = self.viewers.iter().map(|v| v.backlog.load(Ordering::Acquire)).max().unwrap_or(0);
             // the viewer furthest behind (pictures sent that it has not shown yet, from its Stats)
             let viewer = self.viewers.iter_mut().filter_map(|v| v.shown.take()).max_by_key(|s| s.0).map_or(String::new(), |(behind, decode, present)| format!(" · viewer behind {behind} (decode {:.1} ms, present {:.1} ms)", decode as f64 / 1000.0, present as f64 / 1000.0));
+            let congested_ms = std::mem::take(&mut self.tl_congested_s) * 1000.0;
+            // the adaptive rate decides on this second (a fixed `kbps` setting: nothing to decide)
+            if let (Some(want), true) = (cx.global::<CaptureState>().want, self.settings.as_ref().is_some_and(|s| s.kbps == 0)) {
+                let second = super::rate::Second { fps: self.fps, pictures: encoded, congested_ms, held_encoder, tile_ms, sent_kbps: bytes * 8 / 1000, size: want.stream, full_chroma: want.full_chroma };
+                let ceiling = self.rate_ceiling(want.stream, want.full_chroma);
+                let was = self.rate.kbps(ceiling);
+                if self.rate.second(&second, ceiling) {
+                    super::note(&format!(
+                        "desk link: {}x{} {} (slowest tile {tile_ms:.1} ms of {:.1}, {held_encoder} frames waited for the encoder)",
+                        want.stream[0], want.stream[1],
+                        if self.rate.half_chroma(want.stream) { "streams 4:2:0: the encoder is behind at 4:4:4" } else { "tries 4:4:4 again" },
+                        1000.0 / self.fps.max(1) as f64
+                    ));
+                    self.update_capture(cx);
+                }
+                let now = self.rate.kbps(ceiling);
+                if now != was {
+                    super::note(&format!("desk link: rate {} -> {} Mbit/s ({})", was / 1000, now / 1000, super::limit_name(self.rate.limit(ceiling))));
+                }
+                self.tell_rate(cx);
+            }
+            let rate = match &self.told_rate {
+                Some(ServerMsg::Rate { kbps, limit, full_chroma, .. }) => format!("{} Mbit/s {} {}", kbps / 1000, if *full_chroma { "4:4:4" } else { "4:2:0" }, super::limit_name(*limit)),
+                _ => String::new(),
+            };
             super::note(&format!(
-                "desk link 1s: frames {} · captured {} (held {held}, behind {behind}) · congested {:.0} ms · encoded {encoded} (refined {refined}, max {:.1} ms) · sent {sent} ({:.0} Mbit/s, write max {:.1} ms) · backlog {backlog} · rate {}{viewer}",
+                "desk link 1s: frames {} · captured {} (held {held}, behind {behind}, encoder {held_encoder}) · congested {congested_ms:.0} ms · encoded {encoded} (refined {refined}, max {:.1} ms, tile {tile_ms:.1} ms) · sent {sent} ({:.0} Mbit/s, write max {:.1} ms) · backlog {backlog} · rate {} · {rate}{viewer}",
                 std::mem::take(&mut self.tl_frames),
                 std::mem::take(&mut self.tl_captured),
-                std::mem::take(&mut self.tl_congested_s) * 1000.0,
                 enc_max as f64 / 1000.0,
                 bytes as f64 * 8.0 / 1e6,
                 write_max as f64 / 1000.0,
@@ -433,7 +528,7 @@ mod native {
                 super::note(&format!("desk link: {fps} pictures a second (was {})", self.fps));
                 self.fps = fps;
                 cx.global::<CaptureState>().interval = 1.0 / fps as f64;
-                self.send_all(&ServerMsg::Rate { fps: fps as u16 });
+                self.tell_rate(cx);
             }
             let refresh = self.screen_refresh(cx).unwrap_or(fps as f64);
             cx.global::<CaptureState>().every = ((refresh / fps as f64).round() as u32).max(1);
@@ -442,7 +537,8 @@ mod native {
             let want = match (self.watching(), screen.filter(|s| s.width >= 16 && s.height >= 16)) {
                 (true, Some(s)) => {
                     let stream = Self::stream_size_of(&s);
-                    let full_chroma = self.full_chroma() && !self.lost_full_chroma.contains(&stream);
+                    // 4:2:0 where 4:4:4 lost the device, or where the encoder could not keep up
+                    let full_chroma = self.full_chroma() && !self.lost_full_chroma.contains(&stream) && !self.rate.half_chroma(stream);
                     let split = self.settings.as_ref().map_or(super::settings::Split::Tiles, |s| s.split);
                     let auto = TilePlan::new(stream, fps, split, VideoStreamEncoder::engines(), VideoStreamEncoder::max_size(full_chroma));
                     // a `tiles = CxR` setting, never fewer than the encoder's size needs
@@ -567,8 +663,9 @@ mod native {
                 }
             }
             let settings = self.settings.clone().unwrap_or_default();
+            let kbps = self.stream_kbps(want.stream, want.full_chroma);
             if let Some(e) = &self.encoder {
-                e.send(Job::Picture { handle, held, size: want.stream, fence, built_ns: makepad_hal::clock_ns(), fps: self.fps, kbps: settings.kbps, split: settings.split, full_chroma: want.full_chroma, refine: false, plan: want.plan });
+                e.send(Job::Picture { handle, held, size: want.stream, fence, built_ns: makepad_hal::clock_ns(), fps: self.fps, kbps, split: settings.split, full_chroma: want.full_chroma, refine: false, plan: want.plan });
                 self.tl_captured += 1;
             }
             // still for REFINE_AFTER s: the same picture again, near lossless
@@ -585,9 +682,10 @@ mod native {
             let (Some(want), Some(texture)) = (want, texture) else { return };
             let Some(&(handle, _)) = self.pictures.iter().find(|(_, t)| *t == texture) else { return };
             let settings = self.settings.clone().unwrap_or_default();
+            let kbps = self.stream_kbps(want.stream, want.full_chroma);
             if let Some(e) = &self.encoder {
                 // the picture's frame finished long ago: nothing to wait for
-                e.send(Job::Picture { handle, held, size: want.stream, fence: Fence::None, built_ns: makepad_hal::clock_ns(), fps: self.fps, kbps: settings.kbps, split: settings.split, full_chroma: want.full_chroma, refine: true, plan: want.plan });
+                e.send(Job::Picture { handle, held, size: want.stream, fence: Fence::None, built_ns: makepad_hal::clock_ns(), fps: self.fps, kbps, split: settings.split, full_chroma: want.full_chroma, refine: true, plan: want.plan });
             }
         }
 
@@ -646,10 +744,10 @@ mod native {
                             server: std::fs::read_to_string("/etc/hostname").map(|h| h.trim().to_string()).unwrap_or_else(|_| "makepad wm".into()),
                         };
                         let _ = out.send(Out::Msg(welcome.encode()));
-                        let _ = out.send(Out::Msg(ServerMsg::Rate { fps: self.fps as u16 }.encode()));
+                        let _ = out.send(Out::Msg(self.rate_msg(cx).encode()));
                         // the address without its port
                         let ip = peer.rsplit_once(':').map_or(peer.as_str(), |(ip, _)| ip).trim_matches(|c| c == '[' || c == ']').to_string();
-                        self.viewers.push(Viewer { session, name, peer: ip, full_chroma: caps & proto::caps::FULL_CHROMA != 0, refresh_hz: 0, since: std::time::Instant::now(), out, backlog, paused: Arc::new(AtomicBool::new(paused)), shown: None, window: None, active_at: std::time::Instant::now() });
+                        self.viewers.push(Viewer { session, name, peer: ip, full_chroma: caps & proto::caps::FULL_CHROMA != 0, refresh_hz: 0, since: std::time::Instant::now(), out, backlog, paused: Arc::new(AtomicBool::new(paused)), shown: None, window: None, active_at: std::time::Instant::now(), input: false, view_only: caps & proto::caps::VIEW_ONLY != 0, cap_mbps: 0 });
                         self.generation = self.generation.wrapping_add(1);
                         self.sync_subscribers();
                         self.cursor = None;
@@ -696,12 +794,26 @@ mod native {
                             }
                             Control::Window { width, height, scale } => {
                                 super::note(&format!("desk link: {} window {width}x{height} at {:.2}x", self.viewers[i].name, scale as f64 / 100.0));
+                                // a resize after the first size (maximise, fullscreen, a drag) is
+                                // someone using that viewer: the desktop follows it at once, not
+                                // only after its next input
+                                if self.viewers[i].window.is_some_and(|w| w != (width, height, scale)) {
+                                    self.viewers[i].active_at = std::time::Instant::now();
+                                    self.viewers[i].input = true;
+                                }
                                 self.viewers[i].window = Some((width, height, scale));
                             }
                             Control::Active => {
                                 self.viewers[i].active_at = std::time::Instant::now();
+                                self.viewers[i].input = true;
                             }
                             Control::Clipboard(text) => cx.copy_to_clipboard(&text),
+                            Control::RateCap(mbps) => {
+                                super::note(&format!("desk link: {} caps the stream at {}", self.viewers[i].name, if mbps == 0 { "nothing (auto)".to_string() } else { format!("{mbps} Mbit/s") }));
+                                self.viewers[i].cap_mbps = mbps;
+                                self.tell_rate(cx);
+                                continue;
+                            }
                             Control::Stats { frame, decode_us, present_us } => {
                                 let behind = self.encode_stats.last_frame.load(Ordering::Relaxed).wrapping_sub(frame);
                                 self.viewers[i].shown = Some((behind, decode_us, present_us));

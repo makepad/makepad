@@ -106,6 +106,8 @@ pub enum Control {
     Active,
     Clipboard(String),
     Stats { frame: u32, decode_us: u32, present_us: u32 },
+    /// The viewer's own rate cap (Mbit/s; 0 = none).
+    RateCap(u16),
 }
 
 /// What the UI queues for a session.
@@ -545,6 +547,7 @@ impl SessionCtx {
                     ClientMsg::Window { width, height, scale } => Some(Control::Window { width, height, scale }),
                     ClientMsg::Clipboard { text } => Some(Control::Clipboard(text)),
                     ClientMsg::Stats { frame, decode_us, present_us } => Some(Control::Stats { frame, decode_us, present_us }),
+                    ClientMsg::RateCap { mbps } => Some(Control::RateCap(mbps)),
                     ClientMsg::Hello { .. } => return Err("a second hello".into()),
                     input => {
                         if self.active.swap(self.session, Ordering::AcqRel) != self.session {

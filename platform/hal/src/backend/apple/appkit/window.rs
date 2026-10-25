@@ -55,6 +55,8 @@ pub struct Win {
     /// the display link of the window and whether the app asked for a frame
     pub link: Cell<ObjcId>,
     pub want_frame: Cell<bool>,
+    /// Display link callbacks in a row that found no frame asked for (it pauses at `LINK_IDLE`).
+    pub link_idle: Cell<u8>,
     pub fallback: Cell<ObjcId>,
     last_geom: Cell<Option<[f64; 12]>>,
     dpi_override: Cell<Option<f64>>,
@@ -130,6 +132,7 @@ impl Win {
                 effect_view: Cell::new(nil),
                 link: Cell::new(nil),
                 want_frame: Cell::new(false),
+                link_idle: Cell::new(0),
                 fallback: Cell::new(nil),
                 last_geom: Cell::new(None),
                 dpi_override: Cell::new(None),

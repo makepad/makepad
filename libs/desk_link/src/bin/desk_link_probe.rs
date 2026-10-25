@@ -1,10 +1,12 @@
-//! desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--split tiles|interleave|off] [--stall MS,EVERY_MS] [--window WxH[@SCALE]] [--hz N] [--dump DIR] [--420] [--keyreq MS]: a headless Desk Link viewer for
+//! desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--split tiles|interleave|off] [--stall MS,EVERY_MS] [--window WxH[@SCALE] [--drive]] [--hz N] [--dump DIR] [--420] [--keyreq MS]: a headless Desk Link viewer for
 //! checks. It connects with this machine's fleet credential, prints the Welcome, counts the
 //! pictures and bytes, pings once a second (RTT), and with `--input` moves the desktop's pointer
 //! between two points twice a second, timing each move until the desktop's own Cursor message
 //! reports the pointer there (input injection end to end). `--window` tells the desktop a viewer
 //! window of that many device pixels (scale in hundredths, default 200) and `--hz` its display
-//! refresh (default 120 with `--window`): a desktop that follows its viewer takes that size.
+//! refresh (default 120 with `--window`). The probe is view-only (`caps::VIEW_ONLY`): a desktop
+//! that follows its viewer takes that size only with `--drive`, so a probe never resizes a
+//! desktop someone is watching.
 //! `--dump DIR` writes each encoder stream (from its first key frame) to DIR/stream-<i>.h264 and
 //! its tile position to DIR/tiles.txt (`<i> <x0> <y0>`), for decoding them elsewhere.
 //!
@@ -22,7 +24,7 @@ use std::time::{Duration, Instant};
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let Some(target) = args.get(1).filter(|a| !a.starts_with("--")) else {
-        eprintln!("usage: desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--split tiles|interleave|off] [--stall MS,EVERY_MS] [--window WxH[@SCALE]] [--hz N] [--dump DIR] [--420] [--keyreq MS]");
+        eprintln!("usage: desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--split tiles|interleave|off] [--stall MS,EVERY_MS] [--window WxH[@SCALE] [--drive]] [--hz N] [--dump DIR] [--420] [--keyreq MS]");
         std::process::exit(2);
     };
     let secs: u64 = args.windows(2).find(|w| w[0] == "--secs").and_then(|w| w[1].parse().ok()).unwrap_or(10);
@@ -52,6 +54,8 @@ fn main() {
     let dump: Option<std::path::PathBuf> = args.windows(2).find(|w| w[0] == "--dump").map(|w| w[1].clone().into());
     // --420: a viewer whose decoder does not take 4:4:4 (the desktop streams 4:2:0)
     let caps = if args.iter().any(|a| a == "--420") { 0 } else { proto::caps::FULL_CHROMA };
+    // view-only unless --drive: a probe never resizes a followed desktop someone is using
+    let caps = if args.iter().any(|a| a == "--drive") { caps } else { caps | proto::caps::VIEW_ONLY };
     let keyreq: Option<u64> = args.windows(2).find(|w| w[0] == "--keyreq").and_then(|w| w[1].parse().ok());
     let opts = Opts { window, hz, dump, caps, keyreq };
     let (host, port) = match target.rsplit_once(':') {
@@ -179,7 +183,7 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
                 ServerMsg::Refused { reason } => return Err(format!("refused: {reason}")),
                 ServerMsg::Bye { reason } => return Err(format!("bye: {reason}")),
                 ServerMsg::Stream { screen, stream: size } => println!("probe: the stream is now screen {screen} at {size:?}"),
-                ServerMsg::Rate { fps } => println!("probe: the desktop streams {fps} pictures a second"),
+                ServerMsg::Rate { fps, kbps, limit, full_chroma } => println!("probe: the desktop streams {fps} pictures a second at {} Mbit/s {} (limit {limit})", kbps / 1000, if full_chroma { "4:4:4" } else { "4:2:0" }),
                 ServerMsg::Video { key, data, stream, parts, built_ns, encoded_ns, frame, x0, y0, .. } => {
                     let i = stream as usize;
                     if per_stream.len() <= i {

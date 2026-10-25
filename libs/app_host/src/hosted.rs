@@ -152,6 +152,11 @@ pub struct HostedApp {
     /// When the last Tick went out: no two Ticks are closer than one frame
     /// ([`tick_gap_open`]), whether the beat or an acknowledgement sends.
     last_tick_at: Option<f64>,
+    /// An owner frame went by while the last Tick was out: the child is late, and its next Tick
+    /// goes out at its acknowledgement instead of waiting for yet another owner frame (a child
+    /// whose frame takes a little over one display period ran at half the rate: 9 ms at 120 Hz
+    /// was 60 fps, the WM compositing every other tick).
+    late: bool,
     /// The child has something to do: input is queued for it, it asked for
     /// a frame (`RequestAnimationFrame`) or its timer fell due (`WakeIn`).
     /// The beat ticks the child only while this holds; an idle child is not
@@ -256,6 +261,7 @@ impl HostedApp {
             tick_period: 0.008,
             tick_outstanding: None,
             last_tick_at: None,
+            late: false,
             tick_wanted: true,
             throttled: false,
             paces_ticks: true,
@@ -383,6 +389,7 @@ impl HostedApp {
         }
         self.paces_ticks = on;
         self.tick_outstanding = None;
+        self.late = false;
         self.tick_wanted = true;
         self.ensure_beat(cx);
     }
@@ -494,6 +501,11 @@ impl HostedApp {
                 self.tick_timer = cx.start_timeout((at - self.now()).max(0.0));
             }
         }
+        // a Tick out: the owner's next frame tells whether the child is late (`late`)
+        if self.tick_outstanding.is_some() && !self.late && self.paces_ticks && !self.tick_frame_asked {
+            self.tick_frame = cx.new_next_frame();
+            self.tick_frame_asked = true;
+        }
     }
 
     /// When the host next has something to send the child. There is no fast
@@ -513,6 +525,9 @@ impl HostedApp {
         }
         if let Some(sent_at) = self.tick_outstanding {
             return Some(Beat::At(sent_at + self.tick_fallback()));
+        }
+        if self.late {
+            return Some(Beat::At(now));
         }
         Some(Beat::Frame)
     }
@@ -798,6 +813,7 @@ impl HostedApp {
         }
         self.ticks_sent += 1;
         let now = self.now();
+        self.late = false;
         self.tick_outstanding = Some(now);
         self.last_tick_at = Some(now);
     }
@@ -850,6 +866,10 @@ impl HostedApp {
         let mut framed = false;
         if self.tick_frame_asked && self.tick_frame.is_event(event).is_some() {
             self.tick_frame_asked = false;
+            if self.tick_outstanding.is_some() {
+                // an owner frame passed and the child has not answered its Tick yet
+                self.late = true;
+            }
             framed = target.is_some() && self.beat_needed();
         }
         if beat || framed {
@@ -959,6 +979,7 @@ impl HostedApp {
         }
         self.current_target = target;
         self.tick_outstanding = None;
+        self.late = false;
         self.tick_wanted = true;
         if self.wake_timer.0 != 0 {
             cx.stop_timer(self.wake_timer);
@@ -1574,6 +1595,31 @@ mod pacing_tests {
         // a child slower than a frame: the same, its Tick goes out with the owner's next frame
         at_ms(130.0);
         assert_eq!(app.next_beat(), Some(Beat::Frame));
+    }
+
+    /// A child that missed an owner frame (its Tick still out when the frame came) gets its
+    /// next Tick at its acknowledgement, not one more owner frame later: a 9 ms child at 120 Hz
+    /// draws about 110 frames a second, not 60. A Tick resets it.
+    #[test]
+    fn a_late_child_is_ticked_at_its_acknowledgement() {
+        at_ms(100.0);
+        let mut app = settled_app();
+        app.tick_wanted = true;
+        let mut msgs = Vec::new();
+        app.append_tick(app.current_target.unwrap(), &mut msgs);
+        app.tick_wanted = true;
+        // the owner's next frame comes while the Tick is out
+        at_ms(108.3);
+        app.late = app.tick_outstanding.is_some();
+        at_ms(109.0);
+        app.tick_done();
+        assert_eq!(app.next_beat(), Some(Beat::At(0.109)), "late: at once");
+        assert!(app.tick_gap_ok(), "a frame has passed since the last Tick");
+        app.append_tick(app.current_target.unwrap(), &mut msgs);
+        assert!(!app.late);
+        at_ms(112.0);
+        app.tick_done();
+        assert_eq!(app.next_beat(), Some(Beat::Frame), "on time: the owner's next frame");
     }
 
     /// A live resize keeps frames that hold the new size and makes new ones with room to

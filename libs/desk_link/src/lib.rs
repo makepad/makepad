@@ -11,7 +11,7 @@ use std::io::{self, Write};
 #[cfg(feature = "server")]
 pub mod server;
 
-pub const VERSION: u16 = 5;
+pub const VERSION: u16 = 6;
 pub const DEFAULT_PORT: u16 = 8790;
 /// The largest message either side accepts (a key frame of a big desktop fits many times over).
 pub const MAX_MESSAGE: usize = 16 << 20;
@@ -60,6 +60,25 @@ pub mod mods {
 pub mod caps {
     /// Decodes 4:4:4 H.264 (High 4:4:4 Predictive) on its hardware decoder.
     pub const FULL_CHROMA: u32 = 1;
+    /// Only watches (a probe, a test client): its `Window` never decides the size of a desktop
+    /// that follows its viewer.
+    pub const VIEW_ONLY: u32 = 2;
+}
+
+/// `ServerMsg::Rate::limit`: what holds the stream's rate where it is now.
+pub mod limit {
+    /// The starting rate, nothing measured yet.
+    pub const START: u8 = 0;
+    /// Nothing: the rate creeps back up.
+    pub const CLEAN: u8 = 1;
+    /// The link: a viewer fell behind (its socket backlog), the rate went down.
+    pub const LINK: u8 = 2;
+    /// The encoder: it took longer than a picture's time (a big 4:4:4 desktop goes 4:2:0).
+    pub const ENCODER: u8 = 3;
+    /// A cap: the desktop's `max_mbps`, a viewer's `RateCap`, or the size's own rate.
+    pub const CAP: u8 = 4;
+    /// The desktop's settings name a fixed rate (`kbps`).
+    pub const FIXED: u8 = 5;
 }
 
 /// `ClientMsg::SetSplit` values: one stream, tiles (each picture in bands, one per engine, at
@@ -137,6 +156,9 @@ pub enum ClientMsg {
     /// How the last shown picture fared: decode time and decode-end -> on screen.
     Stats { frame: u32, decode_us: u32, present_us: u32 },
     Clipboard { text: String },
+    /// The most this viewer wants the stream to take (Mbit/s, all tiles; 0 = no cap of its
+    /// own): the desktop streams at most the lowest of its watching viewers' caps.
+    RateCap { mbps: u16 },
 }
 
 /// Server -> viewer.
@@ -162,8 +184,10 @@ pub enum ServerMsg {
     Stream { screen: u32, stream: [u32; 2] },
     /// The pictures a second the desktop streams at now (its own display's refresh, the
     /// watching viewers' and its settings' cap, whichever is lowest); sent after the Welcome and
-    /// on every change. A still desktop sends fewer.
-    Rate { fps: u16 },
+    /// on every change. A still desktop sends fewer. `kbps`: the stream's rate now (all its
+    /// tiles, the encoder's average target), `limit` what holds it there ([`limit`]),
+    /// `full_chroma` whether it is 4:4:4 now.
+    Rate { fps: u16, kbps: u32, limit: u8, full_chroma: bool },
     Clipboard { text: String },
     Bye { reason: String },
 }
@@ -280,6 +304,7 @@ mod tag {
     pub const PING: u8 = 20;
     pub const STATS: u8 = 21;
     pub const CLIPBOARD_C: u8 = 22;
+    pub const RATE_CAP: u8 = 23;
 
     pub const WELCOME: u8 = 100;
     pub const REFUSED: u8 = 101;
@@ -369,6 +394,11 @@ impl ClientMsg {
                 o.str(text);
                 o.done()
             }
+            ClientMsg::RateCap { mbps } => {
+                let mut o = Out::new(RATE_CAP);
+                o.u16(*mbps);
+                o.done()
+            }
         }
     }
 
@@ -395,6 +425,7 @@ impl ClientMsg {
             GAMEPAD_GONE => ClientMsg::GamepadGone { slot: r.u8()? },
             PING => ClientMsg::Ping { client_ns: r.u64()? },
             STATS => ClientMsg::Stats { frame: r.u32()?, decode_us: r.u32()?, present_us: r.u32()? },
+            RATE_CAP => ClientMsg::RateCap { mbps: r.u16()? },
             CLIPBOARD_C => ClientMsg::Clipboard { text: r.str()? },
             _ => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unknown viewer message {ty}"))),
         })
@@ -445,9 +476,9 @@ impl ServerMsg {
                 o.str(reason);
                 o.done()
             }
-            ServerMsg::Rate { fps } => {
+            ServerMsg::Rate { fps, kbps, limit, full_chroma } => {
                 let mut o = Out::new(RATE);
-                o.u16(*fps);
+                o.u16(*fps).u32(*kbps).u8(*limit).u8(*full_chroma as u8);
                 o.done()
             }
         }
@@ -477,7 +508,7 @@ impl ServerMsg {
             STREAM => ServerMsg::Stream { screen: r.u32()?, stream: [r.u32()?, r.u32()?] },
             CLIPBOARD_S => ServerMsg::Clipboard { text: r.str()? },
             BYE => ServerMsg::Bye { reason: r.str()? },
-            RATE => ServerMsg::Rate { fps: r.u16()? },
+            RATE => ServerMsg::Rate { fps: r.u16()?, kbps: r.u32()?, limit: r.u8()?, full_chroma: r.bool()? },
             _ => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unknown server message {ty}"))),
         })
     }
@@ -630,6 +661,7 @@ mod tests {
         round_client(ClientMsg::Ping { client_ns: u64::MAX - 3 });
         round_client(ClientMsg::Stats { frame: 9, decode_us: 1200, present_us: 8000 });
         round_client(ClientMsg::Clipboard { text: "héllo".into() });
+        round_client(ClientMsg::RateCap { mbps: 300 });
     }
 
     #[test]
@@ -651,7 +683,7 @@ mod tests {
         round_server(ServerMsg::Stream { screen: 0, stream: [2560, 1440] });
         round_server(ServerMsg::Clipboard { text: String::new() });
         round_server(ServerMsg::Bye { reason: "the WM quits".into() });
-        round_server(ServerMsg::Rate { fps: 120 });
+        round_server(ServerMsg::Rate { fps: 120, kbps: 250_000, limit: limit::LINK, full_chroma: true });
     }
 
     #[test]

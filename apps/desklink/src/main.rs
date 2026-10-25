@@ -55,6 +55,7 @@ script_mod! {
                             details := CheckBox{text: "Latency details"}
                             screen_next := Button{width: Fill text: "Next screen"}
                             split_mode := Button{width: Fill text: "Engines: tiles"}
+                            rate_cap := Button{width: Fill text: "Rate: auto"}
                         }
                         View{
                             width: Fill height: Fill
@@ -117,6 +118,12 @@ pub struct App {
     details: bool,
     #[rust]
     latency: Latency,
+    /// Pictures drawn this second so far, and over the last second: (shown, decoded but
+    /// never shown) a second.
+    #[rust]
+    shown: u32,
+    #[rust]
+    shown_rate: (u32, u32),
     /// Present times waiting for their report: (frame, decode_us, present_us).
     #[rust]
     last_stats: Option<(u32, u32, u32)>,
@@ -326,9 +333,9 @@ impl App {
         }
         let Some(c) = self.conns.get(self.selected) else { return };
         let picture = c.latest.lock().unwrap().take();
-        let (state, welcome, cursor, offset, fps, mbps, warning, stream_fps, read_gap_ms, decode_queue) = {
+        let (state, welcome, cursor, offset, fps, mbps, warning, stream_fps, read_gap_ms, decode_queue, stream_rate) = {
             let s = c.shared.lock().unwrap();
-            (s.state.clone().unwrap_or(State::Connecting), s.welcome.clone(), s.cursor, s.offset_ns, s.fps, s.mbps, s.warning.clone(), s.stream_fps, s.read_gap_ms, s.decode_queue)
+            (s.state.clone().unwrap_or(State::Connecting), s.welcome.clone(), s.cursor, s.offset_ns, s.fps, s.mbps, s.warning.clone(), s.stream_fps, s.read_gap_ms, s.decode_queue, s.stream_rate)
         };
         let remote = self.remote(cx);
         let Some(mut view) = remote.borrow_mut::<RemoteView>() else { return };
@@ -345,6 +352,7 @@ impl App {
             self.latency.present = drawn.saturating_sub(decoded) as f64 / 1e6;
             self.latency.total = self.latency.encode + self.latency.network + self.latency.decode + self.latency.present;
             self.last_stats = Some((frame, (self.latency.decode * 1000.0) as u32, (self.latency.present * 1000.0) as u32));
+            self.shown += 1;
         }
         view.note = match &state {
             State::Connected => None,
@@ -360,7 +368,10 @@ impl App {
             // pixel a whole block, nothing resampled)
             lines.push(format!("window {}x{} px{} · scale {:.4}{}", self.window_px[0], self.window_px[1], if self.fullscreen { " (fullscreen)" } else { "" }, view.scale, if view.whole { " whole-pixel" } else { " resampled" }));
         }
-        lines.push(view::rate_line(fps, mbps, stream_fps, crate::conn::DISPLAY_HZ.load(std::sync::atomic::Ordering::Acquire)));
+        lines.push(view::rate_line(fps, mbps, stream_fps, crate::conn::DISPLAY_HZ.load(std::sync::atomic::Ordering::Acquire), self.shown_rate));
+        if let Some(rate) = stream_rate {
+            lines.push(view::stream_rate_line(rate));
+        }
         // view only (the desktop cannot inject input): always said, never a silent dead mouse
         if let Some(w) = welcome.as_ref().filter(|w| !w.input) {
             lines.push(if w.input_note.is_empty() { "input unavailable on this host".to_string() } else { w.input_note.clone() });
@@ -473,6 +484,9 @@ impl App {
         }
     }
 }
+
+/// The rate cap button's steps (Mbit/s; 0 = auto).
+const RATE_CAPS: [u32; 6] = [0, 800, 400, 250, 150, 80];
 
 /// The panel toggle: Cmd+Shift+P on macOS, Ctrl+Shift+P elsewhere (never sent to the desktop).
 fn is_panel_toggle(e: &KeyEvent) -> bool {
@@ -756,6 +770,17 @@ impl MatchEvent for App {
                 c.send(ClientMsg::RequestKeyframe);
             }
         }
+        // the stream's rate: auto (the desktop adapts it to the link and its encoder, up to its
+        // own cap) or at most a chosen rate
+        if self.ui.button(cx, ids!(rate_cap)).clicked(actions) {
+            use std::sync::atomic::Ordering;
+            let now = crate::conn::RATE_CAP_MBPS.load(Ordering::Acquire);
+            let next = RATE_CAPS.iter().position(|c| *c == now).map_or(0, |i| (i + 1) % RATE_CAPS.len());
+            let cap = RATE_CAPS[next];
+            crate::conn::RATE_CAP_MBPS.store(cap, Ordering::Release);
+            let label = if cap == 0 { "Rate: auto".to_string() } else { format!("Rate: at most {cap} Mbit/s") };
+            self.ui.button(cx, ids!(rate_cap)).set_text(cx, &label);
+        }
         if self.ui.button(cx, ids!(screen_next)).clicked(actions) {
             if let Some(c) = self.current() {
                 let next = c.shared.lock().unwrap().welcome.as_ref().map(|w| (w.screen + 1) % w.screens.len().max(1) as u32);
@@ -813,6 +838,8 @@ impl AppMain for App {
             self.poll_pads(cx);
         }
         if self.tick.is_event(event).is_some() {
+            let dropped = self.current().map_or(0, |c| std::mem::take(&mut c.shared.lock().unwrap().dropped));
+            self.shown_rate = (std::mem::take(&mut self.shown), dropped);
             self.refresh(cx);
             if let (Some((frame, decode_us, present_us)), Some(c)) = (self.last_stats.take(), self.current()) {
                 c.send(ClientMsg::Stats { frame, decode_us, present_us });
@@ -822,7 +849,7 @@ impl AppMain for App {
                     let s = c.shared.lock().unwrap();
                     (s.fps, s.mbps, s.rtt_ms.unwrap_or(0.0), s.stream_fps, s.read_gap_ms, s.decode_queue)
                 }).unwrap_or_default();
-                eprintln!("desklink stats: rtt {rtt:.2} ms · {} · {} · {}", view::latency_line(&self.latency), view::rate_line(fps, mbps, stream_fps, crate::conn::DISPLAY_HZ.load(std::sync::atomic::Ordering::Acquire)), view::flow_line(gap, queue));
+                eprintln!("desklink stats: rtt {rtt:.2} ms · {} · {} · {}", view::latency_line(&self.latency), view::rate_line(fps, mbps, stream_fps, crate::conn::DISPLAY_HZ.load(std::sync::atomic::Ordering::Acquire), self.shown_rate), view::flow_line(gap, queue));
             }
         }
         if let Event::Draw(_) = event {

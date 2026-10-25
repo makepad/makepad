@@ -57,6 +57,10 @@ pub struct EncodeStats {
     pub pictures: AtomicU64,
     pub refined: AtomicU64,
     pub encode_us_max: AtomicU64,
+    /// The slowest tile's encode (the push into the encoder until its bitstream, µs) of every
+    /// picture, summed, and the pictures: the adaptive rate's encoder-bound test.
+    pub tile_us_sum: AtomicU64,
+    pub tile_pictures: AtomicU64,
     /// The last picture sent out (its frame number): a viewer's `Stats` frame against it is how
     /// far that viewer is behind.
     pub last_frame: std::sync::atomic::AtomicU32,
@@ -101,6 +105,8 @@ fn ready(fence: Fence) -> Result<GpuReady, String> {
 /// One engine's stream: its encoder, the part of each picture it takes, and its worker.
 struct Stream {
     tx: Sender<Work>,
+    /// Its share of the picture's area: of the whole stream's rate.
+    share: f64,
     /// Its tile's first column and row (tiles), or 0, 0 (whole pictures).
     x0: u32,
     y0: u32,
@@ -115,13 +121,21 @@ struct Work {
     key: bool,
     refine: bool,
     built_ns: u64,
+    /// This stream's rate (kbit/s): set on the encoder when it changed.
+    kbps: u32,
 }
 
-/// The tile messages of the pictures in flight, oldest first.
-type Gathering = std::collections::VecDeque<(u32, Vec<Option<Vec<u8>>>)>;
+/// The tile messages of the pictures in flight, oldest first, with the slowest tile's encode (µs).
+type Gathering = std::collections::VecDeque<(u32, Vec<Option<Vec<u8>>>, u64)>;
 
-/// A worker's answer: (stream, frame, built, encoded, key, Annex-B or the failure).
-type Done = (usize, u32, u64, u64, bool, Result<Vec<u8>, String>);
+/// A worker's answer: (stream, frame, built, encoded, key, the encode's own time (µs), Annex-B
+/// or the failure).
+type Done = (usize, u32, u64, u64, bool, u64, Result<Vec<u8>, String>);
+
+/// `total` kbit/s for a stream of `share` of the picture.
+fn share_kbps(total: u32, share: f64) -> u32 {
+    if total == 0 { 0 } else { ((total as f64 * share) as u32).max(1) }
+}
 
 /// A picture whose bitstream is no bigger than this per stream changed nothing visible (a redraw
 /// of the same desktop): the desktop is still.
@@ -138,14 +152,17 @@ fn open_streams(size: [u32; 2], fps: u32, kbps: u32, split: Split, full_chroma: 
     // engines, or one stream
     let tiles = plan.tiles() > 1;
     let n = if tiles { plan.tiles() } else if split == Split::Interleave && size[1] >= 64 { engines } else { 1 } as usize;
-    let kbps = if kbps == 0 { 0 } else { (kbps / n as u32).max(1) };
-    let cols = TilePlan::edges(size[0], plan.cols);
-    let rows = TilePlan::edges(size[1], plan.rows);
+    let cols = TilePlan::columns(size[0], plan.cols);
+    let rows = TilePlan::bands(size[1], plan.rows);
     let mut streams = Vec::with_capacity(n);
     for i in 0..n {
         let ((x0, w), (y0, h)) = if tiles { (cols[i % cols.len()], rows[i / cols.len()]) } else { ((0, size[0]), (0, size[1])) };
         // an interleaved stream carries every n-th picture
         let stream_fps = if tiles { fps } else { (fps / n as u32).max(1) };
+        // the whole stream's rate by area: a tile its own share, interleaved streams each the
+        // whole rate at their share of the pictures
+        let share = if tiles { (w as f64 * h as f64) / (size[0] as f64 * size[1] as f64).max(1.0) } else { 1.0 / n as f64 };
+        let kbps = share_kbps(kbps, share);
         let options = VideoStreamEncoderOptions { codec: StreamVideoCodec::H264, width: w, height: h, fps: stream_fps, bitrate_kbps: kbps, keyint: 0, low_latency: true, full_chroma };
         let tile = StreamTile { engine: i as u32 % engines, x0, y0, source_height: size[1] };
         let mut encoder = VideoStreamEncoder::new_tile(options, tile).map_err(|e| format!("{e:?}"))?;
@@ -155,20 +172,27 @@ fn open_streams(size: [u32; 2], fps: u32, kbps: u32, split: Split, full_chroma: 
         std::thread::Builder::new()
             .name(format!("desk-link-encode-{i}"))
             .spawn(move || {
+                let mut applied = kbps;
                 while let Ok(w) = rx.recv() {
+                    if w.kbps != applied && w.kbps != 0 {
+                        encoder.set_bitrate_kbps(w.kbps);
+                        applied = w.kbps;
+                    }
                     if w.key {
                         encoder.request_keyframe();
                     } else if w.refine {
                         encoder.request_refinement();
                     }
+                    let pushed = makepad_hal::clock_ns();
                     let out = encoder.push_shared_texture(w.handle, w.ready, w.frame as i64).map_err(|e| format!("{e:?}")).map(|packets| packets.into_iter().flat_map(|p| p.data).collect::<Vec<u8>>());
-                    if done.send((i, w.frame, w.built_ns, makepad_hal::clock_ns(), w.key, out)).is_err() {
+                    let encoded = makepad_hal::clock_ns();
+                    if done.send((i, w.frame, w.built_ns, encoded, w.key, encoded.saturating_sub(pushed) / 1000, out)).is_err() {
                         return;
                     }
                 }
             })
             .map_err(|e| e.to_string())?;
-        streams.push(Stream { tx, x0, y0 });
+        streams.push(Stream { tx, share, x0, y0 });
     }
     Ok((streams, tiles))
 }
@@ -208,7 +232,7 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
     let last_change = std::cell::Cell::new(Instant::now());
     let refining: std::cell::Cell<Option<u32>> = std::cell::Cell::new(None);
     let take = |d: Done, streams: &Option<(Vec<Stream>, [u32; 2], (Split, bool, u32, TilePlan), bool)>, gathering: &mut Gathering, failed: &mut bool, fail: &mut dyn FnMut(String)| {
-        let (i, frame, built_ns, encoded_ns, key, out) = d;
+        let (i, frame, built_ns, encoded_ns, key, took_us, out) = d;
         let Some((list, _, _, tiles)) = streams else { return };
         let parts = if *tiles { list.len() } else { 1 };
         match out {
@@ -221,8 +245,10 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
                 }
                 let msg = proto::encode_video(frame, key, built_ns, encoded_ns, 0, (i as u8, parts as u8, list[i].x0, list[i].y0), &data);
                 stats.encode_us_max.fetch_max(encoded_ns.saturating_sub(built_ns) / 1000, Ordering::Relaxed);
-                let complete = |stats: &EncodeStats| {
+                let complete = |stats: &EncodeStats, took_us: u64| {
                     stats.pictures.fetch_add(1, Ordering::Relaxed);
+                    stats.tile_us_sum.fetch_add(took_us, Ordering::Relaxed);
+                    stats.tile_pictures.fetch_add(1, Ordering::Relaxed);
                     stats.last_frame.store(frame, Ordering::Relaxed);
                     if refining.get().is_some() {
                         stats.refined.fetch_add(1, Ordering::Relaxed);
@@ -230,16 +256,17 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
                 };
                 if parts == 1 {
                     send(msg);
-                    complete(&stats);
+                    complete(&stats, took_us);
                 } else {
                     // each engine encodes in order: the oldest picture completes first
-                    let Some((_, slot)) = gathering.iter_mut().find(|(f, _)| *f == frame) else { return };
+                    let Some((_, slot, slowest)) = gathering.iter_mut().find(|(f, _, _)| *f == frame) else { return };
                     slot[i] = Some(msg);
-                    if gathering.front().is_some_and(|(_, parts)| parts.iter().all(Option::is_some)) {
-                        let (_, parts) = gathering.pop_front().unwrap();
+                    *slowest = (*slowest).max(took_us);
+                    if gathering.front().is_some_and(|(_, parts, _)| parts.iter().all(Option::is_some)) {
+                        let (_, parts, slowest) = gathering.pop_front().unwrap();
                         let all: Vec<u8> = parts.into_iter().flat_map(Option::unwrap).collect();
                         send(all);
-                        complete(&stats);
+                        complete(&stats, slowest);
                     }
                 }
             }
@@ -339,9 +366,9 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
                     for _ in 1..n {
                         readies.push(clone_ready(&readies[0]));
                     }
-                    gathering.push_back((frame, vec![None; n]));
+                    gathering.push_back((frame, vec![None; n], 0));
                     for (s, ready) in list.iter().zip(readies) {
-                        let _ = s.tx.send(Work { handle, _held: held.clone(), ready, frame, key, refine, built_ns });
+                        let _ = s.tx.send(Work { handle, _held: held.clone(), ready, frame, key, refine, built_ns, kbps: share_kbps(kbps, s.share) });
                         in_flight += 1;
                     }
                     while let Ok(d) = done_rx.try_recv() {
@@ -356,7 +383,8 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
                         in_flight -= 1;
                         take(d, &streams, &mut gathering, &mut failed, &mut fail);
                     }
-                    let _ = list[frame as usize % n].tx.send(Work { handle, _held: held, ready, frame, key, refine, built_ns });
+                    let s = &list[frame as usize % n];
+                    let _ = s.tx.send(Work { handle, _held: held, ready, frame, key, refine, built_ns, kbps: share_kbps(kbps, s.share) });
                     in_flight += 1;
                     // answers that came meanwhile go out at once
                     while let Ok(d) = done_rx.try_recv() {

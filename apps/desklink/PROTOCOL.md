@@ -1,4 +1,4 @@
-# Desk Link protocol, version 5
+# Desk Link protocol, version 6
 
 Desk Link is how a viewer (this app) sees and drives a desktop (the window manager's
 `desk_link` server, `apps/wm/src/desk_link/`). It runs between machines on one LAN only: no
@@ -50,7 +50,7 @@ Fixed-size fields are little-endian. `str` and `bytes` are `u32 LE length` + byt
 
 | type | name | payload |
 |---|---|---|
-| 1 | Hello | `version u16, name str, authorization str, screen i32 (-1 = the desktop's default), paused bool, caps u32` (1 = the viewer's decoder takes H.264 High 4:4:4 Predictive) |
+| 1 | Hello | `version u16, name str, authorization str, screen i32 (-1 = the desktop's default), paused bool, caps u32` (1 = the viewer's decoder takes H.264 High 4:4:4 Predictive; 2 = view-only: its `Window` never decides the size of a desktop that follows its viewer, e.g. a probe) |
 | 2 | Pause | — no pictures for this session; pings continue |
 | 3 | Resume | — pictures again, starting with a key frame |
 | 4 | SelectScreen | `index u32` (into `Welcome.screens`) |
@@ -67,6 +67,7 @@ Fixed-size fields are little-endian. `str` and `bytes` are `u32 LE length` + byt
 | 20 | Ping | `client_ns u64` (the viewer's clock) |
 | 21 | Stats | `frame u32, decode_us u32, present_us u32` |
 | 22 | Clipboard | `text str` (the desktop's clipboard takes it) |
+| 23 | RateCap | `mbps u16`: the most this viewer wants the stream to take (all tiles; 0 = no cap of its own). The desktop streams at most the lowest cap of its watching viewers. |
 
 Gamepad buttons: bit 0 A, 1 B, 2 X, 3 Y, 4 left shoulder, 5 right shoulder, 6 select, 7 start, 8 home,
 9 left thumb, 10 right thumb, 11-14 d-pad up/down/left/right. Sticks run −32767..32767, up positive
@@ -84,7 +85,7 @@ Gamepad buttons: bit 0 A, 1 B, 2 X, 3 Y, 4 left shoulder, 5 right shoulder, 6 se
 | 105 | Stream | `screen u32, stream_w u32, stream_h u32` (the stream shows another screen now) |
 | 106 | Clipboard | `text str` |
 | 107 | Bye | `reason str` (then the desktop closes) |
-| 108 | Rate | `fps u16`: the pictures a second the desktop streams at now: the lowest of its settings' cap (`fps`, default 120), its streamed screen's refresh and every watching viewer's `Refresh`. Sent after Welcome and on every change; a still desktop sends fewer. |
+| 108 | Rate | `fps u16, kbps u32, limit u8, full_chroma bool`: the pictures a second the desktop streams at now (the lowest of its settings' cap (`fps`, default 120), its streamed screen's refresh and every watching viewer's `Refresh`; a still desktop sends fewer), the stream's rate (kbit/s, all tiles; 0 = by picture size), what holds the rate (0 starting, 1 nothing: rising, 2 the link, 3 the encoder, 4 a cap, 5 a fixed setting) and whether it is 4:4:4. Sent after Welcome and on every change. |
 
 Screens are in desktop device pixels. `input = false` means viewer input is not injected (for
 example, no `/dev/uinput` access); `input_note` says why.
@@ -110,8 +111,13 @@ example, no `/dev/uinput` access); `input_note` says why.
 - **Damage-driven.** A picture is made only when the desktop's own frame changed (not for a cursor
   move), at most one per `1/fps` seconds (`fps = 60` by default). A change that comes too soon is
   encoded when it is due. An idle desktop sends nothing.
-- **Rate control.** VBR, average `kbps` (default about 0.12 bit per pixel per picture at the planned
-  fps; 60 Mbit/s for 4K60), peak 2x average, virtual buffer 2 frames.
+- **Rate control.** VBR at one rate for the whole stream, split over the tiles by area. A fixed
+  `kbps` setting, or adaptive: it starts at 250 Mbit/s (or the size's own rate, about 0.45 bit per
+  pixel per picture at 4:4:4, if lower), goes down below what got out when a viewer falls behind
+  (link-bound), and creeps back up when clean, up to the size's rate, `max_mbps` and
+  the viewers' `RateCap`. When the encoder cannot keep a picture's time at 4:4:4 (its slowest
+  tile takes most of it and frames wait for it), that size streams 4:2:0 at the same picture
+  rate, and tries 4:4:4 again after a while. `Rate` tells the viewers each change.
 - **Backpressure.** The desktop never drops an encoded picture: the next one references it. While
   a watching viewer has more than 2 pictures unsent, it makes none. The newest picture goes out
   once the viewer has caught up.

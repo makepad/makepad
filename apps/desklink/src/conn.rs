@@ -58,6 +58,9 @@ pub struct Latency {
 
 /// This display's refresh (Hz; 0 = not measured yet): every connection tells its desktop.
 pub static DISPLAY_HZ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// The rate cap the user set (Mbit/s, all tiles; 0 = auto: the desktop's own): every connection
+/// tells its desktop (`RateCap`).
+pub static RATE_CAP_MBPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// The picture area in device pixels (width << 32 | height) and the scale (hundredths), as the
 /// view last drew it: told to the desktop once it has held still (`WINDOW_SETTLE`).
@@ -65,6 +68,8 @@ static VIEW_WINDOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 static VIEW_SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 /// A window size is told once it held this long (a live resize sends only where it ends).
 const WINDOW_SETTLE: Duration = Duration::from_millis(250);
+/// A window size that has not held still this long after it changed is reported in the log.
+const WINDOW_LATEST: Duration = Duration::from_millis(1000);
 
 pub fn set_view_window(width: u32, height: u32, scale: u32) {
     VIEW_WINDOW.store((width as u64) << 32 | height as u64, Ordering::Release);
@@ -87,12 +92,17 @@ pub struct Shared {
     pub mbps: f64,
     /// The pictures a second the desktop streams at (its `Rate`; a still desktop sends fewer).
     pub stream_fps: Option<u16>,
+    /// The stream's rate (kbit/s), what holds it (`limit::*`) and whether it is 4:4:4 (its `Rate`).
+    pub stream_rate: Option<(u32, u8, bool)>,
     pub warning: Option<String>,
     /// Over the last second: the longest time the network thread did not read (ms; a stall
     /// here fills the desktop's socket and holds its pictures back), and the most pictures
     /// waiting for the decoder (decoding slower than they arrive).
     pub read_gap_ms: f64,
     pub decode_queue: usize,
+    /// Pictures decoded but never shown (see `Assembly::dropped`), counted up by the decoders;
+    /// the view reads and resets it once a second.
+    pub dropped: u32,
 }
 
 /// A decoded part of a picture: its pixels from column `x0`, row `y0` on (all of it, or one
@@ -322,8 +332,11 @@ impl Net {
         let mut last_heard = Instant::now();
         // the display refresh last told to the desktop
         let mut told_hz = 0u32;
-        // the window last told, and the one seen since when
+        let mut told_cap = 0u32;
+        // the window last told, the one seen since when, and since when the window differs from
+        // the one told (a size that keeps changing is told after WINDOW_LATEST anyway)
         let (mut told_window, mut seen_window) = ((0u64, 0u32), ((0u64, 0u32), Instant::now()));
+        let mut differs_since: Option<Instant> = None;
         let result = loop {
             if self.stop.load(Ordering::Acquire) {
                 break Ok("closed".into());
@@ -335,11 +348,29 @@ impl Net {
                     break Err(format!("write: {e}"));
                 }
             }
+            let cap = RATE_CAP_MBPS.load(Ordering::Acquire);
+            if cap != told_cap {
+                told_cap = cap;
+                if let Err(e) = proto::write_all(&mut stream, &ClientMsg::RateCap { mbps: cap.min(u16::MAX as u32) as u16 }.encode()) {
+                    break Err(format!("write: {e}"));
+                }
+            }
             let window = (VIEW_WINDOW.load(Ordering::Acquire), VIEW_SCALE.load(Ordering::Acquire));
+            if window != told_window {
+                differs_since.get_or_insert_with(Instant::now);
+            }
             if window != seen_window.0 {
                 seen_window = (window, Instant::now());
-            } else if window != told_window && seen_window.1.elapsed() >= WINDOW_SETTLE {
+            }
+            if differs_since.is_some_and(|t| t.elapsed() >= WINDOW_LATEST) {
+                // never settled: say so (a layout flapping by a pixel would keep the desktop at
+                // its old size), once per change
+                eprintln!("desklink: the window has not held still for {} ms since it changed (now {}x{} at {}, told {}x{}); not told yet", WINDOW_LATEST.as_millis(), window.0 >> 32, window.0 as u32, window.1, told_window.0 >> 32, told_window.0 as u32);
+                differs_since = Some(Instant::now() + Duration::from_secs(3600));
+            }
+            if window != told_window && seen_window.1.elapsed() >= WINDOW_SETTLE {
                 told_window = window;
+                differs_since = None;
                 let (width, height) = ((window.0 >> 32) as u32, window.0 as u32);
                 if width > 0 && height > 0 {
                     let scale = window.1.min(u16::MAX as u32) as u16;
@@ -452,8 +483,11 @@ impl Net {
                         }
                         self.signal.set();
                     }
-                    ServerMsg::Rate { fps } => {
-                        self.shared.lock().unwrap().stream_fps = Some(fps);
+                    ServerMsg::Rate { fps, kbps, limit, full_chroma } => {
+                        let mut s = self.shared.lock().unwrap();
+                        s.stream_fps = Some(fps);
+                        s.stream_rate = Some((kbps, limit, full_chroma));
+                        drop(s);
                         self.signal.set();
                     }
                     ServerMsg::Clipboard { .. } => {}
@@ -570,8 +604,7 @@ fn play_loop(path: String, gpu: bool, still: Option<u32>, shared: Arc<Mutex<Shar
 
 fn decode_loop(rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal: SignalToUI, shared: Arc<Mutex<Shared>>, cmd: Sender<ClientMsg>, queued: Arc<AtomicUsize>, gpu: bool) {
     // one decoder per encoder stream (a tile, or an interleaved stream), each on a thread of its
-    // own. The hardware decode itself goes in turn where the platform needs it (macOS: one
-    // engine, see apple_stream_decoder's DECODE_IN_TURN); the threads overlap the rest
+    // own: the tiles of a picture decode at once, put together by frame number before they show
     let gathering: Arc<Mutex<Assembly>> = Arc::new(Mutex::new(Assembly::default()));
     let mut workers: Vec<Sender<Packet>> = Vec::new();
     // how many streams the desktop sends (a single one is checked for missing pictures)
@@ -611,24 +644,89 @@ type Gather = (u32, Vec<Option<Part>>, Picture);
 /// published (an interleaved stream's older picture finishing late is not shown after a newer).
 #[derive(Default)]
 struct Assembly {
-    gather: Option<Gather>,
+    /// The pictures whose tiles are coming in, oldest first (at most `GATHERING`): the tile
+    /// decoders run apart (one hardware engine time-sliced over their sessions), so a tile of
+    /// the next picture often finishes before the last tile of this one. Gathering one picture
+    /// at a time dropped this one then: ~70 of ~115 pictures a second shown.
+    gather: std::collections::VecDeque<Gather>,
     published: Option<u32>,
+    /// Pictures never shown since the last `take_dropped`: replaced by a newer one before the
+    /// view took them, or never complete (a newer one completed first).
+    dropped: u32,
+}
+
+/// Pictures put together at once (tiles of more pictures than this apart: the oldest goes).
+const GATHERING: usize = 4;
+
+/// `a` is older than `b` (frame numbers wrap).
+fn older(a: u32, b: u32) -> bool {
+    a != b && b.wrapping_sub(a) < u32::MAX / 2
 }
 
 impl Assembly {
     fn publish(&mut self, picture: Picture, latest: &Mutex<Option<Picture>>, signal: &SignalToUI) {
-        if self.published.is_some_and(|last| picture.frame.wrapping_sub(last) > u32::MAX / 2) {
+        if self.published.is_some_and(|last| !older(last, picture.frame)) {
             return;
         }
         self.published = Some(picture.frame);
-        *latest.lock().unwrap() = Some(picture);
+        if latest.lock().unwrap().replace(picture).is_some() {
+            self.dropped += 1;
+        }
         signal.set();
+    }
+
+    /// A tile of a picture of `parts` tiles; the picture once all of them are here (older
+    /// pictures still incomplete then are dropped: this one shows instead).
+    fn tile(&mut self, s: usize, parts: usize, part: Part, picture: Picture) -> Option<Picture> {
+        let frame = picture.frame;
+        if self.published.is_some_and(|last| !older(last, frame)) {
+            return None;
+        }
+        let at = match self.gather.iter().position(|(f, got, _)| *f == frame && got.len() == parts) {
+            Some(i) => {
+                let (_, _, p) = &mut self.gather[i];
+                p.encoded_ns = p.encoded_ns.max(picture.encoded_ns);
+                p.received_ns = p.received_ns.max(picture.received_ns);
+                p.decoded_ns = p.decoded_ns.max(picture.decoded_ns);
+                // the slowest tile's decode: they ran at once
+                p.decode_ns = p.decode_ns.max(picture.decode_ns);
+                i
+            }
+            None => {
+                let i = self.gather.iter().position(|(f, _, _)| older(frame, *f)).unwrap_or(self.gather.len());
+                self.gather.insert(i, (frame, (0..parts).map(|_| None).collect(), picture));
+                if self.gather.len() > GATHERING {
+                    self.gather.pop_front();
+                    self.dropped += 1;
+                    if i == 0 {
+                        return None;
+                    }
+                    i - 1
+                } else {
+                    i
+                }
+            }
+        };
+        let (_, got, _) = &mut self.gather[at];
+        if s < got.len() {
+            got[s] = Some(part);
+        }
+        if !got.iter().all(Option::is_some) {
+            return None;
+        }
+        // complete: the older ones never will be shown
+        self.dropped += at as u32;
+        let (_, got, mut p) = self.gather.drain(..=at).last().unwrap();
+        p.parts = got.into_iter().flatten().collect();
+        p.width = p.parts.iter().map(|part| part.x0 + part.width).max().unwrap_or(0);
+        p.height = p.parts.iter().map(|part| part.y0 + part.height).max().unwrap_or(0);
+        Some(p)
     }
 }
 
 /// One encoder stream's decoder: waits for its key frame after a failure; a whole picture
 /// goes out at once, a tile once its picture's other tiles are here (never a torn picture; a
-/// tile of a newer picture drops an incomplete older one).
+/// newer picture complete first drops the older incomplete ones, see `Assembly`).
 fn decode_stream(s: usize, rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal: SignalToUI, shared: Arc<Mutex<Shared>>, cmd: Sender<ClientMsg>, gathering: Arc<Mutex<Assembly>>, streams: Arc<AtomicUsize>, gpu: bool) {
     let mut decoder: Option<VideoStreamDecoder> = None;
     let mut waiting_key = false;
@@ -693,32 +791,65 @@ fn decode_stream(s: usize, rx: Receiver<Packet>, latest: Arc<Mutex<Option<Pictur
             if parts == 1 {
                 picture.parts.push(part);
                 assembly.publish(picture, &latest, &signal);
+                let dropped = std::mem::take(&mut assembly.dropped);
+                drop(assembly);
+                if dropped > 0 {
+                    shared.lock().unwrap().dropped += dropped;
+                }
                 continue;
             }
-            let gathering = &mut assembly.gather;
-            match gathering.as_mut() {
-                Some((frame, got, p)) if *frame == packet.frame && got.len() == parts => {
-                    p.encoded_ns = p.encoded_ns.max(picture.encoded_ns);
-                    p.received_ns = p.received_ns.max(picture.received_ns);
-                    p.decoded_ns = p.decoded_ns.max(decoded_ns);
-                    // the slowest tile's decode: they ran at once
-                    p.decode_ns = p.decode_ns.max(picture.decode_ns);
-                }
-                // an older picture's tile after a newer one started: dropped
-                Some((frame, got, _)) if got.len() == parts && frame.wrapping_sub(packet.frame) < u32::MAX / 2 && *frame != packet.frame => continue,
-                _ => *gathering = Some((packet.frame, (0..parts).map(|_| None).collect(), picture)),
-            }
-            let (_, got, _) = gathering.as_mut().unwrap();
-            if s < got.len() {
-                got[s] = Some(part);
-            }
-            if got.iter().all(Option::is_some) {
-                let (_, got, mut p) = gathering.take().unwrap();
-                p.parts = got.into_iter().flatten().collect();
-                p.width = p.parts.iter().map(|part| part.x0 + part.width).max().unwrap_or(0);
-                p.height = p.parts.iter().map(|part| part.y0 + part.height).max().unwrap_or(0);
+            if let Some(p) = assembly.tile(s, parts, part, picture) {
                 assembly.publish(p, &latest, &signal);
             }
+            let dropped = std::mem::take(&mut assembly.dropped);
+            drop(assembly);
+            if dropped > 0 {
+                shared.lock().unwrap().dropped += dropped;
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tile(frame: u32, s: usize) -> (Part, Picture) {
+        let part = Part { x0: s as u32 * 64, y0: 0, width: 64, height: 16, nv12: Vec::new(), gpu: None };
+        let picture = Picture { width: 0, height: 0, parts: Vec::new(), frame, built_ns: 0, encoded_ns: 0, sent_ns: 0, received_ns: 0, decoded_ns: 0, decode_ns: 0 };
+        (part, picture)
+    }
+
+    fn put(a: &mut Assembly, frame: u32, s: usize) -> Option<u32> {
+        let (part, picture) = tile(frame, s);
+        let p = a.tile(s, 2, part, picture)?;
+        assert_eq!((p.parts.len(), p.width), (2, 128));
+        a.published = Some(p.frame);
+        Some(p.frame)
+    }
+
+    /// The tile decoders drift apart: the next picture's first tile before this one's last
+    /// still shows both pictures (one at a time dropped every picture it overtook).
+    #[test]
+    fn tiles_of_two_pictures_in_flight_both_show() {
+        let mut a = Assembly::default();
+        assert_eq!(put(&mut a, 10, 0), None);
+        assert_eq!(put(&mut a, 11, 0), None);
+        assert_eq!(put(&mut a, 10, 1), Some(10));
+        assert_eq!(put(&mut a, 11, 1), Some(11));
+        assert_eq!(a.dropped, 0);
+        // a newer picture complete first: the older one never shows, its late tile is ignored
+        assert_eq!(put(&mut a, 12, 0), None);
+        assert_eq!(put(&mut a, 13, 0), None);
+        assert_eq!(put(&mut a, 13, 1), Some(13));
+        assert_eq!(a.dropped, 1);
+        assert_eq!(put(&mut a, 12, 1), None);
+        assert!(a.gather.is_empty());
+        // frame numbers wrap
+        a.published = Some(u32::MAX - 1);
+        assert_eq!(put(&mut a, u32::MAX, 0), None);
+        assert_eq!(put(&mut a, 0, 0), None);
+        assert_eq!(put(&mut a, u32::MAX, 1), Some(u32::MAX));
+        assert_eq!(put(&mut a, 0, 1), Some(0));
     }
 }

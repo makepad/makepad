@@ -28,12 +28,18 @@ pub fn read() -> Option<(u64, u64)> {
 pub fn read_levels() -> Option<[(u64, u64); 2]> {
     extern "C" {
         fn thread_selfcounts(kind: i32, buf: *mut u64, nbytes: usize) -> i32;
-        fn sysctlbyname(n: *const u8, o: *mut u32, ol: *mut usize, nn: *const u8, nl: usize) -> i32;
+        fn sysctlbyname(
+            name: *const std::ffi::c_char,
+            old: *mut std::ffi::c_void,
+            size: *mut usize,
+            new: *mut std::ffi::c_void,
+            new_size: usize,
+        ) -> i32;
     }
     static LEVELS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     let n = *LEVELS.get_or_init(|| {
         let (mut v, mut l) = (0u32, 4usize);
-        if unsafe { sysctlbyname(b"hw.nperflevels\0".as_ptr(), &mut v, &mut l, std::ptr::null(), 0) } == 0 { (v as usize).clamp(1, 2) } else { 1 }
+        if unsafe { sysctlbyname(b"hw.nperflevels\0".as_ptr().cast(), (&mut v as *mut u32).cast(), &mut l, std::ptr::null_mut(), 0) } == 0 { (v as usize).clamp(1, 2) } else { 1 }
     });
     let mut b = [0u64; 4];
     if unsafe { thread_selfcounts(2, b.as_mut_ptr(), 16 * n) } != 0 {
