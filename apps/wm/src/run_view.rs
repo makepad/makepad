@@ -524,18 +524,6 @@ impl MpRunView {
         }
     }
 
-    /// Keep the tail -- that is where the crate name is.
-    fn trimmed_status(&self, width: f64) -> String {
-        // The code font at 9pt is about 7 logical px per character.
-        let max = ((width - 24.0) / 7.0).floor().max(8.0) as usize;
-        let chars: Vec<char> = self.status_line.chars().collect();
-        if chars.len() <= max {
-            return self.status_line.clone();
-        }
-        let tail: String = chars[chars.len() - (max - 1)..].iter().collect();
-        format!("\u{2026}{}", tail)
-    }
-
     pub fn has_frame(&self) -> bool {
         self.hosted.has_frame()
     }
@@ -648,20 +636,18 @@ impl Widget for MpRunView {
                 self.startup_initialized = true;
                 self.no_fb_view.set_text(cx, include_str!("../resources/startup.splash"));
             }
-            let t = self.status_line.trim_start();
-            let lower = t.to_ascii_lowercase();
-            let headline = if lower.starts_with("compiling") {
-                "Compiling…"
-            } else if lower.starts_with("waiting for another build") {
-                "Waiting to compile…"
-            } else if lower.starts_with("build failed") {
-                "Could not build application"
-            } else { "Starting…" };
+            let (headline, progress) = startup_headline(&self.status_line);
             self.no_fb_view.label(cx, ids!(placeholder)).set_text(cx, headline);
-            let status = self.trimmed_status(rect.size.x);
+            let status = startup_detail(&self.status_line, rect.size.x);
             self.no_fb_view
                 .label(cx, ids!(status_line))
                 .set_text(cx, &status);
+            let bar = self.no_fb_view.widget(cx, ids!(startup_progress));
+            bar.set_visible(cx, progress.is_some());
+            if let (Some(progress), Some(mut bar)) = (progress, bar.borrow_mut::<View>()) {
+                // The Splash isolate's view: set its draw instance directly.
+                bar.draw_bg.draw_vars.set_dyn_instance(cx, id!(progress), &[progress]);
+            }
             if let Some(mut icon) = self.no_fb_view.widget(cx, ids!(startup_icon)).borrow_mut::<app_icon::AppIcon>() {
                 icon.set_name(cx, if self.startup_app.is_empty() {"app"} else {&self.startup_app});
             }
@@ -879,5 +865,77 @@ impl crate::tile::TileHost for MpRunView {
 
     fn set_visible(&mut self, cx: &mut Cx, visible: bool) -> bool {
         MpRunView::send_visible(self, cx, visible)
+    }
+}
+
+/// The card's status line: the build stage without the "building <app>… "
+/// prefix (the icon and headline say that), cut at the end with an ellipsis
+/// so the crate count stays and the card stays compact.
+fn startup_detail(status: &str, width: f64) -> String {
+    let status = status.trim();
+    let stage = match status.strip_prefix("building ").and_then(|rest| rest.split_once("\u{2026} ")) {
+        Some((_, stage)) if !stage.trim().is_empty() => stage.trim(),
+        _ => status,
+    };
+    // The card is at most ~520 logical px wide; the regular font at 11pt
+    // is about 6.5 logical px per character.
+    let max = ((width.min(520.0) - 96.0) / 6.5).floor().max(12.0) as usize;
+    if stage.chars().count() <= max {
+        return stage.to_string();
+    }
+    let head: String = stage.chars().take(max - 1).collect();
+    format!("{}\u{2026}", head.trim_end_matches(|c: char| c == ',' || c == ' ' || c == '\u{b7}' || c == '\u{2026}'))
+}
+
+/// The startup card's headline for the launcher's status line, and the
+/// build progress (0..1) from its "N/M crates" when it has one.
+/// "building Synth… compiling 149/162 crates · makepad-flow, …"
+fn startup_headline(status: &str) -> (&'static str, Option<f32>) {
+    let lower = status.trim().to_ascii_lowercase();
+    let headline = if lower.contains("failed") {
+        "Could not build application"
+    } else if lower.contains("waiting for another build") {
+        "Waiting to compile…"
+    } else if lower.starts_with("compiling") || lower.contains("… compiling") {
+        "Compiling…"
+    } else {
+        "Starting…"
+    };
+    let progress = lower.split_once(" crates").and_then(|(head, _)| {
+        let (done, total) = head.rsplit(' ').next()?.split_once('/')?;
+        let (done, total) = (done.parse::<f32>().ok()?, total.parse::<f32>().ok()?);
+        (total > 0.0).then(|| (done / total).clamp(0.0, 1.0))
+    });
+    (headline, progress)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{startup_detail, startup_headline};
+
+    #[test]
+    fn startup_headline_reads_the_launcher_status() {
+        let (h, p) = startup_headline("building Synth… compiling 149/162 crates · makepad-flow, makepad-script…");
+        assert_eq!(h, "Compiling…");
+        assert!((p.unwrap() - 149.0 / 162.0).abs() < 1e-6);
+        assert_eq!(startup_headline("compiling 0/88 crates…"), ("Compiling…", Some(0.0)));
+        assert_eq!(startup_headline("compiling makepad-app-clock…"), ("Compiling…", None));
+        assert_eq!(startup_headline("waiting for another build…"), ("Waiting to compile…", None));
+        assert_eq!(startup_headline("building Synth failed (1)").0, "Could not build application");
+        assert_eq!(startup_headline("build failed — see the app log").0, "Could not build application");
+        assert_eq!(startup_headline("starting Clock…"), ("Starting…", None));
+        assert_eq!(startup_headline(""), ("Starting…", None));
+    }
+
+    #[test]
+    fn startup_detail_keeps_the_count_and_cuts_the_crate_list() {
+        let line = "building Synth… compiling 149/162 crates · makepad-flow, makepad-script, makepad-widgets…";
+        assert_eq!(startup_detail("building Synth… compiling 149/162 crates · makepad-flow…", 2000.0), "compiling 149/162 crates · makepad-flow…");
+        assert!(startup_detail(line, 2000.0).chars().count() <= 65);
+        let short = startup_detail(line, 300.0);
+        assert!(short.starts_with("compiling 149/162 crates"), "{short}");
+        assert!(short.ends_with('\u{2026}') && short.chars().count() <= 31, "{short}");
+        assert_eq!(startup_detail("starting Clock…", 600.0), "starting Clock…");
+        assert_eq!(startup_detail("building Synth…", 600.0), "building Synth…");
     }
 }
