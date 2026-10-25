@@ -308,10 +308,18 @@ pub fn cargo_bin() -> PathBuf {
 /// builds, so nothing it compiled compiles again (`makepad-builder build
 /// APP`, Unix `makepad-builder.sh build APP`).
 pub fn build_argv(app: &AppTarget, root: &Path) -> (PathBuf, Vec<String>) {
-    if let Some(command) = builder_install().and_then(|install| install.command()) {
-        return (command, vec!["build".to_string(), app.id.to_string()]);
+    build_argv_features(app, root, "")
+}
+
+/// [`build_argv`] with cargo features (`--features a,b`; empty: the package's defaults). A
+/// Builder installation builds its own feature sets, so a feature list always builds with cargo.
+pub fn build_argv_features(app: &AppTarget, root: &Path, features: &str) -> (PathBuf, Vec<String>) {
+    if features.trim().is_empty() {
+        if let Some(command) = builder_install().and_then(|install| install.command()) {
+            return (command, vec!["build".to_string(), app.id.to_string()]);
+        }
     }
-    cargo_argv(app, root)
+    cargo_argv(app, root, features)
 }
 
 /// `cargo run` of `app` from the checkout `root` with `app_args` after `--`: cargo
@@ -319,7 +327,14 @@ pub fn build_argv(app: &AppTarget, root: &Path) -> (PathBuf, Vec<String>) {
 /// (Unix: the same process). How a checkout launches a hosted app: it never starts a
 /// binary older than its sources. Release, always.
 pub fn run_argv(app: &AppTarget, root: &Path, app_args: &[String]) -> (PathBuf, Vec<String>) {
-    let (program, mut args) = cargo_argv(app, root);
+    run_argv_features(app, root, "", app_args)
+}
+
+/// [`run_argv`] with cargo features. A service the WM supervises starts this way with the
+/// features its deploy built (`makepad-cargo build --features <the same> <app>`), so the start
+/// compiles nothing.
+pub fn run_argv_features(app: &AppTarget, root: &Path, features: &str, app_args: &[String]) -> (PathBuf, Vec<String>) {
+    let (program, mut args) = cargo_argv(app, root, features);
     args[0] = "run".to_string();
     args.push("--".to_string());
     args.extend(app_args.iter().cloned());
@@ -385,11 +400,15 @@ pub fn cargo_command(program: &Path, args: &[String], root: &Path) -> Command {
     command
 }
 
-fn cargo_argv(app: &AppTarget, root: &Path) -> (PathBuf, Vec<String>) {
+fn cargo_argv(app: &AppTarget, root: &Path, features: &str) -> (PathBuf, Vec<String>) {
     let manifest = root.join(app.manifest.unwrap_or("Cargo.toml"));
     let manifest = manifest.to_string_lossy();
     let args = ["build", "--release", "--manifest-path", &manifest, "-p", app.package, "--bin", app.bin];
-    (cargo_bin(), args.iter().map(|arg| arg.to_string()).collect())
+    let mut args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+    if !features.trim().is_empty() {
+        args.extend(["--features".to_string(), features.trim().to_string()]);
+    }
+    (cargo_bin(), args)
 }
 
 // ----------------------------------------------------------------------
@@ -571,7 +590,7 @@ mod tests {
     #[test]
     fn a_cargo_build_is_a_release_build_of_exactly_the_binary() {
         let root = PathBuf::from("/checkout");
-        let (program, args) = cargo_argv(&find("route").unwrap().target(), &root);
+        let (program, args) = cargo_argv(&find("route").unwrap().target(), &root, "");
         assert!(program.to_string_lossy().ends_with("cargo"), "{program:?}");
         let manifest = root.join("Cargo.toml").to_string_lossy().into_owned();
         assert_eq!(
@@ -579,8 +598,26 @@ mod tests {
             ["build", "--release", "--manifest-path", manifest.as_str(), "-p", "makepad-app-route", "--bin", "makepad-app-route"]
         );
         let own = AppTarget { manifest: Some("apps/x/Cargo.toml"), ..find("notes").unwrap().target() };
-        let (_, args) = cargo_argv(&own, &root);
+        let (_, args) = cargo_argv(&own, &root, "");
         assert_eq!(args[3], root.join("apps/x/Cargo.toml").to_string_lossy());
+    }
+
+    /// A service the WM runs with features (the AI Hub: `node`) is built by the deploy with the
+    /// same list, so `cargo run` of it is a no-op: the two commands differ only in the verb.
+    #[test]
+    fn a_feature_run_and_the_deploys_feature_build_share_every_input() {
+        let root = Path::new("/checkout");
+        let hub = find("aihub").unwrap().target();
+        let (_, build) = build_argv_features(&hub, root, "node");
+        let (_, run) = run_argv_features(&hub, root, "node", &[]);
+        assert_eq!(build[0], "build");
+        assert_eq!(run[0], "run");
+        assert_eq!(build[1..], run[1..run.len() - 1]);
+        assert_eq!(&build[build.len() - 2..], ["--features", "node"]);
+        assert_eq!(run.last().map(String::as_str), Some("--"));
+        // no features: the package's defaults, as every launcher builds
+        let (_, plain) = build_argv_features(&hub, root, "");
+        assert!(!plain.iter().any(|a| a == "--features"));
     }
 
     /// Every launcher's cargo builds with the workspace profile and no

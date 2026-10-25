@@ -1,16 +1,23 @@
 //! This node's AI hub: the AI Hub app (apps/aihub), started by the window manager as an
 //! ordinary process at session start, the same app a Mac or Windows desktop runs, with its tray
-//! icon in the WM's tray area (`trays`) and its window as the hub's control panel. The WM keeps
-//! it running:
+//! icon in the WM's tray area (`trays`) and its panel as the tray's dropdown (a flyout under the
+//! bar item, `dropdown`). The WM keeps it running:
 //!
-//! - it runs under the JIT (`makepad run makepad-app-aihub --features node --allow-c`, the standing
-//!   default) or as the built binary (`runner = native`), with the node's settings
-//!   (`~/.makepad/wm/ai-hub.conf`, [`NodeConf`]): the app reads the same file
-//!   (`MAKEPAD_AI_HUB_NODE_CONF`) for where it serves (port, this node's LAN address, cache) and
-//!   which chat model it loads at start; the WM hands it the environment the file gives (the
-//!   chat model and pins, context, prefetch, the CUDA toolkit for the JIT's kernel build);
-//! - an app that exits (a crash, a kill, its Quit) is started again, after a pause that doubles
-//!   with each exit in a row (2 s .. 5 min) and starts over once it stayed up for two minutes;
+//! - it starts through `cargo run --release -p makepad-app-aihub --features <features>` in the WM's
+//!   checkout (the registry's `run_argv_features`, the cargo environment of every launcher), with
+//!   the node's settings (`~/.makepad/wm/ai-hub.conf`, [`NodeConf`]): the app reads the same
+//!   file (`MAKEPAD_AI_HUB_NODE_CONF`) for where it serves (port, this node's LAN address, cache)
+//!   and which chat model it loads at start; the WM hands it the environment the file gives (the
+//!   chat model and pins, context, prefetch, the CUDA toolkit for the kernel build). The rule for
+//!   every service the WM starts: `cargo run` with the deploy's exact build inputs (package,
+//!   features, release profile, the cargo target and CUDA environment of the WM session), so a
+//!   start after the deploy's build (`makepad-cargo build --features node aihub`) compiles
+//!   nothing and a start after a source change builds first: never a stale binary;
+//! - an app that exits (a crash, a kill) is started again, after a pause that doubles with each
+//!   exit in a row (2 s .. 5 min) and starts over once it stayed up for two minutes. Its tray
+//!   menu's Quit is deliberate: the app writes `enabled = off` into the settings, and the WM
+//!   leaves it off (also across WM restarts) until the person starts it from the launcher
+//!   (`start_from_launcher`, which writes `enabled = on`);
 //! - a WM restart does not cost it (Unix). It runs outside the WM's life: its output goes to its
 //!   log file, on Linux under systemd in a scope of the user's manager (the WM's unit stops its
 //!   whole control group), and `~/.makepad/wm/ai-hub.state` names its pid and what it was
@@ -28,11 +35,11 @@
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
-use makepad_ai_hub::node_conf::{NodeConf, Runner, CONF_ENV, NODE_CONF_ENV};
+use makepad_ai_hub::node_conf::{NodeConf, CONF_ENV, NODE_CONF_ENV};
 use makepad_app_registry as registry;
 
 /// The app's registry id and its package (the name its command line carries).
-const APP_ID: &str = "aihub";
+const APP_ID: &str = crate::clients::HUB_SERVICE_APP;
 
 /// The node's settings as the WM reads them: the file, or the defaults; a hidden WM without its
 /// own settings file starts no hub.
@@ -73,34 +80,21 @@ impl Running {
     }
 }
 
-/// What the app was started as: the program (path, size, modification time) and everything the
-/// settings hand it. A WM that finds a live app with the same identity keeps it.
-fn identity(program: &Path, conf: &NodeConf) -> String {
-    let meta = std::fs::metadata(program).ok();
+/// What the app was started as: the binary cargo runs (path, size, modification time) and
+/// everything the settings hand it. A WM that finds a live app with the same identity keeps it.
+fn identity(binary: &Path, conf: &NodeConf) -> String {
+    let meta = std::fs::metadata(binary).ok();
     let size = meta.as_ref().map_or(0, |m| m.len());
     let modified = meta
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0, |d| d.as_nanos());
-    format!("{} {size} {modified} nice={} args={:?} env={:?}", program.display(), conf.nice, app_args(conf), conf.hub_env())
+    format!("{} {size} {modified} nice={} features={} env={:?}", binary.display(), conf.nice, conf.features, conf.hub_env())
 }
 
-/// The program's arguments: `run <package> --features <set> --allow-c` under the JIT, none
-/// natively. The hub links native AI libraries (ggml's CUDA kernels, built by their build
-/// scripts where a CUDA toolkit is named): the JIT builds those with cargo and links them in.
-fn app_args(conf: &NodeConf) -> Vec<String> {
-    match conf.runner {
-        Runner::Native => Vec::new(),
-        Runner::Jit => {
-            let package = registry::find(APP_ID).map_or("makepad-app-aihub", |e| e.package);
-            let mut args = vec!["run".to_string(), package.to_string()];
-            if !conf.features.trim().is_empty() {
-                args.extend(["--features".to_string(), conf.features.trim().to_string()]);
-            }
-            args.push("--allow-c".to_string());
-            args
-        }
-    }
+/// The registry's AI Hub app.
+fn hub_target() -> Result<registry::AppTarget<'static>, String> {
+    registry::find(APP_ID).map(|entry| entry.target()).ok_or_else(|| "the registry has no aihub".to_string())
 }
 
 /// `ai-hub.state`: the pid of the app this WM (or an earlier one) started and its identity.
@@ -119,7 +113,8 @@ fn read_state(path: &Path) -> Option<(u32, String)> {
 }
 
 /// Whether `pid` is still the AI Hub app: alive, and (Linux) its command line names the app
-/// (its binary, or the package `makepad run` runs), so a reused pid is never taken for it.
+/// (`cargo run ... --bin makepad-app-aihub` while cargo checks the build, then its binary), so a
+/// reused pid is never taken for it.
 fn app_alive(pid: u32) -> bool {
     if !makepad_app_host::launch::process_alive(pid) {
         return false;
@@ -184,28 +179,19 @@ impl HubApp {
         }
     }
 
-    /// What starts the app: the `makepad` tool (JIT) or the built app (the deploy builds
-    /// either). Starting takes seconds; the JIT compiles what runs.
-    fn program(&self) -> Result<PathBuf, String> {
-        let root = registry::repo_root();
-        match self.conf.runner {
-            Runner::Jit => registry::built_binary(&registry::MAKEPAD_RUN, root.as_deref())
-                .filter(|b| b.is_file())
-                .ok_or_else(|| "makepad is not built (the deploy builds it: cargo build --release -p makepad-run)".to_string()),
-            Runner::Native => {
-                let entry = registry::find(APP_ID).ok_or("the registry has no aihub")?;
-                let target = entry.target();
-                let bin = match (&self.conf.target_dir, &root) {
-                    (Some(dir), Some(root)) => Some(registry::checkout_binary(&target, root, Some(std::ffi::OsStr::new(dir)))),
-                    _ => registry::built_binary(&target, root.as_deref()),
-                };
-                bin.filter(|b| b.is_file())
-                    .ok_or_else(|| "the AI Hub app is not built (the deploy builds it: cargo build --release -p makepad-app-aihub --features node)".to_string())
-            }
-        }
+    /// The built app cargo runs (the deploy built it with the same features): its identity.
+    fn binary(&self) -> Result<PathBuf, String> {
+        let root = registry::repo_root().ok_or("no makepad checkout to run the AI Hub from")?;
+        let target_dir = std::env::var_os("CARGO_TARGET_DIR");
+        Ok(registry::checkout_binary(&hub_target()?, &root, target_dir.as_deref()))
     }
 
-    fn command(&self, program: &Path) -> Command {
+    /// `cargo run --release -p makepad-app-aihub --features <features>` in the checkout, with the
+    /// cargo environment of every launcher (`registry::cargo_env`), under the user's systemd
+    /// scope and `nice` where they exist: they and cargo exec, so the app's pid is the child's.
+    fn command(&self) -> Result<Command, String> {
+        let root = registry::repo_root().ok_or("no makepad checkout to run the AI Hub from")?;
+        let (cargo, cargo_args) = registry::run_argv_features(&hub_target()?, &root, &self.conf.features, &[]);
         let mut argv: Vec<std::ffi::OsString> = Vec::new();
         #[cfg(target_os = "linux")]
         if let Some(run) = user_scope() {
@@ -215,42 +201,31 @@ impl HubApp {
         if cfg!(unix) && self.conf.nice > 0 {
             argv.extend(["nice".into(), "-n".into(), self.conf.nice.to_string().into()]);
         }
-        argv.push(program.as_os_str().to_owned());
-        argv.extend(app_args(&self.conf).into_iter().map(Into::into));
+        argv.push(cargo.into_os_string());
+        argv.extend(cargo_args.into_iter().map(Into::into));
         let mut cmd = Command::new(&argv[0]);
-        cmd.args(&argv[1..]);
+        cmd.args(&argv[1..]).current_dir(&root);
+        registry::cargo_env(&mut cmd);
+        // Its output is a log file, not a terminal: plain lines.
+        cmd.env("CARGO_TERM_PROGRESS_WHEN", "never");
         registry::child_env::scrub(&mut cmd);
-        if let Some(root) = registry::repo_root() {
-            cmd.current_dir(root);
-        }
-        if self.conf.runner == Runner::Jit {
-            // How this machine debugs its JIT apps (`~/.makepad/wm/jit.env`), as for every JIT app.
-            if let Ok(text) = std::fs::read_to_string(crate::theme::makepad_home().join("wm/jit.env")) {
-                for (key, value) in crate::clients::jit_env(&text) {
-                    if key == "TMPDIR" {
-                        let _ = std::fs::create_dir_all(&value);
-                    }
-                    cmd.env(key, value);
-                }
-            }
-        }
         for (k, v) in self.conf.hub_env() {
             cmd.env(k, v);
         }
         // The app serves as this node's hub: from this file, not its own settings.
         cmd.env(NODE_CONF_ENV, &self.conf_path);
-        cmd
+        Ok(cmd)
     }
 
     /// The first start: a live app an earlier WM started with this identity is kept (a WM
     /// restart no longer costs the hub, its loaded models or its running jobs). One started
     /// from another binary or other settings is stopped, and a new one starts once it is gone.
-    fn adopt_or_replace(&mut self, now: f64, program: &Path) -> bool {
+    fn adopt_or_replace(&mut self, now: f64, binary: &Path) -> bool {
         let Some((pid, id)) = read_state(&self.state) else { return false };
         if !app_alive(pid) {
             return false;
         }
-        if id == identity(program, &self.conf) {
+        if id == identity(binary, &self.conf) {
             makepad_widgets::log!("wm: AI Hub: kept pid {pid}, started by an earlier WM with this program and these settings");
             self.running = Some(Running::Adopted(pid));
             self.restart_at = None;
@@ -275,18 +250,25 @@ impl HubApp {
             makepad_widgets::log!("wm: AI Hub: off in {}; not started", self.conf_path.display());
             return;
         }
-        let program = match self.program() {
-            Ok(program) => program,
+        let binary = match self.binary() {
+            Ok(binary) => binary,
             Err(reason) => {
                 makepad_widgets::log!("wm: AI Hub: {reason}");
                 self.retry_later(now, reason);
                 return;
             }
         };
-        if std::mem::take(&mut self.first_start) && self.adopt_or_replace(now, &program) {
+        if std::mem::take(&mut self.first_start) && self.adopt_or_replace(now, &binary) {
             return;
         }
-        let mut cmd = self.command(&program);
+        let mut cmd = match self.command() {
+            Ok(cmd) => cmd,
+            Err(reason) => {
+                makepad_widgets::log!("wm: AI Hub: {reason}");
+                self.retry_later(now, reason);
+                return;
+            }
+        };
         #[cfg(unix)]
         makepad_app_host::launch::own_process_group(&mut cmd);
         crate::host::no_console_window(&mut cmd);
@@ -312,14 +294,14 @@ impl HubApp {
         #[cfg(windows)]
         makepad_app_host::launch::exit_with_parent(&child);
         #[cfg(unix)]
-        if let Err(e) = std::fs::write(&self.state, format!("pid = {}\nidentity = {}\n", child.id(), identity(&program, &self.conf))) {
+        if let Err(e) = std::fs::write(&self.state, format!("pid = {}\nidentity = {}\n", child.id(), identity(&binary, &self.conf))) {
             makepad_widgets::log!("wm: AI Hub: {}: {e}", self.state.display());
         }
         makepad_widgets::log!(
-            "wm: AI Hub: started pid {} ({} {}, port {}{})",
+            "wm: AI Hub: started pid {} ({:?} {}, port {}{})",
             child.id(),
-            program.display(),
-            app_args(&self.conf).join(" "),
+            cmd.get_program(),
+            cmd.get_args().map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" "),
             self.conf.port,
             if self.conf.model.is_empty() { String::new() } else { format!(", model {}", self.conf.model) }
         );
@@ -349,6 +331,22 @@ impl HubApp {
         match said {
             Some(line) => format!("{status}: {line}"),
             None => status.to_string(),
+        }
+    }
+
+    /// The pid of the app this WM runs (its own child, or one an earlier WM left running):
+    /// the one the WM socket then admits as the node's hub (a service client, no tile).
+    pub fn pid(&self) -> Option<u32> {
+        self.running.as_ref().map(Running::pid)
+    }
+
+    /// The person started the hub from the launcher after its Quit (the caller wrote
+    /// `enabled = on`): it starts now, with a clean slate.
+    pub fn user_start(&mut self, now: f64) {
+        self.conf = NodeConf::load_or(&self.conf_path, &self.conf);
+        self.crashes = 0;
+        if self.running.is_none() {
+            self.restart_at = Some(now);
         }
     }
 
@@ -389,6 +387,12 @@ impl HubApp {
                 } else {
                     self.spawn(now);
                 }
+            } else if !NodeConf::load_or(&self.conf_path, &self.conf).enabled {
+                // Its Quit (or the settings turned it off): it stays off until the person starts
+                // it from the launcher.
+                makepad_widgets::log!("wm: AI Hub exited ({status}); off in {}: not started again", self.conf_path.display());
+                self.crashes = 0;
+                self.restart_at = None;
             } else {
                 if now - self.started_at >= STEADY_S {
                     self.crashes = 0;
@@ -439,6 +443,12 @@ impl HubApp {
     }
 }
 
+/// Whether `pid` is the AI Hub app this node's WMs started (`ai-hub.state` names it): when its
+/// process comes to the WM socket it is a service the WM supervises, not a window.
+pub fn is_hub_pid(pid: u32) -> bool {
+    read_state(&crate::theme::makepad_home().join("wm/ai-hub.state")).is_some_and(|(p, _)| p == pid)
+}
+
 /// The node's hub is off (`enabled = off`): one an earlier WM left running stops.
 pub fn stop_leftover(pool: &makepad_widgets::makepad_platform::thread::TaskPool) {
     let state = crate::theme::makepad_home().join("wm/ai-hub.state");
@@ -465,13 +475,14 @@ mod tests {
     }
 
     #[test]
-    fn the_app_runs_under_the_jit_with_the_node_features_or_natively() {
-        let jit = NodeConf::default();
-        assert_eq!(app_args(&jit), ["run", "makepad-app-aihub", "--features", "node", "--allow-c"]);
-        let native = NodeConf { runner: Runner::Native, ..Default::default() };
-        assert!(app_args(&native).is_empty());
-        let plain = NodeConf { features: String::new(), ..Default::default() };
-        assert_eq!(app_args(&plain), ["run", "makepad-app-aihub", "--allow-c"]);
+    fn the_app_starts_through_cargo_run_with_the_node_features() {
+        let target = hub_target().unwrap();
+        let (cargo, args) = registry::run_argv_features(&target, Path::new("/ck"), &NodeConf::default().features, &[]);
+        assert_eq!(cargo.file_name().and_then(|n| n.to_str()), Some("cargo"));
+        assert_eq!(args, ["run", "--release", "--manifest-path", "/ck/Cargo.toml", "-p", "makepad-app-aihub", "--bin", "makepad-app-aihub", "--features", "node", "--"]);
+        // The deploy's build is the same command with `build`.
+        let (_, build) = registry::build_argv_features(&target, Path::new("/ck"), "node");
+        assert_eq!(build[1..], args[1..args.len() - 1]);
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -511,20 +522,42 @@ mod tests {
     }
 
     #[test]
+    fn an_exit_after_its_quit_stays_off_until_the_launcher_starts_it() {
+        let mut h = app("quit");
+        let mut conf = NodeConf::default();
+        conf.enabled = false;
+        conf.save_to(&h.conf_path).unwrap();
+        let mut child = Command::new("false").spawn().unwrap();
+        let _ = child.wait();
+        h.running = Some(Running::Child(child));
+        h.tick(10.0);
+        assert!(h.running.is_none());
+        assert_eq!((h.crashes, h.restart_at), (0, None), "its Quit is no crash and schedules nothing");
+        h.tick(1000.0);
+        assert!(h.running.is_none(), "still off");
+        // The launcher writes `enabled = on` and starts it.
+        conf.enabled = true;
+        conf.save_to(&h.conf_path).unwrap();
+        h.user_start(2000.0);
+        assert_eq!(h.restart_at, Some(2000.0));
+        assert!(h.conf.enabled);
+    }
+
+    #[test]
     fn the_state_file_names_the_app_and_its_identity_follows_program_and_settings() {
         let dir = scratch("state");
         let state = dir.join("ai-hub.state");
-        std::fs::write(&state, "pid = 4242\nidentity = /x/makepad 10 20 nice=10 args=[] env=[]\n").unwrap();
-        assert_eq!(read_state(&state), Some((4242, "/x/makepad 10 20 nice=10 args=[] env=[]".to_string())));
+        std::fs::write(&state, "pid = 4242\nidentity = /x/makepad-app-aihub 10 20 nice=10 features=node env=[]\n").unwrap();
+        assert_eq!(read_state(&state), Some((4242, "/x/makepad-app-aihub 10 20 nice=10 features=node env=[]".to_string())));
         std::fs::write(&state, "pid = nope\n").unwrap();
         assert_eq!(read_state(&state), None);
-        let program = dir.join("makepad");
+        let program = dir.join("makepad-app-aihub");
         std::fs::write(&program, b"one").unwrap();
         let conf = NodeConf::default();
         let first = identity(&program, &conf);
         assert_eq!(first, identity(&program, &conf), "the same app is kept");
         assert_ne!(first, identity(&program, &NodeConf { model: "qwen3.8-27b".into(), ..Default::default() }), "other settings replace it");
-        assert_ne!(first, identity(&program, &NodeConf { runner: Runner::Native, ..Default::default() }), "another runner replaces it");
+        assert_ne!(first, identity(&program, &NodeConf { features: "node,claude-stub".into(), ..Default::default() }), "other features replace it");
         std::fs::write(&program, b"rebuilt").unwrap();
         assert_ne!(first, identity(&program, &conf), "a new build replaces it");
         // Keeping needs a live app: a gone pid is never taken.

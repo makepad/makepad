@@ -941,10 +941,14 @@ impl HostedApp {
         self.ticks_done = 0;
         #[cfg(target_os = "linux")]
         {
-            // Drop the outbox first: Drop shuts the aux endpoint before the
-            // client socket is replaced.
-            self.outbox = None;
-            self.aux_chan_listener = None;
+            // The descriptor channel is the client's, not its window's: another window of the
+            // same client (a service whose only window is a tray dropdown, with an id after its
+            // unmade main window's) keeps it. Drop the outbox first: Drop shuts the aux endpoint
+            // before the client socket is replaced.
+            if self.current_target.map(|target| target.client) != target.map(|target| target.client) {
+                self.outbox = None;
+                self.aux_chan_listener = None;
+            }
             self.inflight = None;
             self.pending = None;
             self.transport_error = None;

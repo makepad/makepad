@@ -189,7 +189,7 @@ pub fn host_dark() -> Option<bool> {
 #[cfg(all(target_os = "android", not(relax)))]
 pub use crate::app_main::android_on_load;
 pub use crate::app_main::{
-    admitted_by_window_manager, attach_parent_console, discover_window_manager, hosted_by_window_manager, is_window_manager, launched_by_host,
+    admitted_by_window_manager, attach_parent_console, discover_window_manager, hosted_by_window_manager, is_window_manager, launched_by_host, set_outlives_window_manager,
     new_cx_with_font_set, resolve_studio_http, run_app, set_window_manager, should_run_stdin_loop_from_env, WmAdmission,
 };
 // Working-tree startup instrumentation (`MAKEPAD_TRACE=startup`).

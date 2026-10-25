@@ -752,6 +752,34 @@ pub mod window_op {
     pub const SHOW: u8 = 4;
 }
 
+/// `HostedDropdown::op` values.
+pub mod dropdown_op {
+    /// App to host: show the dropdown window under the host's item of tray `tray`, `w` by `h`
+    /// points (`WindowHandle::show_at_tray`; again while it shows = a new size).
+    pub const SHOW: u8 = 0;
+    /// App to host: the dropdown window is hidden.
+    pub const HIDE: u8 = 1;
+    /// Host to app: the person turned away from the dropdown (a click elsewhere, Escape, the
+    /// tray item again): the app hides the window (it hears `Event::PopupDismissed`).
+    pub const DISMISS: u8 = 2;
+}
+
+/// A tray dropdown window (`window_kind::DROPDOWN`, `CreateWindow::kind_id`) of a hosted app:
+/// the host shows it as a borderless flyout under the tray's bar item, never as a tile.
+/// Both ways, as JSON in `Custom`.
+#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
+pub struct HostedDropdown { pub window_id: usize, pub op: u8, pub tray: u64, pub w: f64, pub h: f64 }
+#[derive(SerJson, DeJson)]
+struct DropdownEnvelope { makepad_dropdown: HostedDropdown }
+impl HostedDropdown {
+    pub fn new(window_id: usize, op: u8) -> Self { Self { window_id, op, ..Default::default() } }
+    pub fn to_json(&self) -> String { DropdownEnvelope { makepad_dropdown: self.clone() }.serialize_json() }
+    pub fn parse(json: &str) -> Option<Self> {
+        if !json.contains("\"makepad_dropdown\"") { return None; }
+        DropdownEnvelope::deserialize_json(json).ok().map(|e| e.makepad_dropdown)
+    }
+}
+
 /// App to host: the app's window was asked to close, minimise or
 /// maximise/restore (`Window::close` and the like). A hosted child has no
 /// platform window to do it to, so the host, which owns the window, does it

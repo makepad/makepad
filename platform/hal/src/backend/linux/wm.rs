@@ -19,7 +19,7 @@ use crate::{session, wm_socket, Id};
 use makepad_micro_serde::SerBin;
 use makepad_studio_protocol::{
     AppToStudio, AppToStudioVec, ChildRelay, HostRelay, MouseCursor, PinchPhase, PresentableDraw, PresentableImageId, RelayTray, RelayTrayItem, RemoteKeyModifiers, ScrollPhase,
-    drag_answer, drag_double, window_op, HostedAppearance, HostedCaption, HostedDragAnswer, HostedDragQuery, HostedVisible, HostedWindowOp, SharedSwapchain, StudioToApp, StudioToAppVec, WIRE,
+    drag_answer, drag_double, window_op, HostedAppearance, HostedCaption, HostedDragAnswer, HostedDragQuery, HostedDropdown, HostedVisible, HostedWindowOp, dropdown_op, SharedSwapchain, StudioToApp, StudioToAppVec, WIRE,
 };
 use std::collections::{HashMap, VecDeque};
 use std::ffi::CStr;
@@ -314,6 +314,9 @@ struct Win {
     /// first and are not its frame (they must not end the Tick before its frame is drawn).
     ahead: u32,
     geom: Option<([f64; 4], f64)>,
+    /// A tray dropdown (`window_kind::DROPDOWN`): the WM shows it as a flyout under the tray's
+    /// bar item, never as a tile.
+    dropdown: bool,
 }
 
 pub(super) struct App {
@@ -537,6 +540,14 @@ impl App {
                     }
                     return;
                 }
+                // The WM dismissed a tray dropdown (a click elsewhere, Escape, the item again): the
+                // app hears it as the window system's `PopupDismissed` and hides the window.
+                if let Some(window) = HostedDropdown::parse(&json).filter(|w| w.op == dropdown_op::DISMISS) {
+                    if let Some(w) = self.key_of(window.window_id).and_then(|key| self.windows.get(&key)) {
+                        self.state.shared.push(w.recipient, |q, id| q.popup_dismissed(id));
+                    }
+                    return;
+                }
                 // The tile's visibility is this shell's pacing (no frames while nothing shows).
                 if let Some(shown) = HostedVisible::parse(&json) {
                     self.hidden = !shown.visible;
@@ -591,10 +602,10 @@ impl App {
                     self.state.shared.push((*sid, Id::NONE), |q, _| q.tray_menu(tray, item));
                 }
             }
-            StudioToApp::Relay(HostRelay::TrayClick { tray }) => {
+            StudioToApp::Relay(HostRelay::TrayClick { tray, anchor, screen }) => {
                 if let Some((sid, _)) = self.trays.get(&tray) {
-                    // the WM's relay carries no icon rect yet
-                    self.state.shared.push((*sid, Id::NONE), |q, _| q.tray_click(tray, 0.0, 0.0, 0.0, 0.0, [0.0; 4]));
+                    let screen = [screen[0] as f32, screen[1] as f32, screen[2] as f32, screen[3] as f32];
+                    self.state.shared.push((*sid, Id::NONE), |q, _| q.tray_click(tray, anchor[0], anchor[1], anchor[2], anchor[3], screen));
                 }
             }
             StudioToApp::Relay(HostRelay::Clipboard { request_id, text, png }) => {
@@ -761,10 +772,10 @@ impl App {
         self.detached_at = None;
         self.state.detached.store(false, Ordering::Release);
         self.hidden = false;
-        let mut windows: Vec<(Key, usize)> = self.windows.iter().map(|(k, w)| (*k, w.window_id)).collect();
-        windows.sort_by_key(|(_, id)| *id);
-        for (key, window_id) in windows {
-            self.hub.send(vec![AppToStudio::CreateWindow { window_id, kind_id: 0 }]);
+        let mut windows: Vec<(Key, usize, bool)> = self.windows.iter().map(|(k, w)| (*k, w.window_id, w.dropdown)).collect();
+        windows.sort_by_key(|(_, id, _)| *id);
+        for (key, window_id, dropdown) in windows {
+            self.hub.send(vec![AppToStudio::CreateWindow { window_id, kind_id: if dropdown { window_kind::DROPDOWN as usize } else { 0 } }]);
             if self.hidden_windows.contains(&key) {
                 self.window_op(window_op::MINIMIZE);
             }
@@ -783,12 +794,13 @@ impl Shell for App {
     fn command(&mut self, op: Op) {
         match op {
             Op::Cmd(sid, command) => match command {
-                OsCmd::WindowCreate { id, .. } => {
+                OsCmd::WindowCreate { id, kind, .. } => {
                     let window_id = self.next_window;
                     self.next_window += 1;
                     let geom = self.early.remove(&window_id);
-                    self.windows.insert((sid, id), Win { window_id, recipient: (sid, id), requested: false, awaiting: false, ahead: 0, geom });
-                    self.hub.send(vec![AppToStudio::CreateWindow { window_id, kind_id: 0 }]);
+                    let dropdown = kind & 0xff == window_kind::DROPDOWN;
+                    self.windows.insert((sid, id), Win { window_id, recipient: (sid, id), requested: false, awaiting: false, ahead: 0, geom, dropdown });
+                    self.hub.send(vec![AppToStudio::CreateWindow { window_id, kind_id: if dropdown { window_kind::DROPDOWN as usize } else { 0 } }]);
                     let focused = self.wm_focus.get(&window_id).copied().unwrap_or(true);
                     self.state.shared.push((sid, id), |q, id| q.focus(id, focused));
                     self.replay_wm_state((sid, id));
@@ -806,6 +818,14 @@ impl Shell for App {
                 // The app's caption buttons: the WM minimises, maximises or closes the tile.
                 OsCmd::WindowState { id, state } => {
                     let Some(key) = self.resolve((sid, id)) else { return };
+                    // A dropdown is hidden and shown by its own ops; it is never the tile.
+                    if self.windows.get(&key).is_some_and(|w| w.dropdown) {
+                        if state == window_state::HIDE {
+                            let window_id = self.windows[&key].window_id;
+                            self.hub.send(vec![AppToStudio::Custom(HostedDropdown::new(window_id, dropdown_op::HIDE).to_json())]);
+                        }
+                        return;
+                    }
                     match state {
                         // A hidden window (a tray app's closed one) is a minimised tile.
                         window_state::HIDE => {
@@ -829,11 +849,11 @@ impl Shell for App {
                         _ => {}
                     }
                 }
-                // The WM's tray area shows the tray; its menu choices come back as relays.
-                // (a dropdown tray's click opens the menu here too: the relay has no dropdown yet)
-                OsCmd::TraySet { tray, w, h, alpha, tooltip, items, .. } => {
+                // The WM's tray area shows the tray; its menu choices and (a dropdown's) primary
+                // clicks come back as relays.
+                OsCmd::TraySet { tray, w, h, alpha, tooltip, items, flags } => {
                     let items = items.into_iter().map(|(item, label)| tray_item(&item, label)).collect();
-                    let relay = RelayTray { tray, width: w, height: h, alpha, tooltip, items };
+                    let relay = RelayTray { tray, width: w, height: h, alpha, tooltip, items, dropdown: flags & tray_flags::DROPDOWN != 0 };
                     self.hub.send(vec![AppToStudio::Relay(ChildRelay::SetTray(relay.clone()))]);
                     self.trays.insert(tray, (sid, relay));
                 }
@@ -841,6 +861,13 @@ impl Shell for App {
                     if self.trays.remove(&tray).is_some() {
                         self.hub.send(vec![AppToStudio::Relay(ChildRelay::RemoveTray { tray })]);
                     }
+                }
+                // A tray dropdown: the WM places the window under the tray's bar item.
+                OsCmd::WindowAtTray { id, tray, w, h } => {
+                    let Some(key) = self.resolve((sid, id)) else { return };
+                    let window_id = self.windows[&key].window_id;
+                    let show = HostedDropdown { tray, w: w as f64, h: h as f64, ..HostedDropdown::new(window_id, dropdown_op::SHOW) };
+                    self.hub.send(vec![AppToStudio::Custom(show.to_json())]);
                 }
                 OsCmd::DragReply { to: input::reply::QUERY, answer, .. } => {
                     if let Some(id) = self.drag_queries.pop_front() {
@@ -1061,7 +1088,7 @@ mod tests {
             next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
             trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, quit_sent: false, stopping: false };
         let key = (9_001, Id::new(1, 1));
-        app.windows.insert(key, Win { window_id: 0, recipient: key, requested: false, awaiting: false, ahead: 0, geom: None });
+        app.windows.insert(key, Win { window_id: 0, recipient: key, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });
         // covered: the app's frame request is held, a Tick grants nothing and is answered at once
         app.message(StudioToApp::Custom(HostedVisible { visible: false }.to_json()));
         app.command(Op::Cmd(key.0, OsCmd::FrameRequest { id: key.1 }));
@@ -1106,7 +1133,7 @@ mod tests {
             (item(menu_kind::ITEM | menu_kind::CHECKABLE | menu_kind::CHECKED, 2), "Enabled".to_string()),
             (item(menu_kind::ITEM, 3), "Open AI Hub".to_string()),
         ];
-        app.command(Op::Cmd(4, OsCmd::TraySet { tray: 77, w: 2, h: 1, flags: 0, alpha: vec![0, 255], tooltip: "AI Hub".into(), items }));
+        app.command(Op::Cmd(4, OsCmd::TraySet { tray: 77, w: 2, h: 1, flags: tray_flags::DROPDOWN, alpha: vec![0, 255], tooltip: "AI Hub".into(), items }));
         assert_eq!(app.trays.get(&77).map(|(sid, _)| *sid), Some(4), "the choice goes to the session that set it");
         app.command(Op::CloseSession(4));
         assert!(app.trays.is_empty(), "a closed session's tray goes");
@@ -1118,6 +1145,7 @@ mod tests {
                 assert!(t.items[1].line);
                 assert_eq!(t.items[2], RelayTrayItem { id: 2, label: "Enabled".into(), enabled: true, checked: Some(true), line: false });
                 assert_eq!(t.items[3].checked, None);
+                assert!(t.dropdown, "the dropdown flag reaches the WM");
             }
             other => panic!("{other:?}"),
         }
@@ -1128,6 +1156,49 @@ mod tests {
         app.dispatch().unwrap();
         assert!(app.detached_at.is_some() && !app.quit_sent, "a tray app waits for the next WM");
         app.state.detached.store(false, Ordering::Release);
+    }
+
+    #[test]
+    /// A tray dropdown is announced to the WM as such, asks to be shown at its tray with its size,
+    /// says when it is hidden (not as the tile's minimise), and the WM's primary click on the
+    /// tray reaches the session that set it.
+    fn a_dropdown_window_is_announced_shown_at_its_tray_and_hidden() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8];
+            while !request.ends_with(b"\r\n\r\n") { stream.read_exact(&mut byte).unwrap(); request.push(byte[0]); }
+            stream.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n").unwrap();
+            (0..3).map(|_| AppToStudioVec::deserialize_bin(&read_client_frame(&mut stream).1).unwrap().0).collect::<Vec<_>>()
+        });
+        let state = Arc::new(State { shared: Shared::global(), inbox: Default::default(), hung_up: AtomicBool::new(false), detached: AtomicBool::new(false),
+            rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
+        let hub = Hub::connect(port, 81, "makepad-app-aihub", state.clone()).unwrap();
+        let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
+            early: HashMap::new(), next_window: 0, ticking: false, asked_frame: false, hidden: false, clip_reads: HashMap::new(),
+            next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
+            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, quit_sent: false, stopping: false };
+        let id = Id::new(5, 1);
+        app.command(Op::Cmd(6, OsCmd::WindowCreate { id, kind: window_kind::DROPDOWN, parent: Id::NONE, geom: [0.0; 4] }));
+        assert!(app.windows[&(6, id)].dropdown);
+        app.command(Op::Cmd(6, OsCmd::WindowAtTray { id, tray: 77, w: 460.0, h: 600.0 }));
+        app.command(Op::Cmd(6, OsCmd::WindowState { id, state: window_state::HIDE }));
+        assert!(app.hidden_windows.is_empty(), "a hidden dropdown is not a minimised tile");
+        let sent = server.join().unwrap();
+        assert!(matches!(sent[0].as_slice(), [AppToStudio::CreateWindow { window_id: 0, kind_id }] if *kind_id == window_kind::DROPDOWN as usize), "{:?}", sent[0]);
+        match sent[1].as_slice() {
+            [AppToStudio::Custom(json)] => {
+                let d = HostedDropdown::parse(json).unwrap();
+                assert_eq!((d.op, d.window_id, d.tray, d.w, d.h), (dropdown_op::SHOW, 0, 77, 460.0, 600.0));
+            }
+            other => panic!("{other:?}"),
+        }
+        match sent[2].as_slice() {
+            [AppToStudio::Custom(json)] => assert_eq!(HostedDropdown::parse(json).unwrap().op, dropdown_op::HIDE),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -1153,7 +1224,7 @@ mod tests {
             next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
             trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, quit_sent: false, stopping: false };
         let key = (9_003, Id::new(1, 1));
-        app.windows.insert(key, Win { window_id: 0, recipient: key, requested: false, awaiting: false, ahead: 0, geom: None });
+        app.windows.insert(key, Win { window_id: 0, recipient: key, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });
         let presenter = Presenter(state.clone());
         // frame 1 is on the GPU; the app asks again and the next Tick grants frame 2
         app.command(Op::Cmd(key.0, OsCmd::FrameRequest { id: key.1 }));
@@ -1200,7 +1271,7 @@ mod tests {
             next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
             trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, quit_sent: false, stopping: false };
         let key = (9_002, Id::new(1, 1));
-        app.windows.insert(key, Win { window_id: 0, recipient: key, requested: false, awaiting: false, ahead: 0, geom: None });
+        app.windows.insert(key, Win { window_id: 0, recipient: key, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });
         let presenter = Presenter(state.clone());
         // each granted beat submits a frame and asks for the next one at once
         for _ in 0..MAX_IN_FLIGHT {
@@ -1246,7 +1317,7 @@ mod tests {
             trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, quit_sent: false, stopping: false };
         let host = (session::HOST, Id::new(1, 1));
         let lent = (9_002, Id::new(4, 1));
-        app.windows.insert(host, Win { window_id: 0, recipient: lent, requested: false, awaiting: false, ahead: 0, geom: None });
+        app.windows.insert(host, Win { window_id: 0, recipient: lent, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });
         // two presses (a double click) before the app answers: the answers keep the WM's ids
         app.message(StudioToApp::Custom(HostedDragQuery { id: 11, x: 40.0, y: 8.0 }.to_json()));
         app.message(StudioToApp::Custom(HostedDragQuery { id: 12, x: 41.0, y: 8.0 }.to_json()));
@@ -1304,7 +1375,7 @@ mod tests {
             next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
             trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, quit_sent: false, stopping: false };
         let host = (session::HOST, Id::new(77, 1));
-        app.windows.insert(host, Win { window_id: 0, recipient: host, requested: false, awaiting: false, ahead: 0, geom: None });
+        app.windows.insert(host, Win { window_id: 0, recipient: host, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });
         let old_style = r#"{"makepad_style":{"name":"windows"}}"#;
         let style = r#"{"makepad_style":{"name":"macos"}}"#;
         let back = r#"{"makepad_back":{}}"#;

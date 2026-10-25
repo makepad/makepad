@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The WM starts the AI Hub app (under makepad run) at session start and keeps it running
+# The WM starts the AI Hub app (cargo run) at session start and keeps it running
 # (apps/wm/src/hub_app.rs, settings ~/.makepad/wm/ai-hub.conf): a WM restart keeps the app,
 # its loaded models and its tray, which comes back on the next WM.
 set -Eeuo pipefail
@@ -15,6 +15,13 @@ export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 cd "$MAKEPAD_WM_ROOT"
 if test ! -x target/release/makepad-app-wm || test "${MAKEPAD_WM_BUILD:-0}" = 1; then
     cargo build --offline --release -p makepad-app-wm
+fi
+# The AI Hub app is built the way the WM runs it (`cargo run --release -p makepad-app-aihub
+# --features node`, hub_app.rs), in this session's environment, so the WM's start of it compiles
+# nothing (the WM hands its children no `MAKEPAD=linux_direct`, so this build has none either).
+# `node` is the `features` default of ~/.makepad/wm/ai-hub.conf.
+if test ! -x target/release/makepad-app-aihub || test "${MAKEPAD_WM_BUILD:-0}" = 1; then
+    env -u MAKEPAD cargo run --offline --release -p makepad-app-registry --bin makepad-cargo -- build --features node aihub
 fi
 
 # The saved display arrangement (order, per-screen modes, render-on GPU):

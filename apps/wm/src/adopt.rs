@@ -110,6 +110,19 @@ impl App {
             }
             let entry = makepad_app_registry::apps().iter().find(|a| a.package == crate_name);
             let (app, label) = entry.map_or((crate_name.clone(), crate_name.clone()), |e| (e.id.to_string(), e.label.to_string()));
+            // The node's AI Hub app, started by this WM or an earlier one (hub_app): a service
+            // with a tray and a dropdown (dropdown.rs), no tile. Its run view takes the GPU
+            // descriptor channel; nothing lays it out.
+            #[cfg(not(target_arch = "wasm32"))]
+            if app == clients::HUB_SERVICE_APP && hub_app::is_hub_pid(pid) {
+                log!("wm: {label} (pid {pid}) came to the WM by itself as this node's service; client {client}: no tile");
+                self.state_mut().clients.insert(client, clients::ClientSlot::adopted_service(client, &app));
+                let hub_port = self.state_mut().hub_port;
+                self.desk(cx)
+                    .borrow_mut::<WmDesk>()
+                    .map(|mut d| d.with_run_view(cx, client, |cx, v| v.set_run_target(cx, client, 0, hub_port)));
+                continue;
+            }
             log!("wm: {label} (pid {pid}) came to the WM by itself; client {client}");
             let slot = clients::ClientSlot::adopted(client, &app);
             let area = self.desk_area(cx);

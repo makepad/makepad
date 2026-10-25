@@ -184,9 +184,15 @@ if test -f "$seed/clone.json"; then
     install -o arch -g arch -m 0755 "$seed/makepad-app-wm" /home/arch/makepad/target/release/makepad-app-wm
     install -o arch -g arch -m 0644 "$seed/clone.json" /home/arch/makepad/CLONE-REVISION.json
 else
-    stage 'Building the release WM offline (it builds the CUDA AI hub when it starts)'
+    stage 'Building the release WM offline'
     runuser -u arch -- env HOME=/home/arch CARGO_NET_OFFLINE=true MAKEPAD_CUDA_ROOT=/opt/cuda NVCC_CCBIN=/usr/bin/g++-15 CUDAHOSTCXX=/usr/bin/g++-15 PATH="$PATH" bash -c 'cd /home/arch/makepad && cargo build --offline --release -p makepad-app-wm'
 fi
+# The WM starts the AI Hub app with `cargo run --release -p makepad-app-aihub --features node`
+# (apps/wm/src/hub_app.rs). This is that build, by the same command (makepad-cargo is the
+# launchers' cargo) in the WM session's environment (/etc/environment, written above): the WM's
+# start compiles nothing. `node` is the `features` default of ~/.makepad/wm/ai-hub.conf.
+stage 'Building the AI Hub app (CUDA kernels) the way the WM runs it'
+runuser -u arch -- env HOME=/home/arch CARGO_NET_OFFLINE=true CUDA_HOME=/opt/cuda CUDA_PATH=/opt/cuda MAKEPAD_CUDA_ROOT=/opt/cuda NVCC_CCBIN=/usr/bin/g++-15 CUDAHOSTCXX=/usr/bin/g++-15 PATH="$PATH" bash -c 'cd /home/arch/makepad && cargo run --offline --release -p makepad-app-registry --bin makepad-cargo -- build --features node aihub'
 sshd -t
 systemctl reload sshd
 touch "$state/complete"

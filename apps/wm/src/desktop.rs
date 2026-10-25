@@ -662,8 +662,10 @@ fn mac_icon_box(cell: Rect, hover: f64) -> Rect {
 /// The compositor samples exactly the shelf it will paint this frame, including
 /// an interrupted style tween. Glass outside the dock cannot add a blur stack.
 pub(crate) fn dock_items(state: &WmState) -> Vec<crate::shell::menu::MenuItem> {
+    // A supervised service (the AI Hub) is in the launcher, not the dock.
+    let service = format!("apps.{}", crate::clients::HUB_SERVICE_APP);
     let mut apps: Vec<_> = crate::shell::launcher::apps(&state.launchable)
-        .into_iter().filter(|app| !app.disabled).collect();
+        .into_iter().filter(|app| !app.disabled && app.id != service).collect();
     for client in state.dock_clients() {
         if let Some(client) = state.clients.get(&client) {
             let id = format!("apps.{}", client.app);

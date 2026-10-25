@@ -154,6 +154,13 @@ pub fn set_window_manager(window_manager: bool) {
     WINDOW_MANAGER.store(window_manager, std::sync::atomic::Ordering::Release);
 }
 
+static OUTLIVES_WINDOW_MANAGER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `app_main!` records [`AppMain::outlives_window_manager`] here before anything opens.
+pub fn set_outlives_window_manager(on: bool) {
+    OUTLIVES_WINDOW_MANAGER.store(on, std::sync::atomic::Ordering::Release);
+}
+
 /// This process is a window manager: it never becomes a client of another one.
 pub fn is_window_manager() -> bool {
     WINDOW_MANAGER.load(std::sync::atomic::Ordering::Acquire)
@@ -206,7 +213,8 @@ pub fn discover_window_manager(crate_name: &'static str) {
     #[cfg(all(target_os = "linux", not(relax)))]
     ADMITTED.get_or_init(|| {
         use makepad_hal::wm_socket::{self, Backend};
-        if launched_by_host() || is_window_manager() || resolve_studio_host_from_env().is_some()
+        if launched_by_host() || is_window_manager() || OUTLIVES_WINDOW_MANAGER.load(std::sync::atomic::Ordering::Acquire)
+            || resolve_studio_host_from_env().is_some()
             || std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some()
             || std::env::var("MAKEPAD_HAL_BACKEND").is_ok_and(|b| !b.is_empty())
         {
@@ -460,6 +468,18 @@ pub trait AppMain {
     /// `MAKEPAD_HIDE_WINDOWS`, `--stdin-loop`) and `MAKEPAD_NEW_INSTANCE=1`
     /// always run on their own. Mobile OSes keep one instance themselves.
     fn single_instance() -> bool
+    where
+        Self: Sized,
+    {
+        false
+    }
+
+    /// Whether the app is a service that keeps running when the makepad window manager hosting it
+    /// restarts (a tray app: the AI Hub). Such an app is hosted by the HAL's own WM shell, which
+    /// detaches from a window manager that went away and attaches to the next one (its windows
+    /// and trays come back), instead of being adopted over the hosted `--stdin-loop` wire, whose
+    /// children end with their host.
+    fn outlives_window_manager() -> bool
     where
         Self: Sized,
     {
@@ -803,6 +823,7 @@ macro_rules! app_main {
                 return;
             }
             $crate::set_window_manager(<$app as AppMain>::window_manager());
+            $crate::set_outlives_window_manager(<$app as AppMain>::outlives_window_manager());
             $crate::discover_window_manager(env!("CARGO_PKG_NAME"));
             $crate::startup_trace("pre_start (objc classes)");
 

@@ -64,6 +64,53 @@ impl HubLink {
         }
     }
 
+    /// The pid of the hub app this WM runs, once started (`hub_app`): a process the WM socket
+    /// admits under this pid is the node's hub, a service the WM keeps: no tile.
+    pub fn app_pid(&self) -> Option<u32> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(Some(link)) = self.link.as_ref() {
+            return link.app.pid();
+        }
+        None
+    }
+
+    /// The person asked for the AI Hub from the launcher: after its Quit (or with the settings
+    /// off) it is turned on again (`enabled = on` in `ai-hub.conf`) and starts; with it running
+    /// there is nothing to do. False where this WM runs no hub of its own (a hidden or
+    /// in-process WM), so the launcher falls back to its ordinary start.
+    pub fn start_from_launcher(&mut self, processes: bool, now: f64) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if !processes || std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() && std::env::var_os(makepad_ai_hub::node_conf::CONF_ENV).is_none() {
+                return false;
+            }
+            let path = makepad_ai_hub::node_conf::NodeConf::path();
+            let mut conf = makepad_ai_hub::node_conf::NodeConf::load_from(&path);
+            if !conf.enabled {
+                conf.enabled = true;
+                if let Err(e) = conf.save_to(&path) {
+                    makepad_widgets::log!("wm: AI Hub: {e}");
+                    return false;
+                }
+                makepad_widgets::log!("wm: AI Hub: started from the launcher; {} says on again", path.display());
+            }
+            // A WM that ran none (off at its start) makes the link now.
+            if !matches!(self.link, Some(Some(_))) {
+                self.link = None;
+                self.stop_leftover = false;
+            }
+            if let Some(link) = self.link(processes) {
+                link.app.user_start(now);
+            }
+            true
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (processes, now);
+            false
+        }
+    }
+
     /// Once a second: the app's exit and restart (a no-op without one).
     pub fn tick(&mut self, processes: bool, now: f64, pool: &makepad_widgets::makepad_platform::thread::TaskPool) {
         let link = self.link(processes);

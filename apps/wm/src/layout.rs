@@ -1338,7 +1338,21 @@ impl WmLayout {
         });
     }
 
-    /// False only for a Quick-Look panel (`add_preview_float`).
+    /// A tray dropdown (`dropdown.rs`): a float at `rect`, above every other window on every
+    /// workspace, that no focus mover lands on and the layout's focus never moves to.
+    pub fn add_flyout_float(&mut self, client: ClientId, rect: LRect, ws: usize) {
+        self.floats.retain(|f| f.client != client);
+        self.floats.push(FloatEntry {
+            client,
+            rect,
+            pinned: true,
+            ws,
+            no_key_focus: true,
+            from_tree: false,
+        });
+    }
+
+    /// False only for a Quick-Look panel (`add_preview_float`) or a tray dropdown.
     pub fn takes_key_focus(&self, client: ClientId) -> bool {
         if self.desktop.minimized(client) { return false; }
         !self

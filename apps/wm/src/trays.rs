@@ -4,10 +4,15 @@
 //! An app's tray reaches the WM as a hosted relay (`ChildRelay::SetTray` / `RemoveTray`): from
 //! the HAL's WM shell (a native app or `makepad run` adopted through the WM socket) or from a
 //! `--stdin-loop` child. The WM keeps each one's glyph as a texture (an alpha mask, tinted with
-//! the bar's text colour like its own icons), its tooltip and its menu. A primary click opens
-//! the menu in a flyout drawn with the shell kit (as macOS opens a status item's menu); a chosen
-//! item goes back to the app as `HostRelay::TrayMenu`. The WM sends no `TrayClick`: an app puts
-//! its primary action in the menu ("Open AI Hub"). A tray goes with its client.
+//! the bar's text colour like its own icons), its tooltip and its menu.
+//!
+//! What a click does is the convention of macOS and Windows. A tray without `dropdown` opens its
+//! menu in a flyout drawn with the shell kit on a primary click; a chosen item goes back to the
+//! app as `HostRelay::TrayMenu`, and the WM sends no `TrayClick`. A `dropdown` tray (the AI Hub)
+//! belongs to the app's primary click: the WM sends `HostRelay::TrayClick` with the bar item's
+//! rect, the app shows its dropdown window (`show_at_tray`) and `dropdown.rs` places that window as
+//! a flyout under the item; a second click, a click elsewhere or Escape closes it. A secondary
+//! click opens the menu. A tray goes with its client.
 
 use crate::shell::bar::BarTray;
 use crate::shell::panels::TrayMenu;
@@ -75,6 +80,17 @@ impl WmTrays {
 
     fn menu_of(e: &Entry) -> TrayMenu {
         TrayMenu { client: e.client, tray: e.relay.tray, glyph: e.glyph.clone(), tooltip: e.relay.tooltip.clone(), items: e.relay.items.clone() }
+    }
+
+    /// The client and id of the bar's `index`th tray, and whether its primary click is the
+    /// app's (a `dropdown` tray).
+    pub fn at(&self, index: usize) -> Option<(u64, u64, bool)> {
+        self.entries.get(index).map(|e| (e.client, e.relay.tray, e.relay.dropdown))
+    }
+
+    /// The bar index of the first dropdown tray `client` shows.
+    pub fn first_dropdown_of(&self, client: u64) -> Option<usize> {
+        self.entries.iter().position(|e| e.client == client && e.relay.dropdown)
     }
 
     /// The bar index of `client`'s tray `tray`.

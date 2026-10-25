@@ -13,8 +13,11 @@
 //! On a makepad WM node the WM starts it at session start as the node's hub
 //! (`MAKEPAD_AI_HUB_NODE_CONF` names the node's `ai-hub.conf`): it serves on the node's LAN
 //! address and port with every local model of the node's registry, loads the node's chat
-//! model, keeps the compute mode in that file, starts with its window hidden (its tray icon in
-//! the WM's tray area opens it) and has no Quit: the WM keeps it running.
+//! model and keeps the compute mode in that file. The WM keeps it running (a crash starts it
+//! again). Its tray icon sits in the WM's tray area and its panel is the tray's dropdown, a
+//! flyout the WM places under the icon (no window, no dock entry, no "Open in window"). Its
+//! menu's Quit is deliberate: the app writes `enabled = off` into that file and the WM leaves
+//! it off until the person starts it from the launcher.
 
 pub use makepad_widgets;
 
@@ -37,7 +40,10 @@ script_mod! {
     use mod.prelude.widgets.*
     startup() do #(App::script_component(vm)){
         ui: Root{
+            // the regular window ("Open in window", or the whole UI where the desktop has no
+            // tray): made when it is first shown
             main_window := Window{
+                create_on_start: false
                 window.title: "AI Hub"
                 window.inner_size: vec2(560, 860)
                 body +: {
@@ -260,7 +266,7 @@ impl App {
         let key = format!("{glyph:?}|{status}|{}", hub.settings.render());
         if key != hub.tray_key {
             hub.tray_key = key;
-            cx.set_tray(tray::icon(&hub.settings, glyph, &status, hub.node.is_none()));
+            cx.set_tray(tray::icon(&hub.settings, glyph, &status, !(cfg!(target_os = "linux") && cx.desktop_has_tray_dropdown())));
         }
         if !(force || turned_off || p.seq != hub.last_seq || glyph == tray::Glyph::Working) {
             return;
@@ -333,13 +339,23 @@ impl App {
         self.close_dropdown(cx, "open in window");
         cx.show_in_dock(true);
         self.window_shown = true;
-        self.ui.window(cx, ids!(main_window)).set_visible(cx, true);
+        self.ui.window(cx, ids!(main_window)).show(cx);
         self.refresh(cx, true);
     }
 
     fn quit(&mut self, cx: &mut Cx) {
         selftest_note("quit from the tray");
         if let Some(mut hub) = self.hub.take() {
+            // A node's Quit is deliberate: `enabled = off` in the node's settings is what the WM
+            // reads, so it does not start the hub again until the person starts it.
+            if let Some((path, _)) = &hub.node {
+                let mut conf = NodeConf::load_from(path);
+                conf.enabled = false;
+                match conf.save_to(path) {
+                    Ok(()) => log!("aihub: quit from the tray: {} says off; the WM leaves the hub off", path.display()),
+                    Err(e) => log!("aihub: quit from the tray, but {e}"),
+                }
+            }
             hub.serve.quit();
         }
         cx.remove_tray(tray::TRAY);
@@ -368,19 +384,17 @@ impl App {
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         let hub = Hub::start(cx);
-        let node = hub.node.is_some();
         self.hub = Some(hub);
         // sets the tray
         self.refresh(cx, true);
-        if cx.has_tray_dropdown() {
-            // the hub lives in the tray; the window waits for "Open in window"
-            self.ui.window(cx, ids!(main_window)).set_visible(cx, false);
+        if cx.desktop_has_tray_dropdown() {
+            // the hub lives in the tray; its dropdown is the panel, and the regular window (made
+            // when first shown) waits for "Open in window" (not offered on a WM node)
             cx.show_in_dock(false);
-        } else if node && cx.has_tray() {
-            // A WM node's hub starts in its tray (at session start, nobody asked for its window).
-            self.ui.window(cx, ids!(main_window)).set_visible(cx, false);
-        } else {
+        } else if !cx.has_tray() {
+            // no tray here: the window is the app
             self.window_shown = true;
+            self.ui.window(cx, ids!(main_window)).show(cx);
             self.refresh(cx, true);
         }
     }
@@ -405,6 +419,12 @@ impl MatchEvent for App {
 }
 
 impl AppMain for App {
+    /// A service in the WM's tray: it keeps serving, with its models loaded, when the WM restarts
+    /// and comes back on the next one.
+    fn outlives_window_manager() -> bool {
+        true
+    }
+
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
         makepad_shell_kit::eval_default_theme(vm);

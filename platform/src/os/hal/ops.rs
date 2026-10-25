@@ -303,6 +303,14 @@ impl Cx {
                 CxOsOp::MinimizeWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::MINIMIZE),
                 CxOsOp::MaximizeWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::MAXIMIZE),
                 CxOsOp::RestoreWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::RESTORE),
+                // A hosted app's tray dropdown is shown by its own op (`ShowWindowAtTray`) and says when it
+                // is hidden; it is never the host's tile to minimise or show.
+                CxOsOp::HideWindow(w) if self.hal.hosted.is_some() && self.windows[w].dropdown => {
+                    Self::send_studio_message(crate::studio::AppToStudio::Custom(
+                        crate::studio::HostedDropdown::new(w.id(), crate::studio::dropdown_op::HIDE).to_json(),
+                    ));
+                }
+                CxOsOp::ShowWindow(w) if self.hal.hosted.is_some() && self.windows[w].dropdown => {}
                 // A hosted app's hidden window is a minimised one on its host; shown, it comes back.
                 CxOsOp::HideWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::MINIMIZE),
                 CxOsOp::ShowWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::SHOW),
@@ -324,8 +332,12 @@ impl Cx {
                 CxOsOp::FullscreenWindow(w) => self.hal.frames.w.window_state(hal_window_id(w), window_state::FULLSCREEN),
                 CxOsOp::HideWindow(w) => self.hal.frames.w.window_state(hal_window_id(w), window_state::HIDE),
                 CxOsOp::ShowWindowAtTray(w, tray, size) => {
+                    // A hosted app (the makepad WM adopted it): the WM places the window under its
+                    // tray item (`dropdown.rs`), the size is the app's own layout points.
                     if self.hal.hosted.is_some() {
-                        self.hal.frames.gap("a hosted app has no system tray");
+                        Self::send_studio_message(crate::studio::AppToStudio::Custom(
+                            crate::studio::HostedDropdown { window_id: w.id(), op: crate::studio::dropdown_op::SHOW, tray: tray.0, w: size.x, h: size.y }.to_json(),
+                        ));
                         continue;
                     }
                     let size = self.windows[w].layout_vec2d_to_native_points(size);

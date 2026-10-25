@@ -12,9 +12,14 @@
 //!
 //! On the makepad WM the tray travels as a hosted relay (`ChildRelay::SetTray`, from the HAL's
 //! WM shell or a hosted child): the WM draws the glyph in its bar's tray area tinted with its
-//! shell tokens, shows the tooltip, and opens the menu on a primary click (as macOS does; it
-//! sends no `TrayClick`, dropdown or not, yet). A tray app outlives a WM restart: its windows
-//! and trays come back on the next WM.
+//! shell tokens and shows the tooltip. The convention for what a click does is the same as on
+//! macOS and Windows: a `dropdown` tray's primary click is the app's (the WM sends
+//! `HostRelay::TrayClick` with the bar item's rect as `anchor`; the app shows its dropdown window
+//! with `show_at_tray`, which the WM places as a borderless flyout centred under the item, above
+//! the other windows and in no dock; it hides on a click elsewhere, Escape or a second click on
+//! the item, as `Event::PopupDismissed`) and the menu opens on a secondary click. A tray that is
+//! not a `dropdown` opens its menu on the primary click, and the WM sends it no `TrayClick`. A
+//! tray app outlives a WM restart: its windows and trays come back on the next WM.
 
 use crate::{cx::Cx, cx_api::CxOsOp, makepad_live_id::LiveId, makepad_math::Rect};
 
@@ -27,7 +32,8 @@ pub struct TrayIcon {
     pub menu: Vec<TrayMenuItem>,
     /// The primary click is the app's (`Event::TrayClick`: it opens its dropdown) and the menu
     /// opens on a secondary click (right click, Ctrl-click on macOS). Without it a macOS click
-    /// opens the menu; Windows always sends left clicks as `TrayClick`.
+    /// opens the menu and the makepad WM's primary click does too; Windows always sends left
+    /// clicks as `TrayClick`.
     pub dropdown: bool,
 }
 
@@ -65,8 +71,8 @@ pub struct TrayMenuEvent {
     pub item: LiveId,
 }
 
-/// A primary click on a tray icon, where the system gives one (Windows left click; macOS for a
-/// `dropdown` tray, otherwise it opens the menu).
+/// A primary click on a tray icon, where the system gives one (Windows left click; macOS and the
+/// makepad WM for a `dropdown` tray, otherwise they open the menu).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TrayClickEvent {
     pub tray: LiveId,
@@ -104,11 +110,18 @@ impl Cx {
         !self.trays.is_empty()
     }
 
-    /// Whether a `dropdown` tray's primary click reaches the app as `TrayClick` here, so its
-    /// dropdown window can be its main UI: macOS and Windows. Not yet on the makepad WM (its
-    /// tray opens the menu); there the app keeps its regular window.
+    /// Whether this desktop gives a `dropdown` tray's primary click to the app as `TrayClick`,
+    /// so its dropdown window can be its main UI: macOS, Windows and the makepad WM (an app its
+    /// HAL WM shell hosts; not a `--stdin-loop` child). True before the app has set a tray.
+    pub fn desktop_has_tray_dropdown(&self) -> bool {
+        cfg!(any(target_os = "macos", target_os = "windows"))
+            || (cfg!(target_os = "linux") && crate::app_main::hosted_by_window_manager() && !crate::app_main::launched_by_host())
+    }
+
+    /// The app has a tray the desktop shows and its `dropdown` tray's primary click is the app's
+    /// (`desktop_has_tray_dropdown`).
     pub fn has_tray_dropdown(&self) -> bool {
-        self.has_tray() && cfg!(any(target_os = "macos", target_os = "windows"))
+        self.has_tray() && self.desktop_has_tray_dropdown()
     }
 }
 
@@ -134,5 +147,6 @@ pub(crate) fn relay_tray(tray: &TrayIcon) -> crate::studio::RelayTray {
         alpha: tray.image.alpha[..width as usize * height as usize].to_vec(),
         tooltip: tray.tooltip.clone(),
         items,
+        dropdown: tray.dropdown,
     }
 }

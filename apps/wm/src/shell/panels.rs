@@ -828,6 +828,17 @@ impl ShellPanel {
         panel_card_rect(self.anchor, screen, w, height, margin, self.tokens.bar.size_horizontal)
     }
 
+    /// Where a tray dropdown `w` x `h` goes under the bar item `anchor`: a card placed as this
+    /// panel places its own (centred on the item, one margin off the bar, clamped into the
+    /// screen by the same margin), and the screen rect it was fitted into. `target` is the item's
+    /// screen on a multi-screen desktop, else the whole window as last drawn.
+    pub fn flyout_rect(&self, anchor: Rect, target: Option<Rect>, w: f64, h: f64) -> (Rect, Rect) {
+        let screen = target.unwrap_or(self.screen);
+        let margin = self.tokens.spacing.gaps_out;
+        let w = w.min((screen.size.x - margin * 2.0).max(1.0));
+        (panel_card_rect(anchor, screen, w, h, margin, self.tokens.bar.size_horizontal), screen)
+    }
+
     fn section_header(&mut self, cx: &mut Cx2d, r: Rect, label: &str, value: &str) {
         let tok = self.tokens;
         let fg = tok.popups.text;

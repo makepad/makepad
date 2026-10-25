@@ -118,6 +118,9 @@ pub struct RelayTray {
     pub alpha: Vec<u8>,
     pub tooltip: String,
     pub items: Vec<RelayTrayItem>,
+    /// The primary click is the app's: the host sends `HostRelay::TrayClick` with the icon's rect
+    /// and the app shows its dropdown window there; the menu opens on a secondary click.
+    pub dropdown: bool,
 }
 
 /// Child → host.
@@ -170,9 +173,10 @@ pub enum HostRelay {
     Clipboard { request_id: u64, text: String, png: Vec<u8> },
     /// Menu item `item` of the child's tray `tray` was chosen. APPENDED LAST.
     TrayMenu { tray: u64, item: u64 },
-    /// The child's tray `tray` was clicked (a host whose convention has a primary action;
-    /// the makepad WM opens the menu instead and never sends it). APPENDED LAST.
-    TrayClick { tray: u64 },
+    /// The primary click on the child's `dropdown` tray `tray` (`RelayTray::dropdown`): `anchor` is
+    /// the tray item's rect in the host's window space (x, y, w, h), `screen` the visible area of
+    /// the screen it is on (the dropdown fits itself into it). APPENDED LAST.
+    TrayClick { tray: u64, anchor: [f64; 4], screen: [f64; 4] },
 }
 
 #[cfg(test)]
@@ -199,13 +203,14 @@ mod relay_tag_tests {
         assert_eq!(tag(&ChildRelay::SetTray(RelayTray::default())), 10);
         assert_eq!(tag(&ChildRelay::RemoveTray { tray: 0 }), 11);
         assert_eq!(tag(&HostRelay::TrayMenu { tray: 0, item: 0 }), 4);
-        assert_eq!(tag(&HostRelay::TrayClick { tray: 0 }), 5);
+        assert_eq!(tag(&HostRelay::TrayClick { tray: 0, anchor: [0.0; 4], screen: [0.0; 4] }), 5);
         let tray = ChildRelay::SetTray(RelayTray {
             tray: 7,
             width: 2,
             height: 1,
             alpha: vec![0, 255],
             tooltip: "AI Hub · serving".into(),
+            dropdown: true,
             items: vec![
                 RelayTrayItem { id: 3, label: "Enabled".into(), enabled: true, checked: Some(true), line: false },
                 RelayTrayItem { line: true, ..Default::default() },

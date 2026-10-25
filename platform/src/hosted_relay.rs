@@ -525,10 +525,10 @@ impl Cx {
             HostRelay::TrayMenu { tray, item } => {
                 self.call_event_handler(&Event::TrayMenu(crate::tray::TrayMenuEvent { tray: LiveId(tray), item: LiveId(item) }));
             }
-            HostRelay::TrayClick { tray } => {
-                // the WM's relay carries no icon rect yet
-                let zero = crate::makepad_math::Rect::default();
-                self.call_event_handler(&Event::TrayClick(crate::tray::TrayClickEvent { tray: LiveId(tray), anchor: zero, screen: zero }));
+            HostRelay::TrayClick { tray, anchor, screen } => {
+                use crate::makepad_math::{dvec2, Rect};
+                let rect = |r: [f64; 4]| Rect { pos: dvec2(r[0], r[1]), size: dvec2(r[2], r[3]) };
+                self.call_event_handler(&Event::TrayClick(crate::tray::TrayClickEvent { tray: LiveId(tray), anchor: rect(anchor), screen: rect(screen) }));
             }
         }
     }

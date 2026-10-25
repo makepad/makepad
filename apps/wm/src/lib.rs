@@ -52,12 +52,14 @@ mod hub_link;
 #[cfg(not(target_arch = "wasm32"))]
 mod hub_app;
 mod trays;
+mod dropdown;
 mod gpu_yield;
 mod local_use;
 mod scroll_gesture;
 use scroll_gesture::Gesture as ScrollGesture;
 use hub_link::HubLink;
 use trays::WmTrays;
+use dropdown::Dropdowns;
 use makepad_ai_hub_panel::hub_control;
 use desk_link::DeskLink;
 use gpu_yield::YieldPolicy;
@@ -593,6 +595,9 @@ pub struct App {
     /// The apps' tray icons in the bar's tray area (`trays`).
     #[rust]
     trays: WmTrays,
+    /// A tray app's open dropdown (`dropdown`).
+    #[rust]
+    dropdown: Dropdowns,
     /// The remote desktop server (desk_link): off unless its settings enable it.
     #[rust]
     desk_link: DeskLink,
@@ -1014,6 +1019,7 @@ impl App {
                 !slot.warm
                     && !slot.pane
                     && !slot.is_preview
+                    && !slot.service
                     && slot.closing.is_none()
                     && (clients::word_match(&slot.app, app_id) || clients::word_match(&slot.title, app_id))
             })
@@ -1025,6 +1031,14 @@ impl App {
     }
 
     fn launch_app(&mut self, cx: &mut Cx, app_id: &str) {
+        // The node's AI Hub is a service the WM supervises (hub_app): the launcher starts it
+        // again after its Quit, through the same `cargo run`, and never as a window.
+        if app_id == clients::HUB_SERVICE_APP {
+            let processes = self.processes();
+            if self.hub_link.start_from_launcher(processes, host::now()) {
+                return;
+            }
+        }
         if (!self.domains_enabled() || app_id.starts_with("wl.") || app_id.starts_with("wayland="))
             && self.wayland_launch(cx, app_id) {
             return;
@@ -2151,6 +2165,7 @@ impl App {
         if self.trays.client_gone(client) {
             self.trays_changed(cx);
         }
+        self.dropdown_end(cx, client);
         if let Some(mut p) = self.ui.widget(cx, ids!(file_picker)).borrow_mut::<shell::file_picker::ShellFilePicker>() {
             p.forget_client(cx, client);
         }
@@ -2267,6 +2282,7 @@ impl App {
         if !takes_focus {
             return;
         }
+        self.dropdown_focus_moved(cx, client);
         // Defensive: the menu is modal and must never still read "open"
         // once a hosted client is about to take key focus — every launch
         // path already closes it first, but force it shut here too so a
@@ -3229,7 +3245,8 @@ impl App {
         }
         let id = self.next_id;
         let Some(owner) = self.state_mut().clients.get(&client) else { return };
-        if owner.parent.is_some() || owner.window_id == window_id {
+        // (A supervised service has its dropdown only, dropdown.rs.)
+        if owner.parent.is_some() || owner.window_id == window_id || owner.service {
             return;
         }
         let slot = clients::ClientSlot::later_window(id, client, owner, window_id);
@@ -3578,6 +3595,11 @@ impl App {
                 self.send_relays(answers);
             }
             AppToStudio::Custom(json) => {
+                // A tray app's dropdown window: shown under its tray item, or hidden (dropdown.rs).
+                if let Some(dropdown) = makepad_widgets::makepad_platform::studio::HostedDropdown::parse(&json) {
+                    self.dropdown_message(cx, client, dropdown);
+                    return;
+                }
                 if let Some(status) = makepad_app_host::AppStatus::parse(&json) {
                     let text = status.label();
                     if let Some(slot) = self.state_mut().clients.get_mut(&client) {
@@ -6122,6 +6144,7 @@ impl MatchEvent for App {
             live_resize: false,
             drop_hint: None,
             pane_sliding: false,
+            dropdown_client: None,
             style: Default::default(),
             launchable: Launchable::default(),
             accessibility: desktop::Accessibility::load(&theme::makepad_home().join("wm/accessibility.splash")),
@@ -6317,9 +6340,11 @@ impl MatchEvent for App {
                             self.window_control(cx, control);
                         }
                     }
+                    BarModule::Tray(i) => self.tray_press(cx, seg, i),
                     other => self.toggle_shell_panel(cx, seg, other),
                 },
                 ShellBarAction::RightPress(seg, module) => match module {
+                    BarModule::Tray(i) => self.tray_menu_press(cx, seg, i),
                     // The Omarchy button's right click opens a terminal.
                     BarModule::Style => {
                         self.bar_press_segment = seg;
@@ -6674,6 +6699,10 @@ impl App {
         // A client's file dialog is modal while it is up: the pointer, the keys and the
         // typed text are its own, before the WM's binds and any client.
         if self.file_picker_event(cx, event) {
+            return;
+        }
+        // A tray app's dropdown closes on Escape and on a press outside it.
+        if self.state.is_some() && self.dropdown_event(cx, event) {
             return;
         }
         // A reconcile in the last desk draw: the bar follows it now.

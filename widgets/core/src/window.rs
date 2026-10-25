@@ -2836,6 +2836,15 @@ impl WindowRef {
         }
     }
 
+    /// Make the window when it was not made at the start (`create_on_start: false`), else show
+    /// it again in front (`WindowHandle::show`): a tray app's regular window.
+    pub fn show(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.window.handle.show(cx);
+            inner.view.redraw(cx);
+        }
+    }
+
     /// Show a tray app's dropdown window (`dropdown: true`, `create_on_start: false`) at tray
     /// `tray`'s icon, `size` points large (`WindowHandle::show_at_tray`): made on first use,
     /// placed again (and resized) on every call. Hide it with `set_visible(cx, false)` on its

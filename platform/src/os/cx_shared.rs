@@ -1174,6 +1174,14 @@ impl Cx {
                             self.redraw_all();
                         }
                     }
+                } else if let Some(dropdown) = makepad_studio_protocol::HostedDropdown::parse(&data) {
+                    // The host turned away from this app's tray dropdown: a popup dismissed.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if dropdown.op == makepad_studio_protocol::dropdown_op::DISMISS {
+                        self.hal_hosted_popup_dismissed(dropdown.window_id);
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    let _ = dropdown;
                 } else if let Some(window) = crate::ime::HostedWindow::parse(&data) {
                     #[cfg(not(target_arch = "wasm32"))]
                     if window.op == crate::ime::hosted_window_op::CLOSE_REQUEST {

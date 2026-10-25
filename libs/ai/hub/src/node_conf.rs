@@ -20,15 +20,21 @@
 //! models = all                    # keep every model this node can run in its cache (or a list of ids)
 //! models_licences = none,community   # licence classes `models` fetches (+ non-commercial, restricted, gated)
 //! models_mbps = 60                # its download pacing, MB/s
-//! runner = jit                    # jit: `makepad run makepad-app-aihub` (default); native: the built app binary
-//! features = node                 # the app's cargo features under the JIT (node: the full local AI set)
-//! target_dir = /home/arch/makepad-target-hub     # its own cargo target (a CUDA build env differs from the apps')
+//! features = node                 # the app's cargo features (node: the full local AI set)
 //! env MAKEPAD_CUDA_ROOT = /opt/cuda              # any other variable for the app
 //! ```
 //!
 //! Without `env MAKEPAD_CUDA_ROOT` the toolkit installed here is named (`/opt/cuda`,
 //! `/usr/local/cuda`, Windows' `CUDA_PATH`): without it the hub's CUDA kernels are not built
 //! and it serves no GPU model.
+//!
+//! The WM starts the app with `cargo run --release -p makepad-app-aihub --features <features>`
+//! in its checkout, with the cargo environment of every launcher (`makepad-cargo`), in the
+//! WM's own cargo target: the deploy builds it with the very same command
+//! (`makepad-cargo build --features <features> aihub`, same CUDA environment), so the start
+//! compiles nothing. `enabled = off` also records the app's Quit: the tray menu's Quit writes
+//! it, and the WM starts the app again only when the person starts it from the launcher
+//! (which writes `enabled = on`).
 
 use crate::activity::ComputeMode;
 use std::path::{Path, PathBuf};
@@ -38,15 +44,6 @@ pub const CONF_ENV: &str = "MAKEPAD_WM_AI_HUB_CONF";
 /// The variable the WM sets for the AI Hub app it starts: this file's path. The app then
 /// serves as this node's hub (`NodeConf`) instead of from its own settings.
 pub const NODE_CONF_ENV: &str = "MAKEPAD_AI_HUB_NODE_CONF";
-
-/// How the WM starts the app.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Runner {
-    /// `makepad run makepad-app-aihub` (the JIT, the standing default).
-    Jit,
-    /// The built `makepad-app-aihub` binary (the deploy builds it with `--features node`).
-    Native,
-}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct NodeConf {
@@ -62,9 +59,7 @@ pub struct NodeConf {
     pub nice: i32,
     /// Whether this node takes compute jobs (the app's picker).
     pub compute: ComputeMode,
-    pub runner: Runner,
     pub features: String,
-    pub target_dir: Option<String>,
     /// Prefetch (`MAKEPAD_AI_PREFETCH`): `all`, or model ids; None = off.
     pub models: Option<String>,
     pub models_licences: Option<String>,
@@ -86,9 +81,7 @@ impl Default for NodeConf {
             pin: Vec::new(),
             nice: 10,
             compute: ComputeMode::Automatic,
-            runner: Runner::Jit,
             features: "node".to_string(),
-            target_dir: None,
             models: None,
             models_licences: None,
             models_mbps: None,
@@ -149,13 +142,7 @@ impl NodeConf {
                 "pin" => { s.pin = value.split(',').map(str::trim).filter(|m| !m.is_empty()).map(str::to_string).collect(); true }
                 "nice" => value.parse().map(|n| s.nice = n).is_ok(),
                 "compute" => ComputeMode::parse(value).map(|m| s.compute = m).is_some(),
-                "runner" => match value {
-                    "jit" => { s.runner = Runner::Jit; true }
-                    "native" => { s.runner = Runner::Native; true }
-                    _ => false,
-                },
                 "features" => { s.features = value.to_string(); true }
-                "target_dir" => { s.target_dir = Some(value.to_string()).filter(|v| !v.is_empty()); true }
                 "models" => { s.models = Some(value.to_string()).filter(|v| !v.is_empty()); true }
                 "models_licences" => { s.models_licences = Some(value.to_string()).filter(|v| !v.is_empty()); true }
                 "models_mbps" => value.parse::<f64>().map(|_| s.models_mbps = Some(value.to_string())).is_ok(),
@@ -196,11 +183,7 @@ impl NodeConf {
         }
         out.push_str(&format!("nice = {}\n", self.nice));
         out.push_str(&format!("compute = {}\n", self.compute.name()));
-        out.push_str(&format!("runner = {}\n", match self.runner { Runner::Jit => "jit", Runner::Native => "native" }));
         out.push_str(&format!("features = {}\n", self.features));
-        if let Some(dir) = &self.target_dir {
-            out.push_str(&format!("target_dir = {dir}\n"));
-        }
         for (key, value) in [("models", &self.models), ("models_licences", &self.models_licences), ("models_mbps", &self.models_mbps)] {
             if let Some(value) = value {
                 out.push_str(&format!("{key} = {value}\n"));
@@ -236,8 +219,8 @@ impl NodeConf {
     }
 
     /// The environment the settings give the app, in order (later wins). The hub library
-    /// reads these at its start (the chat model and pins, context, prefetch) and the JIT's
-    /// build of the CUDA kernels reads the toolkit's root.
+    /// reads these at its start (the chat model and pins, context, prefetch) and the build of
+    /// the CUDA kernels reads the toolkit's root.
     pub fn hub_env(&self) -> Vec<(String, String)> {
         let mut env = Vec::new();
         if !self.model.is_empty() {
@@ -255,9 +238,6 @@ impl NodeConf {
         }
         if let Some(kv) = &self.kv {
             env.push(("MAKEPAD_ASSET_AI_LLM_KV".to_string(), kv.clone()));
-        }
-        if let Some(dir) = &self.target_dir {
-            env.push(("CARGO_TARGET_DIR".to_string(), dir.clone()));
         }
         for (key, value) in [("MAKEPAD_AI_PREFETCH", &self.models), ("MAKEPAD_AI_PREFETCH_LICENCES", &self.models_licences), ("MAKEPAD_AI_PREFETCH_MBPS", &self.models_mbps)] {
             if let Some(value) = value {
@@ -331,12 +311,12 @@ mod tests {
     fn settings_read_what_the_node_ran_with_and_write_back_the_same() {
         let text = "port = 8123\nhost = 10.0.0.217\ncache_dir = /home/arch/.makepad/weights-chat\nmodel = qwen3.8-27b # the 27B\n\
                     context = 32768\ncontext_max = 81920\nkv = q8_0\npin = kokoro, whisper-large-v3-turbo\nnice = 10\ncompute = ai-first\n\
-                    runner = native\nfeatures = node,claude-stub\n\
-                    target_dir = /home/arch/makepad-target-hub\nmodels = all\nmodels_licences = none,community,non-commercial\nmodels_mbps = 40\nenv MAKEPAD_CUDA_ROOT = /opt/cuda\nenv MAKEPAD_AI_UI_RESERVE_MB = 1536\nbogus = 1\n";
+                    features = node,claude-stub\n\
+                    models = all\nmodels_licences = none,community,non-commercial\nmodels_mbps = 40\nenv MAKEPAD_CUDA_ROOT = /opt/cuda\nenv MAKEPAD_AI_UI_RESERVE_MB = 1536\nbogus = 1\n";
         let s = NodeConf::parse(text);
         assert!(s.enabled);
         assert_eq!(s.compute, ComputeMode::AiFirst);
-        assert_eq!((s.runner, s.features.as_str()), (Runner::Native, "node,claude-stub"));
+        assert_eq!(s.features.as_str(), "node,claude-stub");
         assert_eq!(s.serve_host().as_deref(), Some("10.0.0.217"));
         assert_eq!(s.base_url().as_deref(), Some("https://10.0.0.217:8123"));
         assert_eq!(s.cache_dir(), PathBuf::from("/home/arch/.makepad/weights-chat"));
@@ -345,15 +325,15 @@ mod tests {
         assert_eq!(get("MAKEPAD_AI_MODEL"), Some("qwen3.8-27b"));
         assert_eq!(get("MAKEPAD_AI_PIN_MODELS"), Some("qwen3.8-27b,kokoro,whisper-large-v3-turbo"));
         assert_eq!((get("MAKEPAD_ASSET_AI_LLM_CONTEXT"), get("MAKEPAD_ASSET_AI_LLM_CONTEXT_MAX"), get("MAKEPAD_ASSET_AI_LLM_KV")), (Some("32768"), Some("81920"), Some("q8_0")));
-        assert_eq!((get("CARGO_TARGET_DIR"), get("MAKEPAD_CUDA_ROOT"), get("MAKEPAD_AI_UI_RESERVE_MB")), (Some("/home/arch/makepad-target-hub"), Some("/opt/cuda"), Some("1536")));
+        assert_eq!((get("MAKEPAD_CUDA_ROOT"), get("MAKEPAD_AI_UI_RESERVE_MB")), (Some("/opt/cuda"), Some("1536")));
         assert_eq!((get("MAKEPAD_AI_PREFETCH"), get("MAKEPAD_AI_PREFETCH_LICENCES"), get("MAKEPAD_AI_PREFETCH_MBPS")), (Some("all"), Some("none,community,non-commercial"), Some("40")));
         assert_eq!(NodeConf::parse(&s.render()), s);
         // The conf's own CUDA root is the one passed, once.
         assert_eq!(env.iter().filter(|(k, _)| k == CUDA_ROOT).count(), 1);
-        // Nothing set: the defaults, JIT with the node features, this machine's LAN address.
+        // Nothing set: the defaults, the node features, this machine's LAN address.
         let d = NodeConf::parse("enabled = off\n");
         assert!(!d.enabled);
-        assert_eq!((d.port, d.compute, d.runner, d.features.as_str()), (8123, ComputeMode::Automatic, Runner::Jit, "node"));
+        assert_eq!((d.port, d.compute, d.features.as_str()), (8123, ComputeMode::Automatic, "node"));
         assert!(d.hub_env().iter().all(|(k, _)| k == CUDA_ROOT));
         assert_eq!(lan_host(" 10.0.0.5 ").as_deref(), Some("10.0.0.5"));
         assert_eq!(lan_host("0.0.0.0"), lan_host(""), "the wildcard is this machine's LAN address");

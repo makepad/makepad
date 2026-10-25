@@ -84,9 +84,10 @@ pub const CLAUDE: LiveId = live_id!(claude);
 pub const LOCAL: LiveId = live_id!(local);
 pub const QUIT: LiveId = live_id!(quit_hub);
 
-/// The tray icon for the hub as it stands. `quit`: the menu offers Quit (not on a WM node,
-/// whose WM keeps its hub running; Enabled turns it off there).
-pub fn icon(settings: &Settings, glyph: Glyph, status: &str, quit: bool) -> TrayIcon {
+/// The tray icon for the hub as it stands. `window`: the menu offers "Open in window" (not on a
+/// makepad WM node, whose only UI is the tray's dropdown). Quit is on every desktop; on a WM node
+/// it is deliberate and the hub stays off until the person starts it from the launcher.
+pub fn icon(settings: &Settings, glyph: Glyph, status: &str, window: bool) -> TrayIcon {
     let svc = |b: Backend, id: LiveId| {
         let s = settings.service(b);
         let label = match (s.on, s.auto_off_at) {
@@ -102,11 +103,11 @@ pub fn icon(settings: &Settings, glyph: Glyph, status: &str, quit: bool) -> Tray
         svc(Backend::Claude, CLAUDE),
         svc(Backend::Local, LOCAL),
         TrayMenuItem::Line,
-        TrayMenuItem::item(OPEN, "Open in window"),
     ];
-    if quit {
-        menu.push(TrayMenuItem::item(QUIT, "Quit AI Hub (stops serving)"));
+    if window {
+        menu.push(TrayMenuItem::item(OPEN, "Open in window"));
     }
+    menu.push(TrayMenuItem::item(QUIT, "Quit AI Hub (stops serving)"));
     // a click opens the dropdown (the panel) where the desktop gives the click to the app; the
     // menu is the secondary click's
     TrayIcon { id: TRAY, image: image(glyph), tooltip: format!("AI Hub \u{b7} {status}"), menu, dropdown: true }
@@ -117,11 +118,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_wm_nodes_menu_has_no_quit() {
+    fn a_wm_nodes_menu_has_quit_but_no_window() {
         let s = Settings::default();
-        let has_quit = |t: TrayIcon| t.menu.iter().any(|i| matches!(i, TrayMenuItem::Item { id, .. } if *id == QUIT));
-        assert!(has_quit(icon(&s, Glyph::Serving, "Serving", true)));
-        assert!(!has_quit(icon(&s, Glyph::Serving, "Serving", false)));
+        let has = |t: &TrayIcon, wanted: LiveId| t.menu.iter().any(|i| matches!(i, TrayMenuItem::Item { id, .. } if *id == wanted));
+        let desktop = icon(&s, Glyph::Serving, "Serving", true);
+        let wm = icon(&s, Glyph::Serving, "Serving", false);
+        assert!(has(&desktop, QUIT) && has(&desktop, OPEN));
+        assert!(has(&wm, QUIT) && !has(&wm, OPEN));
     }
 
     #[test]

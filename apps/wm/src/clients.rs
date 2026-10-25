@@ -164,6 +164,10 @@ fn registry_app(entry: &makepad_app_registry::AppEntry) -> AppDef {
     app
 }
 
+/// The registry id of the supervised service the WM keeps (the node's AI Hub, `hub_app.rs`): the
+/// launcher offers it (starting it again after its Quit), the dock never shows it.
+pub const HUB_SERVICE_APP: &str = "aihub";
+
 /// The curated applications, in menu order: the menu rows of the shared
 /// registry (`libs/app_registry/apps.json`). Every one of these is a real
 /// window we host; servers and headless tools are deliberately absent.
@@ -667,6 +671,10 @@ pub struct ClientSlot {
     /// One of an app's later windows (`client_windows.rs`): the app's client. No process
     /// of its own; its sender is the app's.
     pub parent: Option<ClientId>,
+    /// A service the WM supervises (the node's AI Hub app, hub_app.rs): it came to the socket
+    /// like any app but has no tile and is in no layout, no dock and no alt-tab. Its one window
+    /// is a tray dropdown (`dropdown.rs`) that shows as a flyout under its tray item.
+    pub service: bool,
 }
 
 impl ClientSlot {
@@ -700,6 +708,7 @@ impl ClientSlot {
             pane: false,
             external: false,
             parent: None,
+            service: false,
         }
     }
 
@@ -723,6 +732,16 @@ impl ClientSlot {
         slot.ready = false;
         slot.external = true;
         slot.status = "starting…".into();
+        slot
+    }
+
+    /// The slot of a supervised service the WM socket admitted (`service`): the same client as
+    /// an adopted app, without a tile.
+    pub fn adopted_service(id: ClientId, app: &str) -> ClientSlot {
+        let mut slot = ClientSlot::adopted(id, app);
+        slot.service = true;
+        // Never the keyboard's target: its dropdown takes pointer input only.
+        slot.takes_focus = false;
         slot
     }
 
@@ -859,6 +878,7 @@ fn client_slot(pool: &TaskPool, id: ClientId, app: &AppDef, child: Child, warm: 
         pane: false,
         external: false,
         parent: None,
+        service: false,
     }
 }
 
@@ -1186,6 +1206,7 @@ mod tests {
                 "Stage",
                 "Makepad Story",
                 "Sandbox",
+                "AI Hub",
             ]
             .map(str::to_string)
         );

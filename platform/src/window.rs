@@ -836,6 +836,20 @@ impl WindowHandle {
         cx.push_unique_platform_op(CxOsOp::CloseWindow(self.window_id()));
     }
 
+    /// Shows the window: made first when it is not yet (`create_on_start: false`), else shown
+    /// again in front like `set_visible(cx, true)`. A tray app makes its regular window this way
+    /// when the person asks for it.
+    pub fn show(&mut self, cx: &mut Cx) {
+        let id = self.window_id();
+        if !cx.windows[id].is_created {
+            if !cx.platform_ops.iter().any(|op| matches!(op, CxOsOp::CreateWindow(w) if *w == id)) {
+                cx.platform_ops.push_back(CxOsOp::CreateWindow(id));
+            }
+            return;
+        }
+        self.set_visible(cx, true);
+    }
+
     /// Hides the window (it keeps its state and comes back with `set_visible(cx, true)`), or
     /// shows it again in front of the others with the app activated. A tray app hides its
     /// window on `WindowCloseRequested` (`accept_close.set(false)`) and shows it from its menu.

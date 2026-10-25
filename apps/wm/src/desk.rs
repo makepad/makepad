@@ -480,6 +480,9 @@ pub struct WmState {
     /// frame, and every tile snaps to the layout like a dragged one — a
     /// tween on top of the slide would lag it (see `dragging`).
     pub pane_sliding: bool,
+    /// The service client whose tray dropdown is open (`dropdown.rs`): a float drawn bare, above
+    /// the windows, and in no dock.
+    pub dropdown_client: Option<ClientId>,
     /// What the shell surfaces may offer to launch (apps.rs): the linked
     /// modules, and the checkout's apps where this build hosts processes.
     pub launchable: crate::apps::Launchable,
@@ -665,7 +668,7 @@ impl WmState {
             let l = self.layout();
             return l.clients_on(l.active);
         }
-        self.screens.shown_clients()
+        self.screens.shown_clients().into_iter().filter(|c| Some(*c) != self.dropdown_client).collect()
     }
 
     /// The active screen's layout: where new windows, workspace keys and
@@ -2825,6 +2828,8 @@ impl Widget for WmDesk {
             }
         }
         self.spanned_tiles = spans.iter().map(|(c, _)| *c).collect();
+        // A tray dropdown is drawn bare: the app's card is its whole look.
+        self.spanned_tiles.extend(state.dropdown_client);
         // A fullscreen space's window is drawn bare, whichever space is shown.
         for s in &state.screens.screens {
             self.spanned_tiles.extend(s.layout.spaces.items().iter().filter_map(|sp| sp.fullscreen_client()));
