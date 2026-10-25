@@ -1438,3 +1438,8 @@ Windows.Win32.UI.WindowsAndMessaging.WM_CONTEXTMENU
 Windows.Win32.UI.WindowsAndMessaging.WM_NULL
 Windows.Win32.UI.WindowsAndMessaging.TPM_NONOTIFY
 Windows.Win32.UI.WindowsAndMessaging.TPM_BOTTOMALIGN
+# tray dropdowns: the icon's rect and its monitor
+Windows.Win32.UI.Shell.Shell_NotifyIconGetRect
+Windows.Win32.UI.Shell.NOTIFYICONIDENTIFIER
+Windows.Win32.Graphics.Gdi.MonitorFromRect
+Windows.Win32.UI.WindowsAndMessaging.SWP_SHOWWINDOW

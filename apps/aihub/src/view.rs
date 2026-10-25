@@ -1,6 +1,8 @@
-//! The AI Hub window: the serving controls (Enabled, each backend with its inactivity
+//! The AI Hub panel: the serving controls (Enabled, each backend with its inactivity
 //! turn-off, the address), the fleet as this hub hears it, then the shared hub panel
 //! (`makepad-ai-hub-panel`, the one the WM's top bar shows), all drawn with the shell kit.
+//! The tray dropdown draws it as the WM's flyout card (`card: true`: the popups surface with
+//! its border), the window on the plain popups ground.
 
 use crate::serve::{Phase, Published};
 use crate::settings::{Backend, IdleOff, Settings};
@@ -71,6 +73,9 @@ pub struct HubAppView {
     d: ShellDraw,
     #[live]
     tokens: ShellTokens,
+    /// drawn as a flyout card (the tray dropdown)
+    #[live]
+    card: bool,
     #[rust]
     pub state: ViewState,
     #[rust]
@@ -106,10 +111,18 @@ impl HubAppView {
         let tok = self.tokens;
         let fg = tok.popups.text;
         self.hits.clear();
-        self.draw_bg.color = tok.popups.bg();
-        self.draw_bg.draw_abs(cx, window);
+        // the card's border is inside the window: the content keeps its padding inside it
+        let edge = if self.card {
+            self.d.card(cx, window, &tok.popups);
+            tok.popups.border_width
+        } else {
+            self.draw_bg.color = tok.popups.bg();
+            self.draw_bg.draw_abs(cx, window);
+            0.0
+        };
         self.view_h = window.size.y;
-        let top = rect(window.pos.x + PAD, window.pos.y + PAD - self.scroll, window.size.x - 2.0 * PAD, 1.0e6);
+        let pad = PAD + edge;
+        let top = rect(window.pos.x + pad, window.pos.y + pad - self.scroll, window.size.x - 2.0 * pad, 1.0e6);
         let st = self.state.clone();
 
         // The master switch and the address.
@@ -210,7 +223,12 @@ impl HubAppView {
         let h = self.panel.height(&st.snapshot);
         let body = rect(rest.pos.x, rest.pos.y, rest.size.x, h);
         self.panel.draw(cx, &mut self.d, &tok, &st.snapshot, body);
-        self.content_h = body.pos.y + h + PAD + self.scroll - window.pos.y;
+        self.content_h = body.pos.y + h + pad + self.scroll - window.pos.y;
+    }
+
+    /// The height everything takes (the last draw's), for a dropdown sized to its content.
+    pub fn content_height(&self) -> f64 {
+        self.content_h
     }
 }
 
@@ -225,7 +243,7 @@ fn state_line(st: &ViewState, backend: Backend) -> String {
         return match backend {
             Backend::Claude => "Off: the hub does not offer Claude (Sandboxes drop the row)".to_string(),
             Backend::Local => match p.local_models.len() {
-                0 => "Off: no local model this machine can run is on disk".to_string(),
+                0 => "Off: no local model on disk yet (Download one under Models)".to_string(),
                 n => format!("Off \u{b7} {n} on disk: {}", p.local_models.join(", ")),
             },
         };

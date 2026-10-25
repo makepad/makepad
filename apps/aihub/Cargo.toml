@@ -11,13 +11,28 @@ name = "makepad-app-aihub"
 path = "src/main.rs"
 
 [features]
-# The local model runtime (chat models on Metal / CPU). Speech is left out: it would
-# reach for the OS speech engines.
-default = ["localai"]
+# The local model backends that run on Metal (macOS) and CUDA/CPU (Windows, Linux): chat,
+# vision and OCR (`localai`), Whisper speech-to-text, Kokoro text-to-speech, notes, beats,
+# stems, matting, depth, segmentation, upscaling, body pose. CUDA-only families (image
+# generation, video, music generation, sound effects, 3D) are left out.
+# Whisper and Kokoro bring the hub's speech-session code along (`speech`); the service
+# never starts a session, so the OS speech engines (and their permission prompts) are
+# never asked for.
+default = ["localai", "stt", "tts", "notes-native", "beats-native", "stems-native", "matte-native", "depth-native", "segment-native", "upscale-native", "body-native"]
 localai = ["makepad-ai-hub/localai"]
+stt = ["makepad-ai-hub/stt"]
+tts = ["makepad-ai-hub/tts"]
+notes-native = ["makepad-ai-hub/notes-native"]
+beats-native = ["makepad-ai-hub/beats-native"]
+stems-native = ["makepad-ai-hub/stems-native"]
+matte-native = ["makepad-ai-hub/matte-native"]
+depth-native = ["makepad-ai-hub/depth-native"]
+segment-native = ["makepad-ai-hub/segment-native"]
+upscale-native = ["makepad-ai-hub/upscale-native"]
+body-native = ["makepad-ai-hub/body-native"]
 # A makepad WM node's hub (the WM starts the app with `--features node`): every local model
 # backend the headless node hub (apps/ai-hub) builds by default, CUDA kernels included where
-# MAKEPAD_CUDA_ROOT names a toolkit. A Mac keeps the lean default.
+# MAKEPAD_CUDA_ROOT names a toolkit. A Mac keeps the default (Metal/CPU backends only).
 node = ["localai", "makepad-ai-hub/flux", "makepad-ai-hub/paint", "makepad-ai-hub/paint-cuda", "makepad-ai-hub/llm",
     "makepad-ai-hub/tts", "makepad-ai-hub/indextts", "makepad-ai-hub/speech", "makepad-ai-hub/stt", "makepad-ai-hub/video",
     "makepad-ai-hub/interpolate", "makepad-ai-hub/audio", "makepad-ai-hub/mesh", "makepad-ai-hub/matte-native",

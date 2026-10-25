@@ -67,6 +67,7 @@ impl App {
                 TrayMenuItem::Line,
                 TrayMenuItem::item(live_id!(quit), "Quit"),
             ],
+            dropdown: false,
         });
     }
 }

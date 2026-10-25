@@ -86,6 +86,10 @@ impl Win {
     fn popup(&self) -> bool {
         self.kind & 0xff == window_kind::POPUP
     }
+    /// a tray app's dropdown: shown by `WindowAtTray`, dismissed when it is deactivated
+    fn dropdown(&self) -> bool {
+        self.kind & 0xff == window_kind::DROPDOWN
+    }
     fn maximized(&self) -> bool {
         unsafe { IsZoomed(self.hwnd.get()).as_bool() }
     }
@@ -352,6 +356,8 @@ fn show(w: &Win) {
 fn style_for(kind: u32) -> (WINDOW_STYLE, WINDOW_EX_STYLE) {
     match kind & 0xff {
         window_kind::POPUP => (WS_POPUP, WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE),
+        // no taskbar button of its own, above the others; it takes the focus when shown
+        window_kind::DROPDOWN => (WS_POPUP, WS_EX_TOOLWINDOW | WS_EX_TOPMOST),
         window_kind::CHROMELESS => (WS_POPUP | WS_THICKFRAME, WS_EX_APPWINDOW),
         _ => (WS_OVERLAPPEDWINDOW, WS_EX_APPWINDOW),
     }
@@ -395,7 +401,7 @@ fn create(s: &'static Shared, sid: u32, id: Id, kind: u32, parent: Id, geom: [f3
         high_surrogate: Cell::new(0),
         cursor: Cell::new(cursor::DEFAULT),
         silent: Cell::new(false),
-        hidden_until_present: Cell::new(flags & open_flags::HIDDEN_UNTIL_PRESENT != 0 && !s.revealed.load(Ordering::Acquire)),
+        hidden_until_present: Cell::new(kind & 0xff != window_kind::DROPDOWN && flags & open_flags::HIDDEN_UNTIL_PRESENT != 0 && !s.revealed.load(Ordering::Acquire)),
         buttons: Cell::new(0),
         last_pos: Cell::new((0.0, 0.0)),
         no_focus: flags & open_flags::NO_FOCUS != 0,
@@ -452,7 +458,8 @@ fn create(s: &'static Shared, sid: u32, id: Id, kind: u32, parent: Id, geom: [f3
         }
     }
     publish_geom(&win);
-    if !win.hidden_until_present.get() {
+    // a dropdown waits for `WindowAtTray`
+    if !win.hidden_until_present.get() && !win.dropdown() {
         show(&win);
     }
     if log_enabled() {
@@ -536,6 +543,14 @@ fn command(s: &'static Shared, sid: u32, cmd: OsCmd) {
                 publish_geom(&w);
             }
         }
+        // the app-drawn caption's close: the window's own WM_CLOSE answers `CloseRequested`
+        OsCmd::WindowState { id, state: window_state::CLOSE } => {
+            if let Some(w) = target(id) {
+                unsafe {
+                    let _ = PostMessageW(Some(w.hwnd.get()), WM_CLOSE, WPARAM(0), LPARAM(0));
+                }
+            }
+        }
         OsCmd::WindowState { id, state } => {
             if let Some(w) = target(id) {
                 // fullscreen is a maximize over the whole monitor: switching between the two
@@ -616,7 +631,13 @@ fn command(s: &'static Shared, sid: u32, cmd: OsCmd) {
             }
         }
         OsCmd::MenuSet { items } => menu::set(sid, items),
-        OsCmd::TraySet { tray, w, h, alpha, tooltip, items } => tray::set(sid, tray, w, h, alpha, tooltip, items),
+        OsCmd::TraySet { tray, w, h, alpha, tooltip, items, .. } => tray::set(sid, tray, w, h, alpha, tooltip, items),
+        OsCmd::WindowAtTray { id, tray, w, h } => {
+            if let Some(win) = target(id) {
+                tray::window_at(sid, win.hwnd.get(), tray, w, h);
+                publish_geom(&win);
+            }
+        }
         OsCmd::TrayRemove { tray } => tray::remove(sid, tray),
         OsCmd::FileDialog { req, kind, title, location, filename, filters } => {
             let owner = APP.with_borrow(|a| session_window(a, sid).map(|w| w.hwnd.get().0 as usize)).unwrap_or(0);
@@ -690,6 +711,7 @@ pub(super) fn handles(cmd: &OsCmd) -> bool {
             | OsCmd::MenuSet { .. }
             | OsCmd::TraySet { .. }
             | OsCmd::TrayRemove { .. }
+            | OsCmd::WindowAtTray { .. }
             | OsCmd::FileDialog { .. }
             | OsCmd::AppIcon { .. }
     )
@@ -1053,7 +1075,14 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             w.forwarded.set([0; 4]);
             w.push(|q, id| q.focus(id, false));
         }
-        WM_ACTIVATE => rawinput::activated(hwnd, (wparam.0 & 0xffff) as u32 != WA_INACTIVE),
+        WM_ACTIVATE => {
+            let active = (wparam.0 & 0xffff) as u32 != WA_INACTIVE;
+            // a click anywhere else (or another app) took the focus from a dropdown
+            if !active && w.dropdown() && unsafe { IsWindowVisible(hwnd).as_bool() } {
+                w.push(|q, id| q.popup_dismissed(id));
+            }
+            rawinput::activated(hwnd, active)
+        }
         WM_ACTIVATEAPP => app_activation(wparam.0 != 0),
         WM_INPUT => {
             rawinput::input(&w, lparam, modifiers());

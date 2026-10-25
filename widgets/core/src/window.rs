@@ -1142,11 +1142,15 @@ impl Window {
         content
     }
 
-    fn close_after_recording(&mut self, cx: &mut Cx) {
+    /// `ask`: the caption's close button (the app is asked, as by a native close button);
+    /// otherwise the window closes without asking (`WindowRef::close`).
+    fn close_after_recording(&mut self, cx: &mut Cx, ask: bool) {
         if self.screen_cap.is_managed() && self.screen_cap.is_busy() {
             self.managed_close_pending = true;
             self.screen_cap.stop(cx);
             self.view.redraw(cx);
+        } else if ask {
+            self.window.handle.request_close(cx);
         } else {
             self.window.handle.close(cx);
         }
@@ -2832,11 +2836,22 @@ impl WindowRef {
         }
     }
 
+    /// Show a tray app's dropdown window (`dropdown: true`, `create_on_start: false`) at tray
+    /// `tray`'s icon, `size` points large (`WindowHandle::show_at_tray`): made on first use,
+    /// placed again (and resized) on every call. Hide it with `set_visible(cx, false)` on its
+    /// `Event::PopupDismissed` and on Esc.
+    pub fn show_at_tray(&self, cx: &mut Cx, tray: LiveId, size: Vec2d) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.window.handle.show_at_tray(cx, tray, size);
+            inner.view.redraw(cx);
+        }
+    }
+
     /// Close the window through the platform, the way its own caption
     /// button does — the app sees the ordinary window-close path.
     pub fn close(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.close_after_recording(cx);
+            inner.close_after_recording(cx, false);
         }
     }
     /// See `WindowHandle::set_chromeless_when_maximized` (Windows only;
@@ -3347,7 +3362,7 @@ impl Widget for Window {
                     self.window.handle.maximize(cx);
                 }
                 if clicked(&self.hosted_close) {
-                    self.close_after_recording(cx);
+                    self.close_after_recording(cx, true);
                 }
             }
             if let Some(voice) = WidgetHooks::voice(cx) {
@@ -3376,7 +3391,7 @@ impl Widget for Window {
                 if self.screen_cap.is_managed() {
                     log!("[makepad-remote] user closed window {}; finalizing Studio recording", self.window.window_id().id());
                 }
-                self.close_after_recording(cx);
+                self.close_after_recording(cx, true);
             }
         }
 

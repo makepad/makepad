@@ -593,7 +593,8 @@ impl App {
             }
             StudioToApp::Relay(HostRelay::TrayClick { tray }) => {
                 if let Some((sid, _)) = self.trays.get(&tray) {
-                    self.state.shared.push((*sid, Id::NONE), |q, _| q.tray_click(tray));
+                    // the WM's relay carries no icon rect yet
+                    self.state.shared.push((*sid, Id::NONE), |q, _| q.tray_click(tray, 0.0, 0.0, 0.0, 0.0, [0.0; 4]));
                 }
             }
             StudioToApp::Relay(HostRelay::Clipboard { request_id, text, png }) => {
@@ -818,12 +819,19 @@ impl Shell for App {
                         }
                         window_state::MAXIMIZE => self.window_op(window_op::MAXIMIZE),
                         window_state::RESTORE => self.window_op(window_op::RESTORE),
-                        window_state::CLOSE => self.window_op(window_op::CLOSE),
+                        // The app-drawn caption's close: the app is asked first (a tray app hides
+                        // its window); the WM's own close of a main tile would end the process.
+                        window_state::CLOSE => {
+                            if let Some(w) = self.windows.get(&key) {
+                                self.state.shared.push(w.recipient, |q, id| q.close_requested(id));
+                            }
+                        }
                         _ => {}
                     }
                 }
                 // The WM's tray area shows the tray; its menu choices come back as relays.
-                OsCmd::TraySet { tray, w, h, alpha, tooltip, items } => {
+                // (a dropdown tray's click opens the menu here too: the relay has no dropdown yet)
+                OsCmd::TraySet { tray, w, h, alpha, tooltip, items, .. } => {
                     let items = items.into_iter().map(|(item, label)| tray_item(&item, label)).collect();
                     let relay = RelayTray { tray, width: w, height: h, alpha, tooltip, items };
                     self.hub.send(vec![AppToStudio::Relay(ChildRelay::SetTray(relay.clone()))]);
@@ -1098,7 +1106,7 @@ mod tests {
             (item(menu_kind::ITEM | menu_kind::CHECKABLE | menu_kind::CHECKED, 2), "Enabled".to_string()),
             (item(menu_kind::ITEM, 3), "Open AI Hub".to_string()),
         ];
-        app.command(Op::Cmd(4, OsCmd::TraySet { tray: 77, w: 2, h: 1, alpha: vec![0, 255], tooltip: "AI Hub".into(), items }));
+        app.command(Op::Cmd(4, OsCmd::TraySet { tray: 77, w: 2, h: 1, flags: 0, alpha: vec![0, 255], tooltip: "AI Hub".into(), items }));
         assert_eq!(app.trays.get(&77).map(|(sid, _)| *sid), Some(4), "the choice goes to the session that set it");
         app.command(Op::CloseSession(4));
         assert!(app.trays.is_empty(), "a closed session's tray goes");

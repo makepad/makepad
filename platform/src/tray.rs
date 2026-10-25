@@ -1,17 +1,22 @@
 //! The system tray (macOS status item, Windows notification area, the makepad WM's tray area on
 //! Linux): an icon with a tooltip and a menu that lives outside the app's windows.
 //! `Cx::set_tray` creates or updates one in place, `Cx::remove_tray` removes it; a chosen item
-//! arrives as `Event::TrayMenu`, a primary click (Windows) as `Event::TrayClick`. While a tray
-//! exists, closing the last window does not end the app: it keeps running from the tray until it
-//! quits.
+//! arrives as `Event::TrayMenu`, a primary click (Windows, and macOS for a `dropdown` tray) as
+//! `Event::TrayClick`. While a tray exists, closing the last window does not end the app: it
+//! keeps running from the tray until it quits.
+//!
+//! A tray app's main UI can be a dropdown: a window made with `WindowHandle::configure_dropdown`
+//! (`dropdown: true` in a `Window`'s `window`), shown at the icon with
+//! `WindowHandle::show_at_tray` on `TrayClick` and hidden on its `Event::PopupDismissed`
+//! (`Cx::has_tray_dropdown` says where the desktop does this).
 //!
 //! On the makepad WM the tray travels as a hosted relay (`ChildRelay::SetTray`, from the HAL's
 //! WM shell or a hosted child): the WM draws the glyph in its bar's tray area tinted with its
 //! shell tokens, shows the tooltip, and opens the menu on a primary click (as macOS does; it
-//! sends no `TrayClick`). A tray app outlives a WM restart: its windows and trays come back on
-//! the next WM.
+//! sends no `TrayClick`, dropdown or not, yet). A tray app outlives a WM restart: its windows
+//! and trays come back on the next WM.
 
-use crate::{cx::Cx, cx_api::CxOsOp, makepad_live_id::LiveId};
+use crate::{cx::Cx, cx_api::CxOsOp, makepad_live_id::LiveId, makepad_math::Rect};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TrayIcon {
@@ -20,6 +25,10 @@ pub struct TrayIcon {
     pub image: TrayImage,
     pub tooltip: String,
     pub menu: Vec<TrayMenuItem>,
+    /// The primary click is the app's (`Event::TrayClick`: it opens its dropdown) and the menu
+    /// opens on a secondary click (right click, Ctrl-click on macOS). Without it a macOS click
+    /// opens the menu; Windows always sends left clicks as `TrayClick`.
+    pub dropdown: bool,
 }
 
 /// A monochrome glyph: one alpha byte per pixel, rows top-down. macOS shows it as a template
@@ -56,11 +65,17 @@ pub struct TrayMenuEvent {
     pub item: LiveId,
 }
 
-/// A primary click on a tray icon, where the system gives one (Windows left click; macOS opens
-/// the menu instead).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A primary click on a tray icon, where the system gives one (Windows left click; macOS for a
+/// `dropdown` tray, otherwise it opens the menu).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TrayClickEvent {
     pub tray: LiveId,
+    /// The icon's rect, in points from the primary screen's top left corner (y down); zero where
+    /// the system does not say.
+    pub anchor: Rect,
+    /// The visible area of the icon's screen (without menu bar, Dock, taskbar), same space: a
+    /// dropdown sizes itself by it (`WindowHandle::show_at_tray` fits it there).
+    pub screen: Rect,
 }
 
 impl Cx {
@@ -87,6 +102,13 @@ impl Cx {
     /// Whether the app has a tray the desktop shows (it then outlives its last window).
     pub fn has_tray(&self) -> bool {
         !self.trays.is_empty()
+    }
+
+    /// Whether a `dropdown` tray's primary click reaches the app as `TrayClick` here, so its
+    /// dropdown window can be its main UI: macOS and Windows. Not yet on the makepad WM (its
+    /// tray opens the menu); there the app keeps its regular window.
+    pub fn has_tray_dropdown(&self) -> bool {
+        self.has_tray() && cfg!(any(target_os = "macos", target_os = "windows"))
     }
 }
 

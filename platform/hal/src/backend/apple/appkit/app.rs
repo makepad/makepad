@@ -1193,7 +1193,12 @@ fn command(sid: u32, cmd: OsCmd) {
             a.menu_sid.set(sid);
             update_menu(&items);
         }
-        OsCmd::TraySet { tray, w, h, alpha, tooltip, items } => super::tray::set(sid, tray, w, h, &alpha, &tooltip, &items),
+        OsCmd::TraySet { tray, w, h, flags, alpha, tooltip, items } => super::tray::set(sid, tray, w, h, flags, &alpha, &tooltip, &items),
+        OsCmd::WindowAtTray { id, tray, w, h } => {
+            if let Some(win) = window_of(id) {
+                super::tray::window_at(sid, win, tray, w, h);
+            }
+        }
         OsCmd::TrayRemove { tray } => super::tray::remove(sid, tray),
         OsCmd::FileDialog { req, kind, title, location, filename, filters } => file_dialog(sid, req, kind, &title, &location, &filename, &filters),
         OsCmd::DragReply { id, to, answer } => {

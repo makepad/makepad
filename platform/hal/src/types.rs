@@ -682,6 +682,16 @@ pub mod window_kind {
     /// `window_style::BADGE_HOVER`, session 0 sees the pointer move over it (copies of the moves as
     /// events of the badge, and a `MouseLeave` of it); input itself always stays the window's.
     pub const BADGE: u32 = 4;
+    /// A tray app's dropdown: borderless, not resizable, above other windows, no Dock / taskbar
+    /// entry of its own, made hidden. `WindowAtTray` places and shows it under its tray icon; its
+    /// focus loss answers `PopupDismissed` (the app hides it). No parent.
+    pub const DROPDOWN: u32 = 5;
+}
+
+/// `TraySet::flags`.
+pub mod tray_flags {
+    /// a primary click answers `TrayClick`, the menu opens on a secondary click
+    pub const DROPDOWN: u32 = 1;
 }
 
 /// `TextureImport::kind`.
@@ -728,7 +738,9 @@ pub mod window_state {
     pub const FULLSCREEN: u32 = 3;
     pub const HIDE: u32 = 4;
     pub const SHOW: u32 = 5;
-    /// An embedded window asks its parent to close it.
+    /// The window's own close button (an app-drawn caption's): the window system answers
+    /// `CloseRequested`, as for its native close, and the app decides; an embedded window asks
+    /// its parent to close it.
     pub const CLOSE: u32 = 6;
 }
 

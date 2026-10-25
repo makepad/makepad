@@ -326,6 +326,9 @@ hal_events! {
     // ---- system tray (status items), appended
     /// Menu item `item` (its `MenuItem::cmd`) of the app's tray `tray` (`TraySet::tray`) was chosen.
     TrayMenu = 148, tray_menu { tray: u64, item: u64 };
-    /// A primary click on tray `tray` where the system gives one (Windows); macOS opens the menu.
-    TrayClick = 149, tray_click { tray: u64 };
+    /// A primary click on tray `tray` (Windows; macOS for a `tray_flags::DROPDOWN` tray, which
+    /// otherwise opens the menu). `x`, `y`, `w`, `h` is the icon's rect and `screen` the visible area
+    /// of its screen (x, y, w, h), in points from the primary screen's top left corner, y down
+    /// (zero where the system does not say).
+    TrayClick = 149, tray_click { tray: u64, x: f64, y: f64, w: f64, h: f64, screen: rect };
 }

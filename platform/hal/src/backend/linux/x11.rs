@@ -571,6 +571,12 @@ impl App {
                 }
                 self.publish(native);
             }
+            // the app-drawn caption's close: asked as the window manager's close is
+            window_state::CLOSE => {
+                if let Some(w) = self.windows.get(&native) {
+                    self.shared.push(w.recipient, |q, id| q.close_requested(id));
+                }
+            }
             _ => {}
         }
     }
@@ -1558,6 +1564,7 @@ impl Shell for App {
                 | OsCmd::MenuSet { .. }
                 | OsCmd::TraySet { .. }
                 | OsCmd::TrayRemove { .. }
+                | OsCmd::WindowAtTray { .. }
                 | OsCmd::ClipboardActions { .. }
                 | OsCmd::ShareText { .. }
                 | OsCmd::MobileUi { .. }

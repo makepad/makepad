@@ -78,6 +78,90 @@ pub struct ModelInfo {
     pub device: String,
 }
 
+/// What the catalogue says of a local model that is not served now.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Get {
+    NotDownloaded,
+    /// Asked for; waits for the download before it.
+    Queued,
+    /// Bytes on disk of the total.
+    Downloading { done: u64, total: u64 },
+    /// All files on disk (served once the Local models switch is on).
+    OnDisk,
+    /// The download stopped; the downloader's reason. Asking again resumes it.
+    Failed(String),
+    /// It cannot be fetched (weights converted by hand); why.
+    NotDownloadable(String),
+}
+
+/// One line on what a model of registry `domain` does, finer than [`ModelKind::what`].
+pub fn domain_what(domain: &str) -> &'static str {
+    match domain {
+        "text" => "Chat and translation",
+        "vision" => "Reads pictures",
+        "ocr" => "Reads text in pictures and documents",
+        "stt" => "Speech to text",
+        "speech" => "Text to speech",
+        "image" => "Image generation",
+        "edit" | "inpaint" | "control" => "Image editing",
+        "matte" => "Cuts the subject out of a picture",
+        "depth" => "Depth from a picture",
+        "segment" => "Finds and outlines objects in pictures",
+        "upscale" => "Upscales pictures",
+        "enhance" => "Upscales and smooths video",
+        "body" => "Body pose and shape from a picture",
+        "notes" => "Notes from audio (MIDI)",
+        "beats" => "Finds beats and downbeats",
+        "stems" => "Splits songs into stems",
+        "music" => "Music generation",
+        "audio" => "Sound effects",
+        "video" => "Video generation",
+        "mesh" => "3D models from pictures",
+        "splat" => "3D scenes from pictures",
+        "rig" => "Rigs 3D characters",
+        "motion" => "Character animation",
+        "paint" => "Textures 3D models",
+        _ => "Other",
+    }
+}
+
+/// What has to happen before a download (makepad_ai_hub::catalogue::LicenceGate).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LicenceGate {
+    /// A click starts it.
+    Open,
+    /// The person confirms the licence first (its class: "non-commercial", "restricted", "gated", …).
+    Confirm(String),
+    /// Gated on Hugging Face and no HF_TOKEN.
+    NeedsToken,
+}
+
+/// A local model this machine can run (the AI Hub app's catalogue).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CatalogueModel {
+    pub id: String,
+    pub kind: ModelKind,
+    /// One line on what it does, finer than its kind ("Cuts the subject out of a picture").
+    pub what: &'static str,
+    pub download_bytes: u64,
+    pub disk_bytes: u64,
+    /// Licence class ("none", "community", "non-commercial", …).
+    pub licence: String,
+    pub gate: LicenceGate,
+    pub get: Get,
+}
+
+/// Every local model of the registry this machine can run, for the panel's Download /
+/// Cancel / Delete. None where the panel only shows what a hub serves (the WM).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Catalogue {
+    pub models: Vec<CatalogueModel>,
+    /// Registry models this machine cannot run, with the reason.
+    pub elsewhere: Vec<(String, String)>,
+    /// The outcome of the person's last delete or a refused download ("deleted kokoro, 0.4 GB freed").
+    pub note: Option<String>,
+}
+
 /// One model at work.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Activity {
@@ -145,6 +229,8 @@ pub struct HubSnapshot {
     pub policy: Option<String>,
     /// Whether it takes compute jobs now, and why (`GET /control` "activity").
     pub admission: Option<Admission>,
+    /// The local models this machine can run, served or not (the AI Hub app).
+    pub catalogue: Option<Catalogue>,
 }
 
 pub use makepad_ai_hub::activity::ComputeMode;
@@ -238,6 +324,12 @@ pub enum HubCommand {
     /// What the WM tells its node's hub about this machine: whether a game is being played
     /// (`POST /control/local-use` `use`; the mode is the app's and stays as it is).
     LocalUse { gaming: bool },
+    /// Fetch a catalogue model; `confirmed`: the person said yes to its licence.
+    Download { id: String, confirmed: bool },
+    /// Stop a download (the partial file stays; Download resumes it).
+    CancelDownload(String),
+    /// Delete a model's files (never while loaded or in use).
+    Delete(String),
 }
 
 /// What the worker thread publishes.
@@ -406,7 +498,8 @@ pub fn command_request(base: &str, cmd: &HubCommand) -> Option<(String, makepad_
             obj(vec![("mb", Value::Int(*mb as i64)), ("unload", Value::Bool(*unload)), ("reserve_mb", Value::Int(*reserve_mb as i64))]),
         ),
         HubCommand::LocalUse { gaming } => (format!("{base}/control/local-use"), obj(vec![("use", s(if *gaming { "gaming" } else { "" }))])),
-        HubCommand::SetCompute(_) => return None,
+        // The AI Hub app takes these itself.
+        HubCommand::SetCompute(_) | HubCommand::Download { .. } | HubCommand::CancelDownload(_) | HubCommand::Delete(_) => return None,
     })
 }
 
@@ -474,6 +567,7 @@ pub fn parse_snapshot(v: &makepad_strict_json::Value) -> HubSnapshot {
         chat_model: llm.and_then(|l| l.get("model")).and_then(|m| m.as_str()).map(|m| m.to_string()),
         context_options: llm.and_then(|l| l.get("context_options")).and_then(|o| o.as_arr()).unwrap_or(&[]).iter().filter_map(|c| c.as_u64().map(|c| c as u32)).collect(),
         kv: if llm.and_then(|l| l.get("kv")).and_then(|k| k.as_str()) == Some("q8") { KvPrecision::Q8 } else { KvPrecision::F16 },
+        catalogue: None,
         admission: v.get("activity").filter(|a| a.get("admission_open").is_some()).map(|a| Admission {
             open: a.get("admission_open").and_then(|o| o.as_bool()).unwrap_or(false),
             reason: str_of(a.get("reason")),

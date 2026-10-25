@@ -102,12 +102,14 @@ pub fn icon(settings: &Settings, glyph: Glyph, status: &str, quit: bool) -> Tray
         svc(Backend::Claude, CLAUDE),
         svc(Backend::Local, LOCAL),
         TrayMenuItem::Line,
-        TrayMenuItem::item(OPEN, "Open AI Hub"),
+        TrayMenuItem::item(OPEN, "Open in window"),
     ];
     if quit {
         menu.push(TrayMenuItem::item(QUIT, "Quit AI Hub (stops serving)"));
     }
-    TrayIcon { id: TRAY, image: image(glyph), tooltip: format!("AI Hub \u{b7} {status}"), menu }
+    // a click opens the dropdown (the panel) where the desktop gives the click to the app; the
+    // menu is the secondary click's
+    TrayIcon { id: TRAY, image: image(glyph), tooltip: format!("AI Hub \u{b7} {status}"), menu, dropdown: true }
 }
 
 #[cfg(test)]

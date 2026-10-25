@@ -369,11 +369,18 @@ hal_commands! {
     /// monochrome glyph, the `tooltip`, and its menu. `data` is `count` flat `MenuItem`s (all
     /// `parent` 0, `cmd` the item's id, `menu_kind::CHECKABLE`/`CHECKED` for check marks) followed
     /// by `w * h` alpha bytes (one per pixel, rows top-down). Chosen items answer as `TrayMenu`.
-    TraySet = 151, tray_set { tray: u64, w: u32, h: u32, tooltip: sid, count: u32, data: rng };
+    /// `flags` (`tray_flags`): `DROPDOWN` = a primary click answers `TrayClick` (the app opens its
+    /// dropdown window) and the menu opens on a secondary click.
+    TraySet = 151, tray_set { tray: u64, w: u32, h: u32, tooltip: sid, count: u32, flags: u32, data: rng };
     /// Removes the app's tray `tray`.
     TrayRemove = 152, tray_remove { tray: u64 };
     /// The virtual display (`direct::VirtualDisplay`), packed strings: `WxH@Hz`
     /// (`VirtualDisplay::mode_string`) and `mirror` or `off` (what the panels show); no strings = the panels' own
     /// modes again. Answered by `DirectDisplayResult`.
     DirectDisplayVirtual = 153, direct_display_virtual { req: u64, count: u32, args: rng };
+    /// Sizes window `id` (a `window_kind::DROPDOWN`) to `w` x `h` points, fitted into the visible
+    /// area of the screen with tray `tray`'s icon, places it there (under the macOS status item,
+    /// next to the Windows notification icon), shows it in front and gives it the focus. Its focus
+    /// loss (a click anywhere else) answers `PopupDismissed`.
+    WindowAtTray = 154, window_at_tray { id: obj, tray: u64, w: f32, h: f32 };
 }

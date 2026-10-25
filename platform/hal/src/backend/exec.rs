@@ -52,8 +52,11 @@ pub enum OsCmd {
     DragStart { id: Id, items: Vec<(u32, String)> },
     MenuSet { items: Vec<(MenuItem, String)> },
     /// Create or update tray `tray`: `alpha` is `w * h` bytes, `items` its menu.
-    TraySet { tray: u64, w: u32, h: u32, alpha: Vec<u8>, tooltip: String, items: Vec<(MenuItem, String)> },
+    /// `flags`: `tray_flags`.
+    TraySet { tray: u64, w: u32, h: u32, flags: u32, alpha: Vec<u8>, tooltip: String, items: Vec<(MenuItem, String)> },
     TrayRemove { tray: u64 },
+    /// Size dropdown `id` to `w` x `h` points and show it at tray `tray`'s icon.
+    WindowAtTray { id: Id, tray: u64, w: f32, h: f32 },
     FileDialog { req: u32, kind: u32, title: String, location: String, filename: String, filters: Vec<String> },
     ShareText { text: String },
     ClipboardActions { id: Id, show: bool, area: [f32; 4], selection: bool },
@@ -550,7 +553,8 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 }
                 return;
             }
-            let adopted = (adopt || gpu.auto_adopt()).then(|| world.adopt_window(sid, id)).flatten();
+            // a dropdown is always a window of its own
+            let adopted = (kind & 0xff != window_kind::DROPDOWN && (adopt || gpu.auto_adopt())).then(|| world.adopt_window(sid, id)).flatten();
             let Some(s) = world.session_mut(sid) else { return };
             let geom = match adopted {
                 Some(g) => g,
@@ -1026,6 +1030,11 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 e.val.state = state;
                 let g = e.val.geom;
                 if !gpu.os(sid, OsCmd::WindowState { id, state }) {
+                    // no window system: a close button's close is asked all the same
+                    if state == window_state::CLOSE {
+                        s.events.close_requested(id);
+                        return;
+                    }
                     let dpi = s.dpi;
                     s.events.geom(id, g[0] as f64, g[1] as f64, g[2] as f64, g[3] as f64, dpi, state);
                 }
@@ -1084,7 +1093,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             let items: Vec<(MenuItem, String)> = read_items::<MenuItem>(items, count).map(|i| (i, s.string(i.str).unwrap_or("").to_string())).collect();
             gpu.os(sid, OsCmd::MenuSet { items });
         }
-        HalCmd::TraySet { tray, w, h, tooltip, count, data } => {
+        HalCmd::TraySet { tray, w, h, tooltip, count, flags, data } => {
             let head = count as usize * <MenuItem as crate::buffers::Wire>::SIZE;
             let pixels = w as usize * h as usize;
             if data.len() < head + pixels {
@@ -1093,10 +1102,17 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             }
             let items: Vec<(MenuItem, String)> = read_items::<MenuItem>(&data[..head], count).map(|i| (i, s.string(i.str).unwrap_or("").to_string())).collect();
             let tooltip = s.string(tooltip).unwrap_or("").to_string();
-            gpu.os(sid, OsCmd::TraySet { tray, w, h, alpha: data[head..head + pixels].to_vec(), tooltip, items });
+            gpu.os(sid, OsCmd::TraySet { tray, w, h, flags, alpha: data[head..head + pixels].to_vec(), tooltip, items });
         }
         HalCmd::TrayRemove { tray } => {
             gpu.os(sid, OsCmd::TrayRemove { tray });
+        }
+        HalCmd::WindowAtTray { id, tray, w, h } => {
+            if w.is_finite() && h.is_finite() && w >= 1.0 && h >= 1.0 {
+                os_window(gpu, s, id, OsCmd::WindowAtTray { id, tray, w, h });
+            } else {
+                s.bad();
+            }
         }
         HalCmd::ShareText { text } => {
             let text = String::from_utf8_lossy(text).into_owned();

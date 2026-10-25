@@ -677,7 +677,12 @@ impl Cx {
             HalEvent::ResizeLoop { .. } => {} // the main thread tracks the resize, the sessions run on
             HalEvent::MenuCmd { cmd } => self.call_event_handler(&Event::MacosMenuCommand(LiveId(cmd))),
             HalEvent::TrayMenu { tray, item } => self.call_event_handler(&Event::TrayMenu(crate::tray::TrayMenuEvent { tray: LiveId(tray), item: LiveId(item) })),
-            HalEvent::TrayClick { tray } => self.call_event_handler(&Event::TrayClick(crate::tray::TrayClickEvent { tray: LiveId(tray) })),
+            HalEvent::TrayClick { tray, x, y, w, h, screen } => {
+                use crate::makepad_math::{dvec2, Rect};
+                let anchor = Rect { pos: dvec2(x, y), size: dvec2(w, h) };
+                let screen = Rect { pos: dvec2(screen[0] as f64, screen[1] as f64), size: dvec2(screen[2] as f64, screen[3] as f64) };
+                self.call_event_handler(&Event::TrayClick(crate::tray::TrayClickEvent { tray: LiveId(tray), anchor, screen }))
+            }
 
             // ---- app
             // (every backend paints its windows once after the app started)

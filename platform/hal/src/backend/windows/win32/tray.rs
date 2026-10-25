@@ -4,7 +4,10 @@
 //! as `TrayClick`, the context menu (right click, Shift+F10) opens the tray's menu with
 //! TrackPopupMenuEx and the chosen item answers as `TrayMenu`. The app's glyph is drawn white on a
 //! dark taskbar and black on a light one (SystemUsesLightTheme), again when the theme changes;
-//! when Explorer restarts (`TaskbarCreated`) the icons are added again.
+//! when Explorer restarts (`TaskbarCreated`) the icons are added again. A `TrayClick` carries the
+//! icon's rect (Shell_NotifyIconGetRect) and its monitor's work area in points; `WindowAtTray`
+//! (`window_at`) puts a dropdown window next to the icon, inside that work area: above a bottom
+//! taskbar, below a top one, beside a side one.
 //!
 //! `MAKEPAD_TRAY_SELFTEST=1`: after a tray is first added the shell logs whether the shell took
 //! it and clicks it itself (posts `NIN_SELECT` to the icon's callback), so a test sees the path to
@@ -15,7 +18,9 @@ use crate::types::*;
 use crate::Id;
 use makepad_windows_sys::core::{PCWSTR, PWSTR};
 use makepad_windows_sys::Win32::Foundation::*;
+use makepad_windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromRect, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST};
 use makepad_windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use makepad_windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use makepad_windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 use makepad_windows_sys::Win32::UI::Shell::*;
 use makepad_windows_sys::Win32::UI::WindowsAndMessaging::*;
@@ -24,6 +29,8 @@ use std::cell::{Cell, RefCell};
 /// The icons' callback message.
 const WM_TRAY: u32 = WM_APP + 2;
 const CLASS: &str = "MakepadHalTray";
+/// the space between the taskbar and a dropdown, points
+const DROPDOWN_GAP: f64 = 8.0;
 
 struct Tray {
     sid: u32,
@@ -270,7 +277,84 @@ fn show_menu(hwnd: HWND, uid: u32, at: POINT) {
 
 fn click(uid: u32) {
     if let Some((sid, tray)) = TRAYS.with_borrow(|t| t.iter().find(|t| t.uid == uid).map(|t| (t.sid, t.id))) {
-        Shared::global().push((sid, Id::NONE), |q, _| q.tray_click(tray));
+        let (anchor, screen) = match place(uid) {
+            Some(p) => (p.points(p.icon), p.points(p.work)),
+            None => ([0.0; 4], [0.0; 4]),
+        };
+        Shared::global().push((sid, Id::NONE), |q, _| q.tray_click(tray, anchor[0] as f64, anchor[1] as f64, anchor[2] as f64, anchor[3] as f64, screen));
+    }
+}
+
+/// Where an icon is: its rect and its monitor's work area (screen pixels) and that monitor's scale.
+struct Place {
+    icon: RECT,
+    work: RECT,
+    scale: f64,
+}
+
+impl Place {
+    /// x, y, w, h in points (pixels / the monitor's scale)
+    fn points(&self, r: RECT) -> [f32; 4] {
+        let s = self.scale;
+        [(r.left as f64 / s) as f32, (r.top as f64 / s) as f32, ((r.right - r.left) as f64 / s) as f32, ((r.bottom - r.top) as f64 / s) as f32]
+    }
+}
+
+fn place(uid: u32) -> Option<Place> {
+    let id = NOTIFYICONIDENTIFIER { cbSize: std::mem::size_of::<NOTIFYICONIDENTIFIER>() as u32, hWnd: HWND(HWND_TRAY.get() as _), uID: uid, ..Default::default() };
+    unsafe {
+        let icon = Shell_NotifyIconGetRect(&id).ok()?;
+        let monitor: HMONITOR = MonitorFromRect(&icon, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return None;
+        }
+        let (mut dx, mut dy) = (96u32, 96u32);
+        let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
+        Some(Place { icon, work: info.rcWork, scale: dx.max(1) as f64 / 96.0 })
+    }
+}
+
+/// `WindowAtTray`: dropdown `hwnd` becomes `w` x `h` points (the icon's monitor's scale), fitted
+/// into that monitor's work area next to tray `tray`'s icon, topmost and in the foreground.
+pub(super) fn window_at(sid: u32, hwnd: HWND, tray: u64, w: f32, h: f32) {
+    let uid = TRAYS.with_borrow(|t| t.iter().find(|t| t.sid == sid && t.id == tray).map(|t| t.uid));
+    let Some(p) = uid.and_then(place) else {
+        // no icon to go next to: shown where it is
+        unsafe {
+            let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+            let _ = SetForegroundWindow(hwnd);
+        }
+        return;
+    };
+    let (icon, work) = (p.icon, p.work);
+    let gap = (DROPDOWN_GAP * p.scale).round() as i32;
+    let width = ((w as f64 * p.scale).round() as i32).min(work.right - work.left - 2 * gap).max(1);
+    let height = ((h as f64 * p.scale).round() as i32).min(work.bottom - work.top - 2 * gap).max(1);
+    let clamp = |v: i32, lo: i32, hi: i32| v.max(lo).min(hi.max(lo));
+    let (cx, cy) = ((icon.left + icon.right) / 2, (icon.top + icon.bottom) / 2);
+    let (x, y) = if icon.top >= work.bottom {
+        // a bottom taskbar: above it, centred on the icon
+        (clamp(cx - width / 2, work.left + gap, work.right - width - gap), work.bottom - gap - height)
+    } else if icon.bottom <= work.top {
+        (clamp(cx - width / 2, work.left + gap, work.right - width - gap), work.top + gap)
+    } else if icon.left >= work.right {
+        (work.right - gap - width, clamp(cy - height / 2, work.top + gap, work.bottom - height - gap))
+    } else if icon.right <= work.left {
+        (work.left + gap, clamp(cy - height / 2, work.top + gap, work.bottom - height - gap))
+    } else {
+        // the overflow flyout (inside the work area): above the icon
+        (clamp(cx - width / 2, work.left + gap, work.right - width - gap), clamp(icon.top - gap - height, work.top + gap, work.bottom - height - gap))
+    };
+    unsafe {
+        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, width, height, SWP_SHOWWINDOW);
+        let _ = SetForegroundWindow(hwnd);
+    }
+    if std::env::var_os("MAKEPAD_TRAY_SELFTEST").is_some() {
+        eprintln!(
+            "tray selftest: dropdown {width}x{height} px at ({x}, {y}), icon {}x{} px at ({}, {}), work area ({}, {})-({}, {}), scale {}",
+            icon.right - icon.left, icon.bottom - icon.top, icon.left, icon.top, work.left, work.top, work.right, work.bottom, p.scale
+        );
     }
 }
 

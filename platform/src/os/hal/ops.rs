@@ -116,7 +116,12 @@ impl Cx {
                 }
                 // no position: the window system places it (a NaN position says so)
                 let nan = crate::makepad_math::dvec2(f64::NAN, f64::NAN);
-                (window_kind::NORMAL, Id::NONE, position.unwrap_or(nan), size)
+                if window.dropdown {
+                    // placed at its tray by `WindowAtTray`
+                    (window_kind::DROPDOWN, Id::NONE, nan, size)
+                } else {
+                    (window_kind::NORMAL, Id::NONE, position.unwrap_or(nan), size)
+                }
             }
         };
         // the geometry the app lays out against until the HAL confirms the window
@@ -133,7 +138,9 @@ impl Cx {
         let visuals = window.window_visuals();
         let kind = kind | exact | macos_window_style(&window.macos);
         let fullscreen = window.is_fullscreen;
-        let adopt = !std::mem::replace(&mut self.hal.window_created, true);
+        // a dropdown never takes the host's window (`makepad run`'s load screen): the app's
+        // first regular window does
+        let adopt = kind & 0xff != window_kind::DROPDOWN && !std::mem::replace(&mut self.hal.window_created, true);
         let fb = &mut self.hal.frames;
         fb.w.window_create(id, kind, parent, [position.x as f32, position.y as f32, size.x as f32, size.y as f32], adopt);
         if !title.is_empty() {
@@ -274,6 +281,20 @@ impl Cx {
                 // The host owns these operations, including close. Keep the child's
                 // HAL window alive until the host ends the session, as in the stdin backends.
                 CxOsOp::CloseWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::CLOSE),
+                // a hosted (--stdin-loop) app's close button closes as its `close` does
+                CxOsOp::RequestCloseWindow(w) if self.hal_hosted_extra_window(w) => {
+                    if self.windows[w].is_created {
+                        self.windows[w].is_created = false;
+                        self.hal.frames.w.window_close(hal_window_id(w));
+                    }
+                }
+                CxOsOp::RequestCloseWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::CLOSE),
+                // the window system (or the parent of an embedded window) answers `CloseRequested`
+                CxOsOp::RequestCloseWindow(w) => {
+                    if self.windows[w].is_created {
+                        self.hal.frames.w.window_state(hal_window_id(w), window_state::CLOSE);
+                    }
+                }
                 CxOsOp::MinimizeWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::MINIMIZE),
                 CxOsOp::MaximizeWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::MAXIMIZE),
                 CxOsOp::RestoreWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::RESTORE),
@@ -297,6 +318,14 @@ impl Cx {
                 CxOsOp::MaximizeWindow(w) => self.hal.frames.w.window_state(hal_window_id(w), window_state::MAXIMIZE),
                 CxOsOp::FullscreenWindow(w) => self.hal.frames.w.window_state(hal_window_id(w), window_state::FULLSCREEN),
                 CxOsOp::HideWindow(w) => self.hal.frames.w.window_state(hal_window_id(w), window_state::HIDE),
+                CxOsOp::ShowWindowAtTray(w, tray, size) => {
+                    if self.hal.hosted.is_some() {
+                        self.hal.frames.gap("a hosted app has no system tray");
+                        continue;
+                    }
+                    let size = self.windows[w].layout_vec2d_to_native_points(size);
+                    self.hal.frames.w.window_at_tray(hal_window_id(w), tray.0, size.x as f32, size.y as f32);
+                }
                 CxOsOp::ShowWindow(w) => {
                     self.hal.frames.w.window_state(hal_window_id(w), window_state::SHOW);
                     if self.hal.hosted.is_none() { self.hal.frames.w.activate_app(); }
@@ -467,7 +496,8 @@ impl Cx {
                     let (w, h) = if image.alpha.len() >= pixels { (image.width, image.height) } else { (0, 0) };
                     data.extend_from_slice(&image.alpha[..w as usize * h as usize]);
                     let tooltip = fb.intern(&tray.tooltip);
-                    fb.w.tray_set(tray.id.0, w, h, tooltip, count, &data);
+                    let flags = if tray.dropdown { makepad_hal::tray_flags::DROPDOWN } else { 0 };
+                    fb.w.tray_set(tray.id.0, w, h, tooltip, count, flags, &data);
                 }
                 CxOsOp::RemoveTray(id) => {
                     if self.hal.hosted.is_some() {

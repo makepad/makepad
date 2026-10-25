@@ -758,6 +758,11 @@ impl State {
                             _ => {}
                         }
                     }
+                    // the app-drawn caption's close: asked as the compositor's close is
+                    if state == window_state::CLOSE {
+                        let recipient = self.windows[&k].recipient;
+                        self.shared.push(recipient, |q, id| q.close_requested(id));
+                    }
                 }
             }
             OsCmd::WindowButtons { id, show } => {
@@ -879,6 +884,7 @@ impl State {
             | OsCmd::MenuSet { .. }
             | OsCmd::TraySet { .. }
             | OsCmd::TrayRemove { .. }
+            | OsCmd::WindowAtTray { .. }
             | OsCmd::ClipboardActions { .. }
             | OsCmd::ShareText { .. }
             | OsCmd::MobileUi { .. }

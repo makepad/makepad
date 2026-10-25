@@ -526,7 +526,9 @@ impl Cx {
                 self.call_event_handler(&Event::TrayMenu(crate::tray::TrayMenuEvent { tray: LiveId(tray), item: LiveId(item) }));
             }
             HostRelay::TrayClick { tray } => {
-                self.call_event_handler(&Event::TrayClick(crate::tray::TrayClickEvent { tray: LiveId(tray) }));
+                // the WM's relay carries no icon rect yet
+                let zero = crate::makepad_math::Rect::default();
+                self.call_event_handler(&Event::TrayClick(crate::tray::TrayClickEvent { tray: LiveId(tray), anchor: zero, screen: zero }));
             }
         }
     }

@@ -201,6 +201,15 @@ impl Shared {
             SAID.call_once(|| eprintln!("tray: this desktop has no tray for makepad apps (only the makepad WM shows them)"));
             return;
         }
+        // A tray dropdown needs the tray host too: until our WM has it, the dropdown is shown as
+        // a window of that size where the window system puts it.
+        if let OsCmd::WindowAtTray { id, w, h, .. } = cmd {
+            static SAID: std::sync::Once = std::sync::Once::new();
+            SAID.call_once(|| eprintln!("tray dropdown: not supported on this desktop yet; shown as a window"));
+            self.command(sid, OsCmd::WindowGeom { id, geom: [f32::NAN, f32::NAN, w, h] });
+            self.command(sid, OsCmd::WindowState { id, state: window_state::SHOW });
+            return;
+        }
         if log_enabled() {
             match &cmd {
                 OsCmd::WindowCreate { id, kind, parent, geom } => eprintln!(

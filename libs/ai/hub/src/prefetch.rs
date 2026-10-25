@@ -162,13 +162,13 @@ enum Verdict {
 /// A serving peer, its pacing (`serve_mbps`: 0 unpaced, None unknown) and the digests it holds (None: a
 /// peer the operator listed in `MAKEPAD_AI_PEER_SOURCES` whose inventory is not
 /// readable, asked for every file after the known holders).
-struct Peer {
+pub(crate) struct Peer {
     base: String,
     mbps: Option<f64>,
     digests: Option<HashSet<String>>,
 }
 
-fn peers(node: &PrefetchNode) -> Vec<Peer> {
+pub(crate) fn peers(node: &PrefetchNode) -> Vec<Peer> {
     let listed = PeerPlan::env_sources();
     let mut out = Vec::new();
     for found in crate::discovery::start_listener().nodes() {
@@ -248,44 +248,9 @@ pub fn run_pass(node: &PrefetchNode, config: &PrefetchConfig, complete: &mut dyn
     }
 
     let peers = if wanted.is_empty() { Vec::new() } else { peers(node) };
-    let held = |file: &FileSpec| file.sha256.as_deref().is_some_and(|d| peers.iter().any(|p| p.digests.as_ref().is_some_and(|s| s.contains(d))));
-    // Peer-held files first; the rest (Hugging Face) after, rotated by this
-    // node's key so the nodes of a fleet start on different files.
-    let (mut order, mut rest): (Vec<&FileSpec>, Vec<&FileSpec>) = wanted.iter().copied().partition(|f| held(f));
-    if !rest.is_empty() {
-        let spin = node.node_key.bytes().fold(0usize, |a, b| a.wrapping_mul(31).wrapping_add(b as usize)) % rest.len();
-        rest.rotate_left(spin);
-    }
-    order.extend(rest);
-
-    let mut failed: HashMap<&str, String> = HashMap::new();
-    let mut fetched = 0u64;
+    let order = fetch_order(node, &peers, &wanted);
     let cancel = CancelToken::new();
-    for file in &order {
-        let sources = file.sha256.as_deref().map(|d| sources_for(&peers, d, file.local)).unwrap_or_default();
-        let plan = PeerPlan::for_job(&[], &[], &sources, &node.node_key, node.secret.clone());
-        let downloader = node.downloader.clone().with_peer_plan(plan);
-        let pace = Pace::new(config.bytes_per_sec);
-        let mut first: Option<u64> = None;
-        let mut last = 0u64;
-        let mut progress = |p: DownloadProgress| {
-            let start = *first.get_or_insert(p.done);
-            last = p.done;
-            pace.wait(p.done.saturating_sub(start));
-        };
-        match downloader.ensure_file(file, node.cache_dir, &mut progress, &cancel) {
-            Ok(_) => {
-                if let Some(start) = first {
-                    fetched += last.saturating_sub(start);
-                    eprintln!("prefetch: {} done ({:.2} GB)", file.cache_as, file.size.unwrap_or(last) as f64 / 1e9);
-                }
-            }
-            Err(e) => {
-                eprintln!("prefetch: {}: {e}", file.cache_as);
-                failed.insert(file.cache_as.as_str(), e.to_string());
-            }
-        }
-    }
+    let (fetched, failed) = fetch_files(node, &peers, &order, config.bytes_per_sec, &mut |_, _| {}, &cancel);
 
     let mut lines = vec![format!(
         "# prefetch pass {} s, fetched {:.1} GB, gpu {} {} MB cc {}, {} peer(s)",
@@ -322,6 +287,66 @@ pub fn run_pass(node: &PrefetchNode, config: &PrefetchConfig, complete: &mut dyn
     }
     eprintln!("{}", lines[0]);
     text
+}
+
+/// The order to fetch `wanted` in: files a peer holds first; the rest (Hugging Face)
+/// after, rotated by this node's key so the nodes of a fleet start on different files.
+pub(crate) fn fetch_order<'f>(node: &PrefetchNode, peers: &[Peer], wanted: &[&'f FileSpec]) -> Vec<&'f FileSpec> {
+    let held = |file: &FileSpec| file.sha256.as_deref().is_some_and(|d| peers.iter().any(|p| p.digests.as_ref().is_some_and(|s| s.contains(d))));
+    let (mut order, mut rest): (Vec<&FileSpec>, Vec<&FileSpec>) = wanted.iter().copied().partition(|f| held(f));
+    if !rest.is_empty() {
+        let spin = node.node_key.bytes().fold(0usize, |a, b| a.wrapping_mul(31).wrapping_add(b as usize)) % rest.len();
+        rest.rotate_left(spin);
+    }
+    order.extend(rest);
+    order
+}
+
+/// Fetches `files` in order through the verified, resumable downloader: each from the
+/// peers that hold it (fast holders first), else Hugging Face; paced to `bytes_per_sec`.
+/// `progress` hears each file's index in `files` and its progress. Returns the bytes
+/// received and the failures by cache path; a cancel ends it at the next chunk.
+pub(crate) fn fetch_files<'f>(
+    node: &PrefetchNode,
+    peers: &[Peer],
+    files: &[&'f FileSpec],
+    bytes_per_sec: Option<f64>,
+    progress: &mut dyn FnMut(usize, &DownloadProgress),
+    cancel: &CancelToken,
+) -> (u64, HashMap<&'f str, String>) {
+    let mut failed: HashMap<&str, String> = HashMap::new();
+    let mut fetched = 0u64;
+    for (index, file) in files.iter().enumerate() {
+        if cancel.is_cancelled() {
+            failed.insert(file.cache_as.as_str(), "cancelled".to_string());
+            continue;
+        }
+        let sources = file.sha256.as_deref().map(|d| sources_for(peers, d, file.local)).unwrap_or_default();
+        let plan = PeerPlan::for_job(&[], &[], &sources, &node.node_key, node.secret.clone());
+        let downloader = node.downloader.clone().with_peer_plan(plan);
+        let pace = Pace::new(bytes_per_sec);
+        let mut first: Option<u64> = None;
+        let mut last = 0u64;
+        let mut on_progress = |p: DownloadProgress| {
+            let start = *first.get_or_insert(p.done);
+            last = p.done;
+            progress(index, &p);
+            pace.wait(p.done.saturating_sub(start));
+        };
+        match downloader.ensure_file(file, node.cache_dir, &mut on_progress, cancel) {
+            Ok(_) => {
+                if let Some(start) = first {
+                    fetched += last.saturating_sub(start);
+                    eprintln!("prefetch: {} done ({:.2} GB)", file.cache_as, file.size.unwrap_or(last) as f64 / 1e9);
+                }
+            }
+            Err(e) => {
+                eprintln!("prefetch: {}: {e}", file.cache_as);
+                failed.insert(file.cache_as.as_str(), e.to_string());
+            }
+        }
+    }
+    (fetched, failed)
 }
 
 /// Unique bytes of a model's files.

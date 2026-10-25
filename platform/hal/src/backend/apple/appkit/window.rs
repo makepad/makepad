@@ -28,6 +28,8 @@ pub struct Win {
     pub id: Cell<Id>,
     pub owner_id: Id,
     pub popup: bool,
+    /// a tray app's dropdown (`window_kind::DROPDOWN`): placed by `WindowAtTray`
+    pub dropdown: bool,
     /// `window_style` bits the window was made with
     pub style: u32,
     pub window: ObjcId,
@@ -92,10 +94,13 @@ impl Win {
         let style = kind & !0xff;
         let kind = kind & 0xff;
         let popup = kind == window_kind::POPUP;
+        let dropdown = kind == window_kind::DROPDOWN;
         let size = NSSize { width: geom[2].max(1.0) as f64, height: geom[3].max(1.0) as f64 };
         let win = unsafe {
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
-            let window_class = if style & window_style::PANEL != 0 { classes.panel } else { classes.window };
+            // a dropdown is a non-activating panel: it takes the keyboard without activating the app
+            // (a status item click never does), so a click anywhere else is its resignKey
+            let window_class = if style & window_style::PANEL != 0 || kind == window_kind::DROPDOWN { classes.panel } else { classes.window };
             let window: ObjcId = msg_send![window_class, alloc];
             let delegate: ObjcId = msg_send![classes.window_delegate, new];
             let view: ObjcId = msg_send![classes.view, alloc];
@@ -106,6 +111,7 @@ impl Win {
                 owner_sid: sid,
                 owner_id: id,
                 popup,
+                dropdown,
                 style,
                 window,
                 view,
@@ -145,6 +151,8 @@ impl Win {
 
             if popup {
                 win.init_popup(size, geom, parent);
+            } else if dropdown {
+                win.init_dropdown(size);
             } else {
                 win.init_window(kind, size, geom);
             }
@@ -314,9 +322,36 @@ impl Win {
         let () = msg_send![input_context, invalidateCharacterCoordinates];
     }
 
+    /// A tray app's dropdown: a borderless non-activating panel at the pop-up menu level on every
+    /// space, made hidden;
+    /// `WindowAtTray` (`tray::window_at`) places and shows it under the status item. It is not
+    /// a document window: no Dock window-list entry, not in the Window menu.
+    unsafe fn init_dropdown(&self, size: NSSize) {
+        let frame = NSRect { origin: NSPoint { x: 0.0, y: 0.0 }, size };
+        let style = NSWindowStyleMask::NSBorderlessWindowMask as u64
+            | NSWindowStyleMask::NSFullSizeContentViewWindowMask as u64
+            | NSWindowStyleMask::NSNonactivatingPanelWindowMask as u64;
+        let () = msg_send![self.window, initWithContentRect: frame styleMask: style backing: NSBackingStoreType::NSBackingStoreBuffered as u64 defer: NO];
+        let () = msg_send![self.window, setDelegate: self.delegate];
+        let () = msg_send![self.window, setReleasedWhenClosed: NO];
+        let () = msg_send![self.window, setLevel: NSPopUpMenuWindowLevel];
+        let () = msg_send![self.window, setHasShadow: YES];
+        let () = msg_send![self.window, setExcludedFromWindowsMenu: YES];
+        let () = msg_send![self.window, setHidesOnDeactivate: NO];
+        let () = msg_send![self.window, setBecomesKeyOnlyIfNeeded: NO];
+        let () = msg_send![self.window, setCollectionBehavior: NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary];
+        let () = msg_send![self.window, setAcceptsMouseMovedEvents: YES];
+        let () = msg_send![self.view, setLayerContentsRedrawPolicy: 2i64];
+        let () = msg_send![self.window, setContentView: self.view];
+        let () = msg_send![self.window, makeFirstResponder: self.view];
+        self.add_tracking(size);
+        let input_context: ObjcId = msg_send![self.view, inputContext];
+        let () = msg_send![input_context, invalidateCharacterCoordinates];
+    }
+
     /// A panel that does not activate the app.
     pub fn nonactivating_panel(&self) -> bool {
-        self.style & window_style::PANEL != 0 && self.style & window_style::NON_ACTIVATING != 0
+        self.dropdown || self.style & window_style::PANEL != 0 && self.style & window_style::NON_ACTIVATING != 0
     }
 
     /// A panel that becomes key only when a click needs a text field.
@@ -440,7 +475,7 @@ impl Win {
     }
 
     pub fn lost_focus(&self) {
-        if self.popup {
+        if self.popup || self.dropdown {
             self.push(|q| q.popup_dismissed(self.id.get()));
         } else {
             self.push(|q| q.focus(self.id.get(), false));
@@ -873,6 +908,11 @@ impl Win {
                 }
                 window_state::HIDE => {
                     let () = msg_send![self.window, orderOut: nil];
+                }
+                // the app-drawn caption's close: asked as the traffic light's close is
+                window_state::CLOSE => {
+                    self.close_requested();
+                    return;
                 }
                 window_state::SHOW => {
                     // shown again (a tray app's panel): in front and, when this process may

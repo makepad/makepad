@@ -163,9 +163,17 @@ fn define_tray_target_class() -> *const Class {
             super::tray::action(sid as u32, tray as u64, item as u64);
         }));
     }
+    // a dropdown tray's button (`tray_flags::DROPDOWN`)
+    extern "C" fn tray_click(this: &Object, _sel: Sel, _button: ObjcId) {
+        shielded("tray click", std::panic::AssertUnwindSafe(|| {
+            let (sid, tray): (usize, usize) = unsafe { (*this.get_ivar("sid"), *this.get_ivar("tray_u64")) };
+            super::tray::click(sid as u32, tray as u64);
+        }));
+    }
     let mut decl = ClassDecl::new("HalTrayTarget", class!(NSObject)).unwrap();
     unsafe {
         decl.add_method(sel!(trayAction:), tray_action as extern "C" fn(&Object, Sel, ObjcId));
+        decl.add_method(sel!(trayClick:), tray_click as extern "C" fn(&Object, Sel, ObjcId));
     }
     decl.add_ivar::<usize>("sid");
     decl.add_ivar::<usize>("tray_u64");

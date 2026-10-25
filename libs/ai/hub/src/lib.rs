@@ -109,6 +109,8 @@ pub mod peer_fetch;
 pub mod peer_serve;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod prefetch;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod catalogue;
 pub mod protocol;
 mod progress_watch;
 pub mod providers;

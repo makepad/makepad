@@ -4,8 +4,9 @@
 //! commands; it reads what the owner publishes.
 
 use crate::settings::{Backend, Settings};
+use makepad_ai_hub::catalogue::{Catalogue, DownloadRow, DownloadState, Downloads};
 use makepad_ai_hub::node_conf::NodeConf;
-use makepad_ai_hub::registry::Registry;
+use makepad_ai_hub::registry::{ModelSpec, Registry};
 use makepad_ai_hub::server::{start_service, ServiceConfig, ServiceHandle};
 use std::net::SocketAddr;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -44,6 +45,12 @@ impl Plan {
     /// Whether the hub `self` describes serves the same as `other` (all but the compute mode).
     fn same_service(&self, other: &Plan) -> bool {
         (&self.offered, &self.host, self.port, &self.cache_dir, &self.node_model) == (&other.offered, &other.host, other.port, &other.cache_dir, &other.node_model)
+    }
+
+    /// Whether the hub serves exactly the local models on disk (not a WM node, whose hub
+    /// serves its whole registry): then a download or delete changes what it serves.
+    fn serves_on_disk(&self) -> bool {
+        self.offered.contains(&Backend::Local) && self.node_model.is_none()
     }
 }
 
@@ -99,6 +106,12 @@ pub struct Published {
     pub notes: Vec<(Backend, String)>,
     /// The local models this machine can run and has on disk.
     pub local_models: Vec<String>,
+    /// Every registry model this machine can run (on disk or not), and the others' count.
+    pub catalogue: Catalogue,
+    /// The person's downloads (queued, fetching, failed).
+    pub downloads: Vec<DownloadRow>,
+    /// The outcome of the last delete, or why a download was refused.
+    pub note: Option<String>,
     /// `GET /control` of the running hub (None when off).
     pub control: Option<makepad_strict_json::Value>,
     pub clients: Vec<ClientRow>,
@@ -126,6 +139,11 @@ enum Msg {
     Plan(Plan),
     /// A control route of the running hub (`/control/model`, `/control/local-use`, …).
     Control(String, Vec<u8>),
+    /// Fetch a catalogue model (`confirmed`: the person said yes to its licence).
+    Download(String, bool),
+    CancelDownload(String),
+    /// Delete a model's files (refused while it is loaded or in use).
+    Delete(String),
     Quit,
 }
 
@@ -152,6 +170,18 @@ impl Serve {
         let _ = self.tx.send(Msg::Control(path.to_string(), body));
     }
 
+    pub fn download(&self, id: &str, confirmed: bool) {
+        let _ = self.tx.send(Msg::Download(id.to_string(), confirmed));
+    }
+
+    pub fn cancel_download(&self, id: &str) {
+        let _ = self.tx.send(Msg::CancelDownload(id.to_string()));
+    }
+
+    pub fn delete(&self, id: &str) {
+        let _ = self.tx.send(Msg::Delete(id.to_string()));
+    }
+
     pub fn published(&self) -> Published {
         self.published.lock().map(|p| p.clone()).unwrap_or_default()
     }
@@ -171,23 +201,127 @@ impl Drop for Serve {
     }
 }
 
-/// The registry entries of the local models this build can run on this machine and has
-/// on disk (nothing is downloaded on its own).
-pub fn local_models(cache_dir: &std::path::Path) -> Vec<makepad_ai_hub::registry::ModelSpec> {
-    let Ok(registry) = Registry::embedded() else { return Vec::new() };
-    let gpu = makepad_ai_hub::gpu::query_gpu();
-    registry
-        .models
-        .into_iter()
-        .filter(|spec| spec.backend != makepad_ai_hub::claude_cli::BACKEND)
-        .filter(|spec| !spec.files.is_empty() && spec.files_present(cache_dir))
-        .filter(|spec| makepad_ai_hub::backend::model_availability(spec, &gpu, 0).is_ok())
-        .collect()
+/// The registry entries of the catalogue's models that are on disk: what the hub serves
+/// when Local models is on (nothing downloads on its own: a model the hub's registry does
+/// not hold is never fetched for a request).
+pub fn local_models(registry: &Registry, catalogue: &Catalogue) -> Vec<ModelSpec> {
+    catalogue.on_disk().iter().filter_map(|id| registry.find(id).cloned()).collect()
+}
+
+/// What the owner knows of this machine's models: the registry, the GPU, the catalogue
+/// read from the cache and the person's downloads into it.
+struct Models {
+    registry: Registry,
+    gpu: makepad_ai_hub::gpu::GpuInfo,
+    hf_token: bool,
+    cache_dir: std::path::PathBuf,
+    catalogue: Catalogue,
+    downloads: Option<Downloads>,
+}
+
+impl Models {
+    fn new() -> Models {
+        let registry = Registry::embedded().unwrap_or_default();
+        let hf_token = makepad_ai_hub::download::Downloader::from_env().is_ok_and(|d| d.token.is_some());
+        Models { registry, gpu: makepad_ai_hub::gpu::query_gpu(), hf_token, cache_dir: Default::default(), catalogue: Catalogue::default(), downloads: None }
+    }
+
+    /// Reads the cache again (`cache_dir`, which a plan may change).
+    fn rescan(&mut self, cache_dir: &std::path::Path) {
+        if self.cache_dir != cache_dir {
+            self.cache_dir = cache_dir.to_path_buf();
+            // A new cache: downloads go there (one in flight for the old one ends on its own).
+            self.downloads = None;
+        }
+        let before = (self.catalogue.entries.len(), self.catalogue.on_disk());
+        self.catalogue = makepad_ai_hub::catalogue::scan(&self.registry, &self.cache_dir, &self.gpu, self.hf_token);
+        if before != (self.catalogue.entries.len(), self.catalogue.on_disk()) {
+            let c = &self.catalogue;
+            eprintln!(
+                "aihub: catalogue: {} models this machine can run ({}), {} on disk, {} not for this machine",
+                c.entries.len(),
+                c.entries.iter().map(|e| e.id.as_str()).collect::<Vec<_>>().join(", "),
+                c.on_disk().len(),
+                c.elsewhere.len()
+            );
+        }
+    }
+
+    fn downloads(&mut self) -> Result<&Downloads, String> {
+        if self.downloads.is_none() {
+            let downloader = makepad_ai_hub::download::Downloader::from_env().map_err(|e| e.to_string())?;
+            self.downloads = Some(Downloads::start(self.registry.clone(), self.cache_dir.clone(), downloader));
+        }
+        Ok(self.downloads.as_ref().unwrap())
+    }
+
+    fn rows(&self) -> Vec<DownloadRow> {
+        self.downloads.as_ref().map(|d| d.rows()).unwrap_or_default()
+    }
+}
+
+/// Whether `model` is loaded, loading or working in the hub's `GET /control`.
+fn in_use(control: Option<&makepad_strict_json::Value>, model: &str) -> bool {
+    let Some(c) = control else { return false };
+    let state = c.get("models").and_then(|m| m.as_arr()).and_then(|m| m.iter().find(|m| m.get("id").and_then(|i| i.as_str()) == Some(model))).and_then(|m| m.get("state")).and_then(|s| s.as_str());
+    let active = c.get("active").and_then(|a| a.as_arr()).is_some_and(|a| a.iter().any(|j| j.get("model").and_then(|m| m.as_str()) == Some(model)));
+    active || matches!(state, Some("loaded" | "loading" | "swapping" | "downloading"))
+}
+
+/// Whether the hub runs a job now.
+fn working(control: Option<&makepad_strict_json::Value>) -> bool {
+    control.and_then(|c| c.get("active")).and_then(|a| a.as_arr()).is_some_and(|a| !a.is_empty())
+}
+
+/// "6.9 GB", "230 MB".
+fn size(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 { format!("{:.1} GB", bytes as f64 / 1e9) } else { format!("{:.1} MB", bytes as f64 / 1e6) }
+}
+
+/// The catalogue as the shared panel shows it, with the downloads.
+pub fn panel_catalogue(p: &Published) -> makepad_ai_hub_panel::hub_control::Catalogue {
+    use makepad_ai_hub::catalogue::LicenceGate as G;
+    use makepad_ai_hub_panel::hub_control::{CatalogueModel, Get, LicenceGate, ModelKind};
+    let models = p
+        .catalogue
+        .entries
+        .iter()
+        .map(|e| {
+            let get = match p.downloads.iter().find(|d| d.id == e.id).map(|d| &d.state) {
+                Some(DownloadState::Queued) => Get::Queued,
+                Some(DownloadState::Fetching { done, total, .. }) => Get::Downloading { done: *done, total: *total },
+                Some(DownloadState::Failed(why)) => Get::Failed(why.clone()),
+                None if e.on_disk => Get::OnDisk,
+                None => match &e.not_downloadable {
+                    Some(why) => Get::NotDownloadable(why.clone()),
+                    None => Get::NotDownloaded,
+                },
+            };
+            CatalogueModel {
+                id: e.id.clone(),
+                kind: ModelKind::of(e.kind, e.domain),
+                what: makepad_ai_hub_panel::hub_control::domain_what(e.domain),
+                download_bytes: e.download_bytes,
+                disk_bytes: e.disk_bytes,
+                licence: e.licence.clone(),
+                gate: match &e.gate {
+                    G::Open => LicenceGate::Open,
+                    G::Confirm(c) => LicenceGate::Confirm(c.clone()),
+                    G::NeedsToken => LicenceGate::NeedsToken,
+                },
+                get,
+            }
+        })
+        .collect();
+    makepad_ai_hub_panel::hub_control::Catalogue { models, elsewhere: p.catalogue.elsewhere.clone(), note: p.note.clone() }
 }
 
 struct Running {
     plan: Plan,
     handle: ServiceHandle,
+    /// The on-disk local models it serves (its registry): a download or delete that
+    /// changes them restarts it once it is idle.
+    local: Vec<String>,
 }
 
 fn owner(rx: Receiver<Msg>, published: Arc<Mutex<Published>>) {
@@ -198,11 +332,17 @@ fn owner(rx: Receiver<Msg>, published: Arc<Mutex<Published>>) {
         }
     };
     let discovery = makepad_ai_hub::discovery::start_listener();
+    let mut models = Models::new();
     let mut running: Option<Running> = None;
+    // The plan the person wants (kept: a download or delete applies it again).
+    let mut current: Option<Plan> = None;
     let mut wanted: Option<Plan> = None;
+    let mut control: Option<makepad_strict_json::Value> = None;
+    let mut note: Option<String> = None;
     let mut since = 0u64;
     loop {
-        // Wait for a message; while serving, wake on the hub's own changes too.
+        // Wait for a message; while serving, wake on the hub's own changes too (a
+        // download's progress counts as one).
         let msg = match &running {
             Some(_) => {
                 makepad_ai_hub::control::wait_changed(since, Duration::from_millis(1000));
@@ -218,8 +358,14 @@ fn owner(rx: Receiver<Msg>, published: Arc<Mutex<Published>>) {
                 Err(RecvTimeoutError::Disconnected) => Some(Msg::Quit),
             },
         };
+        let mut disk_changed = false;
         match msg {
             Some(Msg::Quit) => {
+                if let Some(d) = &models.downloads {
+                    for row in d.rows() {
+                        d.cancel(&row.id);
+                    }
+                }
                 if let Some(r) = running.take() {
                     r.handle.stop();
                 }
@@ -227,7 +373,11 @@ fn owner(rx: Receiver<Msg>, published: Arc<Mutex<Published>>) {
                 publish(&mut |p| *p = Published::default());
                 return;
             }
-            Some(Msg::Plan(plan)) => wanted = Some(plan),
+            Some(Msg::Plan(plan)) => {
+                models.rescan(&plan.cache_dir);
+                current = Some(plan.clone());
+                wanted = Some(plan);
+            }
             Some(Msg::Control(path, body)) => {
                 if let Some(r) = &running {
                     if let Err(e) = makepad_ai_hub::server::control_post(&r.handle.shared, &path, &body) {
@@ -235,30 +385,74 @@ fn owner(rx: Receiver<Msg>, published: Arc<Mutex<Published>>) {
                     }
                 }
             }
+            Some(Msg::Download(id, confirmed)) => {
+                // A started download keeps the last note (the rows do not move under the pointer).
+                let refused = match makepad_ai_hub::catalogue::check_download(&models.catalogue, &id, confirmed) {
+                    Ok(()) => models.downloads().map(|d| d.request(&id)).err().map(|e| format!("{id} cannot download: {e}")),
+                    Err(why) => Some(format!("{id} not downloaded: {why}")),
+                };
+                if refused.is_some() {
+                    note = refused;
+                }
+            }
+            Some(Msg::CancelDownload(id)) => {
+                if let Some(d) = &models.downloads {
+                    d.cancel(&id);
+                }
+            }
+            Some(Msg::Delete(id)) => {
+                let busy = in_use(control.as_ref(), &id) || models.downloads.as_ref().is_some_and(|d| d.busy(&id));
+                note = Some(match makepad_ai_hub::catalogue::delete_model(&models.registry, &models.cache_dir, &id, busy) {
+                    Ok(freed) => format!("Deleted {id}: {} freed", size(freed)),
+                    Err(e) => format!("{id} not deleted: {e}"),
+                });
+                eprintln!("aihub: {}", note.as_deref().unwrap_or(""));
+                disk_changed = true;
+            }
             None => {}
         }
-        // Apply a new plan: stop what runs, start what is wanted.
+        // A download ended: read the disk again.
+        if models.downloads.as_ref().is_some_and(|d| !d.take_ended().is_empty()) {
+            disk_changed = true;
+        }
+        if disk_changed {
+            let before = models.catalogue.on_disk();
+            models.rescan(&models.cache_dir.clone());
+            // What the hub serves changes with what is on disk: apply the plan again.
+            if models.catalogue.on_disk() != before && wanted.is_none() {
+                wanted = current.clone();
+            }
+        }
+        // Apply a new plan: stop what runs, start what is wanted. A running hub whose
+        // on-disk models changed restarts once no job runs (a restart drops loaded models).
         if let Some(plan) = wanted.take() {
-            if let Some(r) = running.as_mut().filter(|r| r.plan.same_service(&plan)) {
+            let local_now = if plan.serves_on_disk() { models.catalogue.on_disk() } else { Vec::new() };
+            let same = running.as_ref().is_some_and(|r| r.plan.same_service(&plan) && r.local == local_now);
+            if same {
+                let r = running.as_mut().unwrap();
                 if r.plan.compute != plan.compute {
                     local_use(&r.handle, plan.compute);
                     r.plan.compute = plan.compute;
                 }
+            } else if running.as_ref().is_some_and(|r| r.plan.same_service(&plan)) && working(control.as_ref()) {
+                // Only the on-disk set changed and a job runs: later.
+                wanted = Some(plan);
             } else {
                 if let Some(r) = running.take() {
                     publish(&mut |p| p.phase = Phase::Stopping);
                     r.handle.stop();
                 }
-                let models = local_models(&plan.cache_dir).into_iter().map(|s| s.id).collect::<Vec<_>>();
+                let local = local_models(&models.registry, &models.catalogue);
+                let ids = local.iter().map(|s| s.id.clone()).collect::<Vec<_>>();
                 publish(&mut |p| {
-                    p.local_models = models.clone();
+                    p.local_models = ids.clone();
                     p.control = None;
                     p.addr = None;
                     p.serving.clear();
                     p.phase = if plan.offered.is_empty() { Phase::Off } else { Phase::Starting };
                 });
                 if !plan.offered.is_empty() {
-                    match start(&plan) {
+                    match start(&plan, local) {
                         Ok((handle, serving, notes)) => {
                             let addr = handle.addr;
                             local_use(&handle, plan.compute);
@@ -269,7 +463,8 @@ fn owner(rx: Receiver<Msg>, published: Arc<Mutex<Published>>) {
                                 p.serving = serving.clone();
                                 p.notes = notes.clone();
                             });
-                            running = Some(Running { plan, handle });
+                            let local = if serving.contains(&Backend::Local) && plan.serves_on_disk() { ids.clone() } else { local_now.clone() };
+                            running = Some(Running { plan, handle, local });
                         }
                         Err((reason, notes)) => publish(&mut |p| {
                             p.phase = if reason.is_empty() { Phase::Off } else { Phase::Failed(reason.clone()) };
@@ -290,16 +485,20 @@ fn owner(rx: Receiver<Msg>, published: Arc<Mutex<Published>>) {
             }
             _ => Vec::new(),
         };
-        let control = running.as_ref().and_then(|r| makepad_strict_json::parse(makepad_ai_hub::server::control_snapshot(&r.handle.shared).as_bytes()).ok());
+        control = running.as_ref().and_then(|r| makepad_strict_json::parse(makepad_ai_hub::server::control_snapshot(&r.handle.shared).as_bytes()).ok());
         if let Some(c) = &control {
             since = c.get("seq").and_then(|s| s.as_u64()).unwrap_or(since);
         }
         let (clients, failed) = control.as_ref().map(|c| (clients_of(c), failed_of(c))).unwrap_or_default();
+        let downloads = models.rows();
         publish(&mut |p| {
             p.nodes = nodes.clone();
             p.clients = clients.clone();
             p.failed = failed.clone();
             p.control = control.clone();
+            p.catalogue = models.catalogue.clone();
+            p.downloads = downloads.clone();
+            p.note = note.clone();
         });
     }
 }
@@ -334,7 +533,7 @@ pub fn node_registry(cache_dir: &std::path::Path) -> Vec<makepad_ai_hub::registr
 
 /// Starts the hub for `plan`: Ok with what serves and the notes of what does not; Err with
 /// the reason ("" when nothing could serve at all, which reads as Off with its notes).
-fn start(plan: &Plan) -> Result<(ServiceHandle, Vec<Backend>, Vec<(Backend, String)>), (String, Vec<(Backend, String)>)> {
+fn start(plan: &Plan, local: Vec<ModelSpec>) -> Result<(ServiceHandle, Vec<Backend>, Vec<(Backend, String)>), (String, Vec<(Backend, String)>)> {
     let mut notes = Vec::new();
     // The setting, else this machine's first private IPv4 address.
     let Some(host) = makepad_ai_hub::node_conf::lan_host(&plan.host) else {
@@ -360,11 +559,11 @@ fn start(plan: &Plan) -> Result<(ServiceHandle, Vec<Backend>, Vec<(Backend, Stri
                 Err(e) => notes.push((Backend::Claude, e)),
             },
             Backend::Local => {
-                let local = if plan.node_model.is_some() { node_registry(&plan.cache_dir) } else { local_models(&plan.cache_dir) };
+                let local = if plan.node_model.is_some() { node_registry(&plan.cache_dir) } else { local.clone() };
                 if local.is_empty() {
                     notes.push((Backend::Local, "no local model this machine can run is on disk".to_string()));
                 } else {
-                    models.extend(local);
+                    models.extend(local.iter().cloned());
                     serving.push(Backend::Local);
                 }
             }

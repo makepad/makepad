@@ -10556,6 +10556,11 @@ impl ::core::ops::BitOr for MONITOR_FROM_FLAGS { type Output = Self; fn bitor(se
 impl ::core::ops::BitAnd for MONITOR_FROM_FLAGS { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
 impl ::core::ops::BitXor for MONITOR_FROM_FLAGS { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
 impl ::core::ops::Not for MONITOR_FROM_FLAGS { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+mod import_MonitorFromRect { #[link(name = "USER32", kind = "raw-dylib")] extern "system" { #[link_name = "MonitorFromRect"] pub fn call(lprc: *const crate::Win32::Foundation::RECT,dwFlags: crate::Win32::Graphics::Gdi::MONITOR_FROM_FLAGS) -> crate::Win32::Graphics::Gdi::HMONITOR; } }
+pub use import_MonitorFromRect::call as MonitorFromRect_raw;
+#[inline]
+pub unsafe fn MonitorFromRect(lprc: *const crate::Win32::Foundation::RECT,dwFlags: crate::Win32::Graphics::Gdi::MONITOR_FROM_FLAGS) -> crate::Win32::Graphics::Gdi::HMONITOR {
+import_MonitorFromRect::call(lprc,dwFlags)}
 mod import_MonitorFromWindow { #[link(name = "USER32", kind = "raw-dylib")] extern "system" { #[link_name = "MonitorFromWindow"] pub fn call(hwnd: crate::Win32::Foundation::HWND,dwFlags: crate::Win32::Graphics::Gdi::MONITOR_FROM_FLAGS) -> crate::Win32::Graphics::Gdi::HMONITOR; } }
 pub use import_MonitorFromWindow::call as MonitorFromWindow_raw;
 #[inline]
@@ -22004,6 +22009,16 @@ pub uVersion: u32,
 }
 impl NOTIFYICONDATAW_0 { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
 impl ::core::default::Default for NOTIFYICONDATAW_0 { fn default() -> Self {Self::default()} }
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NOTIFYICONIDENTIFIER {
+pub cbSize: u32,
+pub hWnd: crate::Win32::Foundation::HWND,
+pub uID: u32,
+pub guidItem: crate::core::GUID,
+}
+impl NOTIFYICONIDENTIFIER { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for NOTIFYICONIDENTIFIER { fn default() -> Self {Self::default()} }
 pub const NOTIFYICON_VERSION_4: u32 = 4;
 #[repr(transparent)]
 #[derive(Clone, Copy)]
@@ -22131,6 +22146,14 @@ pub use import_ShellExecuteW::call as ShellExecuteW_raw;
 #[inline]
 pub unsafe fn ShellExecuteW(hwnd: Option<crate::Win32::Foundation::HWND>,lpOperation: Option<crate::core::PCWSTR>,lpFile: crate::core::PCWSTR,lpParameters: Option<crate::core::PCWSTR>,lpDirectory: Option<crate::core::PCWSTR>,nShowCmd: crate::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD) -> crate::Win32::Foundation::HINSTANCE {
 import_ShellExecuteW::call(hwnd.unwrap_or(unsafe { ::core::mem::zeroed() }),lpOperation.unwrap_or(unsafe { ::core::mem::zeroed() }),lpFile,lpParameters.unwrap_or(unsafe { ::core::mem::zeroed() }),lpDirectory.unwrap_or(unsafe { ::core::mem::zeroed() }),nShowCmd)}
+mod import_Shell_NotifyIconGetRect { #[link(name = "SHELL32", kind = "raw-dylib")] extern "system" { #[link_name = "Shell_NotifyIconGetRect"] pub fn call(identifier: *const crate::Win32::UI::Shell::NOTIFYICONIDENTIFIER,iconLocation: *mut crate::Win32::Foundation::RECT) -> crate::core::HRESULT; } }
+pub use import_Shell_NotifyIconGetRect::call as Shell_NotifyIconGetRect_raw;
+#[inline]
+pub unsafe fn Shell_NotifyIconGetRect(identifier: *const crate::Win32::UI::Shell::NOTIFYICONIDENTIFIER) -> Result<crate::Win32::Foundation::RECT, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = import_Shell_NotifyIconGetRect::call(identifier,&mut result__); hr__.ok()?;
+Ok(result__)
+}
 mod import_Shell_NotifyIconW { #[link(name = "SHELL32", kind = "raw-dylib")] extern "system" { #[link_name = "Shell_NotifyIconW"] pub fn call(dwMessage: crate::Win32::UI::Shell::NOTIFY_ICON_MESSAGE,lpData: *const crate::Win32::UI::Shell::NOTIFYICONDATAW) -> crate::core::BOOL; } }
 pub use import_Shell_NotifyIconW::call as Shell_NotifyIconW_raw;
 #[inline]
@@ -22899,6 +22922,7 @@ pub const SWP_NOACTIVATE: crate::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_
 pub const SWP_NOMOVE: crate::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS = crate::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS(2u64 as _);
 pub const SWP_NOSIZE: crate::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS = crate::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS(1u64 as _);
 pub const SWP_NOZORDER: crate::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS = crate::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS(4u64 as _);
+pub const SWP_SHOWWINDOW: crate::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS = crate::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS(64u64 as _);
 pub const SW_HIDE: crate::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD = crate::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD(0i64 as _);
 pub const SW_MAXIMIZE: crate::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD = crate::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD(3i64 as _);
 pub const SW_MINIMIZE: crate::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD = crate::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD(6i64 as _);

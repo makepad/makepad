@@ -321,6 +321,12 @@ pub enum CxOsOp {
     HideWindow(WindowId),
     /// Shows a hidden window again and brings it (and the app) to the front.
     ShowWindow(WindowId),
+    /// The window's own close button (an app-drawn caption's): the app gets
+    /// `WindowCloseRequested`, as for a native close, and the window closes if it accepts.
+    RequestCloseWindow(WindowId),
+    /// A dropdown window (`WindowHandle::show_at_tray`): sized to the points given, shown at
+    /// the tray's icon.
+    ShowWindowAtTray(WindowId, LiveId, Vec2d),
     HideWindowButtons(WindowId),
     ShowWindowButtons(WindowId),
     /// Centre the native window buttons (macOS traffic lights) on this
@@ -580,6 +586,8 @@ impl CxOsOp {
             Self::RestoreWindow(..) => "RestoreWindow",
             Self::HideWindow(..) => "HideWindow",
             Self::ShowWindow(..) => "ShowWindow",
+            Self::RequestCloseWindow(..) => "RequestCloseWindow",
+            Self::ShowWindowAtTray(..) => "ShowWindowAtTray",
             Self::HideWindowButtons(..) => "HideWindowButtons",
             Self::ShowWindowButtons(..) => "ShowWindowButtons",
             Self::CenterWindowButtons(..) => "CenterWindowButtons",
