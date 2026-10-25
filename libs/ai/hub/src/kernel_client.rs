@@ -160,7 +160,7 @@ fn open_link(base_url: &str) -> Result<(Link, Vec<u8>), String> {
         (Link::Tls(s), auth)
     } else {
         let addr = std::net::ToSocketAddrs::to_socket_addrs(&host_port).map_err(|e| e.to_string())?.next().ok_or("no address")?;
-        let s = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5)).map_err(|e| format!("{host_port}: {e}"))?;
+        let s = makepad_network::lan::connect_timeout("ai-hub kernel stream", &addr, Duration::from_secs(5)).map_err(|e| format!("{host_port}: {e}"))?;
         let _ = s.set_nodelay(true);
         (Link::Plain(s), None)
     };

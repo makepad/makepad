@@ -258,7 +258,7 @@ fn connect(url: &ParsedUrl) -> Result<Transport, AssetAiError> {
         let mut last = None;
         let mut stream = None;
         for addr in addrs {
-            match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
+            match makepad_network::lan::connect_timeout("ai-hub http", &addr, CONNECT_TIMEOUT) {
                 Ok(s) => {
                     stream = Some(s);
                     break;

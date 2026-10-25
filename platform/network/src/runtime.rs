@@ -54,6 +54,10 @@ impl NetworkRuntime {
 
     pub fn http_start(&self, request_id: LiveId, request: HttpRequest) -> Result<(), NetworkError> {
         self.sink.ledger.http_started(request_id, &request);
+        if let Err(e) = crate::lan::check_url("http request", &request.url) {
+            self.sink.ledger.ended(request_id, &e.to_string());
+            return Err(NetworkError::backend(e.to_string()));
+        }
         let started = self.backend.http_start(request_id, request, self.sink.clone());
         if let Err(e) = &started {
             self.sink.ledger.ended(request_id, &format!("refused by the backend: {e:?}"));
@@ -67,6 +71,7 @@ impl NetworkRuntime {
     }
 
     pub fn ws_open(&self, socket_id: LiveId, request: HttpRequest) -> Result<(), NetworkError> {
+        crate::lan::check_url("web socket", &request.url).map_err(|e| NetworkError::backend(e.to_string()))?;
         self.backend.ws_open(socket_id, request, self.sink.clone())
     }
 

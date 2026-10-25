@@ -166,11 +166,8 @@ fn lerp_color(a: Vec4f, b: Vec4f, t: f64) -> Vec4f {
 /// window must never change its framebuffer dimensions.
 fn snap_to_device(r: Rect, dpi: f64) -> Rect {
     let dpi = dpi.max(1.0);
-    let snap = |v: f64| (v * dpi).round() / dpi;
-    Rect {
-        pos: dvec2(snap(r.pos.x), snap(r.pos.y)),
-        size: dvec2(snap(r.size.x).max(1.0 / dpi), snap(r.size.y).max(1.0 / dpi)),
-    }
+    let r = r.device_round(dpi);
+    Rect { pos: r.pos, size: dvec2(r.size.x.max(1.0 / dpi), r.size.y.max(1.0 / dpi)) }
 }
 
 /// The chrome and app use the same physical-pixel grid.

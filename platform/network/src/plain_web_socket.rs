@@ -94,7 +94,7 @@ impl PlainWebSocket {
             }
         }
 
-        let mut stream = match TcpStream::connect(format!("{}:{}", split.host, split.port)) {
+        let mut stream = match split.port.parse::<u16>().map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "bad port")).and_then(|port| crate::lan::connect_host("web socket", &split.host, port, None)) {
             Ok(stream) => stream,
             Err(err) => {
                 let _ = rx_sender.send(WebSocketMessage::Error(format!(

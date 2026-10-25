@@ -785,6 +785,8 @@ macro_rules! app_main {
         pub fn app_main() {
             $crate::attach_parent_console();
             Cx::init_log();
+            // MAKEPAD_NET_AUDIT=1: log every socket from the first instruction on
+            $crate::makepad_network::socket_audit::start_if_enabled();
             $crate::startup_trace("main-entered (dyld done)");
             // A later launch of a single-instance app hands its command line
             // to the running instance and ends here, before the VM or a window.

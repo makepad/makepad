@@ -385,7 +385,8 @@ impl SocketStream {
         use_tls: bool,
         ignore_ssl_cert: bool,
     ) -> io::Result<Self> {
-        let tcp_stream = TcpStream::connect(format!("{host}:{port}"))?;
+        let port_number: u16 = port.parse().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "bad port"))?;
+        let tcp_stream = crate::lan::connect_host("socket stream", host, port_number, None)?;
         let _ = tcp_stream.set_nodelay(true);
 
         if use_tls {
@@ -486,14 +487,6 @@ impl Write for SocketStream {
 /// The TCP connection of a fleet TLS stream: each address of `host` tried for at most 5 s, so an
 /// offline LAN machine fails fast instead of after the OS's minute-long connect timeout.
 fn connect_lan(host: &str, port: &str) -> io::Result<TcpStream> {
-    use std::net::ToSocketAddrs;
     let port: u16 = port.parse().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "bad port"))?;
-    let mut last = None;
-    for addr in (host, port).to_socket_addrs()? {
-        match TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
-            Ok(tcp) => return Ok(tcp),
-            Err(e) => last = Some(e),
-        }
-    }
-    Err(last.unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no address")))
+    crate::lan::connect_host("fleet tls", host, port, Some(Duration::from_secs(5)))
 }

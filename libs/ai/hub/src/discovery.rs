@@ -73,7 +73,9 @@ pub struct FleetBeaconJson {
 pub const FLEET_SERVICE: &str = "makepad-ai-hub-tls";
 
 pub fn start_fleet_beacon(node_id: u64, tls_port: u16, fleet: String, node_key: String) {
-    if std::env::var_os("MAKEPAD_AI_NO_BEACON").is_some_and(|v| v == "1") {
+    if std::env::var_os("MAKEPAD_AI_NO_BEACON").is_some_and(|v| v == "1")
+        || !makepad_network::lan::service("ai-hub fleet beacon")
+    {
         return;
     }
     std::thread::spawn(move || {
@@ -116,6 +118,9 @@ pub const DEFAULT_TLS_PORT: u16 = 8123;
 /// endpoints and reached through the same TLS / known-node / credential
 /// path as a beacon's: nothing is trusted for being a gateway.
 pub fn gateway_nodes(port: u16, timeout: Duration) -> Vec<String> {
+    if !makepad_network::lan::service("ai-hub gateway probe") {
+        return Vec::new();
+    }
     let candidates = makepad_core_util::netif::gateway_candidates();
     let probes: Vec<_> = candidates
         .into_iter()
@@ -148,7 +153,10 @@ pub fn network_addresses() -> Vec<std::net::Ipv4Addr> {
 pub fn answers(host_port: &str, timeout: Duration) -> bool {
     use std::net::ToSocketAddrs;
     let Ok(addrs) = host_port.to_socket_addrs() else { return false };
-    addrs.into_iter().any(|addr| std::net::TcpStream::connect_timeout(&addr, timeout).is_ok())
+    addrs.into_iter().any(|addr| {
+        makepad_network::lan::check("ai-hub hint probe", addr).is_ok()
+            && std::net::TcpStream::connect_timeout(&addr, timeout).is_ok()
+    })
 }
 
 /// Where a LAN broadcast goes (a beacon, a Sandbox room probe): the limited
@@ -239,7 +247,14 @@ impl Discovery {
 /// The filter reads `MAKEPAD_AI_FLEET` per beacon, so sharing across
 /// callers changes nothing they observe. After [`stop_listener`] the next
 /// call starts it again (the set is kept).
+///
+/// Receiving the fleet's broadcast beacons is a local-network operation: where
+/// [`makepad_network::lan::allowed`] says no (a hidden instance), discovery is
+/// unavailable and nothing binds.
 pub fn start_listener() -> Discovery {
+    if !makepad_network::lan::service("ai-hub fleet discovery") {
+        return Discovery::Unavailable { reason: "local network off for this process (MAKEPAD_LAN=1 allows it)" };
+    }
     let mut slot = LISTENER.lock().unwrap_or_else(|e| e.into_inner());
     let set = DISCOVERED.get_or_init(Discovered::default).clone();
     // a failed bind is said once and not retried until a stop (another app holds the port)
@@ -397,7 +412,9 @@ mod tests {
         let a = start_listener();
         let b = start_listener();
         let (Discovery::Available(a), Discovery::Available(b)) = (a, b) else {
-            panic!("native discovery unexpectedly unavailable");
+            // a hidden / MAKEPAD_LAN=0 test run never listens on the LAN
+            assert!(!makepad_network::lan::allowed(), "native discovery unexpectedly unavailable");
+            return;
         };
         assert!(Arc::ptr_eq(&a.nodes, &b.nodes));
     }

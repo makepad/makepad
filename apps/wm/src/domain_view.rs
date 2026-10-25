@@ -255,7 +255,7 @@ impl Widget for MpDomainView {
         let dpi = cx.get_current_window_id().map(|w| cx.windows[w].window_geom.dpi_factor)
             .unwrap_or_else(|| cx.current_dpi_factor());
         cx.begin_turtle(walk, self.layout);
-        let rect = cx.turtle().rect().dpi_snap(1.0 / dpi);
+        let rect = cx.turtle().rect().device_round(dpi);
         #[cfg(not(target_arch = "wasm32"))]
         if let (Some(domain), Some(window)) = (self.domain, self.window) {
             let size = self.target.unwrap_or(rect.size);

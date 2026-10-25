@@ -9,6 +9,12 @@ pub mod fleet;
 // The embedded TCP server is native-only; browsers cannot listen on sockets.
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod http_server;
+// May this process touch the local network (macOS Local Network privacy): the one rule.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+pub mod lan;
+// MAKEPAD_NET_AUDIT=1: every socket this process holds, logged (lan.rs).
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+pub mod socket_audit;
 // In-flight requests and the unread queue for `makepad inspect <pid> net` (std clock: native only).
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]

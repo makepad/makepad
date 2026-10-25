@@ -864,7 +864,7 @@ fn try_connect_addrs(
     for addr in addrs {
         saw_any = true;
         let slice = remaining(deadline)?.min(Duration::from_secs(5));
-        match TcpStream::connect_timeout(&addr, slice) {
+        match crate::lan::connect_timeout("blocking http", &addr, slice) {
             Ok(stream) => return Ok(stream),
             Err(_) => continue,
         }

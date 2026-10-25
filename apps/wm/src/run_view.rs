@@ -563,7 +563,7 @@ impl MpRunView {
 impl Widget for MpRunView {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let dpi_factor = Self::host_dpi_factor(cx);
-        let rect = cx.walk_turtle(walk).dpi_snap(1.0 / dpi_factor);
+        let rect = cx.walk_turtle(walk).device_round(dpi_factor);
         // MAKEPAD_TRACE=tile: where each hosted frame is drawn, in device pixels, and the size it has
         if makepad_error_log::trace_enabled("tile") {
             log!("tile c{} px {:.3},{:.3} {:.3}x{:.3} dpi {dpi_factor} frame {:?}", self.hosted.client().unwrap_or(0),

@@ -10,7 +10,7 @@
 
 use makepad_strict_json::{self as json, Value};
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::ToSocketAddrs;
 use std::time::Duration;
 
 const CONNECT_TIMEOUT_MS: u64 = 3_000;
@@ -76,7 +76,7 @@ pub fn request_json_detailed(
         .map_err(|e| RequestError::Connection(format!("resolve {host_port}: {e}")))?
         .next()
         .ok_or_else(|| RequestError::Connection(format!("resolve {host_port}: no address")))?;
-    let stream = TcpStream::connect_timeout(&addr, Duration::from_millis(CONNECT_TIMEOUT_MS))
+    let stream = makepad_network::lan::connect_timeout("ai-hub fleet http", &addr, Duration::from_millis(CONNECT_TIMEOUT_MS))
         .map_err(|e| RequestError::Connection(format!("connect {host_port}: {e}")))?;
     stream
         .set_read_timeout(Some(Duration::from_millis(IO_TIMEOUT_MS)))
