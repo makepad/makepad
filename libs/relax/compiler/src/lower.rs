@@ -2654,6 +2654,17 @@ impl<'a> Lcx<'a> {
         self.ret_val(v, t);
     }
 
+    /// Whether `d` is an impl's `Clone::clone` and its result type `t` is `TrivialClone`.
+    fn trivial_clone(&self, d: DefId, t: TyId) -> bool {
+        let tcx = &self.u.tcx;
+        let (Some(clone), Some(trivial)) = (tcx.lang_items.get(LangItem::Clone), tcx.lang_items.get(LangItem::TrivialClone)) else { return false };
+        let def = self.u.prog.def(d);
+        if def.kind != DefKind::AssocFn || self.u.prog.def(def.parent).kind != DefKind::Impl || tcx.impl_trait.get(&def.parent) != Some(&clone) || self.u.prog.name(d) != "clone" {
+            return false;
+        }
+        tcx.type_implements_trait(&self.u.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog), TraitRef { def_id: trivial, args: vec![GenericArg::Type(t)] }).must_apply_modulo_regions()
+    }
+
     fn clone_shim_fields(&mut self, pa: &Place, t: TyId, vi: u32, n: usize) -> Vec<(Val, TyId)> {
         // rustc_mir_transform/src/shim.rs:662-702: only initialized clones
         // participate in the unwind chain, in reverse initialization order.
@@ -9828,6 +9839,14 @@ impl<'a> Lcx<'a> {
                     vals.push((self.read_place(&field, ty), ty));
                 }
                 self.emit_call(Callee::Fn(self.u.instance_fn_id(instance)), vals, ret)
+            }
+            InstanceKind::Item(d) if vals.len() == 1 && self.trivial_clone(d, ret) => {
+                // `Clone::clone` of a `TrivialClone` type is a bitwise copy by that trait's contract
+                // (core relies on it: slice clone_from_slice / to_vec copy such elements): a
+                // derived clone's `Option<Copy>` fields read as one copy, not a match per field
+                // (rustc gets there by inlining the match and folding it through undef; GAPB2)
+                let p = self.to_leaves(vals[0].0.clone(), vals[0].1);
+                self.read_place(&Place::Mem(p[0], 0), ret)
             }
             InstanceKind::Item(d) => {
                 let sig = self.u.tcx.fn_item_sig(&self.u.prog, d).expect("item signature");

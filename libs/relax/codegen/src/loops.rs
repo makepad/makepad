@@ -2103,8 +2103,8 @@ fn retarget(t: &mut Term, mut m: impl FnMut(u32) -> u32) {
 
 /// Full unrolling of loops with a small constant trip count (`for _ in 0..3`, deflate's hash-chain
 /// probes): an innermost loop with one latch whose counter `c` is set once outside the loop by a
-/// constant and stepped once in the latch by `c = c + s` (c read nowhere outside the loop, no
-/// calls in the loop) and whose latch decides "again" by `c' cmp k` with constants, runs T <= 4
+/// constant and stepped once in the latch by `c = c + s` (c read nowhere outside the loop; calls
+/// in the body are copied with it) and whose latch decides "again" by `c' cmp k` with constants, runs T <= 4
 /// times; it gets T copies in front of it, copy j reading c as the constant c0 + j*s (a fresh
 /// vreg each, so constant folding sees single definitions). Copy j's back edge enters copy j+1;
 /// the last copy's back edge enters the original loop with c restored (never taken: its compare
@@ -2169,35 +2169,67 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
         let mut members = core.clone();
         members.extend(tails.iter().copied());
         members.sort_unstable();
-        let size: usize = members.iter().map(|b| f.blocks[*b as usize].insts.len() + 1).sum();
+        // The size that runs: a counted build's blocks the counts never saw run (the rare arms of
+        // a loop body, inlined) are copied but cost no time; the copies' code is O3 tier growth,
+        // capped by `all` (sandbox reconcile's loop over two borrowed shape fields: 330 insts with
+        // its never-taken create/destroy arms, about 100 that run; GAPB)
+        let all: usize = members.iter().map(|b| f.blocks[*b as usize].insts.len() + 1).sum();
+        let run_only = !relax_backend::stats::opt_off(options, "-unrollrun");
+        let size: usize = members.iter().filter(|b| !run_only || f.blocks[**b as usize].count != 0.0).map(|b| f.blocks[*b as usize].insts.len() + 1).sum();
         if tr {
-            eprintln!("full-unroll {}: loop b{} {} blocks {} insts", f.name, h, members.len(), size);
+            eprintln!("full-unroll {}: loop b{} {} blocks {} insts ({} run)", f.name, h, members.len(), all, size);
         }
         // (the function's budget below bounds the total growth)
-        if size > 160 {
+        if size > 160 || all > 640 {
+            if tr {
+                eprintln!("  too large");
+            }
             continue;
         }
-        if core.iter().any(|b| f.blocks[*b as usize].insts.iter().any(|i| matches!(i, Inst::Call(..))) || matches!(f.blocks[*b as usize].term, Term::Invoke(..) | Term::Resume)) {
+        // Calls in the body are copied with it, as LLVM's full unroll does (a call is part of the
+        // body's cost, not a bar): reconcile's `for (shape, applied, wanted, solid) in [(&mut
+        // entry.a, ..), (..)]` holds the shape calls of the rare changed case, and only unrolled
+        // do the array's borrows become constant-offset stores that forward, so `entry` stops
+        // escaping and its copies join (GAPB). An invoke's unwind edge leaves for the shared
+        // cleanup: each copy keeps it, it is no early exit.
+        // MAKEPAD_RUN_OPT=-unrollcalls: loops with calls stay rolled
+        if relax_backend::stats::opt_off(options, "-unrollcalls") && core.iter().any(|b| f.blocks[*b as usize].insts.iter().any(|i| matches!(i, Inst::Call(..))) || matches!(f.blocks[*b as usize].term, Term::Invoke(..) | Term::Resume)) {
             continue;
         }
         let latches: Vec<u32> = members.iter().copied().filter(|b| f.blocks[*b as usize].term.succs().any(|s| s == h)).collect();
         // only loops that leave from the header or the latch: a body with early exits (a search
         // loop returning from inside) grows by every copy of its exit paths for little gain
         // (deflate's probe loop measured slower unrolled on x64)
-        let early_exit = members.iter().any(|b| *b != h && !latches.contains(b) && f.blocks[*b as usize].term.succs().any(|s| !m.get(s as usize).copied().unwrap_or(false)));
+        // An edge to the block the header leaves for is no early exit: it is the loop's own end,
+        // tested in two steps (a `for` over an array: the header's `start == end`, then the
+        // loaded Option's tag in the next block, which only the copies' constant loads fold).
+        let h_exit: Vec<u32> = f.blocks[h as usize].term.succs().filter(|s| !m.get(*s as usize).copied().unwrap_or(false)).collect();
+        let split_ok = !relax_backend::stats::opt_off(options, "-unrollmulti");
+        let early_exit = members.iter().any(|b| *b != h && !latches.contains(b) && {
+            let t = &f.blocks[*b as usize].term;
+            let unwind = if let Term::Invoke(_, u) = *t { Some(u) } else { None };
+            t.succs().any(|s| Some(s) != unwind && !(split_ok && h_exit.contains(&s)) && !m.get(s as usize).copied().unwrap_or(false))
+        });
+        let split_used = !early_exit && members.iter().any(|b| *b != h && !latches.contains(b) && f.blocks[*b as usize].term.succs().any(|s| h_exit.contains(&s)));
         if early_exit {
             if tr {
-                eprintln!("  early exits from the body");
+                eprintln!("  early exits from the body (header b{}, latches {:?})", h, latches);
+                for &b in &members {
+                    eprintln!("    b{}: {:?} -> {:?}", b, f.blocks[b as usize].insts, f.blocks[b as usize].term);
+                }
             }
             continue;
         }
-        if latches.len() != 1 {
-            if tr {
-                eprintln!("  {} latches", latches.len());
-            }
+        // Several latches (a `continue` in the body) are fine when the header decides and the
+        // counter's step dominates every latch: each back edge enters the next copy.
+        if latches.is_empty() || (latches.len() > 1 && relax_backend::stats::opt_off(options, "-unrollmulti")) {
             continue;
         }
         let l = latches[0];
+        let multi = latches.len() > 1;
+        // (the entries of the pass start: a copy of an earlier loop that leaves into this one keeps
+        // entering the original. Taking the current entries instead made the race's draw +11..30%
+        // instructions: the newly live copies of consecutive loops; GAPB2 racebisect)
         let outside: Vec<u32> = preds[h as usize].iter().copied().filter(|p| !m[*p as usize]).collect();
         if outside.is_empty() {
             continue;
@@ -2207,7 +2239,7 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
         let lb = &f.blocks[l as usize];
         let mut found = None;
         // (block, k, type, counter, step, the step's value made at k is a constant in each copy)
-        for &sb in std::iter::once(&l).chain(members.iter().filter(|b| **b != l)) {
+        for &sb in std::iter::once(&l).filter(|_| !multi).chain(members.iter().filter(|b| multi || **b != l)) {
             if found.is_some() {
                 break;
             }
@@ -2237,6 +2269,12 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
         };
         // a step outside the latch: it must dominate the latch, and blocks it dominates read the
         // stepped counter in the copies
+        if multi && latches.contains(&sb) {
+            if tr {
+                eprintln!("  {} latches and the step in latch b{}", latches.len(), sb);
+            }
+            continue;
+        }
         let idom = if sb != l { relax_backend::dom::idoms(f) } else { Vec::new() };
         let dominated = |b: u32| -> bool {
             if sb == l {
@@ -2255,14 +2293,33 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
             }
             false
         };
-        if sb != l && (sb == h || !dominated(l)) {
+        if sb != l && (sb == h || !latches.iter().all(|&x| dominated(x))) {
             if tr {
-                eprintln!("  step in b{} does not dominate the latch b{}", sb, l);
+                eprintln!("  step in b{} does not dominate the latches {:?}", sb, latches);
             }
             continue;
         }
         if !f.vregs.get(c.0 as usize).map_or(false, |x| *x == Cls::I) {
             continue;
+        }
+        // The two generalisations (several latches, an exit split over two blocks) pay only where
+        // the copies remove an escape: reconcile's `[(&mut entry.a, ..), (..)]` array read by its
+        // IntoIter (`data + start * stride`) becomes constant-offset loads that forward the
+        // borrows, and `entry` stops escaping (LLVM's full-unroll analysis grants the same bonus
+        // for allocas SROA can then split). box3d's scatter_bodies (`for lane in 0..4` with a
+        // `continue`, reading `simd_body.v.x.get(lane)` from a slot of floats, inlined twice in
+        // solve_contacts_convex) only saves an index add per access: unrolled, it cost +277
+        // static insts and +1.8..11% instructions on box3d_physics (GAPB2). The copies of such
+        // loops also stay within a tighter budget.
+        let general = multi || split_used;
+        if general {
+            let gain = counter_indexes_fixed_memory(f, &members, c);
+            if tr {
+                eprintln!("  several latches {} / split exit {}: fixed-address gain {}", multi, split_used, gain);
+            }
+            if !gain {
+                continue;
+            }
         }
         // the decision: in the latch after the step (`Branch(c' cmp k, h, exit)`: iteration j
         // runs again iff cmp(c0 + (j+1)s)), or in the header before anything redefines c
@@ -2285,8 +2342,8 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
             }
             cmp
         };
-        let latch_cmp = if sb == l && matches!(lb.term, Term::Branch(_, a, b) if a == h || b == h) { find_cmp(lb, ak + 1) } else { None };
-        let header_cmp = if latch_cmp.is_none() && h != l {
+        let latch_cmp = if !multi && sb == l && matches!(lb.term, Term::Branch(_, a, b) if a == h || b == h) { find_cmp(lb, ak + 1) } else { None };
+        let header_cmp = if latch_cmp.is_none() && !latches.contains(&h) {
             let hb = &f.blocks[h as usize];
             if hb.insts.iter().any(|i| { let mut r = false; for_defs(i, |d| r |= d == c); r }) { None } else { find_cmp(hb, 0) }
         } else {
@@ -2371,7 +2428,7 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
                 continue 'next;
             }
         }
-        if size * t > budget {
+        if size * t > budget || all * t > 2400 || (general && size * t > 400) {
             if tr {
                 eprintln!("  {} copies of {} insts over the budget {}", t, size, budget);
             }
@@ -2402,7 +2459,7 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
             }
             for (q, &b) in idx.iter().enumerate() {
                 let mut blk = f.blocks[b as usize].clone();
-                let latch = b == l;
+                let latch = latches.contains(&b);
                 // the block holding the step: after it, the copy's next counter; blocks the step
                 // dominates: the next counter throughout
                 let step_blk = b == sb;
@@ -2440,10 +2497,12 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
                     }
                 });
                 if latch && last {
-                    // the original loop continues from the counter this copy reached
+                    // the original loop continues from the counter this copy reached (in front of
+                    // an invoke's call, which ends its block; nothing in the copy reads c)
                     let p = blk.term_pos;
-                    blk.insts.push(Inst::Mov(c, rj2));
-                    blk.pos.push(p);
+                    let at = blk.insts.len() - usize::from(matches!(blk.term, Term::Invoke(..)) && !blk.insts.is_empty());
+                    blk.insts.insert(at, Inst::Mov(c, rj2));
+                    if blk.pos.len() >= at { blk.pos.insert(at, p); }
                 }
                 if b == h {
                     let p = blk.pos.first().copied().unwrap_or(blk.term_pos);
@@ -2466,6 +2525,100 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
         changed = true;
     }
     changed
+}
+
+/// Whether the loop reads, at `slot + (value of the counter c)`, a stack slot that holds addresses of
+/// other slots (stored there, or copied in from such a slot): an array of borrows (`[(&mut e.a, ..),
+/// (..)]`) walked by its IntoIter. The copies make those reads fixed-offset loads that forward the
+/// stored addresses, so the borrowed slots stop escaping and their copies can join (SROA's bonus in
+/// LLVM's full-unroll analysis). A counter indexing memory behind a pointer, or a slot of plain
+/// values (box3d scatter_bodies' `simd_body.v.x.get(lane)`), gains only an index add per access.
+fn counter_indexes_fixed_memory(f: &Func, members: &[u32], c: VReg) -> bool {
+    const NONE: u32 = u32::MAX;
+    let nv = f.vregs.len();
+    // definitions counted now: the pass's own counts predate the copies of loops it already
+    // unrolled in this function (their fresh vregs: an out-of-range index that panicked the O3
+    // build and dropped it -- piano_render's render_chunk stayed below O3, +7.6%)
+    let mut ndef = vec![0u32; nv];
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    for b in &f.blocks {
+        for i in &b.insts {
+            for_defs(i, |d| ndef[d.0 as usize] += 1);
+        }
+    }
+    // the slot a single-definition vreg points into (its address plus constant offsets)
+    let mut root = vec![NONE; nv];
+    loop {
+        let mut grew = false;
+        for b in &f.blocks {
+            for i in &b.insts {
+                let (d, r) = match *i {
+                    Inst::SlotAddr(d, s) => (d, s),
+                    Inst::Mov(d, a) | Inst::IBinI(IOp::Add | IOp::Sub, _, d, a, _) if root[a.0 as usize] != NONE => (d, root[a.0 as usize]),
+                    _ => continue,
+                };
+                if ndef[d.0 as usize] == 1 && root[d.0 as usize] == NONE {
+                    root[d.0 as usize] = r;
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    // slots holding slot addresses
+    let mut holds = vec![false; f.slots.len()];
+    loop {
+        let mut grew = false;
+        for b in &f.blocks {
+            for i in &b.insts {
+                let (to, yes) = match *i {
+                    Inst::Store(_, base, _, src) => (root[base.0 as usize], root[src.0 as usize] != NONE),
+                    Inst::Copy(dst, src, _) => (root[dst.0 as usize], root[src.0 as usize] != NONE && holds[root[src.0 as usize] as usize]),
+                    _ => continue,
+                };
+                if yes && to != NONE && !holds[to as usize] {
+                    holds[to as usize] = true;
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    // values computed from the counter inside the loop (not through memory)
+    let mut ctr = vec![false; nv];
+    ctr[c.0 as usize] = true;
+    loop {
+        let mut grew = false;
+        for &b in members {
+            for i in &f.blocks[b as usize].insts {
+                let d = match *i {
+                    Inst::Mov(d, a) | Inst::IBinI(_, _, d, a, _) | Inst::Conv(Conv::IntToInt(_), d, a) | Inst::INeg(_, d, a) if ctr[a.0 as usize] => d,
+                    Inst::IBin(_, _, d, a, x) if ctr[a.0 as usize] || ctr[x.0 as usize] => d,
+                    _ => continue,
+                };
+                if !ctr[d.0 as usize] {
+                    ctr[d.0 as usize] = true;
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    let held = |v: VReg| root[v.0 as usize] != NONE && holds[root[v.0 as usize] as usize];
+    members.iter().any(|&b| {
+        f.blocks[b as usize].insts.iter().any(|i| match *i {
+            Inst::IBin(IOp::Add, _, _, a, x) => (held(a) && ctr[x.0 as usize]) || (ctr[a.0 as usize] && held(x)),
+            _ => false,
+        })
+    })
 }
 
 /// `c = conv(conv(c) + s)` ending in `Mov(c, x)` at `k` of block `b`: the counter step of a

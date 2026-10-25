@@ -744,3 +744,48 @@ fn an_overlapping_frame_copy_is_a_memmove() {
         }
     }
 }
+
+/// A value moved into a by-value argument copy (`Slot::arg`) for one call: `E = (n, 1); A = E;
+/// call g(&A)`, E read again after the call only when `reread` (then E and A must stay apart:
+/// the callee owns A and may write it). GAPB: `out.push(entry)` into an outlined push.
+fn arg_copy_build(reread: bool) -> Func {
+    let mut f = Func::new("slot_coalesce_arg_copy".into(), 0);
+    let n = f.vreg(Cls::I);
+    f.params.push(n);
+    f.rets.push(Cls::I);
+    let (se, sa) = (f.slot(16, 8), f.slot(16, 8));
+    f.slots[sa as usize].arg = true;
+    f.block();
+    let v = |f: &mut Func| f.vreg(Cls::I);
+    let (pe, pa, one, a, b, s) = (v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f));
+    push(&mut f, 0, Inst::SlotAddr(pe, se));
+    push(&mut f, 0, Inst::SlotAddr(pa, sa));
+    push(&mut f, 0, Inst::Iconst(one, 1));
+    push(&mut f, 0, Inst::Store(Mem::Int(8, false), pe, 0, n));
+    push(&mut f, 0, Inst::Store(Mem::Int(8, false), pe, 8, one));
+    push(&mut f, 0, Inst::Copy(pa, pe, 16));
+    push(&mut f, 0, Inst::Call(Callee::Fn(5), vec![pa], vec![]));
+    if reread {
+        push(&mut f, 0, Inst::Load(Mem::Int(8, false), a, pe, 0));
+        push(&mut f, 0, Inst::Load(Mem::Int(8, false), b, pe, 8));
+        push(&mut f, 0, Inst::IBin(IOp::Add, U64, s, a, b));
+    } else {
+        push(&mut f, 0, Inst::Mov(s, n));
+    }
+    f.blocks[0].term = Term::Ret(vec![s]);
+    f
+}
+
+#[test]
+fn a_value_moved_into_an_argument_copy_joins_it() {
+    let mut f = arg_copy_build(false);
+    assert!(opt::coalesce_slot_copies(&mut f, true));
+    assert_eq!(copies(&f), 0, "the moved value is built in the argument copy");
+}
+
+#[test]
+fn a_value_read_after_the_call_owning_its_copy_stays_apart() {
+    let mut f = arg_copy_build(true);
+    assert!(!opt::coalesce_slot_copies(&mut f, true));
+    assert_eq!(copies(&f), 1, "the callee may write its copy: the value read after it is another one");
+}

@@ -14,6 +14,9 @@ pub enum Option<T> {
 
 pub use Option::{None, Some};
 
+// library/core/src/option.rs:2290-2295 (const effects are outside this port)
+unsafe impl<T: crate::clone::TrivialClone> crate::clone::TrivialClone for Option<T> {}
+
 impl<T> Option<T> {
     pub const fn is_some(&self) -> bool {
         matches!(*self, Some(_))

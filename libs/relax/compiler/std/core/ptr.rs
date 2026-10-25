@@ -190,6 +190,8 @@ impl<T: crate::marker::PointeeSized> Clone for NonNull<T> {
     }
 }
 impl<T: crate::marker::PointeeSized> Copy for NonNull<T> {}
+// library/core/src/ptr/non_null.rs:1684
+unsafe impl<T: crate::marker::PointeeSized> crate::clone::TrivialClone for NonNull<T> {}
 impl<T: crate::marker::PointeeSized> PartialEq for NonNull<T> {
     fn eq(&self, other: &NonNull<T>) -> bool {
         crate::ptr_methods::ptr_words(self.pointer) == crate::ptr_methods::ptr_words(other.pointer)

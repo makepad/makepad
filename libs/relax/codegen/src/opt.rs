@@ -609,7 +609,7 @@ impl InlineLimits {
     }
 }
 
-fn site_rule(options: &relax_session::Options, callee: &Func, id: u32, nargs: usize, nrets: usize, attrs: u8, hot: bool, unsampled: bool, single: bool, depth: usize, multi_depth: usize, lim: &InlineLimits) -> Option<usize> {
+fn site_rule(options: &relax_session::Options, callee: &Func, id: u32, nargs: usize, nrets: usize, attrs: u8, hot: bool, in_loop: bool, unsampled: bool, single: bool, depth: usize, multi_depth: usize, lim: &InlineLimits) -> Option<usize> {
     // Unlike the leaf heuristic, recursion on a panic path still forbids inlining.
     if callee.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::Call(Callee::Fn(c), _, _) if *c == id)))
         || !callee.blocks.iter().any(|b| matches!(b.term, Term::Ret(_))) {
@@ -641,9 +641,14 @@ fn site_rule(options: &relax_session::Options, callee: &Func, id: u32, nargs: us
     // Keep ordinary low-priority sites inlinable, but reserve expansive
     // hinted bodies for hot sites and closure chains. This bound also applies
     // before samples exist, preventing structural builds from spending their
-    // growth allowance on large peripheral helpers.
+    // growth allowance on large peripheral helpers. A site in a loop is no peripheral helper:
+    // rustc inlines an #[inline] body there by its cost alone (LLVM's inline-hint threshold), and
+    // which loop block the samples or counts call hot varies from build to build (sandbox
+    // reconcile's derived `MirrorEntry::clone`, 138 insts, in the per-entity loop: inlined in one
+    // O3 build, a call in the next; GAPB).
     let mut lim = *lim;
-    if !hot && attrs & ATTR_CHAIN == 0 { lim.hint_insts = lim.hint_insts.min(120); }
+    let in_loop = in_loop && !opt_off(options, "-loopinline");
+    if !hot && !in_loop && attrs & ATTR_CHAIN == 0 { lim.hint_insts = lim.hint_insts.min(120); }
     inline_rule(callee, id, nargs, nrets, attrs, &lim).or_else(|| {
         (hot && inline_inst_count(callee) <= lim.hot_insts).then_some(RULE_SMALL_LEAF)
     })
@@ -856,7 +861,7 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
             let no_growth = cost == 0;
             let attrs = found.unwrap().1;
             let lim_b = pgo_site_limits(lim, counted, priorities[bi].0, shape);
-            let rule = site_rule(options, shape, id, args.len(), rets.len(), attrs, priorities[bi].1, priorities[bi].2, single(*ancestry[bi].last().unwrap(), id), ancestry[bi].len() - 1, multi_depths[bi], &lim_b);
+            let rule = site_rule(options, shape, id, args.len(), rets.len(), attrs, priorities[bi].1, loop_sites[bi], priorities[bi].2, single(*ancestry[bi].last().unwrap(), id), ancestry[bi].len() - 1, multi_depths[bi], &lim_b);
             // New admissions respect the actual growth ceiling, including ABI moves.
             let growth = size.saturating_add(args.len()).saturating_add(
                 shape.blocks.iter().filter(|b| matches!(b.term, Term::Ret(_))).count().saturating_mul(rets.len())
@@ -996,7 +1001,7 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
                 } else if let Some((_, attrs)) = found {
                     let c = callee.unwrap();
                     let lim_b = pgo_site_limits(lim, counted, priorities[bi].0, c);
-                    let rule = site_rule(options, c, *id, args.len(), rets.len(), attrs, priorities[bi].1, priorities[bi].2, single(*ancestry[bi].last().unwrap(), *id), ancestry[bi].len() - 1, multi_depths[bi], &lim_b);
+                    let rule = site_rule(options, c, *id, args.len(), rets.len(), attrs, priorities[bi].1, loop_sites[bi], priorities[bi].2, single(*ancestry[bi].last().unwrap(), *id), ancestry[bi].len() - 1, multi_depths[bi], &lim_b);
                     if ancestry[bi].contains(id) || rule.is_none() {
                         2
                     } else if (attrs & ATTR_COLD != 0 && rule != Some(RULE_COST) || attrs & ATTR_COLD_SRC != 0) && !(inline_inst_count(c) <= INLINE_FREE_INSTS && inline_inst_count(c) <= free_budget) {
@@ -6258,7 +6263,7 @@ mod inline_priority_tests {
         let options = &relax_session::Options::default();
         let mut c = cheap_callee(30); // too large for the unsampled free rule
         let lim = InlineLimits::tier1();
-        let rule = |c: &Func, depth, multi_depth| site_rule(options, c, 1, 0, 0, 0, false, true, false, depth, multi_depth, &lim);
+        let rule = |c: &Func, depth, multi_depth| site_rule(options, c, 1, 0, 0, 0, false, false, true, false, depth, multi_depth, &lim);
         assert_eq!(rule(&c, HISTORY_DEPTH_LIMIT - 1, 0), Some(RULE_COST));
         assert_eq!(rule(&c, HISTORY_DEPTH_LIMIT, 0), None);
         c.blocks[0].insts.extend(vec![Inst::IBinI(IOp::Add, I64, VReg(0), VReg(0), 1); 6]);
@@ -7871,8 +7876,28 @@ pub fn coalesce_slot_copies(f: &mut Func, prefix: bool) -> bool {
         // writing those it writes (all of them, both ways, when its access is not known)
         let nocap_ext = |c: &Callee, k: u32| f.nocapture.iter().find(|x| x.0 == *c && x.1 == k && !x.2).map(|x| x.3);
         let nocap = |c: &Callee, k: u32| nocap_ext(c, k).is_some();
+        // A call's own memory, at the slot's start: the result buffer of a call returning in
+        // memory (written whole, never read: it is uninitialised to the callee) and a by-value
+        // argument copy lowering made for one call and nothing reads (the callee owns it: it reads
+        // and may write all of it). Neither is reached through a kept pointer after the return
+        // (rustc: indirect arguments and the indirect return place are `noalias
+        // captures(address)`), as frame::slot_sets reads them. (read, write) byte ranges.
+        // `out.push(entry)` hands the entry to an outlined push as such a copy (GAPB).
+        let owned = |c: &Callee, k: u32, s2: usize, at: i64| -> Option<((i64, i64), (i64, i64))> {
+            let size = f.slots[s2].size as i64;
+            if at != 0 || relax_backend::stats::opt_env_off("-ownedslots") {
+                return None;
+            }
+            if k == 0 && matches!(c, Callee::Fn(id) if f.sret_callees.contains(id)) {
+                return Some(((0, 0), (0, size)));
+            }
+            (f.slots[s2].arg && sc.call_args[s2].len() == 1 && sc.reads[s2] == 0).then_some(((0, size), (0, size)))
+        };
+        let arg_at = |bi: usize, ii: usize, k: u32| -> i64 {
+            match &f.blocks[bi].insts[ii] { Inst::Call(_, args, _) => vs[args[k as usize].0 as usize].1, _ => -1 }
+        };
         let nc_only: Vec<bool> = (0..ns).map(|s2| sc.esc[s2] && !sc.esc_other[s2] && sret_call[s2].is_none()
-            && sc.call_args[s2].iter().all(|&(bi, ii, k)| matches!(&f.blocks[bi].insts[ii], Inst::Call(c, _, _) if nocap(c, k)))).collect();
+            && sc.call_args[s2].iter().all(|&(bi, ii, k)| matches!(&f.blocks[bi].insts[ii], Inst::Call(c, _, _) if nocap(c, k) || owned(c, k, s2, arg_at(bi, ii, k)).is_some()))).collect();
         let tracked: Vec<bool> = (0..ns).map(|s2| f.slots[s2].size > 0 && (!sc.esc[s2] || sret_call[s2].is_some() || nc_only[s2])).collect();
         // (block, inst) of a nocapture call -> the tracked slots' bytes it may read (`nc_rd`) and
         // write (`nc_wr`): (slot, lo, hi; hi = i64::MAX: anywhere in the slot)
@@ -7883,11 +7908,13 @@ pub fn coalesce_slot_copies(f: &mut Func, prefix: bool) -> bool {
                 for &(bi, ii, k) in &sc.call_args[s2] {
                     let Inst::Call(c, args, _) = &f.blocks[bi].insts[ii] else { continue };
                     let at = vs[args[k as usize].0 as usize].1;
-                    let (rd, wr) = match nocap_ext(c, k).flatten() {
-                        Some(e) => (e.read, e.write),
-                        None => ((0, 0), (0, 0)),
+                    let own = if nocap(c, k) { None } else { owned(c, k, s2, at) };
+                    let (rd, wr) = match (own, nocap_ext(c, k).flatten()) {
+                        (Some((r, w)), _) => ((r.0 as i32, r.1 as i32), (w.0 as i32, w.1 as i32)),
+                        (None, Some(e)) => (e.read, e.write),
+                        (None, None) => ((0, 0), (0, 0)),
                     };
-                    let known = nocap_ext(c, k).flatten().is_some();
+                    let known = own.is_some() || nocap_ext(c, k).flatten().is_some();
                     for ((lo, hi), map) in [(rd, &mut nc_rd), (wr, &mut nc_wr)] {
                         let r = if !known { (s2 as u32, 0, i64::MAX) } else if lo == hi { continue } else { (s2 as u32, at + lo as i64, at + hi as i64) };
                         let v = map.entry((bi, ii)).or_default();
@@ -8519,6 +8546,191 @@ pub fn coalesce_slot_copies(f: &mut Func, prefix: bool) -> bool {
                 }
             }
         }
+        any = true;
+    }
+    any
+}
+
+/// Field-wise copies become one `Copy`: in one block, loads from one base whose values only go
+/// to stores at the same distance from another base, covering a contiguous byte range of at least
+/// 16 bytes, are one copy of that range at the last store (LLVM gets there with the SLP
+/// vectorizer and memcpyopt). A derived `Clone` of a struct of `Copy` fields (sandbox reconcile's
+/// `MirrorEntry`, 208 bytes: 49 scalar stores and as many loads) is copied in 16-byte moves, and
+/// the copy is what slot forwarding and coalescing join along. Kept apart: ranges that may
+/// overlap each other, a write in between that may touch either range, a read in between that
+/// may see the destination's bytes early, calls and other effects in between, and a base address
+/// redefined in between.
+pub fn merge_copy_runs(f: &mut Func) -> bool {
+    const NONE: u32 = u32::MAX;
+    let sc = slot_scan(f);
+    let nv = f.vregs.len();
+    let mut nuse = vec![0u32; nv];
+    let mut tu = Vec::new();
+    for b in &f.blocks {
+        for i in &b.insts {
+            for_uses(i, |v| nuse[v.0 as usize] += 1);
+        }
+        tu.clear();
+        term_uses(&b.term, &mut tu);
+        for v in &tu {
+            nuse[v.0 as usize] += 1;
+        }
+    }
+    // (base, offset, length) of two accesses: may they share a byte?
+    let place = |v: VReg| -> (u32, i64) { sc.vs[v.0 as usize] };
+    let may_overlap = |a: VReg, ao: i64, al: i64, b: VReg, bo: i64, bl: i64| -> bool {
+        if al <= 0 || bl <= 0 {
+            return false;
+        }
+        if a == b {
+            return ao < bo + bl && bo < ao + al;
+        }
+        let ((sa, pa), (sb, pb)) = (place(a), place(b));
+        match (sa != NONE, sb != NONE) {
+            (true, true) if sa != sb => false,
+            (true, true) => pa + ao < pb + bo + bl && pb + bo < pa + ao + al,
+            // a slot whose address goes nowhere else is not behind another pointer
+            (true, false) => sc.esc[sa as usize],
+            (false, true) => sc.esc[sb as usize],
+            (false, false) => true,
+        }
+    };
+    let vw = |f: &Func, v: VReg| if f.vregs[v.0 as usize] == Cls::V256 { 32i64 } else { 16 };
+    let mut any = false;
+    for bi in 0..f.blocks.len() {
+        // (store index, load index, src base, src off, dst base, dst off, len)
+        let mut pairs: Vec<(usize, usize, VReg, i64, VReg, i64, i64)> = Vec::new();
+        {
+            let b = &f.blocks[bi];
+            let mut ld: std::collections::HashMap<u32, (usize, VReg, i64, i64)> = std::collections::HashMap::new();
+            for (ii, i) in b.insts.iter().enumerate() {
+                let st = match *i {
+                    Inst::Store(m, base, o, v) => Some((base, o as i64, mem_size(m) as i64, v)),
+                    Inst::VStore(base, o, v) => Some((base, o as i64, vw(f, v), v)),
+                    _ => None,
+                };
+                if let Some((db, dof, n, v)) = st {
+                    if let Some(&(li, sb, sof, ln)) = ld.get(&v.0) {
+                        if ln == n && sb != db {
+                            pairs.push((ii, li, sb, sof, db, dof, n));
+                        }
+                    }
+                }
+                match *i {
+                    Inst::Load(m, d, base, o) => { ld.insert(d.0, (ii, base, o as i64, mem_size(m) as i64)); }
+                    Inst::VLoad(d, base, o) => { ld.insert(d.0, (ii, base, o as i64, vw(f, d))); }
+                    _ => for_defs(i, |d| { ld.remove(&d.0); }),
+                }
+            }
+        }
+        if pairs.len() < 2 {
+            continue;
+        }
+        // groups by (src base, dst base, distance), runs of touching ranges in source order
+        pairs.sort_by_key(|p| (p.2.0, p.4.0, p.5 - p.3, p.3));
+        let mut runs: Vec<Vec<usize>> = Vec::new();
+        for k in 0..pairs.len() {
+            let p = pairs[k];
+            let joins = runs.last().is_some_and(|r| {
+                let q = pairs[*r.last().unwrap()];
+                q.2 == p.2 && q.4 == p.4 && q.5 - q.3 == p.5 - p.3 && q.3 + q.6 == p.3
+            });
+            if joins {
+                runs.last_mut().unwrap().push(k);
+            } else {
+                runs.push(vec![k]);
+            }
+        }
+        let mut edits: Vec<(Vec<usize>, Vec<usize>, usize, VReg, i64, VReg, i64, i64)> = Vec::new();
+        let mut taken: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        'run: for r in &runs {
+            let (sb, so, db, dof) = (pairs[r[0]].2, pairs[r[0]].3, pairs[r[0]].4, pairs[r[0]].5);
+            let len: i64 = r.iter().map(|&k| pairs[k].6).sum();
+            if r.len() < 2 || len < 16 || may_overlap(sb, so, len, db, dof, len) {
+                continue;
+            }
+            let stores: Vec<usize> = r.iter().map(|&k| pairs[k].0).collect();
+            let loads: Vec<usize> = r.iter().map(|&k| pairs[k].1).collect();
+            if stores.iter().chain(&loads).any(|x| taken.contains(x)) {
+                continue;
+            }
+            let lo = *stores.iter().chain(&loads).min().unwrap();
+            let at = *stores.iter().max().unwrap();
+            let b = &f.blocks[bi];
+            for ii in lo..=at {
+                if stores.contains(&ii) || loads.contains(&ii) {
+                    continue;
+                }
+                let i = &b.insts[ii];
+                let mut redef = false;
+                for_defs(i, |d| redef |= d == sb || d == db);
+                if redef {
+                    continue 'run;
+                }
+                let bad = match *i {
+                    Inst::Load(m, _, base, o) => may_overlap(base, o as i64, mem_size(m) as i64, db, dof, len),
+                    Inst::VLoad(d, base, o) => may_overlap(base, o as i64, vw(f, d), db, dof, len),
+                    Inst::LoadX(..) | Inst::VLoadX(..) => true,
+                    Inst::Store(m, base, o, _) => { let n = mem_size(m) as i64; may_overlap(base, o as i64, n, db, dof, len) || may_overlap(base, o as i64, n, sb, so, len) }
+                    Inst::VStore(base, o, v) => { let n = vw(f, v); may_overlap(base, o as i64, n, db, dof, len) || may_overlap(base, o as i64, n, sb, so, len) }
+                    Inst::Copy(d, s2, n) => { let n = n as i64; may_overlap(d, 0, n, db, dof, len) || may_overlap(d, 0, n, sb, so, len) || may_overlap(s2, 0, n, db, dof, len) }
+                    ref other => !relax_backend::passes::is_pure(other),
+                };
+                if bad {
+                    continue 'run;
+                }
+            }
+            // loads whose value goes only to its store go; the others stay
+            let dead_loads: Vec<usize> = r.iter().filter(|&&k| {
+                let (Inst::Store(_, _, _, v) | Inst::VStore(_, _, v)) = b.insts[pairs[k].0] else { return false };
+                nuse[v.0 as usize] == 1
+            }).map(|&k| pairs[k].1).collect();
+            taken.extend(stores.iter().copied());
+            taken.extend(loads.iter().copied());
+            edits.push((stores, dead_loads, at, sb, so, db, dof, len));
+        }
+        if edits.is_empty() {
+            continue;
+        }
+        // rebuild the block: the run's last store becomes the copy (with its address adds)
+        let old_i = std::mem::take(&mut f.blocks[bi].insts);
+        let old_p = std::mem::take(&mut f.blocks[bi].pos);
+        let had_pos = !old_p.is_empty();
+        let mut drop_at = vec![false; old_i.len()];
+        let mut copy_at: std::collections::HashMap<usize, (VReg, i64, VReg, i64, i64)> = std::collections::HashMap::new();
+        for (stores, dead, at, sb, so, db, dof, len) in &edits {
+            for &x in stores.iter().chain(dead.iter()) {
+                drop_at[x] = true;
+            }
+            copy_at.insert(*at, (*sb, *so, *db, *dof, *len));
+        }
+        let (mut ni, mut np) = (Vec::with_capacity(old_i.len()), Vec::with_capacity(old_p.len()));
+        for (ii, i) in old_i.into_iter().enumerate() {
+            let p = old_p.get(ii).copied().unwrap_or(0);
+            if let Some(&(sb, so, db, dof, len)) = copy_at.get(&ii) {
+                let mut addr = |base: VReg, o: i64, ni: &mut Vec<Inst>, np: &mut Vec<u64>| -> VReg {
+                    if o == 0 {
+                        return base;
+                    }
+                    let a = f.vreg(Cls::I);
+                    ni.push(Inst::IBinI(IOp::Add, IntTy { bits: 64, signed: false }, a, base, o));
+                    np.push(p);
+                    a
+                };
+                let s2 = addr(sb, so, &mut ni, &mut np);
+                let d = addr(db, dof, &mut ni, &mut np);
+                ni.push(Inst::Copy(d, s2, len as u32));
+                np.push(p);
+                continue;
+            }
+            if drop_at[ii] {
+                continue;
+            }
+            ni.push(i);
+            np.push(p);
+        }
+        f.blocks[bi].insts = ni;
+        f.blocks[bi].pos = if had_pos { np } else { Vec::new() };
         any = true;
     }
     any

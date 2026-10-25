@@ -83,6 +83,9 @@ impl<T, const N: usize> [T; N] {
     }
 }
 
+// library/core/src/array/mod.rs:461
+unsafe impl<T: crate::clone::TrivialClone, const N: usize> crate::clone::TrivialClone for [T; N] {}
+
 impl<T: Clone, const N: usize> Clone for [T; N] {
     fn clone(&self) -> [T; N] {
         from_fn(|i| self[i].clone())
