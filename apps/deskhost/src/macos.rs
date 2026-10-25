@@ -23,6 +23,7 @@ extern "C" {
     fn CGDisplayCopyDisplayMode(display: CGDirectDisplayID) -> *mut c_void;
     fn CGDisplayModeGetPixelWidth(mode: *mut c_void) -> usize;
     fn CGDisplayModeGetPixelHeight(mode: *mut c_void) -> usize;
+    fn CGDisplayModeGetRefreshRate(mode: *mut c_void) -> f64;
     fn CGDisplayModeRelease(mode: *mut c_void);
     fn CGEventCreate(source: ObjcId) -> ObjcId;
     fn CGEventGetLocation(event: ObjcId) -> NSPoint;
@@ -38,6 +39,7 @@ extern "C" {
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
     fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
+    fn AXIsProcessTrusted() -> bool;
     static kAXTrustedCheckOptionPrompt: CFStringRef;
 }
 
@@ -50,6 +52,11 @@ extern "C" {
 extern "C" {
     static SCStreamFrameInfoStatus: ObjcId;
 }
+
+/// Why there is no picture / no input: the grant and where the user gives it (said in the log, the
+/// status file and to the viewer).
+pub const SCREEN_MISSING: &str = "Screen Recording is not granted to Desk Host (on that Mac: System Settings > Privacy & Security > Screen & System Audio Recording: turn on \"Desk Host\", or add it with +)";
+pub const INPUT_MISSING: &str = "Accessibility is not granted to Desk Host, so viewers can only watch (on that Mac: System Settings > Privacy & Security > Accessibility: turn on \"Desk Host\", or add it with +)";
 
 /// kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ('420v'): NV12, BT.709 limited range.
 const PIXEL_420V: u32 = four_char_as_u32("420v");
@@ -150,6 +157,7 @@ struct Capture {
 
 pub struct MacDesktop {
     capture: Option<Capture>,
+
     /// The bounds (points, global) of the screen viewers watch: where their input lands.
     target: Arc<Mutex<NSRect>>,
     standard_cursors: Vec<(&'static str, NSPoint, NSSize)>,
@@ -199,7 +207,8 @@ impl MacDesktop {
     }
 
     /// The grants this app needs, asking for the missing ones when `ask` (macOS shows its
-    /// prompt and the System Settings pane once). A line saying where they stand.
+    /// prompt and the System Settings pane once: only on `--ask`, the user's own call; the
+    /// agent never asks). A line saying where they stand.
     pub fn permissions(&self, ask: bool) -> String {
         unsafe {
             let mut screen = CGPreflightScreenCaptureAccess();
@@ -215,7 +224,7 @@ impl MacDesktop {
                 "permissions: Screen Recording {}, Accessibility {}{}",
                 if screen { "granted" } else { "MISSING" },
                 if input { "granted" } else { "MISSING" },
-                if screen && input { "" } else { " (System Settings > Privacy & Security: enable \"Desk Host\" under Screen Recording and Accessibility)" }
+                if screen && input { "" } else { " (System Settings > Privacy & Security: turn on \"Desk Host\" under Screen & System Audio Recording and under Accessibility)" }
             )
         }
     }
@@ -235,8 +244,30 @@ impl Desktop for MacDesktop {
             .collect()
     }
 
+    fn refresh(&mut self, index: usize) -> u32 {
+        let Some(&id) = displays().get(index) else { return 0 };
+        unsafe {
+            let mode = CGDisplayCopyDisplayMode(id);
+            if mode.is_null() {
+                return 0;
+            }
+            let hz = CGDisplayModeGetRefreshRate(mode);
+            CGDisplayModeRelease(mode);
+            hz.round().max(0.0) as u32
+        }
+    }
+
+    fn grants(&mut self) -> String {
+        self.permissions(false)
+    }
+
     fn capture(&mut self, index: usize, fps: u32, frames: Sender<Frame>) -> Result<(), String> {
         self.stop_capture();
+        // checked first: without the grant ScreenCaptureKit would show macOS's prompt, and the
+        // grants are the user's to give (System Settings), never asked for by the agent
+        if !unsafe { CGPreflightScreenCaptureAccess() } {
+            return Err(SCREEN_MISSING.into());
+        }
         let ids = displays();
         let id = *ids.get(index).ok_or("no such screen")?;
         *self.target.lock().unwrap() = unsafe { CGDisplayBounds(id) };
@@ -248,7 +279,7 @@ impl Desktop for MacDesktop {
             let output: ObjcId = msg_send![output, init];
             (*output).set_ivar("sink", sink as *mut c_void);
             let (stream2, output2) = (stream.clone(), output as usize);
-            let _ = fps;
+            let interval = CMTime { value: 1, timescale: fps.clamp(1, 240) as CMTimeScale, flags: kCMTimeFlags_Valid, epoch: 0 };
             let completion = objc_block!(move |content: ObjcId, error: ObjcId| {
                 if error != nil || content == nil {
                     let text = if error != nil { nsstring_to_string(msg_send![error, localizedDescription]) } else { "no shareable content".into() };
@@ -280,6 +311,8 @@ impl Desktop for MacDesktop {
                 let () = msg_send![config, setColorMatrix: kCGDisplayStreamYCbCrMatrix_ITU_R_709_2];
                 let () = msg_send![config, setShowsCursor: NO];
                 let () = msg_send![config, setQueueDepth: 4i64];
+                // at most `fps` frames a second (ScreenCaptureKit's own default is 60)
+                let () = msg_send![config, setMinimumFrameInterval: interval];
                 let s: ObjcId = msg_send![class!(SCStream), alloc];
                 let s: ObjcId = msg_send![s, initWithFilter: filter configuration: config delegate: nil];
                 if s == nil {
@@ -297,7 +330,7 @@ impl Desktop for MacDesktop {
                     if e != nil {
                         log(&format!("capture: {}", nsstring_to_string(msg_send![e, localizedDescription])));
                     } else {
-                        log(&format!("capture: screen {index} at {width}x{height}"));
+                        log(&format!("capture: screen {index} at {width}x{height}, up to {fps} frames a second"));
                     }
                 });
                 let () = msg_send![s, startCaptureWithCompletionHandler: &started];
@@ -350,7 +383,13 @@ impl Desktop for MacDesktop {
 
     fn input(&self) -> InputFactory {
         let target = self.target.clone();
-        Arc::new(move || Ok(Box::new(MacInput { target: target.clone(), at: NSPoint { x: 0.0, y: 0.0 }, held: 0, clicks: (Instant::now(), NSPoint { x: -1e9, y: -1e9 }, 0), wheel: [0, 0], flags: 0, keys_down: Vec::new() }) as Box<dyn Input>))
+        // checked per session: a grant given while the host runs counts from the next viewer
+        Arc::new(move || {
+            if !unsafe { AXIsProcessTrusted() } {
+                return Err(INPUT_MISSING.into());
+            }
+            Ok(Box::new(MacInput { target: target.clone(), at: NSPoint { x: 0.0, y: 0.0 }, held: 0, clicks: (Instant::now(), NSPoint { x: -1e9, y: -1e9 }, 0), wheel: [0, 0], flags: 0, keys_down: Vec::new() }) as Box<dyn Input>)
+        })
     }
 }
 

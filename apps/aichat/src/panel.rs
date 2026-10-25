@@ -727,7 +727,8 @@ pub struct AiChatPanel {
     /// The choices the provider menu lists, in its order.
     #[rust]
     provider_rows: Vec<ProviderRow>,
-    /// The hub discovery answer the menu rows were built from.
+    /// The hub discovery answer the menu rows were built from (only the engine follows the hub).
+    #[cfg(feature = "engine")]
     #[rust]
     hub_seen: u64,
     /// The provider menu shows these labels with this one picked.

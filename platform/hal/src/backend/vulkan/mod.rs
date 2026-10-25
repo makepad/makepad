@@ -81,6 +81,12 @@ pub struct Vulkan {
     /// the window (resizes reuse it), and a snapshot or copy reads only what the frame drew.
     hosted_sizes: FastMap<(u32, u32), [u32; 2]>,
     scanout_images: FastMap<(u32, Id), Vec<Arc<Image>>>,
+    /// MAKEPAD_FRAME_STAMP: the red and blue 8x8 blocks stamped into each frame handed to a host
+    /// (`frame::stamp_frame`), and the size the last window pass drew.
+    #[cfg(target_os = "linux")]
+    stamp: Option<[Arc<Image>; 2]>,
+    #[cfg(target_os = "linux")]
+    window_px: [u32; 2],
     /// session 0's windows with a badge layer (by index): the images their layer was composed
     /// into (`frame::Badged`)
     badged: FastMap<u32, frame::Badged>,
@@ -185,7 +191,7 @@ impl Vulkan {
         crate::gpu_limits::set_max_gpu_buffer_bytes(info.max_buffer);
         crate::gpu_limits::set_gpu_working_set_bytes(info.working_set);
         Ok(Self { #[cfg(any(target_os = "linux", target_os = "android"))] media: Default::default(), #[cfg(target_os = "linux")] capture_pool: FastMap::default(), #[cfg(any(target_os = "linux", target_os = "android"))] shell: None, dev, info, tex: FastMap::default(), buf: FastMap::default(), pipe: FastMap::default(), programs: FastMap::default(), draw_bins: Vec::new(), draw_images: Vec::new(),
-            passes: FastMap::default(), win: FastMap::default(), hosted_sizes: FastMap::default(), scanout_images: FastMap::default(), badged: FastMap::default(), compose: None, aliases: FastMap::default(), pick_ids: FastMap::default(), pick_pending: HashSet::new(),
+            passes: FastMap::default(), win: FastMap::default(), hosted_sizes: FastMap::default(), scanout_images: FastMap::default(), #[cfg(target_os = "linux")] stamp: None, #[cfg(target_os = "linux")] window_px: [0, 0], badged: FastMap::default(), compose: None, aliases: FastMap::default(), pick_ids: FastMap::default(), pick_pending: HashSet::new(),
             fallback: FastMap::default(), windows: surface::Windows::new(source), sharing,
             #[cfg(target_os = "linux")] foreign_support,
             batch: None, spares: Default::default(), mailbox: Mailbox::new(sessions),

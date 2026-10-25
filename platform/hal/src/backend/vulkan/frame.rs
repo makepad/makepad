@@ -130,6 +130,52 @@ impl Vulkan {
         });
     }
 
+    /// MAKEPAD_FRAME_STAMP=1 (lane WMSYNC): each frame this process hands to a host compositor (a WM
+    /// tile) carries its frame number, 16 bits of 8x8 px blocks, red = 1 and blue = 0, on rows 4..12
+    /// of the frame from x 48 (bit 0 leftmost) and on rows 4..12 from its bottom ending 48 px left of
+    /// its right edge (bit 0 rightmost): the frame_probe layout, for any app. The copies are the last
+    /// writes of the frame, so a picture whose two stamps differ was torn or composited before the
+    /// frame completed; a stamp shows which frame a grab or a capture holds
+    /// (local/agent_state/relax-campaign/wmsync-tools/stampcheck.py).
+    #[cfg(target_os = "linux")]
+    fn stamp_frame(&mut self, image: &Arc<Image>, frame: u64, batch: &mut Batch) {
+        let [w, h] = [self.window_px[0].min(image.desc.w), self.window_px[1].min(image.desc.h)];
+        if w < 2 * 48 + 128 || h < 32 { return; }
+        if self.stamp.is_none() {
+            let block = |dev: &Arc<super::device::Device>| Image::new(dev.clone(), TextureObj { format: format::BGRA8, w: 8, h: 8, depth: 1, mips: 1,
+                usage: usage::RENDER_TARGET | usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None });
+            match (block(&self.dev), block(&self.dev)) {
+                (Ok(red), Ok(blue)) => self.stamp = Some([blue, red]),
+                (Err(e), _) | (_, Err(e)) => { eprintln!("[hal-vulkan] frame stamp: {e}"); return; }
+            }
+        }
+        let blocks = self.stamp.clone().unwrap();
+        let range = vk::ImageSubresourceRange::default().aspect_mask(vk::ImageAspectFlags::COLOR).level_count(1).layer_count(1);
+        let layers = vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1);
+        unsafe {
+            // BGRA8: blue, then red
+            for (block, color) in blocks.iter().zip([[0.0, 0.0, 1.0, 1.0], [1.0, 0.0, 0.0, 1.0f32]]) {
+                block.transition(batch.cb, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+                self.dev.raw.cmd_clear_color_image(batch.cb, block.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &vk::ClearColorValue { float32: color }, &[range]);
+                block.transition(batch.cb, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+            }
+            image.transition(batch.cb, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+            for bit in 0..16u32 {
+                let block = &blocks[((frame >> bit) & 1) as usize];
+                for (x, y) in [(48 + 8 * bit, 4), (w - 1 - 48 - 8 * bit - 7, h - 12)] {
+                    let copy = vk::ImageCopy::default().src_subresource(layers).dst_subresource(layers)
+                        .dst_offset(vk::Offset3D { x: x as i32, y: y as i32, z: 0 }).extent(vk::Extent3D { width: 8, height: 8, depth: 1 });
+                    self.dev.raw.cmd_copy_image(batch.cb, block.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        image.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[copy]);
+                }
+            }
+            image.transition(batch.cb, image.sampled_layout());
+        }
+        batch.images.extend(blocks);
+        batch.images.push(image.clone());
+    }
+
     /// The image a badge layer frame of host window `key` draws into: the window's retained
     /// image copied into a free composed image of its size (one a presentation or a snapshot
     /// still holds is not reused). `None`: nothing rendered yet.
@@ -306,6 +352,12 @@ impl Vulkan {
                 }
                 let embedded = s.windows.get(sid, target).is_ok_and(|w| w.val.embedded.is_some());
                 let hosted = s.windows.get(sid, target).is_ok_and(|w| w.val.is_hosted());
+                // a platform-hosted window (a hosted Cx renders into its host's shared image itself)
+                #[cfg(target_os = "linux")]
+                if hosted && frame_stamp() {
+                    self.stamp_frame(&image, packet.frame, &mut batch);
+                    eprintln!("[hal-stamp] frame {} ({}) {}x{}", packet.frame, packet.frame & 0xffff, self.window_px[0], self.window_px[1]);
+                }
                 if embedded || (layered && !badges) { presented = true; }
                 else if !hosted {
                     let key = self.window_key(sid, target);
@@ -324,6 +376,12 @@ impl Vulkan {
                         } else if self.windows.source.is_target(&image) { Ok(image.clone()) } else { self.scanout_image(key, &image, &mut batch) };
                         match scanout {
                             Ok(image) => {
+                                #[cfg(target_os = "linux")]
+                                if frame_stamp() && self.windows.source.is_target(&image) {
+                                    self.stamp_frame(&image, packet.frame, &mut batch);
+                                    // the timeline value this frame will publish (`Timeline::submitted`): the host's PresentableDraw names it
+                                    eprintln!("[hal-stamp] frame {} ({}) {}x{} seq {}", packet.frame, packet.frame & 0xffff, self.window_px[0], self.window_px[1], image.hosted_sequence().map_or(0, |s| s + 2));
+                                }
                                 presenter.scheduled(key.0, key.1);
                                 batch.scanout = Some((presenter, image, Self::token(s), target, key.1, key.0, packet.frame));
                             }
@@ -592,6 +650,8 @@ impl Vulkan {
             self.win.insert((s.id, target.index), Texture { gen: target.gen, image: window.as_ref().unwrap().clone() });
             self.hosted_sizes.insert((s.id, target.index), size);
         }
+        #[cfg(target_os = "linux")]
+        if window.is_some() { self.window_px = size; }
         Ok(window)
     }
 
@@ -743,4 +803,11 @@ impl Vulkan {
             }
         });
     }
+}
+
+/// `MAKEPAD_FRAME_STAMP=1`: stamp every frame handed to a host compositor (`Vulkan::stamp_frame`).
+#[cfg(target_os = "linux")]
+fn frame_stamp() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MAKEPAD_FRAME_STAMP").is_some_and(|v| v == "1"))
 }

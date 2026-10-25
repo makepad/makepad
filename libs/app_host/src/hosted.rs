@@ -1285,6 +1285,19 @@ impl HostedApp {
     /// the presented texture. True when it was applied; otherwise it is kept
     /// and retried by `retry_pending_draw`.
     pub fn set_presentable_draw(&mut self, cx: &mut Cx, presentable_draw: PresentableDraw) -> bool {
+        // MAKEPAD_TRACE=hosted: every frame a child hands over and whether it was taken (copied out of
+        // its shared image, which releases it) or waits; with the child's MAKEPAD_FRAME_STAMP log the
+        // sequence names the frame (wmsync-tools/stampcheck.py pairs them)
+        let trace = makepad_error_log::trace_enabled("hosted").then_some(presentable_draw);
+        let applied = self.set_presentable_draw_inner(cx, presentable_draw);
+        if let Some(pd) = trace {
+            log!("hosted c{} took img {:?} seq {} {}x{} {}", self.client().unwrap_or(0), pd.target_id, pd.sequence, pd.width, pd.height,
+                if applied { "applied" } else { "pending" });
+        }
+        applied
+    }
+
+    fn set_presentable_draw_inner(&mut self, cx: &mut Cx, presentable_draw: PresentableDraw) -> bool {
         if makepad_error_log::trace_enabled("pace") {
             log!("pace wm flip_rx={:.2} c{}", (self.clock.wall_now)() * 1000.0 % 1.0e6, self.client().unwrap_or(0));
         }
