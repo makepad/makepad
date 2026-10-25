@@ -99,6 +99,11 @@ pub enum Control {
     Split(u8),
     /// The viewer's display refresh (Hz, 0 = not known).
     Refresh(u16),
+    /// The viewer's picture area: device pixels and scale (hundredths).
+    Window { width: u32, height: u32, scale: u16 },
+    /// This viewer sent input while another one was the last to: it is the active viewer now
+    /// (a desktop that follows its viewer's size follows this one).
+    Active,
     Clipboard(String),
     Stats { frame: u32, decode_us: u32, present_us: u32 },
 }
@@ -299,6 +304,7 @@ impl Server {
             .name("desk-link-listen".into())
             .spawn(move || {
                 let next_session = Arc::new(AtomicU32::new(1));
+                let active = Arc::new(AtomicU32::new(0));
                 while !stop2.load(Ordering::Acquire) {
                     match listener.accept() {
                         Ok((tcp, peer)) => {
@@ -331,6 +337,7 @@ impl Server {
                                 clock,
                                 input: input.clone(),
                                 guard: guard.clone(),
+                                active: active.clone(),
                                 _slot: slot,
                             };
                             let spawned = std::thread::Builder::new().name(format!("desk-link-{session}")).spawn(move || ctx.run(tcp));
@@ -366,6 +373,8 @@ struct SessionCtx {
     clock: fn() -> u64,
     input: InputFactory,
     guard: Arc<Guard>,
+    /// The session that sent input last (0: none yet), shared by all sessions.
+    active: Arc<AtomicU32>,
     _slot: SessionSlot,
 }
 
@@ -520,10 +529,14 @@ impl SessionCtx {
                     ClientMsg::RequestKeyframe => Some(Control::Keyframe),
                     ClientMsg::SetSplit { split } => Some(Control::Split(split)),
                     ClientMsg::Refresh { hz } => Some(Control::Refresh(hz)),
+                    ClientMsg::Window { width, height, scale } => Some(Control::Window { width, height, scale }),
                     ClientMsg::Clipboard { text } => Some(Control::Clipboard(text)),
                     ClientMsg::Stats { frame, decode_us, present_us } => Some(Control::Stats { frame, decode_us, present_us }),
                     ClientMsg::Hello { .. } => return Err("a second hello".into()),
                     input => {
+                        if self.active.swap(self.session, Ordering::AcqRel) != self.session {
+                            self.send_ui(ToUi::Control { session: self.session, control: Control::Active });
+                        }
                         if let Some(inj) = injector.as_mut() {
                             let geometry = *self.geometry.lock().unwrap();
                             match input {

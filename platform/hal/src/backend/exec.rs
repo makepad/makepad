@@ -1142,6 +1142,21 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             let arrangement = if name.is_empty() { DisplayArrangement::Extended } else { DisplayArrangement::Mirror { optimise_for: name } };
             direct_display(gpu, s, req, crate::direct::DisplayCommand::Arrangement(arrangement));
         }
+        HalCmd::DirectDisplayVirtual { req, count, args } => {
+            let args = read_strs(args, count);
+            let display = match args.as_slice() {
+                [] => Ok(None),
+                [mode, panels] => crate::direct::VirtualDisplay::parse(mode, panels).map(Some),
+                _ => Err("malformed virtual display request".to_string()),
+            };
+            match display {
+                Ok(display) => direct_display(gpu, s, req, crate::direct::DisplayCommand::Virtual(display)),
+                Err(e) => {
+                    s.bad();
+                    s.events.direct_display_result(req, crate::cmds::cmd_tag::DirectDisplayVirtual as u32, false, e.as_bytes());
+                }
+            }
+        }
         HalCmd::DirectDisplayMode { req, args } => {
             let mut args = read_strs(args, 2).into_iter();
             if let (Some(name), Some(mode)) = (args.next(), args.next()) {

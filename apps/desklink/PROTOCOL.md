@@ -1,4 +1,4 @@
-# Desk Link protocol, version 4
+# Desk Link protocol, version 5
 
 Desk Link is how a viewer (this app) sees and drives a desktop (the window manager's
 `desk_link` server, `apps/wm/src/desk_link/`). It runs between machines on one LAN only: no
@@ -57,6 +57,7 @@ Fixed-size fields are little-endian. `str` and `bytes` are `u32 LE length` + byt
 | 5 | RequestKeyframe | — (sent by the viewer after a decode error) |
 | 6 | SetSplit | `split u8` (0 one engine, 1 tiles, 2 interleave: how a desktop with several encode engines shares them, for every viewer) |
 | 7 | Refresh | `hz u16`: the viewer's display refresh, measured from its vsync (0 = not known). Sent after Hello and on every change. |
+| 8 | Window | `width u32, height u32, scale u16`: the viewer's picture area in device pixels and its scale (hundredths, 200 = 2.00x). Sent once it has held still for 250 ms, after the Welcome and after every resize. A desktop whose size follows its viewer (a virtual display set to follow) takes this size and scale from the active viewer (the watching viewer that sent input last), so the picture is shown 1:1. |
 | 10 | Key | `down bool, keycode u32 (makepad KeyCode index), mods u8 (1 shift, 2 control, 4 alt, 8 logo)` |
 | 11 | Pointer | `x u16, y u16`: position over the stream picture, 0..=65535 on each axis |
 | 12 | Button | `down bool, button u8 (0 left, 1 right, 2 middle, 3 back, 4 forward)` |
@@ -77,7 +78,7 @@ Gamepad buttons: bit 0 A, 1 B, 2 X, 3 Y, 4 left shoulder, 5 right shoulder, 6 se
 |---|---|---|
 | 100 | Welcome | `version u16, session u32, screens (n u32, then per screen: name str, x u32, y u32, width u32, height u32), screen u32, stream_w u32, stream_h u32, input bool, input_note str, server str` |
 | 101 | Refused | `reason str` (then the desktop closes) |
-| 102 | Video | `frame u32, key bool, built_ns u64, encoded_ns u64, sent_ns u64, stream u8, parts u8, y0 u32, data bytes` (see Streams) |
+| 102 | Video | `frame u32, key bool, built_ns u64, encoded_ns u64, sent_ns u64, stream u8, parts u8, x0 u32, y0 u32, data bytes` (see Streams) |
 | 103 | Cursor | `x u16, y u16 (over the stream picture), shape u8, visible bool` |
 | 104 | Pong | `client_ns u64 (echoed), server_ns u64` |
 | 105 | Stream | `screen u32, stream_w u32, stream_h u32` (the stream shows another screen now) |
@@ -120,16 +121,22 @@ example, no `/dev/uinput` access); `input_note` says why.
 A desktop whose GPU has several hardware encode engines encodes one H.264 stream per engine;
 each stream is a stream of its own (its own SPS and PPS, its own decoder on the viewer):
 
-- **Tiles** (the default: the lowest latency). Each picture is split into horizontal bands,
-  one per engine, encoded at once. Bands are whole 16-row macroblock rows except the last, and
-  cover the picture's rows exactly once. Every part of picture `frame` carries `parts` = the band
-  count and its first row `y0`; the band's height is its stream's SPS size. The parts of one
+- **Tiles** (the default: the lowest latency). Each picture is cut into `columns x bands` tiles
+  encoded at once, the engines in turn: the fewest tiles that give every engine the same share,
+  that fit the encoder's largest picture (NVIDIA's H.264: 4096 wide, so a 7680-wide desktop has
+  two columns or more) and that a decoder takes at the stream rate (H.264 level 5.2: 2,073,600
+  macroblocks a second per stream); `tiles = CxR` in the desktop's settings picks them. Cuts are
+  whole 16-pixel macroblocks except the last column and band, and cover the picture exactly once.
+  Every part of picture `frame` carries `parts` = the tile count and its tile's first column
+  `x0` and row `y0`; the tile's size is its stream's SPS size. Tiles of two pictures may be in
+  flight at once on the desktop; each picture's parts are still sent back to back. The parts of one
   picture are sent back to back, and the viewer shows a picture only once it has all its parts
   (never a torn picture).
 - **Interleave** (the most pictures per second, at one picture's latency). The engines take whole
-  pictures in turn: picture `frame` comes from stream `frame % streams` with `parts = 1, y0 = 0`.
+  pictures in turn: picture `frame` comes from stream `frame % streams` with `parts = 1, x0 = y0 = 0`
+  (a picture wider than the encoder takes is cut into columns instead: tiles).
 - A key frame request makes every stream start again from a key frame.
-- One engine (or `split = off`): one stream, `stream 0, parts 1, y0 0`.
+- One engine (or `split = off`): one stream, `stream 0, parts 1, x0 0, y0 0` (or columns, as above).
 
 ## Cursor
 

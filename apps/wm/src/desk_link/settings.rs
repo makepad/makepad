@@ -16,6 +16,8 @@
 //! split = tiles           # a GPU with several encode engines: tiles (each picture in bands, one
 //!                         # per engine, at once: the lowest latency), interleave (whole pictures,
 //!                         # the engines in turn: the most pictures per second) or off
+//! tiles = auto            # tiles: the cut of each picture, auto (every engine the same share,
+//!                         # within the encoder's size and the decoder's rate) or CxR (e.g. 2x2)
 //! fleet_dir =             # where fleet.key / revoked are; default: the AI hub's <cache_dir>/fleet
 //! dump =                  # <file>[,<pictures>]: a check of the encoder without the network: the
 //!                         # first pictures (default 600) go to an Annex-B file (no socket opens)
@@ -47,6 +49,8 @@ pub struct DeskLinkSettings {
     pub kbps: u32,
     pub fps: u32,
     pub split: Split,
+    /// `tiles = CxR`: columns x bands of each picture (tiles only); `None`: auto.
+    pub tiles: Option<(u32, u32)>,
     pub full_chroma: bool,
     pub fleet_dir: Option<PathBuf>,
     /// The only peers served (`allow_peers`).
@@ -64,6 +68,7 @@ impl Default for DeskLinkSettings {
             kbps: 0,
             fps: 120,
             split: Split::Tiles,
+            tiles: None,
             full_chroma: true,
             fleet_dir: None,
             allow_peers: Vec::new(),
@@ -126,6 +131,13 @@ impl DeskLinkSettings {
                     "interleave" => { s.split = Split::Interleave; true }
                     "off" => { s.split = Split::Off; true }
                     _ => false,
+                },
+                "tiles" => match value {
+                    "auto" => { s.tiles = None; true }
+                    _ => match value.split_once('x').map(|(c, r)| (c.trim().parse::<u32>(), r.trim().parse::<u32>())) {
+                        Some((Ok(c), Ok(r))) if (1..=8).contains(&c) && (1..=8).contains(&r) => { s.tiles = Some((c, r)); true }
+                        _ => false,
+                    },
                 },
                 "allow_peers" => {
                     let mut ok = true;

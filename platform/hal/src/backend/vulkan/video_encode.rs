@@ -871,6 +871,20 @@ impl StreamEncoder {
         Device::existing().and_then(|d| d.video_encode.as_ref().map(|v| 1 + v.more.len() as u32)).unwrap_or(0)
     }
 
+    /// The largest coded picture of the H.264 profile (4:4:4 when `full_chroma`) on this GPU.
+    pub fn max_size(full_chroma: bool) -> Option<[u32; 2]> {
+        let dev = Device::existing()?;
+        dev.video_encode.as_ref()?;
+        let profile = Profile::new(full_chroma);
+        let mut h264_caps = vk::VideoEncodeH264CapabilitiesKHR::default();
+        let mut encode_caps = vk::VideoEncodeCapabilitiesKHR::default();
+        let mut caps = vk::VideoCapabilitiesKHR::default()
+            .next_video_encode_capabilities_khr(&mut encode_caps)
+            .next_video_encode_h264_capabilities_khr(&mut h264_caps);
+        unsafe { dev.instance.get_physical_device_video_capabilities(dev.physical, &profile.info, &mut caps) }.ok()?;
+        Some([caps.max_coded_extent.width, caps.max_coded_extent.height])
+    }
+
     /// An encoder on engine `engine` (its queue; an engine the GPU does not have is engine 0),
     /// 4:4:4 when `full_chroma`.
     pub fn open(width: u32, height: u32, fps: u32, kbps: u32, engine: usize, full_chroma: bool) -> Result<StreamEncoder, String> {
@@ -1053,6 +1067,14 @@ impl StreamEncoder {
         out
     }
 
+    /// A failed encode that saw the device lost marks it so (the HAL replaces it; its own
+    /// submits may not see the loss while nothing renders).
+    pub fn note_failure(&self, e: &str) {
+        if e.contains("ERROR_DEVICE_LOST") {
+            self.enc.dev.lost.store(true, Ordering::Release);
+        }
+    }
+
     /// Whether this encoder runs on `dev` (after a device loss the process has a new one, and
     /// an encoder of the old one can only fail: it is opened again).
     pub fn on_device(&self, dev: &Arc<Device>) -> bool {
@@ -1064,14 +1086,14 @@ impl StreamEncoder {
     /// them: a tile of it, or all of it), once its producer's `sync` (a sync_file; `None` when its
     /// work is known to be complete) has signalled.
     /// `refine`: the same picture as the last one again at a near-lossless QP (a still desktop).
-    pub fn encode_rows(&mut self, image: vk::Image, image_size: [u32; 2], source_height: u32, y0: u32, sync: Option<OwnedFd>, key: bool, refine: bool) -> Result<Vec<u8>, String> {
+    pub fn encode_rows(&mut self, image: vk::Image, image_size: [u32; 2], source_height: u32, x0: u32, y0: u32, sync: Option<OwnedFd>, key: bool, refine: bool) -> Result<Vec<u8>, String> {
         let [w, h] = self.enc.size;
         let full = self.enc.full_chroma;
         // the packed picture: luma rows, then chroma rows (4:2:0: half as many, each w bytes; 4:4:4:
         // one per luma row, each 2w bytes = two texture rows)
         let chroma_rows = if full { source_height * 2 } else { source_height / 2 };
-        if image_size[0] * 4 < w || image_size[1] < source_height + chroma_rows || y0 + h > source_height || y0 % 2 != 0 {
-            return Err(format!("rows {y0}.. ({h}) of a {source_height} tall NV12 picture in a {}x{} texture: out of it", image_size[0], image_size[1]));
+        if image_size[0] * 4 < x0 + w || image_size[1] < source_height + chroma_rows || y0 + h > source_height || y0 % 2 != 0 || x0 % 4 != 0 {
+            return Err(format!("{w}x{h} at {x0},{y0} of a {source_height} tall NV12 picture in a {}x{} texture: out of it", image_size[0], image_size[1]));
         }
         let pic = self.next_picture(key, refine);
         let started = crate::clock_ns();
@@ -1132,11 +1154,11 @@ impl StreamEncoder {
                 vk::ImageLayout::GENERAL,
                 slot.staging,
                 &[
-                    vk::BufferImageCopy::default().image_subresource(layer).image_offset(vk::Offset3D { x: 0, y: y0 as i32, z: 0 }).image_extent(vk::Extent3D { width: w / 4, height: h, depth: 1 }),
+                    vk::BufferImageCopy::default().image_subresource(layer).image_offset(vk::Offset3D { x: (x0 / 4) as i32, y: y0 as i32, z: 0 }).image_extent(vk::Extent3D { width: w / 4, height: h, depth: 1 }),
                     vk::BufferImageCopy::default()
                         .buffer_offset(w as u64 * h as u64)
                         .image_subresource(layer)
-                        .image_offset(vk::Offset3D { x: 0, y: (source_height + if full { y0 * 2 } else { y0 / 2 }) as i32, z: 0 })
+                        .image_offset(vk::Offset3D { x: (x0 / 4) as i32, y: (source_height + if full { y0 * 2 } else { y0 / 2 }) as i32, z: 0 })
                         .image_extent(vk::Extent3D { width: w / 4, height: if full { h * 2 } else { h / 2 }, depth: 1 }),
                 ],
             );

@@ -442,7 +442,7 @@ fn run(desktop: &mut dyn Desktop) {
                 }
                 let encoded_ns = clock_ns();
                 for p in packets {
-                    let bytes = proto::encode_video(frame_no, p.is_key, frame.captured_ns, encoded_ns, 0, (0, 1, 0), &p.data);
+                    let bytes = proto::encode_video(frame_no, p.is_key, frame.captured_ns, encoded_ns, 0, (0, 1, 0, 0), &p.data);
                     for v in &viewers {
                         if v.paused.load(Ordering::Acquire) {
                             continue;

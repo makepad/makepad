@@ -114,12 +114,14 @@ run_case() {
             printf "%s\n" "${MAKEPAD_WM_GPU_FROM_SAVED:-<unset>}"
             printf "%s\n" "${MAKEPAD_WM_ORDER_FROM_SAVED:-<unset>}"
             printf "%s\n" "${MAKEPAD_WM_MODES_FROM_SAVED:-<unset>}"
+            printf "%s\n" "${MAKEPAD_VIRTUAL_DISPLAY:-<unset>}"
+            printf "%s\n" "${MAKEPAD_WM_VIRTUAL_FROM_SAVED:-<unset>}"
         ' 2>"$stderr_file")
     run_status=$?
     run_stderr=$(cat "$stderr_file")
     rm -f "$stderr_file"
     IFS=$'\n' read -r -d '' field_order field_modes field_pci field_fromsaved \
-        field_order_fromsaved field_modes_fromsaved <<<"$run_stdout"
+        field_order_fromsaved field_modes_fromsaved field_virtual field_virtual_fromsaved <<<"$run_stdout"
 }
 
 # ---------------------------------------------------------------------
@@ -322,6 +324,42 @@ screen 0000:00:02.0 HDMI-A-2
 run_case "$s"
 assert_eq "no-sysfs" "status" "0" "$run_status"
 assert_eq "no-sysfs" "order" "<unset>" "$field_order"
+rm -rf "$s"
+
+# ---------------------------------------------------------------------
+# 9. The virtual line: exported with its panels word and the marker; the
+#    first valid line wins; a malformed one is skipped; a pre-set value
+#    wins and clears the marker; absent = unset.
+# ---------------------------------------------------------------------
+s=$(new_scratch)
+write_layout "$s" 'makepad-display-layout 1
+virtual 7680x2160@120 panels=off scale=200 follow=on
+virtual 1920x1080@60
+'
+run_case "$s"
+assert_eq "virtual" "status" "0" "$run_status"
+assert_eq "virtual" "env" "7680x2160@120 off" "$field_virtual"
+assert_eq "virtual" "marker" "1" "$field_virtual_fromsaved"
+run_case "$s" MAKEPAD_VIRTUAL_DISPLAY="3840x2160@60 mirror" MAKEPAD_WM_VIRTUAL_FROM_SAVED=1
+assert_eq "virtual-pinned" "env" "3840x2160@60 mirror" "$field_virtual"
+assert_eq "virtual-pinned" "marker cleared" "<unset>" "$field_virtual_fromsaved"
+rm -rf "$s"
+
+s=$(new_scratch)
+write_layout "$s" 'makepad-display-layout 1
+virtual banana
+virtual 5120x1440@59.94
+'
+run_case "$s"
+assert_eq "virtual-default-panels" "env" "5120x1440@59.94 mirror" "$field_virtual"
+rm -rf "$s"
+
+s=$(new_scratch)
+write_layout "$s" 'makepad-display-layout 1
+'
+run_case "$s"
+assert_eq "virtual-absent" "env" "<unset>" "$field_virtual"
+assert_eq "virtual-absent" "marker" "<unset>" "$field_virtual_fromsaved"
 rm -rf "$s"
 
 echo "display-layout-env.test.sh: $pass_count passed, $fail_count failed"

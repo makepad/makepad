@@ -6613,6 +6613,12 @@ impl AppMain for App {
 impl App {
     fn handle_wm_event(&mut self, cx: &mut Cx, event: &Event) {
         self.desk_link.handle_event(cx, event);
+        // a virtual desktop that follows its viewer takes the active viewer's window size
+        #[cfg(target_os = "linux")]
+        if let Some(w) = self.desk_link.take_viewer_window() {
+            let refresh_mhz = if w.refresh_mhz != 0 { w.refresh_mhz } else { cx.linux_display_snapshot().virtual_display.map_or(60_000, |v| v.refresh_mhz) };
+            self.desk_link_viewer_window(cx, w.width, w.height, refresh_mhz, w.scale);
+        }
         if self.state.is_some() && self.desk_link_shown != Some(self.desk_link.generation()) {
             self.desk_link_shown = Some(self.desk_link.generation());
             self.sync_desk_link(cx, true);

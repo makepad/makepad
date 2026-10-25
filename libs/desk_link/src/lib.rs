@@ -11,7 +11,7 @@ use std::io::{self, Write};
 #[cfg(feature = "server")]
 pub mod server;
 
-pub const VERSION: u16 = 4;
+pub const VERSION: u16 = 5;
 pub const DEFAULT_PORT: u16 = 8790;
 /// The largest message either side accepts (a key frame of a big desktop fits many times over).
 pub const MAX_MESSAGE: usize = 16 << 20;
@@ -120,6 +120,10 @@ pub enum ClientMsg {
     /// The viewer's display refresh in Hz (measured from its vsync; 0 = not known): the desktop
     /// streams at most this many pictures a second.
     Refresh { hz: u16 },
+    /// The viewer's picture area in device pixels and its scale (hundredths: 200 = 2.00x),
+    /// sent after the Welcome and on every resize (settled). A desktop whose size follows its
+    /// viewer (a virtual display) takes this size, so the picture is shown 1:1.
+    Window { width: u32, height: u32, scale: u16 },
     /// `keycode` is makepad's `KeyCode` index; `mods` [`mods`] bits.
     Key { down: bool, keycode: u32, mods: u8 },
     /// The pointer in the stream picture, 0..=65535 on both axes.
@@ -145,11 +149,12 @@ pub enum ServerMsg {
     /// One picture (an H.264 access unit, Annex-B; a key frame starts with SPS/PPS). Times are the
     /// server's clock: frame build start, bitstream ready, handed to the socket.
     /// A part of picture `frame` from encoder stream `stream` (each stream is an H.264 stream of
-    /// its own, with its own SPS, decoded by its own decoder): its rows from `y0` on (its SPS
-    /// gives how many). The picture is complete with `parts` parts of the same `frame`: one per
+    /// its own, with its own SPS, decoded by its own decoder): its pixels from column `x0`, row
+    /// `y0` on (its SPS gives how many; a picture wider than the encoder takes is split into
+    /// columns as well as bands). The picture is complete with `parts` parts of the same `frame`: one per
     /// stream when the streams are tiles (bands of each picture, encoded at once), 1 when they
     /// interleave (stream `frame % streams` encodes whole pictures in turn).
-    Video { frame: u32, key: bool, built_ns: u64, encoded_ns: u64, sent_ns: u64, stream: u8, parts: u8, y0: u32, data: Vec<u8> },
+    Video { frame: u32, key: bool, built_ns: u64, encoded_ns: u64, sent_ns: u64, stream: u8, parts: u8, x0: u32, y0: u32, data: Vec<u8> },
     /// The pointer over the stream picture (0..=65535), its shape ([`CURSOR_SHAPES`] index).
     Cursor { x: u16, y: u16, shape: u8, visible: bool },
     Pong { client_ns: u64, server_ns: u64 },
@@ -265,6 +270,7 @@ mod tag {
     pub const REQUEST_KEYFRAME: u8 = 5;
     pub const SET_SPLIT: u8 = 6;
     pub const REFRESH: u8 = 7;
+    pub const WINDOW: u8 = 8;
     pub const KEY: u8 = 10;
     pub const POINTER: u8 = 11;
     pub const BUTTON: u8 = 12;
@@ -311,6 +317,11 @@ impl ClientMsg {
             ClientMsg::Refresh { hz } => {
                 let mut o = Out::new(REFRESH);
                 o.u16(*hz);
+                o.done()
+            }
+            ClientMsg::Window { width, height, scale } => {
+                let mut o = Out::new(WINDOW);
+                o.u32(*width).u32(*height).u16(*scale);
                 o.done()
             }
             ClientMsg::Key { down, keycode, mods } => {
@@ -372,6 +383,7 @@ impl ClientMsg {
             REQUEST_KEYFRAME => ClientMsg::RequestKeyframe,
             SET_SPLIT => ClientMsg::SetSplit { split: r.u8()? },
             REFRESH => ClientMsg::Refresh { hz: r.u16()? },
+            WINDOW => ClientMsg::Window { width: r.u32()?, height: r.u32()?, scale: r.u16()? },
             KEY => ClientMsg::Key { down: r.bool()?, keycode: r.u32()?, mods: r.u8()? },
             POINTER => ClientMsg::Pointer { x: r.u16()?, y: r.u16()? },
             BUTTON => ClientMsg::Button { down: r.bool()?, button: r.u8()? },
@@ -407,7 +419,7 @@ impl ServerMsg {
                 o.str(reason);
                 o.done()
             }
-            ServerMsg::Video { frame, key, built_ns, encoded_ns, sent_ns, stream, parts, y0, data } => encode_video(*frame, *key, *built_ns, *encoded_ns, *sent_ns, (*stream, *parts, *y0), data),
+            ServerMsg::Video { frame, key, built_ns, encoded_ns, sent_ns, stream, parts, x0, y0, data } => encode_video(*frame, *key, *built_ns, *encoded_ns, *sent_ns, (*stream, *parts, *x0, *y0), data),
             ServerMsg::Cursor { x, y, shape, visible } => {
                 let mut o = Out::new(CURSOR);
                 o.u16(*x).u16(*y).u8(*shape).u8(*visible as u8);
@@ -459,7 +471,7 @@ impl ServerMsg {
                 ServerMsg::Welcome { version, session, screens, screen: r.u32()?, stream: [r.u32()?, r.u32()?], input: r.bool()?, input_note: r.str()?, server: r.str()? }
             }
             REFUSED => ServerMsg::Refused { reason: r.str()? },
-            VIDEO => ServerMsg::Video { frame: r.u32()?, key: r.bool()?, built_ns: r.u64()?, encoded_ns: r.u64()?, sent_ns: r.u64()?, stream: r.u8()?, parts: r.u8()?, y0: r.u32()?, data: r.bytes()?.to_vec() },
+            VIDEO => ServerMsg::Video { frame: r.u32()?, key: r.bool()?, built_ns: r.u64()?, encoded_ns: r.u64()?, sent_ns: r.u64()?, stream: r.u8()?, parts: r.u8()?, x0: r.u32()?, y0: r.u32()?, data: r.bytes()?.to_vec() },
             CURSOR => ServerMsg::Cursor { x: r.u16()?, y: r.u16()?, shape: r.u8()?, visible: r.bool()? },
             PONG => ServerMsg::Pong { client_ns: r.u64()?, server_ns: r.u64()? },
             STREAM => ServerMsg::Stream { screen: r.u32()?, stream: [r.u32()?, r.u32()?] },
@@ -473,10 +485,11 @@ impl ServerMsg {
 
 /// A `Video` message without copying the picture into a `ServerMsg` first.
 /// `part`: (stream, parts of the picture, first row).
-pub fn encode_video(frame: u32, key: bool, built_ns: u64, encoded_ns: u64, sent_ns: u64, part: (u8, u8, u32), data: &[u8]) -> Vec<u8> {
-    let mut o = Out(Vec::with_capacity(data.len() + 56));
+/// `part`: (stream, parts, x0, y0), see `ServerMsg::Video`.
+pub fn encode_video(frame: u32, key: bool, built_ns: u64, encoded_ns: u64, sent_ns: u64, part: (u8, u8, u32, u32), data: &[u8]) -> Vec<u8> {
+    let mut o = Out(Vec::with_capacity(data.len() + 60));
     o.0.extend_from_slice(&[tag::VIDEO, 0, 0, 0, 0]);
-    o.u32(frame).u8(key as u8).u64(built_ns).u64(encoded_ns).u64(sent_ns).u8(part.0).u8(part.1).u32(part.2).bytes(data);
+    o.u32(frame).u8(key as u8).u64(built_ns).u64(encoded_ns).u64(sent_ns).u8(part.0).u8(part.1).u32(part.2).u32(part.3).bytes(data);
     o.done()
 }
 
@@ -607,6 +620,7 @@ mod tests {
         round_client(ClientMsg::RequestKeyframe);
         round_client(ClientMsg::SetSplit { split: split::INTERLEAVE });
         round_client(ClientMsg::Refresh { hz: 120 });
+        round_client(ClientMsg::Window { width: 7680, height: 2160, scale: 200 });
         round_client(ClientMsg::Key { down: true, keycode: 42, mods: mods::SHIFT | mods::LOGO });
         round_client(ClientMsg::Pointer { x: 65535, y: 12 });
         round_client(ClientMsg::Button { down: false, button: button::RIGHT });
@@ -631,7 +645,7 @@ mod tests {
             server: "wm 166".into(),
         });
         round_server(ServerMsg::Refused { reason: "busy".into() });
-        round_server(ServerMsg::Video { frame: 3, key: true, built_ns: 1, encoded_ns: 2, sent_ns: 3, stream: 1, parts: 2, y0: 1072, data: vec![0, 0, 0, 1, 0x67] });
+        round_server(ServerMsg::Video { frame: 3, key: true, built_ns: 1, encoded_ns: 2, sent_ns: 3, stream: 1, parts: 4, x0: 3840, y0: 1072, data: vec![0, 0, 0, 1, 0x67] });
         round_server(ServerMsg::Cursor { x: 1, y: 2, shape: cursor_index("Text"), visible: true });
         round_server(ServerMsg::Pong { client_ns: 5, server_ns: 6 });
         round_server(ServerMsg::Stream { screen: 0, stream: [2560, 1440] });
@@ -642,12 +656,12 @@ mod tests {
 
     #[test]
     fn video_sent_stamp_offset() {
-        let mut bytes = encode_video(1, false, 10, 20, 0, (0, 1, 0), &[9; 4]);
+        let mut bytes = encode_video(1, false, 10, 20, 0, (0, 1, 0, 0), &[9; 4]);
         bytes[VIDEO_SENT_AT..VIDEO_SENT_AT + 8].copy_from_slice(&30u64.to_le_bytes());
         let mut inbox = Inbox::default();
         inbox.feed(&bytes);
         let (ty, payload) = inbox.next().unwrap().unwrap();
-        assert_eq!(ServerMsg::decode(ty, &payload).unwrap(), ServerMsg::Video { frame: 1, key: false, built_ns: 10, encoded_ns: 20, sent_ns: 30, stream: 0, parts: 1, y0: 0, data: vec![9; 4] });
+        assert_eq!(ServerMsg::decode(ty, &payload).unwrap(), ServerMsg::Video { frame: 1, key: false, built_ns: 10, encoded_ns: 20, sent_ns: 30, stream: 0, parts: 1, x0: 0, y0: 0, data: vec![9; 4] });
     }
 
     #[test]

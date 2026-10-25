@@ -150,8 +150,10 @@ pub struct RemoteView {
 /// GPU pictures kept alive after they were replaced (frames in flight may sample them).
 const RETIRED_PICTURES: usize = 3;
 
-/// A part of the shown picture: its rows from `y0` on, `size`, and its texture(s).
+/// A part of the shown picture: its pixels from column `x0`, row `y0` on, `size`, and its
+/// texture(s).
 pub struct ShownPart {
+    x0: u32,
     y0: u32,
     size: [u32; 2],
     tex: PartTex,
@@ -193,7 +195,7 @@ impl RemoteView {
                     }
                 }
             };
-            self.parts.push(ShownPart { y0: part.y0, size: [part.width, part.height], tex });
+            self.parts.push(ShownPart { x0: part.x0, y0: part.y0, size: [part.width, part.height], tex });
         }
         // a frame in flight may still sample the last few GPU pictures: the GPU is at most a
         // couple behind
@@ -272,13 +274,20 @@ impl Widget for RemoteView {
         self.scale = rect.size.x * cx.current_dpi_factor() / self.size[0].max(1) as f64;
         self.whole = whole;
         let full_h = self.size[1].max(1) as f64;
+        let full_w = self.size[0].max(1) as f64;
+        // the picture area in device pixels and the scale: a desktop that follows its viewer
+        // takes this size (fullscreen = the screen, 1:1)
+        let dpi = cx.current_dpi_factor();
+        crate::conn::set_view_window((view.size.x * dpi).round() as u32, (view.size.y * dpi).round() as u32, (dpi * 100.0).round() as u32);
         // whole device-pixel blocks (1:1, 2x, ...): each remote pixel as it is (nearest); scaled
         // otherwise: a sharper (bicubic) resample keeps text crisp
         self.draw_nv12.sharp = if whole { 2.0 } else { 1.0 };
         for part in &self.parts {
-            // each part's rows of the placed picture: the parts tile it exactly
+            // each part's rect of the placed picture: the parts tile it exactly
             let top = rect.pos.y + rect.size.y * part.y0 as f64 / full_h;
             let bottom = rect.pos.y + rect.size.y * (part.y0 + part.size[1]) as f64 / full_h;
+            let left = rect.pos.x + rect.size.x * part.x0 as f64 / full_w;
+            let right = rect.pos.x + rect.size.x * (part.x0 + part.size[0]) as f64 / full_w;
             let [pw, ph] = part.size;
             match &part.tex {
                 PartTex::Gpu { luma, chroma, full_chroma, .. } => self.draw_nv12.set_planes(luma, chroma, pw, ph, VideoColor::BT709, *full_chroma),
@@ -286,7 +295,7 @@ impl Widget for RemoteView {
             }
             // a draw call per part: each samples its own textures
             self.draw_nv12.new_draw_call(cx);
-            self.draw_nv12.draw_abs(cx, Rect { pos: dvec2(rect.pos.x, top), size: dvec2(rect.size.x, bottom - top) });
+            self.draw_nv12.draw_abs(cx, Rect { pos: dvec2(left, top), size: dvec2(right - left, bottom - top) });
         }
         let drawn = !self.parts.is_empty();
         if drawn {

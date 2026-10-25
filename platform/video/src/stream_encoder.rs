@@ -75,12 +75,15 @@ pub struct EncodedPacket {
     pub is_key: bool,
 }
 
-/// A horizontal band of a taller source picture (`source_height` rows), from its row `y0` on,
-/// encoded as a stream of its own on encode engine `engine`: the tiles of one picture encode at
-/// once on a GPU with several engines ([`VideoStreamEncoder::engines`]).
+/// A tile of a larger source picture (`source_height` rows): its pixels from column `x0`
+/// (a multiple of 4) and row `y0` on, encoded as a stream of its own on encode engine `engine`:
+/// the tiles of one picture encode at once on a GPU with several engines
+/// ([`VideoStreamEncoder::engines`]), and a picture larger than one stream takes
+/// ([`VideoStreamEncoder::max_size`]) is split into columns as well as bands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StreamTile {
     pub engine: u32,
+    pub x0: u32,
     pub y0: u32,
     pub source_height: u32,
 }
@@ -115,7 +118,7 @@ pub struct VideoStreamEncoder {
 
 impl VideoStreamEncoder {
     pub fn new(options: VideoStreamEncoderOptions) -> Result<Self, VideoFileError> {
-        Self::new_tile(options, StreamTile { engine: 0, y0: 0, source_height: options.height })
+        Self::new_tile(options, StreamTile { engine: 0, x0: 0, y0: 0, source_height: options.height })
     }
 
     /// The hardware encode engines of this machine: how many tiles a picture is best split into
@@ -127,15 +130,30 @@ impl VideoStreamEncoder {
         return 1;
     }
 
+    /// The largest picture one stream encodes (4:4:4 when `full_chroma`), `None` when not known
+    /// (no hardware encoder, or a platform that does not say).
+    pub fn max_size(full_chroma: bool) -> Option<[u32; 2]> {
+        #[cfg(target_os = "linux")]
+        {
+            let v = makepad_hal::stream_encode::hal_stream_encoder_max_size(if full_chroma { makepad_hal::stream_encode::FULL_CHROMA } else { 0 });
+            return (v != 0).then(|| [(v >> 32) as u32, v as u32]);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = full_chroma;
+            return None;
+        }
+    }
+
     /// An encoder of the band `tile` of the shared-texture pictures pushed to it
     /// (`options.height` rows of them). Bands other than the whole picture are Linux's (the
     /// other platforms have one engine).
     pub fn new_tile(options: VideoStreamEncoderOptions, tile: StreamTile) -> Result<Self, VideoFileError> {
-        if tile.y0 % 2 != 0 || tile.y0 + options.height > tile.source_height {
+        if tile.x0 % 4 != 0 || tile.y0 % 2 != 0 || tile.y0 + options.height > tile.source_height {
             return Err(VideoFileError::new(format!("tile rows {}..+{} outside a {} tall picture", tile.y0, options.height, tile.source_height)));
         }
         #[cfg(not(target_os = "linux"))]
-        if tile.y0 != 0 || tile.source_height != options.height || tile.engine != 0 {
+        if tile.x0 != 0 || tile.y0 != 0 || tile.source_height != options.height || tile.engine != 0 {
             return Err(VideoFileError::new("tiled stream encoding is Linux's"));
         }
         #[cfg(not(target_os = "linux"))]
@@ -220,7 +238,7 @@ impl VideoStreamEncoder {
     /// `makepad_hal::shared_texture`). No pixel crosses the CPU.
     pub fn push_shared_texture(&mut self, handle: u64, ready: GpuReady, pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
         #[cfg(target_os = "linux")]
-        return self.os.push_shared_texture(handle, ready, pts_100ns, self.tile.source_height, self.tile.y0);
+        return self.os.push_shared_texture(handle, ready, pts_100ns, self.tile.source_height, self.tile.x0, self.tile.y0);
         #[cfg(any(target_vendor = "apple", target_os = "windows"))]
         {
             let GpuReady::Done = ready;

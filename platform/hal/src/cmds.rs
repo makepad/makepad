@@ -372,4 +372,8 @@ hal_commands! {
     TraySet = 151, tray_set { tray: u64, w: u32, h: u32, tooltip: sid, count: u32, data: rng };
     /// Removes the app's tray `tray`.
     TrayRemove = 152, tray_remove { tray: u64 };
+    /// The virtual display (`direct::VirtualDisplay`), packed strings: `WxH@Hz`
+    /// (`VirtualDisplay::mode_string`) and `mirror` or `off` (what the panels show); no strings = the panels' own
+    /// modes again. Answered by `DirectDisplayResult`.
+    DirectDisplayVirtual = 153, direct_display_virtual { req: u64, count: u32, args: rng };
 }

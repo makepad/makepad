@@ -58,6 +58,14 @@ pub fn hal_stream_encoder_engines() -> u32 {
     StreamEncoder::engines()
 }
 
+/// The largest picture one stream encodes (`flags`: `FULL_CHROMA`), width in the high 32 bits,
+/// height in the low; 0 when this machine has no hardware encoder. A larger picture is split
+/// into tiles (columns and bands) of at most this size.
+#[makepad_relax_api::relax_api]
+pub fn hal_stream_encoder_max_size(flags: u32) -> u64 {
+    StreamEncoder::max_size(flags & FULL_CHROMA != 0).map_or(0, |[w, h]| (w as u64) << 32 | h as u64)
+}
+
 /// Flag of `hal_stream_encoder_open`: 4:4:4 (High 4:4:4 Predictive); the texture pictures hold
 /// full-resolution chroma (see `hal_stream_encoder_texture`).
 pub const FULL_CHROMA: u32 = 1;
@@ -103,6 +111,7 @@ fn encode(encoder: u64, f: impl FnOnce(&mut StreamEncoder) -> Result<Vec<u8>, St
             open.out.len() as i64
         }
         Err(e) => {
+            open.encoder.note_failure(&e);
             failed(e);
             -1
         }
@@ -112,11 +121,14 @@ fn encode(encoder: u64, f: impl FnOnce(&mut StreamEncoder) -> Result<Vec<u8>, St
 /// Encodes the picture in the registered DMA-BUF image `handle` (`hal_dmabuf_register`: YUV
 /// packed into BGRA8 texels, `width/4` a row, the luma rows then the interleaved CbCr rows of a
 /// `source_height` tall picture: 4:2:0 half as many chroma rows; 4:4:4 one per luma row, each two
-/// texture rows), from its row `y0` on (this encoder's height of them: a tile),
+/// texture rows), its pixels from column `x0` and row `y0` on (this encoder's size of them: a
+/// tile). A picture split into columns packs each column's chroma rows within the column (4:4:4:
+/// a column's chroma row is its own two texture rows of `column width/4` texels), so a tile is
+/// one rectangle of texels,
 /// once the sync_file `sync_fd` has signalled (taken over; -1 when the picture's GPU work is
 /// complete). The bitstream's length, -1 when it failed.
 #[makepad_relax_api::relax_api]
-pub fn hal_stream_encoder_texture(encoder: u64, handle: u64, source_height: u32, y0: u32, sync_fd: i32, flags: u32) -> i64 {
+pub fn hal_stream_encoder_texture(encoder: u64, handle: u64, source_height: u32, x0: u32, y0: u32, sync_fd: i32, flags: u32) -> i64 {
     let sync = (sync_fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(sync_fd) });
     let (image, size) = match copy::registered_image(handle) {
         Ok(image) => image,
@@ -131,7 +143,7 @@ pub fn hal_stream_encoder_texture(encoder: u64, handle: u64, source_height: u32,
         if !e.on_device(&image.dev) {
             return Err("the GPU device was replaced: the encoder must be opened again".into());
         }
-        e.encode_rows(image.image, size, source_height, y0, sync, flags & KEY != 0, flags & REFINE != 0)
+        e.encode_rows(image.image, size, source_height, x0, y0, sync, flags & KEY != 0, flags & REFINE != 0)
     })
 }
 

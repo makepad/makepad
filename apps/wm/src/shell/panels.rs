@@ -47,7 +47,9 @@ use {std::sync::Arc, super::system_linux::SystemSnapshot};
 #[cfg(target_os = "linux")]
 use makepad_widgets::makepad_platform::linux_display::LinuxDisplaySnapshot;
 #[cfg(target_os = "linux")]
-use {linux::{Chooser, DpiDrag}, super::display_menu::{Change, DisplayTrials}, makepad_widgets::makepad_platform::linux_display::DisplayPacing};
+use {linux::{Chooser, DpiDrag}, super::display_menu::{Change, CustomField, DisplayTrials}, makepad_widgets::makepad_platform::linux_display::DisplayPacing};
+#[cfg(target_os = "linux")]
+use super::display_layout::{SavedVirtual, VirtualSize};
 
 // ======================================================================
 // Civil dates — the calendar grid needs real date maths, no chrono.
@@ -399,6 +401,21 @@ enum Hit {
     PacePicker,
     #[cfg(target_os = "linux")]
     PaceItem(usize),
+    /// The Desktop switch: `false` Panel, `true` Virtual.
+    #[cfg(target_os = "linux")]
+    Desktop(bool),
+    /// The virtual desktop's Size picker, and a chip of its unfolded list
+    /// (`virtual_size_targets`).
+    #[cfg(target_os = "linux")]
+    VirtualSizePicker,
+    #[cfg(target_os = "linux")]
+    VirtualSizeItem(usize),
+    /// A Custom size stepper: the field and the direction.
+    #[cfg(target_os = "linux")]
+    VirtualCustom(CustomField, i32),
+    /// The panels' switch while virtual: `false` Mirror (scaled), `true` Off.
+    #[cfg(target_os = "linux")]
+    VirtualPanels(bool),
     /// Keep or revert the change being tried.
     #[cfg(target_os = "linux")]
     TrialKeep,
@@ -579,6 +596,18 @@ pub struct ShellPanel {
     #[cfg(target_os = "linux")]
     #[rust]
     pace_targets: Vec<DisplayPacing>,
+    /// The virtual desktop's saved choices (`None`: the Panel desktop), as
+    /// the WM last polled them; the Size list is unfolded, and the choice
+    /// behind each drawn chip.
+    #[cfg(target_os = "linux")]
+    #[rust]
+    pub virtual_saved: Option<SavedVirtual>,
+    #[cfg(target_os = "linux")]
+    #[rust]
+    virtual_size_open: bool,
+    #[cfg(target_os = "linux")]
+    #[rust]
+    virtual_size_targets: Vec<VirtualSize>,
     /// "Restart desktop now" was pressed once and asks to confirm.
     #[cfg(target_os = "linux")]
     #[rust]
@@ -769,6 +798,8 @@ impl ShellPanel {
             self.chooser_changes.clear();
             self.pace_open = false;
             self.pace_targets.clear();
+            self.virtual_size_open = false;
+            self.virtual_size_targets.clear();
             self.restart_confirm = false;
             self.gpu_picker = false;
             self.gpu_scroll = 0;
@@ -2361,6 +2392,7 @@ impl ShellPanel {
         self.open == Some(PanelKind::Network)
             || self.chooser.is_some()
             || self.pace_open
+            || self.virtual_size_open
             || self.dpi_drag.is_some()
             || self.restart_confirm
             || self.gpu_picker
@@ -2395,7 +2427,7 @@ impl ShellPanel {
         }
         // Escape folds a screen's picker, or drops a restart confirm; the
         // Display panel stays.
-        if e.key_code == KeyCode::Escape && (self.chooser.is_some() || self.pace_open || self.restart_confirm) {
+        if e.key_code == KeyCode::Escape && (self.chooser.is_some() || self.pace_open || self.virtual_size_open || self.restart_confirm) {
             self.close_chooser();
             self.restart_confirm = false;
             self.swallow_escape_up = true;
@@ -2575,6 +2607,7 @@ impl Widget for ShellPanel {
                         | Hit::Arrangement(_) | Hit::OptimiseFor(_)
                         | Hit::ScreenMove(..) | Hit::ScreenMain(_) | Hit::ScreenResolution(_) | Hit::ScreenRate(_)
                         | Hit::ChooserItem(_) | Hit::TrialKeep | Hit::TrialRevert | Hit::PacePicker | Hit::PaceItem(_)
+                        | Hit::Desktop(_) | Hit::VirtualSizePicker | Hit::VirtualSizeItem(_) | Hit::VirtualCustom(..) | Hit::VirtualPanels(_)
                         | Hit::RestartDesktop | Hit::RestartConfirm | Hit::RestartCancel
                         | Hit::GpuPicker
                         | Hit::Gpu(_) | Hit::PointerSettings | Hit::InvertScroll)) => self.system_press(cx, hit),

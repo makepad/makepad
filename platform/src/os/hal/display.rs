@@ -29,6 +29,10 @@ impl DisplayClient {
                     makepad_hal::direct::DisplayArrangement::Mirror { optimise_for } => optimise_for.as_bytes(),
                 }),
                 LinuxDisplayCommand::Pacing(pacing) => w.direct_display_pacing(req, &pack_strs(&pacing.args())),
+                LinuxDisplayCommand::Virtual(display) => match display {
+                    Some(v) => w.direct_display_virtual(req, 2, &pack_strs(&[&v.mode_string(), v.panels.as_str()])),
+                    None => w.direct_display_virtual(req, 0, &[]),
+                },
                 LinuxDisplayCommand::Mode { name, mode } => {
                     w.direct_display_mode(req, &pack_strs(&[name, mode.as_deref().unwrap_or("")]));
                 }

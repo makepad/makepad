@@ -56,6 +56,18 @@ pub struct Latency {
 /// This display's refresh (Hz; 0 = not measured yet): every connection tells its desktop.
 pub static DISPLAY_HZ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+/// The picture area in device pixels (width << 32 | height) and the scale (hundredths), as the
+/// view last drew it: told to the desktop once it has held still (`WINDOW_SETTLE`).
+static VIEW_WINDOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static VIEW_SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// A window size is told once it held this long (a live resize sends only where it ends).
+const WINDOW_SETTLE: Duration = Duration::from_millis(250);
+
+pub fn set_view_window(width: u32, height: u32, scale: u32) {
+    VIEW_WINDOW.store((width as u64) << 32 | height as u64, Ordering::Release);
+    VIEW_SCALE.store(scale, Ordering::Release);
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Shared {
     pub state: Option<State>,
@@ -80,9 +92,10 @@ pub struct Shared {
     pub decode_queue: usize,
 }
 
-/// A decoded part of a picture: rows `y0..` of it (all of it, or one tile), the decoder's GPU
-/// picture where the platform has one (no CPU copy), else tight NV12.
+/// A decoded part of a picture: its pixels from column `x0`, row `y0` on (all of it, or one
+/// tile), the decoder's GPU picture where the platform has one (no CPU copy), else tight NV12.
 pub struct Part {
+    pub x0: u32,
     pub y0: u32,
     pub width: u32,
     pub height: u32,
@@ -109,6 +122,7 @@ struct Packet {
     key: bool,
     stream: u8,
     parts: u8,
+    x0: u32,
     y0: u32,
     built_ns: u64,
     encoded_ns: u64,
@@ -288,6 +302,8 @@ impl Net {
         let mut last_heard = Instant::now();
         // the display refresh last told to the desktop
         let mut told_hz = 0u32;
+        // the window last told, and the one seen since when
+        let (mut told_window, mut seen_window) = ((0u64, 0u32), ((0u64, 0u32), Instant::now()));
         let result = loop {
             if self.stop.load(Ordering::Acquire) {
                 break Ok("closed".into());
@@ -297,6 +313,19 @@ impl Net {
                 told_hz = hz;
                 if let Err(e) = proto::write_all(&mut stream, &ClientMsg::Refresh { hz: hz.min(u16::MAX as u32) as u16 }.encode()) {
                     break Err(format!("write: {e}"));
+                }
+            }
+            let window = (VIEW_WINDOW.load(Ordering::Acquire), VIEW_SCALE.load(Ordering::Acquire));
+            if window != seen_window.0 {
+                seen_window = (window, Instant::now());
+            } else if window != told_window && seen_window.1.elapsed() >= WINDOW_SETTLE {
+                told_window = window;
+                let (width, height) = ((window.0 >> 32) as u32, window.0 as u32);
+                if width > 0 && height > 0 {
+                    let scale = window.1.min(u16::MAX as u32) as u16;
+                    if let Err(e) = proto::write_all(&mut stream, &ClientMsg::Window { width, height, scale }.encode()) {
+                        break Err(format!("write: {e}"));
+                    }
                 }
             }
             if last_ping.elapsed() >= Duration::from_secs(1) {
@@ -365,14 +394,14 @@ impl Net {
                         ended = Some(Ok(format!("the desktop said goodbye: {reason}")));
                         break;
                     }
-                    ServerMsg::Video { frame, key, built_ns, encoded_ns, sent_ns, stream, parts, y0, data } => {
+                    ServerMsg::Video { frame, key, built_ns, encoded_ns, sent_ns, stream, parts, x0, y0, data } => {
                         // pictures per second: each picture's last part (tiles) or each picture
                         if parts <= 1 || stream + 1 == parts {
                             second.1 += 1;
                         }
                         second.2 += data.len();
                         queue_max = queue_max.max(queued.fetch_add(1, Ordering::AcqRel) + 1);
-                        let _ = dec_tx.send(Packet { frame, key, stream, parts, y0, built_ns, encoded_ns, sent_ns, received_ns: now_ns(), data });
+                        let _ = dec_tx.send(Packet { frame, key, stream, parts, x0, y0, built_ns, encoded_ns, sent_ns, received_ns: now_ns(), data });
                     }
                     ServerMsg::Cursor { x, y, shape, visible } => {
                         self.shared.lock().unwrap().cursor = Some((x, y, shape, visible));
@@ -480,7 +509,7 @@ fn play_loop(path: String, gpu: bool, still: Option<u32>, shared: Arc<Mutex<Shar
             let mut y0 = 0;
             for (decoder, units) in decoders.iter_mut().zip(&tiles) {
                 for f in decoder.push_packet(&units[at], frame as i64).unwrap_or_default() {
-                    parts.push(Part { y0, width: f.width, height: f.height, nv12: f.nv12, gpu: f.gpu });
+                    parts.push(Part { x0: 0, y0, width: f.width, height: f.height, nv12: f.nv12, gpu: f.gpu });
                     y0 += f.height;
                 }
             }
@@ -514,12 +543,11 @@ fn play_loop(path: String, gpu: bool, still: Option<u32>, shared: Arc<Mutex<Shar
 }
 
 fn decode_loop(rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal: SignalToUI, shared: Arc<Mutex<Shared>>, cmd: Sender<ClientMsg>, queued: Arc<AtomicUsize>) {
-    // one decoder per encoder stream (a tile, or an interleaved stream), each waiting for its
-    // key frame after a failure
-    let mut decoders: Vec<Option<VideoStreamDecoder>> = Vec::new();
-    let mut waiting_key: Vec<bool> = Vec::new();
-    // the parts of the tiled picture being put together: its frame, the parts so far, its times
-    let mut gathering: Option<(u32, Vec<Option<Part>>, Picture)> = None;
+    // one decoder per encoder stream (a tile, or an interleaved stream), each on a thread of its
+    // own: the tiles of a picture decode at once (a hardware decoder runs several sessions in
+    // parallel), so a picture of N tiles takes about one tile's decode, not N
+    let gathering: Arc<Mutex<Assembly>> = Arc::new(Mutex::new(Assembly::default()));
+    let mut workers: Vec<Sender<Packet>> = Vec::new();
     loop {
         let packet = match rx.recv_timeout(Duration::from_millis(500)) {
             Ok(p) => {
@@ -530,16 +558,58 @@ fn decode_loop(rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal
             Err(RecvTimeoutError::Disconnected) => return,
         };
         let s = packet.stream as usize;
-        if decoders.len() <= s {
-            decoders.resize_with(s + 1, || None);
-            waiting_key.resize(s + 1, false);
+        while workers.len() <= s {
+            let (tx, wrx) = channel::<Packet>();
+            let (latest2, signal2, shared2, cmd2, gathering2) = (latest.clone(), signal.clone(), shared.clone(), cmd.clone(), gathering.clone());
+            let index = workers.len();
+            let spawned = std::thread::Builder::new().name(format!("desklink-dec-{index}")).spawn(move || decode_stream(index, wrx, latest2, signal2, shared2, cmd2, gathering2));
+            if let Err(e) = spawned {
+                shared.lock().unwrap().warning = Some(format!("decoder thread: {e}"));
+                return;
+            }
+            workers.push(tx);
         }
-        if waiting_key[s] && !packet.key {
+        if workers[s].send(packet).is_err() {
+            return;
+        }
+    }
+}
+
+/// The tiled picture being put together: its frame, the parts so far, its times.
+type Gather = (u32, Vec<Option<Part>>, Picture);
+
+/// What the stream decoders share: the picture being put together, and the last picture
+/// published (an interleaved stream's older picture finishing late is not shown after a newer).
+#[derive(Default)]
+struct Assembly {
+    gather: Option<Gather>,
+    published: Option<u32>,
+}
+
+impl Assembly {
+    fn publish(&mut self, picture: Picture, latest: &Mutex<Option<Picture>>, signal: &SignalToUI) {
+        if self.published.is_some_and(|last| picture.frame.wrapping_sub(last) > u32::MAX / 2) {
+            return;
+        }
+        self.published = Some(picture.frame);
+        *latest.lock().unwrap() = Some(picture);
+        signal.set();
+    }
+}
+
+/// One encoder stream's decoder: waits for its key frame after a failure; a whole picture
+/// goes out at once, a tile once its picture's other tiles are here (never a torn picture; a
+/// tile of a newer picture drops an incomplete older one).
+fn decode_stream(s: usize, rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal: SignalToUI, shared: Arc<Mutex<Shared>>, cmd: Sender<ClientMsg>, gathering: Arc<Mutex<Assembly>>) {
+    let mut decoder: Option<VideoStreamDecoder> = None;
+    let mut waiting_key = false;
+    while let Ok(packet) = rx.recv() {
+        if waiting_key && !packet.key {
             continue;
         }
-        if decoders[s].is_none() || packet.key && waiting_key[s] {
+        if decoder.is_none() || packet.key && waiting_key {
             match VideoStreamDecoder::new_gpu(StreamVideoCodec::H264) {
-                Ok(d) => decoders[s] = Some(d),
+                Ok(d) => decoder = Some(d),
                 Err(e) => {
                     shared.lock().unwrap().warning = Some(format!("hardware decoder: {e:?}"));
                     signal.set();
@@ -547,23 +617,23 @@ fn decode_loop(rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal
                 }
             }
         }
-        waiting_key[s] = false;
+        waiting_key = false;
         let start = now_ns();
-        let out = decoders[s].as_mut().unwrap().push_packet(&packet.data, packet.frame as i64);
+        let out = decoder.as_mut().unwrap().push_packet(&packet.data, packet.frame as i64);
         let decoded_ns = now_ns();
         let frames = match out {
             Ok(frames) => frames,
             Err(e) => {
                 eprintln!("desklink: decode of picture {} (stream {s}): {e:?}; asking for a key frame", packet.frame);
-                waiting_key[s] = true;
+                waiting_key = true;
                 let _ = cmd.send(ClientMsg::RequestKeyframe);
                 continue;
             }
         };
         for f in frames {
-            let part = Part { y0: packet.y0, width: f.width, height: f.height, nv12: f.nv12, gpu: f.gpu };
+            let part = Part { x0: packet.x0, y0: packet.y0, width: f.width, height: f.height, nv12: f.nv12, gpu: f.gpu };
             let mut picture = Picture {
-                width: part.width,
+                width: packet.x0 + part.width,
                 height: packet.y0 + part.height,
                 parts: Vec::new(),
                 frame: packet.frame,
@@ -575,22 +645,24 @@ fn decode_loop(rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal
                 decode_ns: decoded_ns - start,
             };
             let parts = packet.parts.max(1) as usize;
+            let mut assembly = gathering.lock().unwrap();
             if parts == 1 {
                 picture.parts.push(part);
-                *latest.lock().unwrap() = Some(picture);
-                signal.set();
+                assembly.publish(picture, &latest, &signal);
                 continue;
             }
-            // a tile: the picture is shown once all its tiles are here (never a torn picture);
-            // a tile of a newer picture drops an incomplete older one
-            if gathering.as_ref().is_none_or(|(frame, got, _)| *frame != packet.frame || got.len() != parts) {
-                gathering = Some((packet.frame, (0..parts).map(|_| None).collect(), picture));
-            } else if let Some((_, _, p)) = gathering.as_mut() {
-                p.height = p.height.max(picture.height);
-                p.encoded_ns = p.encoded_ns.max(picture.encoded_ns);
-                p.received_ns = p.received_ns.max(picture.received_ns);
-                p.decoded_ns = decoded_ns;
-                p.decode_ns += picture.decode_ns;
+            let gathering = &mut assembly.gather;
+            match gathering.as_mut() {
+                Some((frame, got, p)) if *frame == packet.frame && got.len() == parts => {
+                    p.encoded_ns = p.encoded_ns.max(picture.encoded_ns);
+                    p.received_ns = p.received_ns.max(picture.received_ns);
+                    p.decoded_ns = p.decoded_ns.max(decoded_ns);
+                    // the slowest tile's decode: they ran at once
+                    p.decode_ns = p.decode_ns.max(picture.decode_ns);
+                }
+                // an older picture's tile after a newer one started: dropped
+                Some((frame, got, _)) if got.len() == parts && frame.wrapping_sub(packet.frame) < u32::MAX / 2 && *frame != packet.frame => continue,
+                _ => *gathering = Some((packet.frame, (0..parts).map(|_| None).collect(), picture)),
             }
             let (_, got, _) = gathering.as_mut().unwrap();
             if s < got.len() {
@@ -599,9 +671,9 @@ fn decode_loop(rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal
             if got.iter().all(Option::is_some) {
                 let (_, got, mut p) = gathering.take().unwrap();
                 p.parts = got.into_iter().flatten().collect();
+                p.width = p.parts.iter().map(|part| part.x0 + part.width).max().unwrap_or(0);
                 p.height = p.parts.iter().map(|part| part.y0 + part.height).max().unwrap_or(0);
-                *latest.lock().unwrap() = Some(p);
-                signal.set();
+                assembly.publish(p, &latest, &signal);
             }
         }
     }

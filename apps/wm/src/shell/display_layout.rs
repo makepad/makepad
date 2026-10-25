@@ -34,6 +34,15 @@
 //! for that screen. Only kept (confirmed) changes are ever written.
 //! `pace slowest|fastest|screen <pci> <connector>` (absent: auto) is
 //! the screen whose refresh paces the desktop's frames.
+//! `virtual <WxH>[@Hz] [panels=mirror|off] [scale=<hundredths>] [follow=on|off]`
+//! (absent: the Panel desktop, rendered at the panel's own mode) makes
+//! the virtual display the desktop. The size is the fixed size, or the
+//! fallback while `follow=on` (the Desk Link viewer's window size decides
+//! once a viewer has reported); `panels=` is what the physical panels show
+//! meanwhile (default `mirror`: scaled to fit; `off`: not driven); `scale=`
+//! is the desktop's scale while virtual (default 200 = 2.00x, clamped to
+//! the display scale range); `follow=` defaults to off when the token is
+//! absent. The first valid `virtual` line wins; a malformed one is skipped.
 //!
 //! `display-layout` supersedes the older `display-source` and
 //! `display-gpu` files; [`DisplayLayout::migrate`] reads them once to
@@ -76,10 +85,10 @@
 
 #![cfg(target_os = "linux")]
 
-use makepad_widgets::makepad_platform::linux_display::{DisplayArrangement, DisplayPacing, LinuxDisplayOutput, LinuxDisplaySnapshot};
+use makepad_widgets::makepad_platform::linux_display::{DisplayArrangement, DisplayPacing, LinuxDisplayOutput, LinuxDisplaySnapshot, VirtualDisplay, VirtualPanels};
 use makepad_widgets::makepad_platform::linux_wide_desktop::parse_mode_overrides;
 
-use super::system_linux::validate_gpu_choice;
+use super::system_linux::{validate_gpu_choice, DISPLAY_SCALE_MAX, DISPLAY_SCALE_MIN};
 
 /// The header line's keyword.
 const HEADER_KEYWORD: &str = "makepad-display-layout";
@@ -117,6 +126,121 @@ pub struct DisplayLayout {
     /// Mirror, sized for this screen; `None` is the extended desktop.
     pub mirror: Option<ScreenKey>,
     pub pace: SavedPace,
+    /// The virtual desktop; `None` is the Panel desktop.
+    pub virtual_display: Option<SavedVirtual>,
+}
+
+/// The `virtual` line: the virtual desktop's saved choices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SavedVirtual {
+    /// The fixed size and refresh (the fallback while `follow`) and what
+    /// the panels show.
+    pub mode: VirtualDisplay,
+    /// The desktop scale while virtual, in hundredths.
+    pub scale: u32,
+    /// The Desk Link viewer's window size decides once it has reported.
+    pub follow: bool,
+}
+
+impl SavedVirtual {
+    /// The defaults when Virtual is first picked.
+    pub const DEFAULT_SCALE: u32 = 200;
+
+    pub fn first_pick() -> SavedVirtual {
+        SavedVirtual {
+            mode: VirtualDisplay { width: 7680, height: 2160, refresh_mhz: 120_000, panels: VirtualPanels::Mirror },
+            scale: Self::DEFAULT_SCALE,
+            follow: true,
+        }
+    }
+
+    /// The saved choices with the size picker's `size` applied: Follow
+    /// keeps the fixed size as the fallback, a fixed size turns Follow off.
+    pub fn with_size(&self, size: VirtualSize) -> SavedVirtual {
+        let mut out = *self;
+        match size {
+            VirtualSize::Follow => out.follow = true,
+            VirtualSize::Fixed { width, height, refresh_mhz } => {
+                out.follow = false;
+                out.mode.width = clamp_even(width);
+                out.mode.height = clamp_even(height);
+                out.mode.refresh_mhz = refresh_mhz.clamp(1000, 1_000_000);
+            }
+        }
+        out
+    }
+
+    /// The virtual display the desktop should have: the Desk Link viewer's
+    /// window (`width, height, refresh_mhz`) while following and one has
+    /// reported, else the saved size. Sizes are clamped and even.
+    pub fn target(&self, viewer: Option<(u32, u32, u32)>) -> VirtualDisplay {
+        match viewer.filter(|_| self.follow) {
+            Some((width, height, refresh_mhz)) => VirtualDisplay {
+                width: clamp_even(width),
+                height: clamp_even(height),
+                refresh_mhz: if (1000..=1_000_000).contains(&refresh_mhz) { refresh_mhz } else { self.mode.refresh_mhz },
+                panels: self.mode.panels,
+            },
+            None => self.mode,
+        }
+    }
+
+    fn parse(mut tokens: std::str::SplitWhitespace<'_>) -> Option<SavedVirtual> {
+        let mode = tokens.next()?;
+        let mut panels = VirtualPanels::Mirror;
+        let mut scale = Self::DEFAULT_SCALE;
+        let mut follow = false;
+        for token in tokens {
+            if let Some(value) = token.strip_prefix("panels=") {
+                if let Some(parsed) = VirtualPanels::parse(value) {
+                    panels = parsed;
+                }
+            } else if let Some(value) = token.strip_prefix("scale=") {
+                if let Ok(parsed) = value.parse::<u32>() {
+                    scale = parsed.clamp(DISPLAY_SCALE_MIN, DISPLAY_SCALE_MAX);
+                }
+            } else if let Some(value) = token.strip_prefix("follow=") {
+                match value {
+                    "on" => follow = true,
+                    "off" => follow = false,
+                    _ => {}
+                }
+            }
+        }
+        let mode = VirtualDisplay::parse(mode, panels.as_str()).ok()?;
+        Some(SavedVirtual { mode, scale, follow })
+    }
+
+    fn line(&self) -> String {
+        format!(
+            "virtual {} panels={} scale={} follow={}\n",
+            self.mode.mode_string(),
+            self.mode.panels.as_str(),
+            self.scale,
+            if self.follow { "on" } else { "off" }
+        )
+    }
+}
+
+/// What the Size picker chooses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VirtualSize {
+    /// The Desk Link viewer's window decides.
+    Follow,
+    /// A preset or custom size.
+    Fixed { width: u32, height: u32, refresh_mhz: u32 },
+}
+
+/// `value` within the virtual display's limits, rounded down to even.
+fn clamp_even(value: u32) -> u32 {
+    (value.clamp(VirtualDisplay::MIN_SIZE, VirtualDisplay::MAX_SIZE)) & !1
+}
+
+/// Whether `MAKEPAD_VIRTUAL_DISPLAY` was pinned from outside: set and
+/// non-empty, and not the session script's export of the saved line
+/// (`MAKEPAD_WM_VIRTUAL_FROM_SAVED=1`).
+pub fn virtual_env_pinned(value: Option<&str>, from_saved: Option<&str>) -> bool {
+    value.is_some_and(|v| !v.is_empty()) && from_saved != Some("1")
 }
 
 /// The saved Pace by choice.
@@ -140,6 +264,7 @@ impl DisplayLayout {
         let mut render_on = None;
         let mut mirror = None;
         let mut pace = None;
+        let mut virtual_display = None;
         let mut screens: Vec<ScreenEntry> = Vec::new();
         let mut main_seen = false;
         for raw_line in text.lines() {
@@ -180,6 +305,11 @@ impl DisplayLayout {
                         _ => None,
                     };
                 }
+                "virtual" => {
+                    if virtual_display.is_none() {
+                        virtual_display = SavedVirtual::parse(tokens);
+                    }
+                }
                 "screen" => {
                     let Some(pci) = tokens.next() else { continue };
                     let Some(connector) = tokens.next() else { continue };
@@ -211,7 +341,7 @@ impl DisplayLayout {
                 _ => {}
             }
         }
-        DisplayLayout { render_on, screens, mirror, pace: pace.unwrap_or_default() }
+        DisplayLayout { render_on, screens, mirror, pace: pace.unwrap_or_default(), virtual_display }
     }
 
     /// Serializes back to the file's text. Round-trips through
@@ -262,6 +392,9 @@ impl DisplayLayout {
                 out.push('\n');
             }
         }
+        if let Some(saved) = &self.virtual_display {
+            out.push_str(&saved.line());
+        }
         out
     }
 
@@ -284,7 +417,7 @@ impl DisplayLayout {
                 })
             })
             .collect();
-        DisplayLayout { render_on, screens, mirror: None, pace: SavedPace::Auto }
+        DisplayLayout { render_on, screens, mirror: None, pace: SavedPace::Auto, virtual_display: None }
     }
 
     /// The saved arrangement against this boot's snapshot: mirror for the
@@ -427,7 +560,7 @@ impl DisplayLayout {
         }
         let render_on =
             display_gpu.and_then(|gpu| validate_gpu_choice(gpu).ok().map(str::to_string));
-        DisplayLayout { render_on, screens, mirror: None, pace: SavedPace::Auto }
+        DisplayLayout { render_on, screens, mirror: None, pace: SavedPace::Auto, virtual_display: None }
     }
 }
 
@@ -473,8 +606,8 @@ impl DisplayLayout {
     /// entry they do not have is appended (including screens not connected
     /// now), so a whole-file save never drops them; an appended entry
     /// loses `main` when an edited one has it. `render_on_edited` keeps the
-    /// person's render-on GPU.
-    pub fn merge_loaded(&mut self, loaded: &DisplayLayout, screens_edited: bool, render_on_edited: bool) {
+    /// person's render-on GPU, `virtual_edited` their virtual desktop.
+    pub fn merge_loaded(&mut self, loaded: &DisplayLayout, screens_edited: bool, render_on_edited: bool, virtual_edited: bool) {
         if screens_edited {
             let has_main = self.screens.iter().any(|entry| entry.main);
             for saved in &loaded.screens {
@@ -493,6 +626,9 @@ impl DisplayLayout {
         }
         if !render_on_edited {
             self.render_on = loaded.render_on.clone();
+        }
+        if !virtual_edited {
+            self.virtual_display = loaded.virtual_display;
         }
     }
 }
@@ -588,6 +724,8 @@ pub enum RestoreOp {
     /// `linux_set_display_arrangement`: the saved mirror, or back to the
     /// extended desktop.
     Arrangement(DisplayArrangement),
+    /// `linux_set_virtual_display(Some(..))`: the saved virtual desktop.
+    Virtual(VirtualDisplay),
     /// `linux_set_display_pacing`: the saved Pace by choice.
     Pacing(DisplayPacing),
 }
@@ -618,6 +756,20 @@ pub enum RestoreOp {
 ///   `primary`.
 pub fn restore_plan(layout: &DisplayLayout, snap: &LinuxDisplaySnapshot) -> Vec<RestoreOp> {
     let mut ops = Vec::new();
+    if let Some(saved) = &layout.virtual_display {
+        // The virtual desktop: order, modes, main, arrangement and pacing
+        // are the panels' and do not apply. While following, the viewer's
+        // size may differ from the saved fallback, so only the panels word
+        // is compared; a fixed size must match.
+        let holds = snap.virtual_display.is_some_and(|v| {
+            v.panels == saved.mode.panels
+                && (saved.follow || (v.width, v.height, v.refresh_mhz) == (saved.mode.width, saved.mode.height, saved.mode.refresh_mhz))
+        });
+        if !holds {
+            ops.push(RestoreOp::Virtual(saved.mode));
+        }
+        return ops;
+    }
     let arrangement = layout.arrangement(snap);
     if snap.arrangement != arrangement {
         ops.push(RestoreOp::Arrangement(arrangement.clone()));
@@ -698,7 +850,7 @@ pub fn env_restore_plan(plan: Vec<RestoreOp>, order_env: Option<&str>, modes_env
         .filter(|op| match op {
             RestoreOp::Order(_) => !order_pinned,
             RestoreOp::Mode(name, _) => !mode_pinned.contains(name),
-            RestoreOp::Main(_) | RestoreOp::Arrangement(_) | RestoreOp::Pacing(_) => true,
+            RestoreOp::Main(_) | RestoreOp::Arrangement(_) | RestoreOp::Pacing(_) | RestoreOp::Virtual(_) => true,
         })
         .collect()
 }
@@ -847,6 +999,7 @@ mod tests {
             ],
             mirror: Some(ScreenKey { pci: "0000:01:00.0".to_string(), connector: "HDMI-A-1".to_string() }),
             pace: SavedPace::Screen(ScreenKey { pci: "0000:00:02.0".to_string(), connector: "HDMI-A-2".to_string() }),
+            virtual_display: None,
         };
         let text = layout.serialize();
         assert!(text.contains("\nmirror 0000:01:00.0 HDMI-A-1\n"), "{text}");
@@ -858,6 +1011,91 @@ mod tests {
         for (line, pace) in [("pace slowest", SavedPace::Slowest), ("pace fastest", SavedPace::Fastest), ("pace auto", SavedPace::Auto), ("pace bogus", SavedPace::Auto)] {
             assert_eq!(DisplayLayout::parse(line).pace, pace, "{line}");
         }
+    }
+
+    fn saved_virtual() -> SavedVirtual {
+        SavedVirtual {
+            mode: VirtualDisplay { width: 7680, height: 2160, refresh_mhz: 120_000, panels: VirtualPanels::Off },
+            scale: 200,
+            follow: true,
+        }
+    }
+
+    #[test]
+    fn virtual_line_round_trips_and_parses_tolerantly() {
+        let layout = DisplayLayout { virtual_display: Some(saved_virtual()), ..Default::default() };
+        let text = layout.serialize();
+        assert!(text.contains("\nvirtual 7680x2160@120 panels=off scale=200 follow=on\n"), "{text}");
+        assert_eq!(DisplayLayout::parse(&text), layout);
+        assert!(!DisplayLayout::default().serialize().contains("virtual"));
+        // Defaults: mirror, 2.00x, follow off; fractional refresh; scale clamped.
+        let bare = DisplayLayout::parse("virtual 1920x1080@59.94\n").virtual_display.unwrap();
+        assert_eq!(bare.mode, VirtualDisplay { width: 1920, height: 1080, refresh_mhz: 59_940, panels: VirtualPanels::Mirror });
+        assert_eq!((bare.scale, bare.follow), (200, false));
+        assert_eq!(DisplayLayout::parse(&DisplayLayout { virtual_display: Some(bare), ..Default::default() }.serialize()).virtual_display, Some(bare));
+        assert_eq!(DisplayLayout::parse("virtual 1920x1080 scale=900\n").virtual_display.unwrap().scale, DISPLAY_SCALE_MAX);
+        assert_eq!(DisplayLayout::parse("virtual 1920x1080 panels=sideways scale=x follow=maybe bogus\n").virtual_display.map(|v| (v.mode.panels, v.scale, v.follow)), Some((VirtualPanels::Mirror, 200, false)));
+        // Malformed or out of range lines are skipped; the first valid one wins.
+        assert_eq!(DisplayLayout::parse("virtual\nvirtual banana\nvirtual 10x10\n").virtual_display, None);
+        let two = DisplayLayout::parse("virtual banana\nvirtual 3840x2160@120\nvirtual 1920x1080\n").virtual_display.unwrap();
+        assert_eq!(two.mode.width, 3840);
+    }
+
+    #[test]
+    fn virtual_size_choices_and_viewer_target() {
+        let saved = saved_virtual();
+        let fixed = saved.with_size(VirtualSize::Fixed { width: 2561, height: 1441, refresh_mhz: 144_000 });
+        assert!(!fixed.follow);
+        assert_eq!((fixed.mode.width, fixed.mode.height, fixed.mode.refresh_mhz, fixed.mode.panels), (2560, 1440, 144_000, VirtualPanels::Off));
+        let follow = fixed.with_size(VirtualSize::Follow);
+        assert!(follow.follow);
+        assert_eq!(follow.mode, fixed.mode, "the fixed size stays as the fallback");
+        // No viewer yet: the fallback; a viewer: its window, even, clamped.
+        assert_eq!(follow.target(None), fixed.mode);
+        let viewer = follow.target(Some((3841, 2161, 60_000)));
+        assert_eq!((viewer.width, viewer.height, viewer.refresh_mhz, viewer.panels), (3840, 2160, 60_000, VirtualPanels::Off));
+        assert_eq!(follow.target(Some((99999, 10, 0))).width, VirtualDisplay::MAX_SIZE);
+        assert_eq!(follow.target(Some((99999, 10, 0))).height, VirtualDisplay::MIN_SIZE);
+        assert_eq!(follow.target(Some((99999, 10, 0))).refresh_mhz, 144_000, "no refresh reported: the fallback's");
+        // Not following: the viewer is ignored.
+        assert_eq!(fixed.target(Some((3840, 2160, 60_000))), fixed.mode);
+    }
+
+    #[test]
+    fn virtual_restore_plan_compares_the_panels_and_a_fixed_size() {
+        let layout = DisplayLayout { virtual_display: Some(saved_virtual()), ..Default::default() };
+        let panel_snap = LinuxDisplaySnapshot { direct: true, outputs: vec![placed("card0-HDMI-A-1", "0000:00:02.0", 0, true)], ..Default::default() };
+        assert_eq!(restore_plan(&layout, &panel_snap), vec![RestoreOp::Virtual(saved_virtual().mode)]);
+        let on = |v: VirtualDisplay| LinuxDisplaySnapshot { virtual_display: Some(v), ..panel_snap.clone() };
+        assert_eq!(restore_plan(&layout, &on(saved_virtual().mode)), vec![]);
+        // Following: the viewer's size stands; the wrong panels word does not.
+        let viewer = VirtualDisplay { width: 3840, height: 2160, ..saved_virtual().mode };
+        assert_eq!(restore_plan(&layout, &on(viewer)), vec![]);
+        let mirror = VirtualDisplay { panels: VirtualPanels::Mirror, ..saved_virtual().mode };
+        assert_eq!(restore_plan(&layout, &on(mirror)), vec![RestoreOp::Virtual(saved_virtual().mode)]);
+        // Fixed: the size must match too.
+        let fixed = DisplayLayout { virtual_display: Some(SavedVirtual { follow: false, ..saved_virtual() }), ..Default::default() };
+        assert_eq!(restore_plan(&fixed, &on(viewer)), vec![RestoreOp::Virtual(saved_virtual().mode)]);
+        // Nothing saved: the panels' plan, never a virtual op.
+        assert!(!restore_plan(&DisplayLayout::default(), &on(viewer)).iter().any(|op| matches!(op, RestoreOp::Virtual(_))));
+    }
+
+    #[test]
+    fn virtual_env_is_pinned_only_from_outside() {
+        assert!(virtual_env_pinned(Some("7680x2160@120 off"), None));
+        assert!(!virtual_env_pinned(Some("7680x2160@120 off"), Some("1")));
+        assert!(!virtual_env_pinned(Some(""), None));
+        assert!(!virtual_env_pinned(None, None));
+    }
+
+    #[test]
+    fn merge_loaded_keeps_an_edited_virtual_choice() {
+        let loaded = DisplayLayout { virtual_display: Some(saved_virtual()), ..Default::default() };
+        let mut working = DisplayLayout::default();
+        working.merge_loaded(&loaded, false, false, true);
+        assert_eq!(working.virtual_display, None);
+        working.merge_loaded(&loaded, false, false, false);
+        assert_eq!(working.virtual_display, Some(saved_virtual()));
     }
 
     #[test]
@@ -1264,7 +1502,7 @@ mod tests {
              screen 0000:01:00.0 DP-3 main mode=2560x1440@144\n\
              screen 0000:00:02.0 eDP-1 mode=1920x1200\n",
         );
-        working.merge_loaded(&loaded, true, false);
+        working.merge_loaded(&loaded, true, false, false);
         assert_eq!(working.render_on, loaded.render_on);
         assert_eq!(working.screens.len(), 2);
         assert_eq!(working.screens[0].key, key("0000:00:02.0", "eDP-1"));
@@ -1277,9 +1515,9 @@ mod tests {
 
     #[test]
     fn merge_loaded_takes_untouched_parts_from_the_read() {
-        let mut working = DisplayLayout { render_on: Some("0000:01:00.0 10de:2b85".to_string()), screens: vec![], mirror: None, pace: SavedPace::Auto };
+        let mut working = DisplayLayout { render_on: Some("0000:01:00.0 10de:2b85".to_string()), screens: vec![], mirror: None, pace: SavedPace::Auto, virtual_display: None };
         let loaded = DisplayLayout::parse("render-on 0000:00:02.0 8086:a780\nscreen 0000:00:02.0 HDMI-A-2 main\n");
-        working.merge_loaded(&loaded, false, true);
+        working.merge_loaded(&loaded, false, true, false);
         assert_eq!(working.render_on, Some("0000:01:00.0 10de:2b85".to_string()));
         assert_eq!(working.screens, loaded.screens);
     }

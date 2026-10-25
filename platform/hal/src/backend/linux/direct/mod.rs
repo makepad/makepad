@@ -42,6 +42,8 @@ enum Command {
     Pacing(crate::direct::DisplayPacing),
     /// The HAL replaced its lost GPU device: the presenter renders with this one from now on.
     Device(Arc<Device>),
+    /// The virtual display (see `direct::VirtualDisplay`), or the panels' own modes.
+    Virtual(Option<crate::direct::VirtualDisplay>),
 }
 
 #[derive(Default)]
@@ -245,6 +247,7 @@ impl App {
         let command = match command {
             DisplayCommand::Source(name) => { connected(&name)?; Command::Primary(name) }
             DisplayCommand::Order(order) => Command::Order(order),
+            DisplayCommand::Virtual(display) => Command::Virtual(display),
             DisplayCommand::Arrangement(arrangement) => {
                 if let crate::direct::DisplayArrangement::Mirror { optimise_for } = &arrangement { connected(optimise_for)?; }
                 Command::Arrangement(arrangement)

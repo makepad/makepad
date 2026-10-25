@@ -5,7 +5,11 @@
 //! A GPU with several encode engines (`VideoStreamEncoder::engines`) runs one stream per engine,
 //! each on a worker thread of its own: as tiles (each picture split into bands, encoded at once:
 //! the lowest latency, the default) or interleaved (the engines take whole pictures in turn:
-//! the most pictures per second at one picture's latency).
+//! the most pictures per second at one picture's latency). A picture larger than one stream
+//! takes (`VideoStreamEncoder::max_size`, e.g. 4096 wide for H.264 on NVIDIA) is cut into columns
+//! as well (`TilePlan`); the tiles of a picture spread over all engines. Tiles of two pictures
+//! may be in flight at once (each engine encodes its tiles in order), so a picture's encode
+//! overlaps the next one's copy and submit.
 
 use makepad_desk_link as proto;
 use makepad_widgets::makepad_platform::video_file::{GpuReady, StreamTile, StreamVideoCodec, VideoStreamEncoder, VideoStreamEncoderOptions};
@@ -15,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use makepad_desk_link::server::Out;
-pub use super::capture::InFlight;
+pub use super::capture::{InFlight, TilePlan};
 pub use super::settings::Split;
 
 /// The viewers a picture goes to: their queue, its backlog, whether they pause.
@@ -31,7 +35,7 @@ pub enum Fence {
 pub enum Job {
     /// `refine`: the last picture again at a near-lossless QP (the desktop held still). `held`:
     /// its texture is not drawn over until every engine's read of it is done (dropped then).
-    Picture { handle: u64, held: InFlight, size: [u32; 2], fence: Fence, built_ns: u64, fps: u32, kbps: u32, split: Split, full_chroma: bool, refine: bool },
+    Picture { handle: u64, held: InFlight, size: [u32; 2], fence: Fence, built_ns: u64, fps: u32, kbps: u32, split: Split, full_chroma: bool, refine: bool, plan: TilePlan },
     Keyframe,
     /// The picture texture's registration `handle` is released (after the pictures queued
     /// before it were encoded).
@@ -97,7 +101,8 @@ fn ready(fence: Fence) -> Result<GpuReady, String> {
 /// One engine's stream: its encoder, the part of each picture it takes, and its worker.
 struct Stream {
     tx: Sender<Work>,
-    /// First row and rows of its band (tiles), or the whole picture.
+    /// Its tile's first column and row (tiles), or 0, 0 (whole pictures).
+    x0: u32,
     y0: u32,
 }
 
@@ -112,6 +117,9 @@ struct Work {
     built_ns: u64,
 }
 
+/// The tile messages of the pictures in flight, oldest first.
+type Gathering = std::collections::VecDeque<(u32, Vec<Option<Vec<u8>>>)>;
+
 /// A worker's answer: (stream, frame, built, encoded, key, Annex-B or the failure).
 type Done = (usize, u32, u64, u64, bool, Result<Vec<u8>, String>);
 
@@ -124,21 +132,24 @@ const REFINE_AFTER: Duration = Duration::from_millis(120);
 /// The streams for `size` with `split` on this machine's engines: each a worker thread owning
 /// its encoder. Bands are whole macroblock rows except the last, so they cover the picture's rows
 /// exactly once (pixel-exact seams).
-fn open_streams(size: [u32; 2], fps: u32, kbps: u32, split: Split, full_chroma: bool, done: &Sender<Done>) -> Result<Vec<Stream>, String> {
-    let engines = VideoStreamEncoder::engines().max(1) as usize;
-    let n = if split == Split::Off || size[1] < 64 { 1 } else { engines };
-    let tiles = split == Split::Tiles && n > 1;
-    let band = (size[1] / n as u32) / 16 * 16;
+fn open_streams(size: [u32; 2], fps: u32, kbps: u32, split: Split, full_chroma: bool, plan: TilePlan, done: &Sender<Done>) -> Result<(Vec<Stream>, bool), String> {
+    let engines = VideoStreamEncoder::engines().max(1);
+    // tiles: one stream per tile, the engines in turn; whole pictures interleaved over the
+    // engines, or one stream
+    let tiles = plan.tiles() > 1;
+    let n = if tiles { plan.tiles() } else if split == Split::Interleave && size[1] >= 64 { engines } else { 1 } as usize;
     let kbps = if kbps == 0 { 0 } else { (kbps / n as u32).max(1) };
+    let cols = TilePlan::edges(size[0], plan.cols);
+    let rows = TilePlan::edges(size[1], plan.rows);
     let mut streams = Vec::with_capacity(n);
     for i in 0..n {
-        let (y0, rows) = if tiles { (band * i as u32, if i + 1 == n { size[1] - band * i as u32 } else { band }) } else { (0, size[1]) };
+        let ((x0, w), (y0, h)) = if tiles { (cols[i % cols.len()], rows[i / cols.len()]) } else { ((0, size[0]), (0, size[1])) };
         // an interleaved stream carries every n-th picture
         let stream_fps = if tiles { fps } else { (fps / n as u32).max(1) };
-        let options = VideoStreamEncoderOptions { codec: StreamVideoCodec::H264, width: size[0], height: rows, fps: stream_fps, bitrate_kbps: kbps, keyint: 0, low_latency: true, full_chroma };
-        let tile = StreamTile { engine: i as u32, y0, source_height: size[1] };
+        let options = VideoStreamEncoderOptions { codec: StreamVideoCodec::H264, width: w, height: h, fps: stream_fps, bitrate_kbps: kbps, keyint: 0, low_latency: true, full_chroma };
+        let tile = StreamTile { engine: i as u32 % engines, x0, y0, source_height: size[1] };
         let mut encoder = VideoStreamEncoder::new_tile(options, tile).map_err(|e| format!("{e:?}"))?;
-        super::note(&format!("desk link stream {}/{n}{}: {}", i + 1, if n == 1 { "" } else if tiles { " (tiles)" } else { " (interleaved)" }, encoder.description()));
+        super::note(&format!("desk link stream {}/{n}{}: {}", i + 1, if n == 1 { String::new() } else if tiles { format!(" (tile {x0},{y0} {w}x{h} of {}x{}, engine {})", plan.cols, plan.rows, i as u32 % engines) } else { " (interleaved)".into() }, encoder.description()));
         let (tx, rx) = channel::<Work>();
         let done = done.clone();
         std::thread::Builder::new()
@@ -157,18 +168,18 @@ fn open_streams(size: [u32; 2], fps: u32, kbps: u32, split: Split, full_chroma: 
                 }
             })
             .map_err(|e| e.to_string())?;
-        streams.push(Stream { tx, y0 });
+        streams.push(Stream { tx, x0, y0 });
     }
-    Ok(streams)
+    Ok((streams, tiles))
 }
 
 fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + Sync>, stats: Arc<EncodeStats>) {
     // the streams, for (size, split); dropping them ends their workers
-    let mut streams: Option<(Vec<Stream>, [u32; 2], (Split, bool, u32), bool)> = None;
+    let mut streams: Option<(Vec<Stream>, [u32; 2], (Split, bool, u32, TilePlan), bool)> = None;
     let (done_tx, done_rx) = channel::<Done>();
     let mut in_flight = 0usize;
-    // the tiles of the picture being encoded: (frame, parts received, messages)
-    let mut gathering: Vec<Option<Vec<u8>>> = Vec::new();
+    // the tiles of the pictures being encoded (at most two): each picture's frame and parts
+    let mut gathering: Gathering = std::collections::VecDeque::new();
     let mut frame: u32 = 0;
     let mut key_wanted = true;
     // interleaved streams each need a key frame: the next this many pictures are key frames
@@ -196,7 +207,7 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
     // encoded near lossless (it stays so until a picture changes something)
     let last_change = std::cell::Cell::new(Instant::now());
     let refining: std::cell::Cell<Option<u32>> = std::cell::Cell::new(None);
-    let take = |d: Done, streams: &Option<(Vec<Stream>, [u32; 2], (Split, bool, u32), bool)>, gathering: &mut Vec<Option<Vec<u8>>>, failed: &mut bool, fail: &mut dyn FnMut(String)| {
+    let take = |d: Done, streams: &Option<(Vec<Stream>, [u32; 2], (Split, bool, u32, TilePlan), bool)>, gathering: &mut Gathering, failed: &mut bool, fail: &mut dyn FnMut(String)| {
         let (i, frame, built_ns, encoded_ns, key, out) = d;
         let Some((list, _, _, tiles)) = streams else { return };
         let parts = if *tiles { list.len() } else { 1 };
@@ -208,7 +219,7 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
                     last_change.set(Instant::now());
                     refining.set(None);
                 }
-                let msg = proto::encode_video(frame, key, built_ns, encoded_ns, 0, (i as u8, parts as u8, list[i].y0), &data);
+                let msg = proto::encode_video(frame, key, built_ns, encoded_ns, 0, (i as u8, parts as u8, list[i].x0, list[i].y0), &data);
                 stats.encode_us_max.fetch_max(encoded_ns.saturating_sub(built_ns) / 1000, Ordering::Relaxed);
                 let complete = |stats: &EncodeStats| {
                     stats.pictures.fetch_add(1, Ordering::Relaxed);
@@ -221,9 +232,12 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
                     send(msg);
                     complete(&stats);
                 } else {
-                    gathering[i] = Some(msg);
-                    if gathering.iter().all(Option::is_some) {
-                        let all: Vec<u8> = gathering.iter_mut().flat_map(|m| m.take().unwrap()).collect();
+                    // each engine encodes in order: the oldest picture completes first
+                    let Some((_, slot)) = gathering.iter_mut().find(|(f, _)| *f == frame) else { return };
+                    slot[i] = Some(msg);
+                    if gathering.front().is_some_and(|(_, parts)| parts.iter().all(Option::is_some)) {
+                        let (_, parts) = gathering.pop_front().unwrap();
+                        let all: Vec<u8> = parts.into_iter().flat_map(Option::unwrap).collect();
                         send(all);
                         complete(&stats);
                     }
@@ -258,7 +272,7 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
                 streams = None;
                 key_wanted = true;
             }
-            Job::Picture { handle, held, size, fence, built_ns, fps, kbps, split, full_chroma, refine } => {
+            Job::Picture { handle, held, size, fence, built_ns, fps, kbps, split, full_chroma, refine, plan } => {
                 let held = Arc::new(held);
                 // still (no picture, or pictures that change nothing) for REFINE_AFTER: near-lossless
                 // pictures from this one on, until one changes something
@@ -278,18 +292,17 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
                     key_wanted = true;
                     wake();
                 }
-                if streams.as_ref().is_none_or(|(_, s, sp, _)| *s != size || *sp != (split, full_chroma, fps)) {
+                if streams.as_ref().is_none_or(|(_, s, sp, _)| *s != size || *sp != (split, full_chroma, fps, plan)) {
                     while in_flight > 0 {
                         let Ok(d) = done_rx.recv() else { return };
                         in_flight -= 1;
                         take(d, &streams, &mut gathering, &mut failed, &mut fail);
                     }
                     streams = None;
-                    match open_streams(size, fps, kbps, split, full_chroma, &done_tx) {
-                        Ok(list) => {
-                            let tiles = split == Split::Tiles && list.len() > 1;
-                            gathering = vec![None; if tiles { list.len() } else { 0 }];
-                            streams = Some((list, size, (split, full_chroma, fps), tiles));
+                    match open_streams(size, fps, kbps, split, full_chroma, plan, &done_tx) {
+                        Ok((list, tiles)) => {
+                            gathering.clear();
+                            streams = Some((list, size, (split, full_chroma, fps, plan), tiles));
                             key_wanted = true;
                         }
                         Err(e) => {
@@ -314,18 +327,24 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
                 let key = keys_left > 0;
                 keys_left = keys_left.saturating_sub(1);
                 if tiles {
-                    // every engine on its band of this picture at once
+                    // at most two pictures in flight: the oldest completes before a third starts
+                    let n = list.len();
+                    while in_flight > n {
+                        let Ok(d) = done_rx.recv() else { return };
+                        in_flight -= 1;
+                        take(d, &streams, &mut gathering, &mut failed, &mut fail);
+                    }
+                    // every engine on its tiles of this picture at once
                     let mut readies = vec![ready];
-                    for _ in 1..list.len() {
+                    for _ in 1..n {
                         readies.push(clone_ready(&readies[0]));
                     }
+                    gathering.push_back((frame, vec![None; n]));
                     for (s, ready) in list.iter().zip(readies) {
                         let _ = s.tx.send(Work { handle, _held: held.clone(), ready, frame, key, refine, built_ns });
                         in_flight += 1;
                     }
-                    // a picture's tiles are complete before the next picture starts
-                    while in_flight > 0 {
-                        let Ok(d) = done_rx.recv() else { return };
+                    while let Ok(d) = done_rx.try_recv() {
                         in_flight -= 1;
                         take(d, &streams, &mut gathering, &mut failed, &mut fail);
                     }
@@ -359,3 +378,4 @@ fn clone_ready(ready: &GpuReady) -> GpuReady {
         GpuReady::SyncFile(fd) => fd.try_clone().map(GpuReady::SyncFile).unwrap_or(GpuReady::Done),
     }
 }
+

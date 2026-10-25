@@ -10,7 +10,10 @@
 //! Dev flags: `--connect host[:port]` (repeatable), `--select N`, `--stats` (latency lines on
 //! stderr once a second), `--dump-check <file.h264>` (decode an Annex-B dump with the hardware
 //! decoder, print what came out, exit), `--dump-play <file.h264>[,<tile.h264>...]` (show a dump, or the tiles of one, as a desktop, at
-//! 60 pictures a second, looping; `--cpu-decode` takes the CPU NV12 path instead of GPU pictures, `--still N` stops at picture N).
+//! 60 pictures a second, looping; `--cpu-decode` takes the CPU NV12 path instead of GPU pictures, `--still N` stops at picture N),
+//! `--decode-bench <dir>` (the tile streams of a `desk-link-probe --dump`: each on its own decoder
+//! thread as the viewer runs them, every picture's tiles at once; prints the decode time of a
+//! whole picture and the pictures a second the decoders sustain, exit).
 
 mod conn;
 mod view;
@@ -565,9 +568,107 @@ fn dump_check(path: &str) -> ! {
     std::process::exit(if decoded > 0 && decoded as i64 == pictures { 0 } else { 1 });
 }
 
+/// `--decode-bench <dir>`: `tiles.txt` (`<stream> <x0> <y0>` lines) and `stream-<i>.h264`.
+/// Lock-step: picture k's tiles decode at once (one thread each, released together), the
+/// picture's time is its slowest tile's. Free-running: each thread decodes its whole stream as
+/// fast as it can (the pictures a second the decoders sustain together).
+fn decode_bench(dir: &str) -> ! {
+    use makepad_widgets::makepad_platform::video_file::{annex_b, StreamVideoCodec, VideoStreamDecoder};
+    use std::sync::{Arc, Barrier};
+    let dir = std::path::Path::new(dir);
+    let tiles = std::fs::read_to_string(dir.join("tiles.txt")).unwrap_or_else(|e| {
+        eprintln!("desklink: {}: {e}", dir.join("tiles.txt").display());
+        std::process::exit(2)
+    });
+    // per stream: its access units (one per coded picture, parameter sets with the next)
+    let mut streams: Vec<(String, Vec<Vec<u8>>)> = Vec::new();
+    for line in tiles.lines() {
+        let mut w = line.split_whitespace();
+        let (Some(i), Some(x), Some(y)) = (w.next(), w.next(), w.next()) else { continue };
+        let path = dir.join(format!("stream-{i}.h264"));
+        let data = std::fs::read(&path).unwrap_or_else(|e| {
+            eprintln!("desklink: {}: {e}", path.display());
+            std::process::exit(2)
+        });
+        let mut units = Vec::new();
+        let mut unit = Vec::new();
+        for nal in annex_b::split_annex_b(&data) {
+            unit.extend_from_slice(&[0, 0, 0, 1]);
+            unit.extend_from_slice(nal);
+            let ty = annex_b::nal_unit_type(nal);
+            if ty == 1 || ty == 5 {
+                units.push(std::mem::take(&mut unit));
+            }
+        }
+        streams.push((format!("{i}@{x},{y}"), units));
+    }
+    let pictures = streams.iter().map(|(_, u)| u.len()).min().unwrap_or(0);
+    if pictures == 0 {
+        eprintln!("desklink: no pictures in {}", dir.display());
+        std::process::exit(2);
+    }
+    let run = |lockstep: bool| -> (Vec<Vec<f64>>, f64, Vec<(u32, u32)>, u32) {
+        let barrier = Arc::new(Barrier::new(streams.len()));
+        let started = std::time::Instant::now();
+        let handles: Vec<_> = streams.iter().map(|(_, units)| {
+            let units: Vec<Vec<u8>> = units[..pictures].to_vec();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let mut decoder = VideoStreamDecoder::new_gpu(StreamVideoCodec::H264).expect("hardware decoder");
+                let (mut times, mut size, mut errors) = (Vec::new(), (0, 0), 0u32);
+                for (k, unit) in units.iter().enumerate() {
+                    if lockstep {
+                        barrier.wait();
+                    }
+                    let t = std::time::Instant::now();
+                    match decoder.push_packet(unit, k as i64) {
+                        Ok(frames) => {
+                            for f in frames {
+                                size = (f.width, f.height);
+                            }
+                        }
+                        Err(_) => errors += 1,
+                    }
+                    times.push(t.elapsed().as_secs_f64() * 1000.0);
+                }
+                (times, size, errors)
+            })
+        }).collect();
+        let out: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let wall = started.elapsed().as_secs_f64();
+        let errors = out.iter().map(|o| o.2).sum();
+        let sizes = out.iter().map(|o| o.1).collect();
+        (out.into_iter().map(|o| o.0).collect(), wall, sizes, errors)
+    };
+    let pct = |v: &mut Vec<f64>, p: usize| {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v.get((v.len() * p / 100).min(v.len().saturating_sub(1))).copied().unwrap_or(f64::NAN)
+    };
+    // warm up the decoders' first key frame path once, then measure
+    let (times, _, sizes, errors) = run(true);
+    let mut picture: Vec<f64> = (0..pictures).map(|k| times.iter().map(|t| t[k]).fold(0.0, f64::max)).collect();
+    let (_, free_wall, _, free_errors) = run(false);
+    for ((name, _), (t, size)) in streams.iter().zip(times.iter().zip(&sizes)) {
+        let mut t = t.clone();
+        println!("decode-bench: tile {name} {}x{}: median {:.2} ms, p90 {:.2} ms", size.0, size.1, pct(&mut t, 50), pct(&mut t, 90));
+    }
+    println!(
+        "decode-bench: {pictures} pictures of {} tiles; lock-step picture decode median {:.2} ms, p90 {:.2} ms, max {:.2} ms; free-running {:.1} pictures/s; errors {errors}+{free_errors}",
+        streams.len(),
+        pct(&mut picture.clone(), 50),
+        pct(&mut picture.clone(), 90),
+        pct(&mut picture, 100),
+        pictures as f64 / free_wall
+    );
+    std::process::exit(if errors + free_errors == 0 { 0 } else { 1 });
+}
+
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         let args: Vec<String> = std::env::args().collect();
+        if let Some(i) = args.iter().position(|a| a == "--decode-bench") {
+            decode_bench(args.get(i + 1).map(String::as_str).unwrap_or(""));
+        }
         if let Some(i) = args.iter().position(|a| a == "--dump-check") {
             dump_check(args.get(i + 1).map(String::as_str).unwrap_or(""));
         }

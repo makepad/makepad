@@ -74,15 +74,15 @@ impl LinuxStreamEncoder {
         self.take(bytes, key, pts_100ns)
     }
 
-    /// The rows `y0..` (its height) of the `source_height` tall picture in `handle`.
-    pub fn push_shared_texture(&mut self, handle: u64, ready: GpuReady, pts_100ns: i64, source_height: u32, y0: u32) -> Result<Vec<EncodedPacket>, VideoFileError> {
+    /// Its size of the `source_height` tall picture in `handle`, from column `x0`, row `y0`.
+    pub fn push_shared_texture(&mut self, handle: u64, ready: GpuReady, pts_100ns: i64, source_height: u32, x0: u32, y0: u32) -> Result<Vec<EncodedPacket>, VideoFileError> {
         let sync = match ready {
             GpuReady::Done => -1,
             GpuReady::SyncFile(fd) => fd.into_raw_fd(),
         };
         let (flags, key) = self.flags();
         let refine = if std::mem::take(&mut self.refine_wanted) && !key { hal::REFINE } else { 0 };
-        let bytes = hal::hal_stream_encoder_texture(self.id, handle, source_height, y0, sync, flags | refine);
+        let bytes = hal::hal_stream_encoder_texture(self.id, handle, source_height, x0, y0, sync, flags | refine);
         self.take(bytes, key, pts_100ns)
     }
 

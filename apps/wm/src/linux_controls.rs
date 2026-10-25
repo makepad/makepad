@@ -37,10 +37,12 @@ use makepad_widgets::makepad_platform::linux_input::{
     set_pointer_speed, POINTER_SPEED_MAX, POINTER_SPEED_MIN,
 };
 use makepad_widgets::makepad_platform::linux_display::LinuxDisplaySnapshot;
-use makepad_widgets::makepad_platform::linux_display::{DisplayArrangement, DisplayPacing, LinuxDisplayCommand};
+use makepad_widgets::makepad_platform::linux_display::{
+    DisplayArrangement, DisplayPacing, LinuxDisplayCommand, VirtualPanels,
+};
 use shell::display_layout::{
     env_restore_plan, fill_slots, is_joining, restore_plan, restore_waiting, screen_key, screen_rows,
-    DisplayLayout, RestoreOp, SavedPace, ScreenEntry, ScreenKey,
+    virtual_env_pinned, DisplayLayout, RestoreOp, SavedPace, SavedVirtual, ScreenEntry, ScreenKey, VirtualSize,
 };
 use shell::display_menu::{Change, DisplayTrials, TrialOut};
 use shell::panels::{PanelKind, ShellPanel};
@@ -96,6 +98,21 @@ pub enum ControlAction {
     /// start; otherwise it is applied now and saved once the switch
     /// finishes.
     GpuChoice(Option<String>),
+    /// Desktop: the panel's own mode, rendered once (the virtual display
+    /// off). The normal display scale applies again.
+    DesktopPanel,
+    /// Desktop: the virtual display (the saved choices, else Follow viewer
+    /// with the 7680x2160@120 fallback, panels Mirror, scale 2.00x).
+    DesktopVirtual,
+    /// The virtual desktop's size: follow the Desk Link viewer, or a
+    /// preset / custom size. Applied (no modeset) and saved.
+    VirtualSize(VirtualSize),
+    /// What the panels show while the desktop is virtual: the desktop
+    /// scaled to fit (Mirror) or nothing (Off). Re-drives the panels.
+    VirtualPanels(VirtualPanels),
+    /// The virtual desktop's scale in hundredths: applied and saved as the
+    /// virtual desktop's own (the normal display scale is left alone).
+    VirtualScale(u32),
     /// Pointer speed in hundredths (100 = 1.00×). Applied on every update;
     /// `touchpad` selects the device (`false` mouse, `true` touchpad).
     PointerSpeed { touchpad: bool, value: u32 },
@@ -147,6 +164,16 @@ pub struct LinuxControls {
     layout_user_set: bool,
     /// The person chose a render-on GPU this session; a late read keeps it.
     gpu_user_set: bool,
+    /// The person chose the desktop (Panel / Virtual and its choices) this
+    /// session; a late read keeps it and the restore stops.
+    virtual_user_set: bool,
+    /// The active Desk Link viewer's window as last reported: device
+    /// pixels, refresh (mHz), scale (hundredths). Kept after the viewer
+    /// leaves, so a followed size stays until the next one reports.
+    viewer: Option<(u32, u32, u32, u32)>,
+    /// The normal display scale (the saved or last chosen one), put back
+    /// when the desktop goes from Virtual to Panel.
+    panel_scale: Option<u32>,
     /// The saved order and modes have been restored (or deliberately
     /// skipped) once.
     layout_restore_done: bool,
@@ -317,7 +344,14 @@ impl LinuxControls {
         if self.layout_restore_done {
             return send;
         }
-        let plan = env_restore_plan(restore_plan(layout, displays), order_env, modes_env);
+        let mut plan = env_restore_plan(restore_plan(layout, displays), order_env, modes_env);
+        let virtual_pinned = virtual_env_pinned(
+            std::env::var("MAKEPAD_VIRTUAL_DISPLAY").ok().as_deref(),
+            std::env::var("MAKEPAD_WM_VIRTUAL_FROM_SAVED").ok().as_deref(),
+        );
+        if virtual_pinned {
+            plan.retain(|op| !matches!(op, RestoreOp::Virtual(_)));
+        }
         let waiting = restore_waiting(layout, displays);
         let laid_out = displays.outputs.iter().any(|o| o.desktop_position.is_some());
         if self.layout_restore_generation != Some(generation) && laid_out {
@@ -363,6 +397,24 @@ impl LinuxControls {
         send
     }
 
+    /// The virtual desktop's scale: the followed viewer's while one has
+    /// reported, else the saved one.
+    fn virtual_scale(&self, saved: &SavedVirtual) -> u32 {
+        let viewer = self.viewer.map(|(_, _, _, scale)| scale).filter(|scale| *scale > 0);
+        viewer.filter(|_| saved.follow).unwrap_or(saved.scale).clamp(DISPLAY_SCALE_MIN, DISPLAY_SCALE_MAX)
+    }
+
+    /// The saved virtual desktop, as this session holds it.
+    fn virtual_saved(&self) -> Option<SavedVirtual> {
+        self.layout.as_ref().and_then(|layout| layout.virtual_display)
+    }
+
+    /// The person chose the desktop: the start-up restore is over.
+    fn virtual_set_by_person(&mut self) {
+        self.virtual_user_set = true;
+        self.layout_restore_done = true;
+    }
+
     /// The person changed order, main screen or a mode: the start-up
     /// restore is over for this session.
     fn layout_set_by_person(&mut self) {
@@ -381,7 +433,9 @@ impl LinuxControls {
         self.layout_loaded = true;
         match self.layout.as_mut() {
             None => self.layout = Some(loaded.clone()),
-            Some(layout) => layout.merge_loaded(loaded, self.layout_user_set, self.gpu_user_set),
+            Some(layout) => {
+                layout.merge_loaded(loaded, self.layout_user_set, self.gpu_user_set, self.virtual_user_set)
+            }
         }
         if self.layout_edited {
             self.layout_save = self.layout.clone();
@@ -413,6 +467,58 @@ impl App {
         cx.set_window_dpi_override(window_id, Some(hundredths as f64 / 100.0));
         self.linux_controls.reanchor_frame = cx.new_next_frame();
         true
+    }
+
+    /// Bring the renderer to the virtual desktop `saved` asks for: its
+    /// size (the followed viewer's window when one has reported), refresh
+    /// and panels. Nothing is sent when the snapshot already shows it.
+    fn send_virtual(&mut self, cx: &mut Cx, saved: &SavedVirtual) -> Result<(), String> {
+        let viewer = self.linux_controls.viewer.map(|(w, h, mhz, _)| (w, h, mhz));
+        let target = saved.target(viewer);
+        if cx.linux_display_snapshot().virtual_display == Some(target) {
+            return Ok(());
+        }
+        log!("wm: virtual display {} panels {}", target.mode_string(), target.panels.as_str());
+        cx.linux_set_virtual_display(Some(target))
+    }
+
+    /// Apply the virtual desktop's scale (the person's own choice, so a
+    /// late start-up read of the normal scale does not undo it).
+    fn apply_virtual_scale(&mut self, cx: &mut Cx, saved: &SavedVirtual) {
+        self.linux_controls.dpi_user_set = true;
+        self.linux_controls.dpi_loaded_applied = true;
+        let scale = self.linux_controls.virtual_scale(saved);
+        self.apply_dpi_scale(cx, scale);
+    }
+
+    /// Save `saved` as the virtual desktop's choices.
+    fn save_virtual(&mut self, saved: SavedVirtual) {
+        self.linux_controls.virtual_set_by_person();
+        self.linux_controls.edit_layout(None, |layout| layout.virtual_display = Some(saved));
+    }
+
+    /// The Desk Link viewer's window: device pixels, its display refresh
+    /// (mHz), its scale (hundredths). Applies only while the desktop is
+    /// Virtual with Follow viewer on, and only when it differs from what
+    /// the desktop already is; otherwise it only remembers the report.
+    /// The scale applies as the window's dpi but is not saved: the saved
+    /// virtual scale stays the fallback.
+    pub(crate) fn desk_link_viewer_window(&mut self, cx: &mut Cx, width: u32, height: u32, refresh_mhz: u32, scale: u32) {
+        let report = (width, height, refresh_mhz, scale);
+        if self.linux_controls.viewer == Some(report) {
+            return;
+        }
+        self.linux_controls.viewer = Some(report);
+        let Some(saved) = self.linux_controls.virtual_saved().filter(|saved| saved.follow) else { return };
+        if let Err(message) = self.send_virtual(cx, &saved) {
+            self.linux_controls.notice = format!("Desktop: {message}");
+            log!("wm: virtual display for the viewer's window refused: {message}");
+        }
+        if scale > 0 {
+            let scale = self.linux_controls.virtual_scale(&saved);
+            self.apply_dpi_scale(cx, scale);
+        }
+        self.redraw_all(cx);
     }
 
     /// Ask the renderer for a source. `Ok` means the request is queued,
@@ -520,6 +626,13 @@ impl App {
     pub(crate) fn linux_control(&mut self, cx: &mut Cx, action: ControlAction) {
         self.poll_linux_controls(cx);
         let action = match action {
+            // While the desktop is virtual the scale slider is the virtual
+            // desktop's: its release saves the virtual scale, not the
+            // normal one.
+            ControlAction::DpiScale(value) if self.linux_controls.virtual_saved().is_some() => {
+                self.linux_control(cx, ControlAction::VirtualScale(value));
+                return;
+            }
             ControlAction::DpiScaleLive(value) => {
                 let value = value.clamp(DISPLAY_SCALE_MIN, DISPLAY_SCALE_MAX);
                 self.linux_controls.dpi_user_set = true;
@@ -536,6 +649,7 @@ impl App {
                 self.linux_controls.dpi_user_set = true;
                 self.linux_controls.dpi_loaded_applied = true;
                 self.apply_dpi_scale(cx, value);
+                self.linux_controls.panel_scale = Some(value);
                 self.linux_controls.dpi_save = Some(value);
                 self.poll_linux_controls(cx);
                 self.redraw_all(cx);
@@ -614,6 +728,89 @@ impl App {
                 match cx.linux_set_display_pacing(&pacing) {
                     Ok(()) => log!("wm: display pacing {pacing:?} asked"),
                     Err(message) => self.linux_controls.notice = format!("Pace by: {message}"),
+                }
+                self.poll_linux_controls(cx);
+                self.redraw_all(cx);
+                return;
+            }
+            ControlAction::DesktopPanel => {
+                self.linux_controls.notice.clear();
+                if self.linux_controls.virtual_saved().is_some() {
+                    match cx.linux_set_virtual_display(None) {
+                        Ok(()) => {
+                            self.linux_controls.virtual_set_by_person();
+                            self.linux_controls.edit_layout(None, |layout| layout.virtual_display = None);
+                            if let Some(scale) = self.linux_controls.panel_scale {
+                                self.linux_controls.dpi_user_set = true;
+                                self.linux_controls.dpi_loaded_applied = true;
+                                self.apply_dpi_scale(cx, scale);
+                            }
+                        }
+                        Err(message) => self.linux_controls.notice = format!("Desktop: {message}"),
+                    }
+                }
+                self.poll_linux_controls(cx);
+                self.redraw_all(cx);
+                return;
+            }
+            ControlAction::DesktopVirtual => {
+                self.linux_controls.notice.clear();
+                if self.linux_controls.virtual_saved().is_none() {
+                    let saved = SavedVirtual::first_pick();
+                    if self.linux_controls.panel_scale.is_none() {
+                        self.linux_controls.panel_scale = self.main_window_dpi(cx).map(|dpi| (dpi * 100.0).round() as u32);
+                    }
+                    match self.send_virtual(cx, &saved) {
+                        Ok(()) => {
+                            self.save_virtual(saved);
+                            self.apply_virtual_scale(cx, &saved);
+                        }
+                        Err(message) => self.linux_controls.notice = format!("Desktop: {message}"),
+                    }
+                }
+                self.poll_linux_controls(cx);
+                self.redraw_all(cx);
+                return;
+            }
+            ControlAction::VirtualSize(size) => {
+                self.linux_controls.notice.clear();
+                if let Some(saved) = self.linux_controls.virtual_saved() {
+                    let saved = saved.with_size(size);
+                    match self.send_virtual(cx, &saved) {
+                        Ok(()) => {
+                            self.save_virtual(saved);
+                            self.apply_virtual_scale(cx, &saved);
+                        }
+                        Err(message) => self.linux_controls.notice = format!("Desktop size: {message}"),
+                    }
+                }
+                self.poll_linux_controls(cx);
+                self.redraw_all(cx);
+                return;
+            }
+            ControlAction::VirtualPanels(panels) => {
+                self.linux_controls.notice.clear();
+                if let Some(mut saved) = self.linux_controls.virtual_saved() {
+                    saved.mode.panels = panels;
+                    match self.send_virtual(cx, &saved) {
+                        Ok(()) => self.save_virtual(saved),
+                        Err(message) => self.linux_controls.notice = format!("Panels: {message}"),
+                    }
+                }
+                self.poll_linux_controls(cx);
+                self.redraw_all(cx);
+                return;
+            }
+            ControlAction::VirtualScale(value) => {
+                self.linux_controls.notice.clear();
+                if let Some(mut saved) = self.linux_controls.virtual_saved() {
+                    saved.scale = value.clamp(DISPLAY_SCALE_MIN, DISPLAY_SCALE_MAX);
+                    // The person's value stands over a followed viewer's
+                    // scale until the viewer's window next changes.
+                    self.linux_controls.dpi_user_set = true;
+                    self.linux_controls.dpi_loaded_applied = true;
+                    self.apply_dpi_scale(cx, saved.scale);
+                    self.save_virtual(saved);
                 }
                 self.poll_linux_controls(cx);
                 self.redraw_all(cx);
@@ -698,6 +895,11 @@ impl App {
                 | ControlAction::DisplayKeep
                 | ControlAction::DisplayRevert
                 | ControlAction::DisplayPacing(_)
+                | ControlAction::DesktopPanel
+                | ControlAction::DesktopVirtual
+                | ControlAction::VirtualSize(_)
+                | ControlAction::VirtualPanels(_)
+                | ControlAction::VirtualScale(_)
                 | ControlAction::RestartDesktop
                 | ControlAction::GpuChoice(_)
                 | ControlAction::InvertScroll(_)
@@ -849,21 +1051,27 @@ impl App {
         let mut initial_scale = None;
         let mut initial_pointer = [None; 2];
         if let Some(snapshot) = snapshot.as_ref().filter(|s| s.display_settings_loaded) {
-            if !state.dpi_loaded_applied {
-                if state.dpi_user_set {
-                    state.dpi_loaded_applied = true;
-                } else if let Some(value) = snapshot.dpi_scale {
-                    initial_scale = Some(value);
-                } else {
-                    state.dpi_loaded_applied = true;
-                }
+            if state.panel_scale.is_none() {
+                state.panel_scale = snapshot.dpi_scale;
             }
             if !state.layout_loaded {
                 state.adopt_loaded_layout(&snapshot.display_layout);
-                if snapshot.display_layout.screens.is_empty() {
+                if snapshot.display_layout.screens.is_empty() && snapshot.display_layout.virtual_display.is_none() {
                     // Nothing saved to arrange: the renderer's defaults stand.
                     state.layout_restore_done = true;
                     state.source_loaded_applied = true;
+                }
+            }
+        }
+        if let Some(snapshot) = snapshot.as_ref().filter(|s| s.display_settings_loaded) {
+            // The scale after the layout: a virtual desktop has its own.
+            if !state.dpi_loaded_applied {
+                if state.dpi_user_set {
+                    state.dpi_loaded_applied = true;
+                } else if let Some(value) = state.virtual_saved().map(|saved| state.virtual_scale(&saved)).or(snapshot.dpi_scale) {
+                    initial_scale = Some(value);
+                } else {
+                    state.dpi_loaded_applied = true;
                 }
             }
         }
@@ -983,6 +1191,10 @@ impl App {
                 (None, Some(snapshot)) => snapshot.display_layout.render_on.clone(),
                 (None, None) => None,
             };
+            if panel.virtual_saved != state.virtual_saved() {
+                panel.virtual_saved = state.virtual_saved();
+                changed = true;
+            }
             if panel.render_on_saved != render_on {
                 panel.render_on_saved = render_on;
                 changed = true;
@@ -1165,12 +1377,22 @@ impl App {
             self.redraw_all(cx);
             return;
         }
+        if let LinuxDisplayCommand::Virtual(_) = command {
+            if let Err(message) = result {
+                self.linux_controls.notice = format!("Desktop: {message}");
+                log!("wm: virtual display refused: {message}");
+                self.poll_linux_controls(cx);
+                self.redraw_all(cx);
+            }
+            return;
+        }
         let Err(message) = result else { return };
         let change = match command {
             LinuxDisplayCommand::Mode { name, mode } => Change::Mode { name: name.clone(), mode: mode.clone() },
             LinuxDisplayCommand::Arrangement(_)
             | LinuxDisplayCommand::Source(_)
             | LinuxDisplayCommand::Order(_)
+            | LinuxDisplayCommand::Virtual(_)
             | LinuxDisplayCommand::Pacing(_) => return,
         };
         let displays = cx.linux_display_snapshot();
@@ -1240,6 +1462,14 @@ impl App {
                     log!("wm: applying saved arrangement {arrangement:?}");
                     if let Err(message) = cx.linux_set_display_arrangement(arrangement) {
                         log!("wm: saved arrangement {arrangement:?} refused: {message}");
+                    }
+                }
+                RestoreOp::Virtual(_) => {
+                    if let Some(saved) = layout.virtual_display {
+                        log!("wm: applying saved virtual display");
+                        if let Err(message) = self.send_virtual(cx, &saved) {
+                            log!("wm: saved virtual display refused: {message}");
+                        }
                     }
                 }
                 RestoreOp::Pacing(pacing) => {

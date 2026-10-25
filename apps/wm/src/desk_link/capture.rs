@@ -123,6 +123,54 @@ pub struct DrawNv12Chroma {
     full: f32,
 }
 
+/// How a picture is cut into tiles: `cols` columns by `rows` bands (1 x 1: whole pictures).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TilePlan {
+    pub cols: u32,
+    pub rows: u32,
+}
+
+impl TilePlan {
+    pub const WHOLE: TilePlan = TilePlan { cols: 1, rows: 1 };
+    /// Macroblocks a second one stream may carry: H.264 level 5.2's, which hardware decoders
+    /// (VideoToolbox among them) take; a faster stream is cut further.
+    pub const MAX_MB_RATE: u64 = 2_073_600;
+    pub fn tiles(&self) -> u32 {
+        self.cols * self.rows
+    }
+    /// The plan for `size` pictures at `fps` with `split` on `engines` engines whose streams take
+    /// at most `max` pixels (None: not known, no limit). Tiles: the fewest tiles that are a
+    /// multiple of the engines (every engine gets the same share) and that a viewer's decoder
+    /// takes at `fps` (`MAX_MB_RATE` per stream), fewest columns first; never fewer than the size
+    /// limit needs. Interleave / Off: the size limit's tiles only.
+    pub fn new(size: [u32; 2], fps: u32, split: super::settings::Split, engines: u32, max: Option<[u32; 2]>) -> TilePlan {
+        let [mw, mh] = max.map_or([u32::MAX, u32::MAX], |[w, h]| [(w / 16 * 16).max(16), (h / 16 * 16).max(16)]);
+        let min_cols = size[0].div_ceil(mw).max(1);
+        let min_rows = size[1].div_ceil(mh).max(1);
+        let least = TilePlan { cols: min_cols, rows: min_rows };
+        if split != super::settings::Split::Tiles || engines <= 1 {
+            return least;
+        }
+        // tiles at least 64 pixels each way, each a stream the decoder takes at this rate
+        let mb_rate = |c: u32, r: u32| (size[0] / c).div_ceil(16) as u64 * (size[1] / r + 16).div_ceil(16) as u64 * fps as u64;
+        let fits = |c: u32, r: u32| c >= min_cols && r >= min_rows && size[0] / c >= 64 && size[1] / r >= 64 && mb_rate(c, r) <= Self::MAX_MB_RATE;
+        for k in 1..=4 {
+            let n = engines * k;
+            if let Some(c) = (1..=n).find(|c| n % c == 0 && fits(*c, n / c)) {
+                return TilePlan { cols: c, rows: n / c };
+            }
+        }
+        least
+    }
+    /// The (start, length) of each of `parts` cuts of `len` pixels: whole macroblocks (16) but
+    /// the last, which takes the rest.
+    pub fn edges(len: u32, parts: u32) -> Vec<(u32, u32)> {
+        let parts = parts.max(1);
+        let step = (len / parts) / 16 * 16;
+        (0..parts).map(|i| if i + 1 == parts { (step * i, len - step * i) } else { (step * i, step) }).collect()
+    }
+}
+
 /// What the WM wants captured: the streamed screen's rect in desktop pixels and the picture
 /// size (that rect's size, w % 4 == 0, h % 2 == 0).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -131,6 +179,9 @@ pub struct Want {
     pub stream: [u32; 2],
     /// 4:4:4: chroma at every pixel (the picture is w/4 x 3h).
     pub full_chroma: bool,
+    /// The encoder's tiles: each column's chroma rows are packed within the column (4:4:4: a
+    /// column's chroma row is its own two texture rows), so every tile is one texel rectangle.
+    pub plan: TilePlan,
 }
 
 /// Shared between the WM's Desk Link (writes `want`) and the `DeskCapture` widget (draws it):
@@ -158,6 +209,13 @@ pub struct CaptureState {
     /// Pacing: at most one picture per `interval` s. A desktop change drawn sooner draws C
     /// alone (no picture) and leaves the picture `owed`; the WM draws again when it is due.
     pub interval: f64,
+    /// The streamed screen's frames per picture (its refresh over the stream rate, at least
+    /// 1): a picture may follow the last one after this many frames whatever the clock says
+    /// (frame times jitter around the interval; at a stream rate equal to the refresh every
+    /// frame is a picture).
+    pub every: u32,
+    /// Frames drawn since the last picture.
+    pub since: u32,
     pub last_picture: f64,
     pub owed: bool,
     /// A viewer is behind on pictures (its socket backlog): pictures are held back, the
@@ -260,7 +318,9 @@ impl Widget for DeskCapture {
         let now = cx.seconds_since_app_start();
         // the first picture is drawn whatever is behind (nothing is encoded before it)
         let behind = !resized && st.drawn > 0 && (st.hold || st.in_flight[slot].load(Ordering::Acquire) > 0);
-        let hold = behind || !resized && st.drawn > 0 && now - st.last_picture < st.interval * 0.9;
+        st.since = st.since.saturating_add(1);
+        let too_soon = now - st.last_picture < st.interval * 0.9 && st.since < st.every.max(1);
+        let hold = behind || !resized && st.drawn > 0 && too_soon;
         if hold {
             // too soon for a picture: the desktop alone, C a child of the window pass
             frame.begin(cx, Rect { pos: dvec2(0.0, 0.0), size: root });
@@ -277,6 +337,7 @@ impl Widget for DeskCapture {
             return DrawStep::done();
         }
         st.last_picture = now;
+        st.since = 0;
         st.owed = false;
         picture.begin(cx, clear);
         frame.begin(cx, Rect { pos: dvec2(0.0, 0.0), size: root });
@@ -287,10 +348,13 @@ impl Widget for DeskCapture {
         self.draw_luma.extent = extent;
         self.draw_luma.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: dvec2((w / 4) as f64, h as f64) });
         self.draw_chroma.draw_vars.set_texture(0, frame.texture());
-        self.draw_chroma.source = source;
         self.draw_chroma.extent = extent;
         self.draw_chroma.full = if want.full_chroma { 1.0 } else { 0.0 };
-        self.draw_chroma.draw_abs(cx, Rect { pos: dvec2(0.0, h as f64), size: dvec2((w / 4) as f64, chroma_rows as f64) });
+        // one draw per tile column: its chroma rows within its own texels
+        for (x0, cw) in TilePlan::edges(w, want.plan.cols) {
+            self.draw_chroma.source = vec4(source.x + x0 as f32, source.y, cw as f32, h as f32);
+            self.draw_chroma.draw_abs(cx, Rect { pos: dvec2((x0 / 4) as f64, h as f64), size: dvec2((cw / 4) as f64, chroma_rows as f64) });
+        }
         picture.end(cx);
 
         self.draw_frame.draw_vars.set_texture(0, frame.texture());
@@ -335,5 +399,32 @@ mod tests {
                 assert!(!text.starts_with("ERRORS"), "{name} on {backend} did not compile: {text}");
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+    use super::super::settings::Split;
+    #[test]
+    fn an_8k_wide_picture_spreads_over_every_engine_in_columns_within_the_encoders_width() {
+        let max = Some([4096, 4096]);
+        assert_eq!(TilePlan::new([7680, 2160], 120, Split::Tiles, 4, max), TilePlan { cols: 2, rows: 2 });
+        assert_eq!(TilePlan::new([7680, 2160], 120, Split::Tiles, 3, max), TilePlan { cols: 2, rows: 3 }, "3 x 2560x2160 is past the decoder's rate at 120");
+        assert_eq!(TilePlan::new([7680, 2160], 60, Split::Tiles, 3, max), TilePlan { cols: 3, rows: 1 });
+        assert_eq!(TilePlan::new([7680, 2160], 120, Split::Tiles, 2, max), TilePlan { cols: 2, rows: 2 });
+        assert_eq!(TilePlan::new([7680, 2160], 120, Split::Off, 4, max), TilePlan { cols: 2, rows: 1 });
+        assert_eq!(TilePlan::new([7680, 2160], 120, Split::Interleave, 4, max), TilePlan { cols: 2, rows: 1 });
+        assert_eq!(TilePlan::new([3840, 2160], 120, Split::Tiles, 2, max), TilePlan { cols: 1, rows: 2 });
+        assert_eq!(TilePlan::new([3840, 2160], 120, Split::Tiles, 1, max), TilePlan::WHOLE);
+        assert_eq!(TilePlan::new([3840, 2160], 120, Split::Interleave, 2, max), TilePlan::WHOLE);
+        assert_eq!(TilePlan::new([1280, 100], 120, Split::Tiles, 4, max), TilePlan { cols: 4, rows: 1 });
+    }
+    #[test]
+    fn tile_edges_are_whole_macroblocks_and_cover_the_picture_once() {
+        assert_eq!(TilePlan::edges(7680, 2), vec![(0, 3840), (3840, 3840)]);
+        assert_eq!(TilePlan::edges(7680, 3), vec![(0, 2560), (2560, 2560), (5120, 2560)]);
+        assert_eq!(TilePlan::edges(2160, 2), vec![(0, 1072), (1072, 1088)]);
+        assert_eq!(TilePlan::edges(1000, 1), vec![(0, 1000)]);
     }
 }

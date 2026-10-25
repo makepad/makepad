@@ -76,6 +76,75 @@ pub struct LinuxDisplaySnapshot {
     /// connected outputs and the arrangement; `None`: every screen at its own rate
     /// (`Auto` in extended) or no screen shows the desktop.
     pub paced_by: Option<String>,
+    /// The virtual display, while it is the desktop (see `VirtualDisplay`). Its screen is
+    /// the output row named `VIRTUAL_OUTPUT`; the panels' rows have no desktop position.
+    pub virtual_display: Option<VirtualDisplay>,
+}
+
+/// The output row name of the virtual display.
+pub const VIRTUAL_OUTPUT: &str = "virtual";
+
+/// A desktop of any size and refresh that no panel defines: the renderer draws it at exactly
+/// `width` x `height` device pixels and paces it on its own clock at `refresh_mhz`, with or
+/// without a connected panel. A remote viewer (Desk Link) shows it 1:1. The panels either show
+/// it scaled to fit (aspect kept, letterboxed; a panel whose mode equals the size shows it 1:1
+/// with a plain copy) or are not driven at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VirtualDisplay {
+    pub width: u32,
+    pub height: u32,
+    /// Refresh in millihertz (120 Hz = 120000).
+    pub refresh_mhz: u32,
+    pub panels: VirtualPanels,
+}
+
+/// What the physical panels show while the virtual display is the desktop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum VirtualPanels {
+    /// The virtual desktop scaled to fit each panel (aspect kept), at the panel's own mode.
+    #[default]
+    Mirror,
+    /// No scanout: the panels are not driven.
+    Off,
+}
+
+impl VirtualPanels {
+    pub fn as_str(self) -> &'static str { match self { Self::Mirror => "mirror", Self::Off => "off" } }
+    pub fn parse(s: &str) -> Option<Self> { match s { "mirror" => Some(Self::Mirror), "off" => Some(Self::Off), _ => None } }
+}
+
+impl VirtualDisplay {
+    pub const MIN_SIZE: u32 = 64;
+    pub const MAX_SIZE: u32 = 16384;
+    pub fn refresh_hz(&self) -> f64 { self.refresh_mhz as f64 / 1000.0 }
+    /// `WxH@Hz` with the refresh in Hz (fractions allowed, `59.94`).
+    pub fn mode_string(&self) -> String {
+        if self.refresh_mhz % 1000 == 0 { format!("{}x{}@{}", self.width, self.height, self.refresh_mhz / 1000) }
+        else { format!("{}x{}@{}", self.width, self.height, self.refresh_hz()) }
+    }
+    /// Parses `WxH@Hz` (or `WxH`, 60 Hz) and the panels word.
+    pub fn parse(mode: &str, panels: &str) -> Result<Self, String> {
+        let mode = mode.trim();
+        let (size, rate) = mode.split_once('@').unwrap_or((mode, "60"));
+        let (w, h) = size.split_once('x').ok_or_else(|| format!("{mode:?} is not WxH@Hz"))?;
+        let width: u32 = w.parse().map_err(|_| format!("{mode:?}: width is not a number"))?;
+        let height: u32 = h.parse().map_err(|_| format!("{mode:?}: height is not a number"))?;
+        let hz: f64 = rate.parse().map_err(|_| format!("{mode:?}: refresh is not a number"))?;
+        let panels = VirtualPanels::parse(panels.trim()).ok_or_else(|| format!("{panels:?}: the panels show `mirror` or `off`"))?;
+        let display = Self { width, height, refresh_mhz: (hz * 1000.0).round() as u32, panels };
+        display.validate()?;
+        Ok(display)
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        let range = Self::MIN_SIZE..=Self::MAX_SIZE;
+        if !range.contains(&self.width) || !range.contains(&self.height) {
+            return Err(format!("a virtual display is {}..{} pixels wide and tall, not {}x{}", Self::MIN_SIZE, Self::MAX_SIZE, self.width, self.height));
+        }
+        if !(1000..=1_000_000).contains(&self.refresh_mhz) {
+            return Err(format!("a virtual display refreshes at 1..1000 Hz, not {}", self.refresh_hz()));
+        }
+        Ok(())
+    }
 }
 
 /// Which screen's refresh sets how often the desktop is rendered. Other screens show the
@@ -158,11 +227,15 @@ pub enum DisplayCommand {
     Mode { name: String, mode: Option<String> },
     Arrangement(DisplayArrangement),
     Pacing(DisplayPacing),
+    /// The virtual display becomes the desktop (or changes size, refresh or what the panels
+    /// show: no modeset, the desktop is laid out again); `None`: the panels' own modes again.
+    Virtual(Option<VirtualDisplay>),
 }
 
 impl DisplayCommand {
     /// Pure argument validation, shared by the client and the receiving host.
     pub fn validate(&self) -> Result<(), String> {
+        if let Self::Virtual(Some(display)) = self { display.validate()?; }
         if let Self::Mode { mode: Some(mode), .. } = self {
             let mode = mode.trim();
             if !mode.is_empty() && !mode_string_is_valid(mode) {
@@ -180,6 +253,7 @@ impl DisplayCommand {
             Self::Mode { .. } => cmd_tag::DirectDisplayMode,
             Self::Arrangement(_) => cmd_tag::DirectDisplayArrangement,
             Self::Pacing(_) => cmd_tag::DirectDisplayPacing,
+            Self::Virtual(_) => cmd_tag::DirectDisplayVirtual,
         }
     }
 }
@@ -239,6 +313,8 @@ impl LinuxDisplaySnapshot {
         for arg in args { w.str(arg); }
         w.u8(self.paced_by.is_some() as u8);
         if let Some(name) = &self.paced_by { w.str(name); }
+        w.u8(self.virtual_display.is_some() as u8);
+        if let Some(v) = &self.virtual_display { w.u32(v.width).u32(v.height).u32(v.refresh_mhz).u8(v.panels as u8); }
         w.finish()
     }
 }
@@ -278,7 +354,12 @@ impl DisplayInventory {
         let args: Vec<String> = (0..count).map(|_| r.str()).collect();
         let pacing = DisplayPacing::from_args(&args)?;
         let paced_by = if r.u8() != 0 { Some(r.str()) } else { None };
-        (r.ok && r.at_end()).then_some(Self { snapshot: LinuxDisplaySnapshot { direct, outputs, arrangement, pacing, paced_by }, screens })
+        let virtual_display = if r.u8() != 0 {
+            let (width, height, refresh_mhz) = (r.u32(), r.u32(), r.u32());
+            let panels = if r.u8() == VirtualPanels::Off as u8 { VirtualPanels::Off } else { VirtualPanels::Mirror };
+            Some(VirtualDisplay { width, height, refresh_mhz, panels })
+        } else { None };
+        (r.ok && r.at_end()).then_some(Self { snapshot: LinuxDisplaySnapshot { direct, outputs, arrangement, pacing, paced_by, virtual_display }, screens })
     }
 }
 
@@ -301,11 +382,24 @@ mod tests {
             arrangement: DisplayArrangement::Mirror { optimise_for: "card0-eDP-1".into() },
             pacing: DisplayPacing::Screen("card1-HDMI-A-2".into()),
             paced_by: Some("card1-HDMI-A-2".into()),
+            virtual_display: Some(VirtualDisplay { width: 7680, height: 2160, refresh_mhz: 120_000, panels: VirtualPanels::Off }),
         };
         let inventory = DisplayInventory::read(&snapshot.pack(2.0)).expect("reads back");
         assert_eq!(inventory.snapshot, snapshot);
         assert_eq!(inventory.screens.len(), 1, "only placed screens have desktop rects");
         assert_eq!(inventory.screens[0].bounds, [0.0, 0.0, 1280.0, 800.0]);
+    }
+    #[test]
+    fn a_virtual_display_parses_validates_and_names_its_mode() {
+        let v = VirtualDisplay::parse("7680x2160@120", "off").unwrap();
+        assert_eq!(v, VirtualDisplay { width: 7680, height: 2160, refresh_mhz: 120_000, panels: VirtualPanels::Off });
+        assert_eq!(v.mode_string(), "7680x2160@120");
+        assert_eq!(VirtualDisplay::parse("1920x1080@59.94", "mirror").unwrap().refresh_mhz, 59_940);
+        assert_eq!(VirtualDisplay::parse("1920x1080@59.94", "mirror").unwrap().mode_string(), "1920x1080@59.94");
+        assert!(VirtualDisplay::parse("10x10@60", "off").is_err());
+        assert!(VirtualDisplay::parse("1920x1080@0", "off").is_err());
+        assert!(VirtualDisplay::parse("1920x1080@60", "sometimes").is_err());
+        assert!(DisplayCommand::Virtual(Some(VirtualDisplay { width: 99999, ..v })).validate().is_err());
     }
     #[test]
     fn every_pacing_setting_round_trips_on_the_wire() {

@@ -205,11 +205,11 @@ impl CopyJob {
         self.dev.raw.reset_command_buffer(self.cb,vk::CommandBufferResetFlags::empty()).map_err(error)?;
         self.dev.raw.begin_command_buffer(self.cb,&vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).map_err(error)
     } }
-    fn submit(&mut self,signal:vk::Semaphore,image:Arc<Image>) -> Result<(),String> {
+    fn submit(&mut self,signal:Option<vk::Semaphore>,image:Arc<Image>) -> Result<(),String> {
         unsafe {
             self.dev.raw.end_command_buffer(self.cb).map_err(error)?;
             self.dev.raw.reset_fences(&[self.fence]).map_err(error)?;
-            let commands = [self.cb]; let signals = [signal];
+            let commands = [self.cb]; let signals:Vec<_> = signal.into_iter().collect();
             let submit = vk::SubmitInfo::default().command_buffers(&commands).signal_semaphores(&signals);
             let _queue = lock(&self.dev.queue_lock);
             self.dev.raw.queue_submit(self.dev.queue,&[submit],self.fence).map_err(error)?;
@@ -261,7 +261,10 @@ fn blit_full(dev:&Device,cb:vk::CommandBuffer,source:vk::Image,source_layout:vk:
             dev.raw.cmd_copy_image(cb,source,source_layout,destination,destination_layout,&[copy]);
         } else {
             let blit = vk::ImageBlit::default().src_subresource(sub).dst_subresource(sub).src_offsets(offsets(src)).dst_offsets(offsets(dst));
-            dev.raw.cmd_blit_image(cb,source,source_layout,destination,destination_layout,&[blit],vk::Filter::NEAREST);
+            // A desktop shown smaller than it is (a virtual or mirrored desktop on a smaller
+            // panel) is filtered: nearest would drop whole pixel columns (text strokes).
+            let filter = if dst[2] < src[2] || dst[3] < src[3] { vk::Filter::LINEAR } else { vk::Filter::NEAREST };
+            dev.raw.cmd_blit_image(cb,source,source_layout,destination,destination_layout,&[blit],filter);
         }
     }
     ScanoutOp { source: src, destination: dst, copied: same_format && src[2] == dst[2] && src[3] == dst[3] }
@@ -490,7 +493,7 @@ impl Output {
         transition(&self.dev,self.job.cb,destination,if shot.is_some() { vk::ImageLayout::TRANSFER_SRC_OPTIMAL } else { vk::ImageLayout::TRANSFER_DST_OPTIMAL },vk::ImageLayout::PRESENT_SRC_KHR);
         let ready = self.signals[index as usize];
         let frame_format = image.desc.format;
-        self.job.submit(ready,image)?;
+        self.job.submit(Some(ready),image)?;
         if let Some((reply,staging,scanout)) = shot { self.finish_scanout(reply,staging,scanout,frame_format); }
         self.serial += 1;
         let ids = [self.serial]; let mut present_id = vk::PresentIdKHR::default().present_ids(&ids);
@@ -657,6 +660,71 @@ fn connector_requests(connectors:&[DrmConnector],modes:&HashMap<String,String>,g
     }).collect()
 }
 
+/// The virtual display's head (see `VirtualDisplay`): no connector, no swapchain. A frame
+/// presents on the first tick of the display's own clock after the GPU finished rendering it
+/// (an empty submission's fence on the render queue), one frame in flight: the desktop is paced
+/// like a FIFO panel at the virtual refresh, and the client never runs ahead of the GPU.
+struct VirtualHead {
+    display:VirtualDisplay, job:CopyJob,
+    generation:u64, pending:Option<u64>, complete:u64, last_present:u64,
+    /// The tick the pending frame shows at (once its fence has signalled).
+    due:u64,
+    /// The clock's phase: the ticks are `phase + k * period`.
+    phase:u64,
+}
+impl VirtualHead {
+    fn new(dev:Arc<Device>,display:VirtualDisplay) -> Result<Self,String> {
+        eprintln!("[hal-direct] virtual display {}x{} {:.3} Hz, panels {}",display.width,display.height,display.refresh_hz(),display.panels.as_str());
+        Ok(Self { display,job:CopyJob::new(dev)?,generation:0,pending:None,complete:0,last_present:0,due:0,phase:crate::clock_ns() })
+    }
+    fn period(&self) -> u64 { 1_000_000_000_000 / u64::from(self.display.refresh_mhz.max(1)) }
+    /// The first tick after `t`.
+    fn tick_after(&self,t:u64) -> u64 { let p = self.period(); self.phase + (t.saturating_sub(self.phase) / p + 1) * p }
+    /// A size or panels change keeps the clock; a refresh change starts it again from now.
+    fn change(&mut self,display:VirtualDisplay) {
+        if display.refresh_mhz != self.display.refresh_mhz { self.phase = crate::clock_ns(); }
+        if display != self.display {
+            eprintln!("[hal-direct] virtual display {}x{} {:.3} Hz, panels {}",display.width,display.height,display.refresh_hz(),display.panels.as_str());
+        }
+        self.display = display;
+    }
+    fn service(&mut self,frame:Option<&Frame>) -> Result<(),String> {
+        let now = crate::clock_ns();
+        if let Some(generation) = self.pending {
+            if now < self.due { return Ok(()); }
+            // Not rendered by its tick: it shows on the first tick after the GPU is done.
+            if !self.job.done()? { self.due = self.tick_after(now); return Ok(()); }
+            self.pending = None; self.complete = generation;
+            if crate::profile::on() && self.last_present != 0 {
+                crate::profile::record(crate::profile::Metric::PresentInterval,self.due - self.last_present);
+            }
+            self.last_present = self.due;
+        }
+        let Some(frame) = frame.filter(|f| f.generation != self.generation) else { return Ok(()); };
+        self.job.begin()?;
+        self.job.submit(None,frame.image.clone())?;
+        self.due = self.tick_after(now.max(self.last_present));
+        self.generation = frame.generation; self.pending = Some(frame.generation);
+        Ok(())
+    }
+}
+
+/// What paces the desktop: the pacing output's present state, or the virtual head's.
+#[derive(Clone,Copy)]
+struct Pace { generation:u64, complete:u64, last_present:u64, refresh_mhz:u32 }
+
+/// `MAKEPAD_VIRTUAL_DISPLAY`: `WxH@Hz [mirror|off]` (default mirror), set by the session from
+/// the saved display layout; empty or absent = the panels' own modes.
+fn virtual_from_env() -> Option<VirtualDisplay> {
+    let value = std::env::var("MAKEPAD_VIRTUAL_DISPLAY").ok()?;
+    let mut words = value.split_whitespace();
+    let mode = words.next()?;
+    match VirtualDisplay::parse(mode,words.next().unwrap_or("mirror")) {
+        Ok(display) => Some(display),
+        Err(e) => { eprintln!("[hal-direct] MAKEPAD_VIRTUAL_DISPLAY={value:?}: {e}; the panels' own modes stand"); None }
+    }
+}
+
 struct Context {
     compositor:Arc<Device>, devices:HashMap<vk::PhysicalDevice,Arc<Device>>, physical:Vec<vk::PhysicalDevice>,
     cards:HashMap<PathBuf,Card>, outputs:Vec<Output>, failed:Vec<Failed>,
@@ -670,6 +738,8 @@ struct Context {
     /// with the callback that reports it (oldest first).
     presenting:VecDeque<(u64,super::Presented)>,
     sequence:u64, demand:bool, awaiting:bool, credit_due:u64,
+    /// The virtual display while it is the desktop (see `VirtualDisplay`).
+    virtual_head:Option<VirtualHead>,
 }
 impl Context {
     fn new(compositor:Arc<Device>) -> Result<Self,String> {
@@ -678,9 +748,11 @@ impl Context {
         for arg in std::env::args() { if let Some(value) = arg.strip_prefix("-mode=").or_else(|| arg.strip_prefix("--mode=")) { mode = (value != "auto").then(|| value.to_owned()); } }
         let modes = wide_desktop::parse_mode_overrides(&std::env::var("MAKEPAD_DRM_MODES").unwrap_or_default()).into_iter().collect();
         let order = wide_desktop::parse_display_order(&std::env::var("MAKEPAD_DISPLAY_ORDER").unwrap_or_default());
+        let virtual_head = virtual_from_env().map(|d| VirtualHead::new(compositor.clone(),d)).transpose()?;
         Ok(Self { devices:HashMap::from([(compositor.physical,compositor.clone())]),compositor,physical,
             cards:HashMap::new(),outputs:Vec::new(),failed:Vec::new(),working:HashMap::new(),mirror:None,pacing:Default::default(),connectors:Vec::new(),filter:DrmFilter::from_env(),
-            modes,mode,order,primary:None,size:[0,0],active:true,window:None,current:None,frames:VecDeque::new(),presenting:VecDeque::new(),sequence:0,demand:false,awaiting:false,credit_due:0 })
+            modes,mode,order,primary:None,size:[0,0],active:true,window:None,current:None,frames:VecDeque::new(),presenting:VecDeque::new(),sequence:0,demand:false,awaiting:false,credit_due:0,
+            virtual_head })
     }
     /// The HAL replaced its lost GPU device. The outputs' swapchains, surfaces, copy jobs and
     /// peers lived on the old device and are dropped; the cards keep DRM master and their
@@ -699,6 +771,12 @@ impl Context {
             for (dev,_) in &mut card.displays { if dev.physical == old { *dev = device.clone(); } }
         }
         self.devices.insert(device.physical,device.clone());
+        if let Some(head) = self.virtual_head.take() {
+            match VirtualHead::new(device.clone(),head.display) {
+                Ok(head) => self.virtual_head = Some(head),
+                Err(e) => eprintln!("[hal-direct] virtual display on the new device: {e}"),
+            }
+        }
         self.compositor = device;
         self.connectors.clear(); self.failed.clear();
         state.ready.store(0,Ordering::Release);
@@ -747,6 +825,16 @@ impl Context {
     /// retried when it is replugged (or another monitor appears on it) or its mode
     /// request changes. Returns without touching anything when nothing changed.
     fn reconcile(&mut self,connectors:Vec<DrmConnector>,state:&State) {
+        if self.panels_off() {
+            // The virtual display is the desktop and the panels show nothing: no display is
+            // held (each goes back to the console), no swapchain, no scanout.
+            let changed = !self.outputs.is_empty() || !self.cards.is_empty() || connectors != self.connectors || !self.failed.is_empty();
+            if !self.outputs.is_empty() { eprintln!("[hal-direct] the virtual display is the desktop: the panels are not driven"); }
+            self.drain_outputs(); self.cards.clear(); self.failed.clear();
+            self.connectors = connectors;
+            if changed { self.layout(); self.publish(state); }
+            return;
+        }
         let requests = connector_requests(&connectors,&self.modes,self.mode.as_deref());
         let requested = |name:&str| requests.get(name).cloned().flatten();
         let mut kept = Vec::new(); let mut retired = Vec::new();
@@ -921,6 +1009,13 @@ impl Context {
         self.mirror.as_deref().filter(|name| self.outputs.iter().any(|o| o.connector.name == *name))
     }
     fn layout(&mut self) {
+        if let Some(head) = &self.virtual_head {
+            // The virtual desktop at its own size; every panel shows it scaled to fit (a
+            // panel whose mode is the same size copies it 1:1).
+            self.size = [head.display.width,head.display.height];
+            for output in &mut self.outputs { output.placement = None; }
+            return;
+        }
         if let Some(target) = self.mirror_target().map(str::to_owned) {
             // Mirror: one desktop at the optimised screen's mode. That screen shows it
             // 1:1; every other output has no rectangle of its own, so its copy (or its
@@ -957,6 +1052,7 @@ impl Context {
     /// `paced_by` for the inventory: the pacing output, or `None` while every screen runs at
     /// its own refresh (Auto, extended).
     fn paced_by(&self) -> Option<String> {
+        if self.virtual_head.is_some() { return Some(VIRTUAL_OUTPUT.into()); }
         let main = self.primary_index();
         let mirror = self.mirror_target().is_some();
         let candidates:Vec<_> = self.outputs.iter().enumerate().filter(|(_,o)| mirror || o.placement.is_some()).map(|(i,o)| PacingCandidate {
@@ -966,7 +1062,7 @@ impl Context {
         pacing_choice(&self.pacing,mirror,&candidates).filter(|(_,pick)| *pick).map(|(i,_)| self.outputs[i].connector.name.clone())
     }
     fn publish(&self,state:&State) {
-        let main = self.primary_index();
+        let main = if self.virtual_head.is_some() { None } else { self.primary_index() };
         let mut outputs:Vec<_> = self.outputs.iter().enumerate().map(|(i,o)| LinuxDisplayOutput {
             name:o.connector.name.clone(),width:o.mode.extent.width,height:o.mode.extent.height,refresh_hz:o.mode.refresh_mhz as f64 / 1000.0,
             primary:Some(i) == main,card:card_name(&o.connector.card),desktop_position:o.placement.map(|r| (r.x,r.y)),active:o.last_present != 0,
@@ -979,16 +1075,36 @@ impl Context {
             error:o.error.clone(),requested:o.requested.clone(),
             native:self.cards.get(&o.connector.card).and_then(|c| drm_connector_modes(c.file.as_raw_fd(),o.connector.id).1),
         }).collect();
-        outputs.extend(self.failed.iter().map(|f| f.row.clone())); outputs.sort_by_key(|o| connector_rank(&o.name));
+        outputs.extend(self.failed.iter().map(|f| f.row.clone()));
+        if self.panels_off() {
+            // The connected panels, listed (with their modes) but not driven.
+            outputs.extend(self.connectors.iter().map(|c| {
+                let (modes,native) = OpenOptions::new().read(true).write(true).open(&c.card).map(|f| drm_connector_modes(f.as_raw_fd(),c.id)).unwrap_or_default();
+                LinuxDisplayOutput { name:c.name.clone(),card:card_name(&c.card),status:"not driven: the virtual display is the desktop".into(),
+                    modes,native,pci:pci(&c.card),mode_override:self.modes.get(&c.name).cloned(),..Default::default() }
+            }));
+        }
+        outputs.sort_by_key(|o| connector_rank(&o.name));
+        if let Some(head) = &self.virtual_head {
+            let d = head.display;
+            outputs.insert(0,LinuxDisplayOutput { name:VIRTUAL_OUTPUT.into(),width:d.width,height:d.height,refresh_hz:d.refresh_hz(),primary:true,
+                desktop_position:Some((0,0)),active:head.last_present != 0,
+                status:if head.last_present != 0 { "active (virtual)".into() } else { "virtual; waiting for first frame".into() },
+                modes:vec![(d.width,d.height,d.refresh_hz())],..Default::default() });
+        }
         {
             let mut snapshot = lock(&state.snapshot);
             let arrangement = self.mirror_target().map_or(crate::direct::DisplayArrangement::Extended,|name| crate::direct::DisplayArrangement::Mirror { optimise_for:name.to_owned() });
             let paced_by = self.paced_by();
-            snapshot.displays = LinuxDisplaySnapshot { direct:true,outputs,arrangement,pacing:self.pacing.clone(),paced_by }; snapshot.size = self.size;
-            if !self.outputs.is_empty() { state.acquired.store(true,Ordering::Release); }
+            let virtual_display = self.virtual_head.as_ref().map(|h| h.display);
+            snapshot.displays = LinuxDisplaySnapshot { direct:true,outputs,arrangement,pacing:self.pacing.clone(),paced_by,virtual_display }; snapshot.size = self.size;
+            if !self.outputs.is_empty() || self.virtual_head.is_some() { state.acquired.store(true,Ordering::Release); }
             // A reacquired output has no phase until its new swapchain presents.
             snapshot.timings = self.outputs.iter().filter(|o| o.last_present != 0 && o.mode.refresh_mhz != 0)
                 .map(|o| (o.connector.name.clone(), (o.last_present, 1000.0 / o.mode.refresh_mhz as f64))).collect();
+            if let Some(h) = self.virtual_head.as_ref().filter(|h| h.last_present != 0) {
+                snapshot.timings.insert(VIRTUAL_OUTPUT.into(),(h.last_present,1000.0 / h.display.refresh_mhz.max(1) as f64));
+            }
             state.changed(&mut snapshot);
         }
     }
@@ -998,12 +1114,42 @@ impl Context {
     /// of frame N instead of adding to it. Each output still holds one flip in flight (FIFO):
     /// a present waits for the previous one, so credit comes at most once per refresh.
     fn queued(&self) -> bool {
-        self.current.as_ref().is_none_or(|f| self.pacing_index().is_some_and(|i| self.outputs[i].generation >= f.generation))
+        self.current.as_ref().is_none_or(|f| self.pace().is_some_and(|p| p.generation >= f.generation))
+    }
+    /// The panels are not driven (the virtual display is the desktop, its panels `Off`).
+    fn panels_off(&self) -> bool { self.virtual_head.as_ref().is_some_and(|h| h.display.panels == VirtualPanels::Off) }
+    /// The present state that paces the desktop: the virtual head, else the pacing output.
+    fn pace(&self) -> Option<Pace> {
+        if let Some(h) = &self.virtual_head {
+            return Some(Pace { generation:h.generation,complete:h.complete,last_present:h.last_present,refresh_mhz:h.display.refresh_mhz });
+        }
+        self.pacing_index().map(|i| { let o = &self.outputs[i]; Pace { generation:o.generation,complete:o.complete,last_present:o.last_present,refresh_mhz:o.mode.refresh_mhz } })
+    }
+    /// The virtual display becomes the desktop, changes, or gives way to the panels. Only
+    /// a change of whether the panels are driven touches an output; a size or refresh change
+    /// lays the desktop out again (a fresh credit, a whole frame at the new size).
+    fn set_virtual(&mut self,display:Option<VirtualDisplay>,state:&State) -> bool {
+        let was_off = self.panels_off();
+        let was_virtual = self.virtual_head.is_some();
+        match (display,&mut self.virtual_head) {
+            (None,head) => { if head.take().is_some() { eprintln!("[hal-direct] virtual display off: the panels' own modes"); } }
+            (Some(display),Some(head)) => head.change(display),
+            (Some(display),head) => match VirtualHead::new(self.compositor.clone(),display) {
+                Ok(new) => *head = Some(new),
+                Err(e) => { eprintln!("[hal-direct] virtual display: {e}"); }
+            },
+        }
+        self.awaiting = false; self.demand |= self.window.is_some();
+        state.ready.store(0,Ordering::Release);
+        self.layout(); self.publish(state);
+        // Driving the panels again (or no longer) is a reconcile; leaving the virtual display
+        // gives each panel its own rectangle again.
+        was_off != self.panels_off() || was_virtual != self.virtual_head.is_some()
     }
     /// Report every frame whose present completed on the pacing output.
     fn notify_presented(&mut self) {
-        let Some(index) = self.pacing_index() else { return };
-        let (complete,presented_at) = (self.outputs[index].complete,self.outputs[index].last_present);
+        let Some(pace) = self.pace() else { return };
+        let (complete,presented_at) = (pace.complete,pace.last_present);
         while self.presenting.front().is_some_and(|(generation,_)| *generation <= complete) {
             let (_,presented) = self.presenting.pop_front().unwrap();
             presented(presented_at);
@@ -1030,6 +1176,7 @@ impl Context {
                 // One output's presentation failure (cable pulled, VT, driver) rebuilds that
                 // output alone; the others keep presenting the retained whole frame.
                 eprintln!("[hal-direct] {}: presentation: {e}; rebuilding this output",output.connector.name);
+                if e.contains("ERROR_DEVICE_LOST") && !output.dev.lost.swap(true,Ordering::AcqRel) { state.shared.signal(); }
                 output.rebuild = true; continue;
             }
             let progress = (output.generation,output.complete,output.acquired,output.acquire_ready);
@@ -1053,15 +1200,24 @@ impl Context {
                 }
             }
         }
+        if let Some(head) = &mut self.virtual_head {
+            let old = head.last_present;
+            head.service(self.current.as_ref())?;
+            if head.last_present != old {
+                first |= old == 0;
+                timing_changed = true;
+                let value = (head.last_present,1000.0 / head.display.refresh_mhz.max(1) as f64);
+                lock(&state.snapshot).timings.insert(VIRTUAL_OUTPUT.into(),value);
+            }
+        }
         if first { self.publish(state); }
         if timing_changed { state.timings_changed.store(true, Ordering::Release); state.shared.signal(); }
         self.notify_presented();
         if self.queued() {
             if self.demand && !self.awaiting && self.frames.is_empty() {
-                if let Some(index) = self.pacing_index() {
-                    let output = &self.outputs[index];
-                    let period = 1_000_000_000_000u64 / u64::from(output.mode.refresh_mhz.max(1));
-                    let now = crate::clock_ns(); let phase = output.last_present;
+                if let Some(pace) = self.pace() {
+                    let period = 1_000_000_000_000u64 / u64::from(pace.refresh_mhz.max(1));
+                    let now = crate::clock_ns(); let phase = pace.last_present;
                     let next = if phase == 0 { now + period } else { phase + ((now.saturating_sub(phase) / period) + 1) * period };
                     // Empty animation beats and pointer reports can request again before
                     // a rendered frame reaches this worker. Keep those requests on the
@@ -1077,7 +1233,7 @@ impl Context {
             }
         }
         Ok(self.outputs.iter().any(|o| o.busy(self.current.as_ref()))
-            || (!self.frames.is_empty() && self.pacing_index().is_some()))
+            || (!self.frames.is_empty() && self.pace().is_some()))
     }
 }
 
@@ -1130,6 +1286,7 @@ pub(super) fn run(state:Arc<State>,device:Arc<Device>) {
                 // No modeset: the next credit follows the newly resolved output.
                 Command::Pacing(pacing) => { context.pacing = pacing; context.publish(&state); }
                 Command::Device(device) => { context.replace_device(device,&state); rescan = true; }
+                Command::Virtual(display) => { rescan |= context.set_virtual(display,&state); }
             }
         }
         if stop { break; }
@@ -1151,13 +1308,23 @@ pub(super) fn run(state:Arc<State>,device:Arc<Device>) {
             Ok(busy) => busy,
             Err(e) => {
                 eprintln!("[hal-direct] presentation: {e}; retaining the whole frame for reacquisition");
+                // A lost device seen here first (no render submit to see it: the client waits
+                // for this worker's credit) is the HAL's to replace: say so and wake it.
+                if e.contains("ERROR_DEVICE_LOST") && !context.compositor.lost.swap(true,Ordering::AcqRel) {
+                    eprintln!("[hal-direct] the render GPU device is lost; asking the HAL to replace it");
+                    state.shared.signal();
+                }
                 // Recreate display resources on the next turn; retain the source image and
                 // outstanding demand. A cable/VT failure is not a lost render device.
                 rescan = true; false
             }
         };
         let mut deadline = if busy { now + Duration::from_micros(500) } else if rescan && context.active { now + Duration::from_millis(1) } else { next_scan };
-        if context.active && context.demand && !context.awaiting && context.frames.is_empty() && context.queued() && context.pacing_index().is_some() {
+        // the virtual head's pending tick (it is not `busy`: no polling between ticks)
+        if let Some(due) = context.virtual_head.as_ref().filter(|_| context.active).and_then(|h| h.pending.map(|_| h.due)) {
+            deadline = deadline.min(Instant::now() + Duration::from_nanos(due.saturating_sub(crate::clock_ns())));
+        }
+        if context.active && context.demand && !context.awaiting && context.frames.is_empty() && context.queued() && context.pace().is_some() {
             deadline = deadline.min(Instant::now() + Duration::from_nanos(context.credit_due.saturating_sub(crate::clock_ns())));
         }
         let mut fds:Vec<_> = watch.iter().map(|w| io::PollFd { fd:w.fd(),events:io::READ,revents:0 }).collect();

@@ -1,8 +1,12 @@
-//! desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--split tiles|interleave|off] [--stall MS,EVERY_MS]: a headless Desk Link viewer for
+//! desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--split tiles|interleave|off] [--stall MS,EVERY_MS] [--window WxH[@SCALE]] [--hz N] [--dump DIR] [--420]: a headless Desk Link viewer for
 //! checks. It connects with this machine's fleet credential, prints the Welcome, counts the
 //! pictures and bytes, pings once a second (RTT), and with `--input` moves the desktop's pointer
 //! between two points twice a second, timing each move until the desktop's own Cursor message
-//! reports the pointer there (input injection end to end).
+//! reports the pointer there (input injection end to end). `--window` tells the desktop a viewer
+//! window of that many device pixels (scale in hundredths, default 200) and `--hz` its display
+//! refresh (default 120 with `--window`): a desktop that follows its viewer takes that size.
+//! `--dump DIR` writes each encoder stream (from its first key frame) to DIR/stream-<i>.h264 and
+//! its tile position to DIR/tiles.txt (`<i> <x0> <y0>`), for decoding them elsewhere.
 
 use makepad_network::fleet::auth as fleet_auth;
 use makepad_desk_link::{self as proto, ClientMsg, Inbox, ServerMsg};
@@ -13,7 +17,7 @@ use std::time::{Duration, Instant};
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let Some(target) = args.get(1).filter(|a| !a.starts_with("--")) else {
-        eprintln!("usage: desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--split tiles|interleave|off] [--stall MS,EVERY_MS]");
+        eprintln!("usage: desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--split tiles|interleave|off] [--stall MS,EVERY_MS] [--window WxH[@SCALE]] [--hz N] [--dump DIR] [--420]");
         std::process::exit(2);
     };
     let secs: u64 = args.windows(2).find(|w| w[0] == "--secs").and_then(|w| w[1].parse().ok()).unwrap_or(10);
@@ -34,22 +38,48 @@ fn main() {
         let (a, b) = w[1].split_once(',')?;
         Some((a.parse().ok()?, b.parse().ok()?))
     });
+    let window: Option<(u32, u32, u16)> = args.windows(2).find(|w| w[0] == "--window").and_then(|w| {
+        let (size, scale) = w[1].split_once('@').unwrap_or((&w[1], "200"));
+        let (a, b) = size.split_once('x')?;
+        Some((a.parse().ok()?, b.parse().ok()?, scale.parse().ok()?))
+    });
+    let hz: Option<u16> = args.windows(2).find(|w| w[0] == "--hz").and_then(|w| w[1].parse().ok()).or(window.map(|_| 120));
+    let dump: Option<std::path::PathBuf> = args.windows(2).find(|w| w[0] == "--dump").map(|w| w[1].clone().into());
+    // --420: a viewer whose decoder does not take 4:4:4 (the desktop streams 4:2:0)
+    let caps = if args.iter().any(|a| a == "--420") { 0 } else { proto::caps::FULL_CHROMA };
+    let opts = Opts { window, hz, dump, caps };
     let (host, port) = match target.rsplit_once(':') {
         Some((h, p)) if p.parse::<u16>().is_ok() => (h.to_string(), p.to_string()),
         _ => (target.clone(), proto::DEFAULT_PORT.to_string()),
     };
-    if let Err(e) = run(&host, &port, secs, input, paused, flap, split, stall) {
+    if let Err(e) = run(&host, &port, secs, input, paused, flap, split, stall, opts) {
         eprintln!("probe: {e}");
         std::process::exit(1);
     }
 }
 
+struct Opts {
+    window: Option<(u32, u32, u16)>,
+    hz: Option<u16>,
+    dump: Option<std::path::PathBuf>,
+    caps: u32,
+}
+
 #[allow(clippy::too_many_arguments)]
-fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Option<u64>, split: Option<u8>, stall: Option<(u64, u64)>) -> Result<(), String> {
+fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Option<u64>, split: Option<u8>, stall: Option<(u64, u64)>, opts: Opts) -> Result<(), String> {
+    use std::io::Write;
+    // --dump: per stream its file (opened at its first key frame) and position
+    let mut dumps: Vec<Option<std::fs::File>> = Vec::new();
+    let mut positions: Vec<(u8, u32, u32)> = Vec::new();
+    if let Some(dir) = &opts.dump {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    // bytes and pictures per stream (Mbit/s per tile)
+    let mut per_stream: Vec<(u64, u64)> = Vec::new();
     let credential = fleet_auth::own_credential().ok_or("no fleet credential")?;
     let (mut stream, fp) = SocketStream::connect_capture(host, port).map_err(|e| format!("connect: {e}"))?;
     println!("probe: certificate {}", makepad_network::tls::to_hex(&fp));
-    let hello = ClientMsg::Hello { version: proto::VERSION, name: "probe".into(), authorization: credential.authorization(&fp), screen: -1, paused, caps: proto::caps::FULL_CHROMA };
+    let hello = ClientMsg::Hello { version: proto::VERSION, name: "probe".into(), authorization: credential.authorization(&fp), screen: -1, paused, caps: opts.caps };
     proto::write_all(&mut stream, &hello.encode()).map_err(|e| e.to_string())?;
     stream.set_read_timeout(Some(Duration::from_millis(1))).map_err(|e| e.to_string())?;
     stream.set_write_timeout(Some(Duration::from_millis(5))).map_err(|e| e.to_string())?;
@@ -111,6 +141,12 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
             match ServerMsg::decode(ty, &payload).map_err(|e| e.to_string())? {
                 ServerMsg::Welcome { screens, screen, stream: stream_size, input, input_note, server, .. } => {
                     welcomed = true;
+                    if let Some(hz) = opts.hz {
+                        proto::write_all(&mut stream, &ClientMsg::Refresh { hz }.encode()).map_err(|e| e.to_string())?;
+                    }
+                    if let Some((width, height, scale)) = opts.window {
+                        proto::write_all(&mut stream, &ClientMsg::Window { width, height, scale }.encode()).map_err(|e| e.to_string())?;
+                    }
                     if let Some(split) = split {
                         proto::write_all(&mut stream, &ClientMsg::SetSplit { split }.encode()).map_err(|e| e.to_string())?;
                         proto::write_all(&mut stream, &ClientMsg::RequestKeyframe.encode()).map_err(|e| e.to_string())?;
@@ -119,7 +155,26 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
                 }
                 ServerMsg::Refused { reason } => return Err(format!("refused: {reason}")),
                 ServerMsg::Bye { reason } => return Err(format!("bye: {reason}")),
-                ServerMsg::Video { key, data, stream, parts, built_ns, encoded_ns, frame, .. } => {
+                ServerMsg::Stream { screen, stream: size } => println!("probe: the stream is now screen {screen} at {size:?}"),
+                ServerMsg::Rate { fps } => println!("probe: the desktop streams {fps} pictures a second"),
+                ServerMsg::Video { key, data, stream, parts, built_ns, encoded_ns, frame, x0, y0, .. } => {
+                    let i = stream as usize;
+                    if per_stream.len() <= i {
+                        per_stream.resize(i + 1, (0, 0));
+                        dumps.resize_with(i + 1, || None);
+                    }
+                    per_stream[i].0 += data.len() as u64;
+                    per_stream[i].1 += 1;
+                    if let Some(dir) = &opts.dump {
+                        if dumps[i].is_none() && key {
+                            let path = dir.join(format!("stream-{i}.h264"));
+                            dumps[i] = Some(std::fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?);
+                            positions.push((stream, x0, y0));
+                        }
+                        if let Some(f) = dumps[i].as_mut() {
+                            f.write_all(&data).map_err(|e| e.to_string())?;
+                        }
+                    }
                     // a picture is counted with its last part (tiles) or as itself (interleaved);
                     // its encode time is its slowest part's
                     bytes += data.len() as u64;
@@ -170,6 +225,15 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
         e.get(e.len() * 9 / 10).copied().unwrap_or(f64::NAN)
     });
     println!("probe: longest gap between pictures {gap_max:.1} ms; slowest frame submit to bitstream {encode_max:.1} ms");
+    for (i, (b, n)) in per_stream.iter().enumerate() {
+        println!("probe: stream {i}: {n} parts, {:.2} Mbit/s", *b as f64 * 8.0 / secs_run / 1e6);
+    }
+    if let Some(dir) = &opts.dump {
+        positions.sort();
+        let text: String = positions.iter().map(|(i, x, y)| format!("{i} {x} {y}\n")).collect();
+        std::fs::write(dir.join("tiles.txt"), text).map_err(|e| e.to_string())?;
+        println!("probe: {} stream dump(s) in {}", positions.len(), dir.display());
+    }
     if stall.is_some() {
         println!("probe: {stalls} read stalls");
     }

@@ -34,6 +34,16 @@ pub fn script_mod(vm: &mut makepad_widgets::ScriptVm) {
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::DeskLink;
 
+/// The active viewer's picture area (device pixels), its display refresh (mHz) and scale
+/// (hundredths): what a desktop that follows its viewer (a virtual display) takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ViewerWindow {
+    pub width: u32,
+    pub height: u32,
+    pub refresh_mhz: u32,
+    pub scale: u32,
+}
+
 /// Someone viewing this desktop, for the bar's Desk Link item and its panel.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeskLinkViewer {
@@ -61,6 +71,9 @@ impl DeskLink {
         0
     }
     pub fn disconnect(&mut self, _session: u32) {}
+    pub fn take_viewer_window(&mut self) -> Option<ViewerWindow> {
+        None
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -69,7 +82,8 @@ mod native {
     use makepad_desk_link::server::{Control, Geometry, Input, Out, Server, ServerConfig, ToUi};
     use super::settings::DeskLinkSettings;
     use makepad_desk_link::{self as proto, ScreenInfo, ServerMsg};
-    use super::encode::{EncodeStats, Encoder, Fence, Job, Subscribers};
+    use super::encode::{EncodeStats, Encoder, Fence, Job, Subscribers, TilePlan};
+    use makepad_widgets::makepad_platform::video_file::VideoStreamEncoder;
     use makepad_widgets::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -97,6 +111,10 @@ mod native {
         /// From its last `Stats`: pictures it was behind the last one sent, its decode and
         /// present time (µs).
         shown: Option<(u32, u32, u32)>,
+        /// Its picture area: device pixels and scale (hundredths), from its `Window`.
+        window: Option<(u32, u32, u16)>,
+        /// When it last became the active viewer (it sent input, or it opened).
+        active_at: std::time::Instant,
     }
 
 
@@ -138,6 +156,8 @@ mod native {
         tl_captured: u64,
         tl_congested_at: Option<f64>,
         tl_congested_s: f64,
+        /// The active viewer's window as last handed out (`take_viewer_window`).
+        viewer_window: Option<super::ViewerWindow>,
     }
 
     impl DeskLink {
@@ -157,6 +177,20 @@ mod native {
 
         /// Ends a viewer's session from this desktop (the bar's panel): it is told why and
         /// closed; it leaves the list when the server reports it gone.
+        /// The active viewer's window when it changed since the last call: the watching viewer
+        /// that sent input last (else the last to come) and has said its window size.
+        pub fn take_viewer_window(&mut self) -> Option<super::ViewerWindow> {
+            let v = self.viewers.iter().filter(|v| !v.paused.load(Ordering::Acquire) && v.window.is_some()).max_by_key(|v| v.active_at)?;
+            let (width, height, scale) = v.window?;
+            let refresh_mhz = if v.refresh_hz == 0 { 0 } else { v.refresh_hz as u32 * 1000 };
+            let window = super::ViewerWindow { width, height, refresh_mhz, scale: scale as u32 };
+            if self.viewer_window == Some(window) {
+                return None;
+            }
+            self.viewer_window = Some(window);
+            Some(window)
+        }
+
         pub fn disconnect(&mut self, session: u32) {
             if let Some(v) = self.viewers.iter().find(|v| v.session == session) {
                 super::note(&format!("desk link: disconnecting {} ({}) at the desktop", v.name, v.peer));
@@ -261,7 +295,7 @@ mod native {
             });
             if spawned.is_ok() {
                 self.dump_gone = Some(gone);
-                self.viewers.push(Viewer { session: 0, name: "dump".into(), peer: String::new(), full_chroma: true, refresh_hz: 0, since: std::time::Instant::now(), out: tx, backlog, paused: Arc::new(AtomicBool::new(false)), shown: None });
+                self.viewers.push(Viewer { session: 0, name: "dump".into(), peer: String::new(), full_chroma: true, refresh_hz: 0, since: std::time::Instant::now(), out: tx, backlog, paused: Arc::new(AtomicBool::new(false)), shown: None, window: None, active_at: std::time::Instant::now() });
                 self.sync_subscribers();
             }
         }
@@ -310,6 +344,17 @@ mod native {
                 fps = fps.min(v.refresh_hz as u32);
             }
             fps.max(1)
+        }
+
+        /// The streamed screen's refresh (Hz), when the displays say it.
+        fn screen_refresh(&self, cx: &mut Cx) -> Option<f64> {
+            let (screens, _) = self.screens(cx);
+            #[cfg(target_os = "linux")]
+            if let Some(s) = screens.get(self.screen) {
+                return cx.linux_display_snapshot().outputs.iter().find(|o| o.name == s.name && o.refresh_hz >= 1.0).map(|o| o.refresh_hz);
+            }
+            let _ = screens;
+            None
         }
 
         fn stream_size_of(s: &ScreenInfo) -> [u32; 2] {
@@ -387,10 +432,22 @@ mod native {
                 cx.global::<CaptureState>().interval = 1.0 / fps as f64;
                 self.send_all(&ServerMsg::Rate { fps: fps as u16 });
             }
+            let refresh = self.screen_refresh(cx).unwrap_or(fps as f64);
+            cx.global::<CaptureState>().every = ((refresh / fps as f64).round() as u32).max(1);
             let (screens, _) = self.screens(cx);
             let screen = screens.get(self.screen).or(screens.first()).cloned();
             let want = match (self.watching(), screen.filter(|s| s.width >= 16 && s.height >= 16)) {
-                (true, Some(s)) => Some(Want { screen_px: [s.x, s.y, s.width, s.height], stream: Self::stream_size_of(&s), full_chroma: self.full_chroma() }),
+                (true, Some(s)) => {
+                    let (stream, full_chroma) = (Self::stream_size_of(&s), self.full_chroma());
+                    let split = self.settings.as_ref().map_or(super::settings::Split::Tiles, |s| s.split);
+                    let auto = TilePlan::new(stream, fps, split, VideoStreamEncoder::engines(), VideoStreamEncoder::max_size(full_chroma));
+                    // a `tiles = CxR` setting, never fewer than the encoder's size needs
+                    let plan = match self.settings.as_ref().and_then(|s| s.tiles).filter(|_| split == super::settings::Split::Tiles) {
+                        Some((c, r)) => TilePlan { cols: c.max(TilePlan::new(stream, fps, super::settings::Split::Off, 1, VideoStreamEncoder::max_size(full_chroma)).cols), rows: r },
+                        None => auto,
+                    };
+                    Some(Want { screen_px: [s.x, s.y, s.width, s.height], stream, full_chroma, plan })
+                }
                 _ => None,
             };
             if let (Some(server), Some(s)) = (&self.server, screens.get(self.screen)) {
@@ -401,9 +458,18 @@ mod native {
             if st.want == want {
                 return;
             }
+            // the same screen at another size (a desktop that follows its viewer): the viewers
+            // map their input and place the picture by it
+            if let (Some(old), Some(new)) = (st.want, want) {
+                if old.stream != new.stream {
+                    let screen = self.screen as u32;
+                    self.send_all(&ServerMsg::Stream { screen, stream: new.stream });
+                }
+            }
+            let st = cx.global::<CaptureState>();
             super::note(&format!("desk link capture: {want:?}"));
             // another size or chroma: another picture texture (the registered one goes)
-            let changed_size = st.want.map(|w| (w.stream, w.full_chroma)) != want.map(|w| (w.stream, w.full_chroma));
+            let changed_size = st.want.map(|w| (w.stream, w.full_chroma, w.plan)) != want.map(|w| (w.stream, w.full_chroma, w.plan));
             st.want = want;
             if want.is_none() && !self.watching() || changed_size {
                 // nobody watches (or another size): the picture texture and its memory go
@@ -498,7 +564,7 @@ mod native {
             }
             let settings = self.settings.clone().unwrap_or_default();
             if let Some(e) = &self.encoder {
-                e.send(Job::Picture { handle, held, size: want.stream, fence, built_ns: makepad_hal::clock_ns(), fps: self.fps, kbps: settings.kbps, split: settings.split, full_chroma: want.full_chroma, refine: false });
+                e.send(Job::Picture { handle, held, size: want.stream, fence, built_ns: makepad_hal::clock_ns(), fps: self.fps, kbps: settings.kbps, split: settings.split, full_chroma: want.full_chroma, refine: false, plan: want.plan });
                 self.tl_captured += 1;
             }
             // still for REFINE_AFTER s: the same picture again, near lossless
@@ -517,7 +583,7 @@ mod native {
             let settings = self.settings.clone().unwrap_or_default();
             if let Some(e) = &self.encoder {
                 // the picture's frame finished long ago: nothing to wait for
-                e.send(Job::Picture { handle, held, size: want.stream, fence: Fence::None, built_ns: makepad_hal::clock_ns(), fps: self.fps, kbps: settings.kbps, split: settings.split, full_chroma: want.full_chroma, refine: true });
+                e.send(Job::Picture { handle, held, size: want.stream, fence: Fence::None, built_ns: makepad_hal::clock_ns(), fps: self.fps, kbps: settings.kbps, split: settings.split, full_chroma: want.full_chroma, refine: true, plan: want.plan });
             }
         }
 
@@ -579,7 +645,7 @@ mod native {
                         let _ = out.send(Out::Msg(ServerMsg::Rate { fps: self.fps as u16 }.encode()));
                         // the address without its port
                         let ip = peer.rsplit_once(':').map_or(peer.as_str(), |(ip, _)| ip).trim_matches(|c| c == '[' || c == ']').to_string();
-                        self.viewers.push(Viewer { session, name, peer: ip, full_chroma: caps & proto::caps::FULL_CHROMA != 0, refresh_hz: 0, since: std::time::Instant::now(), out, backlog, paused: Arc::new(AtomicBool::new(paused)), shown: None });
+                        self.viewers.push(Viewer { session, name, peer: ip, full_chroma: caps & proto::caps::FULL_CHROMA != 0, refresh_hz: 0, since: std::time::Instant::now(), out, backlog, paused: Arc::new(AtomicBool::new(paused)), shown: None, window: None, active_at: std::time::Instant::now() });
                         self.generation = self.generation.wrapping_add(1);
                         self.sync_subscribers();
                         self.cursor = None;
@@ -623,6 +689,13 @@ mod native {
                             Control::Refresh(hz) => {
                                 super::note(&format!("desk link: {} shows {hz} Hz", self.viewers[i].name));
                                 self.viewers[i].refresh_hz = hz;
+                            }
+                            Control::Window { width, height, scale } => {
+                                super::note(&format!("desk link: {} window {width}x{height} at {:.2}x", self.viewers[i].name, scale as f64 / 100.0));
+                                self.viewers[i].window = Some((width, height, scale));
+                            }
+                            Control::Active => {
+                                self.viewers[i].active_at = std::time::Instant::now();
                             }
                             Control::Clipboard(text) => cx.copy_to_clipboard(&text),
                             Control::Stats { frame, decode_us, present_us } => {
