@@ -796,6 +796,8 @@ pub struct App {
     style_clock: TweenClock,
     #[rust] title_press: Option<(ClientId, f64, Vec2d)>,
     #[rust] stylesheet: Option<desktop_style::StyleSheet>,
+    /// The stock caption the sheet resolves, as sent (`caption_json`): (sheet name, json).
+    #[rust] caption: Option<(String, String)>,
     #[rust] phone_frame: NextFrame,
     #[rust] phone_time: f64,
     /// The storage read of the home page's order, answered in `Event::Storage`.
@@ -3157,7 +3159,7 @@ impl App {
                             );
                         }
                     }
-                    self.send_desktop_style(client);
+                    self.send_desktop_style(cx, client);
                     // The pane just connected (or reconnected): it learns
                     // every current registration, the WM's own first.
                     if self.ai_bus.is_pane(client) {
@@ -3372,7 +3374,7 @@ impl App {
                             d.with_run_view(cx, client, |cx, v| v.app_ready(cx, client, window_id))
                         });
                     }
-                    self.send_desktop_style(client);
+                    self.send_desktop_style(cx, client);
                     // A home tile's client hears which face to show before
                     // its first frame (mobile_app.rs).
                     self.replay_tile_face(cx, client);

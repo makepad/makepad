@@ -86,6 +86,17 @@ impl App {
         }
         self.module_host.apply_style(cx, &sheet);
         self.stylesheet = Some(sheet);
+        // Its caption to running process clients, when there are any (else on first need).
+        let ready: Vec<ClientId> = self.state_mut().clients.iter().filter(|(_, s)| s.ready && s.sender.is_some()).map(|(id, _)| *id).collect();
+        if !ready.is_empty() {
+            if let Some(caption) = self.caption_json(cx) {
+                for client in ready {
+                    if let Some(sender) = self.state_mut().clients.get(&client).and_then(|s| s.sender.as_ref()) {
+                        send_to_app(sender, vec![StudioToApp::Custom(caption.clone())]);
+                    }
+                }
+            }
+        }
         // New child processes pick the style before their widget definitions load.
         host::set_child_env("MAKEPAD_WIDGET_STYLE", std::ffi::OsStr::new(&sheet_name));
         host::set_child_env("MAKEPAD_WIDGET_STYLE_FAMILY", std::ffi::OsStr::new(style.id()));
@@ -145,7 +156,28 @@ impl App {
             self.module_host.len()
         );
     }
-    pub(super) fn send_desktop_style(&mut self, client: ClientId) {
+    /// The stock caption the WM's sheet resolves (`HostedCaption`), for what draws a caption
+    /// without widgets (`makepad run`'s load screen): resolved once per sheet, on first need.
+    pub(super) fn caption_json(&mut self, cx: &mut Cx) -> Option<String> {
+        let sheet = self.stylesheet.as_ref()?;
+        if self.caption.as_ref().is_some_and(|(name, _)| *name == sheet.name) {
+            return self.caption.as_ref().map(|(_, json)| json.clone());
+        }
+        let name = sheet.name.clone();
+        let look = desktop_style::caption_look_of(cx, &sheet.clone());
+        let json = makepad_studio_protocol::HostedCaption {
+            bar: look.bar,
+            bar_unfocused: look.bar_unfocused,
+            ink: look.ink,
+            ink_unfocused: look.ink_unfocused,
+            size: look.size as f32,
+            button: look.button,
+        }
+        .to_json();
+        self.caption = Some((name, json.clone()));
+        Some(json)
+    }
+    pub(super) fn send_desktop_style(&mut self, cx: &mut Cx, client: ClientId) {
         let Some(json) = self.stylesheet.as_ref().map(|s| s.to_json()) else {
             return;
         };
@@ -166,6 +198,13 @@ impl App {
             let mut msgs = vec![StudioToApp::Custom(json)];
             msgs.extend(appearance.map(StudioToApp::Custom));
             send_to_app(sender, msgs);
+        } else {
+            return;
+        }
+        if let Some(caption) = self.caption_json(cx) {
+            if let Some(sender) = self.state_mut().clients.get(&client).and_then(|s| s.sender.as_ref()) {
+                send_to_app(sender, vec![StudioToApp::Custom(caption)]);
+            }
         }
     }
     pub(super) fn refresh_warm_browser_appearance(&mut self, cx: &mut Cx, dark: bool) {

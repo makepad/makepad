@@ -19,7 +19,7 @@ use crate::{session, wm_socket, Id};
 use makepad_micro_serde::SerBin;
 use makepad_studio_protocol::{
     AppToStudio, AppToStudioVec, ChildRelay, HostRelay, MouseCursor, PinchPhase, PresentableDraw, PresentableImageId, RemoteKeyModifiers, ScrollPhase,
-    drag_answer, drag_double, window_op, HostedAppearance, HostedDragAnswer, HostedDragQuery, HostedVisible, HostedWindowOp, SharedSwapchain, StudioToApp, StudioToAppVec, WIRE,
+    drag_answer, drag_double, window_op, HostedAppearance, HostedCaption, HostedDragAnswer, HostedDragQuery, HostedVisible, HostedWindowOp, SharedSwapchain, StudioToApp, StudioToAppVec, WIRE,
 };
 use std::collections::{HashMap, VecDeque};
 use std::ffi::CStr;
@@ -549,6 +549,13 @@ impl App {
                     if name == "makepad_style" && crate::window_controls::set_host_sheet(&json) {
                         self.state.shared.push((session::HOST, Id::NONE), |q, _| q.wake());
                     }
+                    // The sheet's caption colours, as the app's caption will draw them.
+                    if let Some(c) = (name == "makepad_caption").then(|| HostedCaption::parse(&json)).flatten() {
+                        let caption = crate::window_controls::HostCaption { bar: c.bar, bar_unfocused: c.bar_unfocused, ink: c.ink, ink_unfocused: c.ink_unfocused, size: c.size, button: c.button };
+                        if crate::window_controls::set_host_caption(caption) {
+                            self.state.shared.push((session::HOST, Id::NONE), |q, _| q.wake());
+                        }
+                    }
                     match self.wm_state.iter_mut().find(|(n, _)| n == name) {
                         Some(entry) => entry.1 = json.clone(),
                         None => self.wm_state.push((name.to_string(), json.clone())),
@@ -614,10 +621,10 @@ impl App {
 }
 
 /// The WM messages that are state, not events (the latest one holds): its style sheet
-/// (`makepad_style`), dark/light (`makepad_appearance`) and a window's fullscreen
+/// (`makepad_style`) and its resolved caption (`makepad_caption`), dark/light (`makepad_appearance`) and a window's fullscreen
 /// (`makepad_fullscreen`). Their name is the message's one top-level JSON key.
 fn wm_state_name(json: &str) -> Option<&str> {
-    const STATE: [&str; 3] = ["makepad_style", "makepad_appearance", "makepad_fullscreen"];
+    const STATE: [&str; 4] = ["makepad_style", "makepad_caption", "makepad_appearance", "makepad_fullscreen"];
     let name = json.trim_start().strip_prefix('{')?.trim_start().strip_prefix('"')?;
     let name = &name[..name.find('"')?];
     STATE.contains(&name).then_some(name)

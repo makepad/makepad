@@ -140,10 +140,12 @@ impl Renderer {
             state.domain.clone()
         };
         if caption.height > 0.0 {
-            let app = Line { size: 10.0, height: 13.0, color: crate::caption::TITLE, ..app_style };
-            let what = Line { size: 10.0, height: 13.0, ..status_style };
-            let dot = Line { color: crate::caption::TITLE, ..what };
-            let parts = [(state.app.clone(), app), ("·".to_string(), dot), (status.clone(), what)];
+            let height = (caption.size * 1.3).round();
+            let app = Line { size: caption.size, height, color: caption.ink, ..app_style };
+            let what = Line { size: caption.size, height, ..status_style };
+            let dot = Line { color: caption.ink, ..what };
+            let name = caption.title.clone().unwrap_or_else(|| state.app.clone());
+            let parts = [(name, app), ("·".to_string(), dot), (status.clone(), what)];
             layout.fixed_text.extend(crate::caption::title(&mut self.text, caption, size[0], &parts));
             for (action, rect) in &caption.buttons {
                 layout.cards.push(Card {

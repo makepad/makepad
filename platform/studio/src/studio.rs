@@ -670,6 +670,25 @@ impl HostedAppearance {
     }
 }
 
+/// The stock caption of a window under the WM's style sheet, host to app: what widgets
+/// resolves for it (`desktop_style::caption_look`), for what draws a caption without widgets
+/// (`makepad run`'s load screen, through the WM-hosted HAL shell: `makepad_hal::host_caption`),
+/// so its caption is the app's. Colours 0xRRGGBBAA: the bar (the window's ground where the bar
+/// is clear) and the title, each with focus and without; `size`: the title's font size (points);
+/// `button`: the window buttons' glyph colour.
+/// Sent with the style sheet (on connect and on every change), as `StudioToApp::Custom`.
+#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
+pub struct HostedCaption { pub bar: u32, pub bar_unfocused: u32, pub ink: u32, pub ink_unfocused: u32, pub size: f32, pub button: u32 }
+#[derive(SerJson, DeJson)]
+struct CaptionEnvelope { makepad_caption: HostedCaption }
+impl HostedCaption {
+    pub fn to_json(&self) -> String { CaptionEnvelope { makepad_caption: self.clone() }.serialize_json() }
+    pub fn parse(json: &str) -> Option<Self> {
+        if !json.contains("\"makepad_caption\"") { return None; }
+        CaptionEnvelope::deserialize_json(json).ok().map(|e| e.makepad_caption)
+    }
+}
+
 // Own chrome (the contract is described in the platform's `ime.rs`): the WM asks a makepad
 // window's drag query on a press and the app answers; the app's window buttons ask the WM for
 // the window op. Both travel as `Custom` JSON. They live here, not in the platform, because the

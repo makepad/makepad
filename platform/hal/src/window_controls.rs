@@ -5,6 +5,7 @@
 //! it for an app's caption, and `makepad run`'s load screen (relax-boot, which draws with fonts and
 //! shaders only) reads [`host_window_controls`] for its caption, so the two look the same.
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Mutex;
 
 /// The window controls of a desktop family.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,6 +96,37 @@ pub fn set_host_sheet(json: &str) -> bool {
     let Some(family) = sheet_family(json) else { return false };
     let v = WindowControls::of_family(family) as u8;
     HOST_CONTROLS.swap(v, Ordering::AcqRel) != v
+}
+
+/// The stock caption a window draws under the WM's style sheet, as widgets resolves it
+/// (`desktop_style::caption_look`, sent by the WM as `HostedCaption`): bar and title colours
+/// (0xRRGGBBAA) with focus and without, the title's font size, the buttons' glyph colour.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HostCaption {
+    pub bar: u32,
+    pub bar_unfocused: u32,
+    pub ink: u32,
+    pub ink_unfocused: u32,
+    /// points (widgets' font size)
+    pub size: f32,
+    /// the window buttons' glyph colour
+    pub button: u32,
+}
+
+static HOST_CAPTION: Mutex<Option<HostCaption>> = Mutex::new(None);
+
+/// The caption of the WM's style sheet (the WM-hosted shell sets it from the WM's message):
+/// `None` before one came, or without a WM.
+pub fn host_caption() -> Option<HostCaption> {
+    *HOST_CAPTION.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The WM sent its sheet's caption. Returns whether it changed.
+pub fn set_host_caption(caption: HostCaption) -> bool {
+    let mut at = HOST_CAPTION.lock().unwrap_or_else(|e| e.into_inner());
+    let changed = *at != Some(caption);
+    *at = Some(caption);
+    changed
 }
 
 fn env_family() -> Option<String> {

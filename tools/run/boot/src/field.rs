@@ -556,13 +556,14 @@ impl Field {
         if caption.height > 0.0 {
             let style = Line {
                 role: crate::document::Role::App,
-                size: 10.0,
-                height: 13.0,
+                size: caption.size,
+                height: (caption.size * 1.3).round(),
                 gap: 0.0,
-                color: crate::caption::TITLE,
+                color: caption.ink,
                 align: 0.0,
             };
-            fixed.extend(crate::caption::title(text, caption, w, &[(state.app.clone(), style)]));
+            let name = caption.title.clone().unwrap_or_else(|| state.app.clone());
+            fixed.extend(crate::caption::title(text, caption, w, &[(name, style)]));
         } else if !tiny {
             let name = state.app.to_uppercase();
             fixed.push(line(text, &name, 10.0, margin, 30.0, 0.0, dim));

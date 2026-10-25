@@ -247,6 +247,10 @@ pub struct Boot {
     chrome: caption::Chrome,
     /// the window has focus (the caption's traffic lights grey without it)
     focused: bool,
+    /// under a makepad WM: its sheet's caption, as the app's caption draws it
+    caption_look: Option<makepad_hal::HostCaption>,
+    /// the title the app gave its window (the lent window's), once it did
+    app_title: Option<String>,
 }
 
 impl Boot {
@@ -291,6 +295,8 @@ impl Boot {
                 ..Default::default()
             },
             focused: true,
+            caption_look: None,
+            app_title: None,
         };
         if let Some(chrome) = boot.dump.as_ref().and_then(|d| d.chrome) {
             boot.chrome = chrome;
@@ -523,7 +529,22 @@ impl Boot {
 
     /// The caption strip the window has now.
     fn caption(&self) -> caption::Caption {
-        self.chrome.caption(self.geometry[2], self.environment.touch)
+        let mut caption = self.chrome.caption(self.geometry[2], self.environment.touch);
+        caption.title = self.app_title.clone();
+        caption.ink = caption::TITLE;
+        caption.size = 10.0;
+        // under a makepad WM: the app's own caption, from the WM's sheet
+        if let (Some(_), Some(look)) = (self.chrome.hosted, self.caption_look) {
+            let (bar, ink) = if self.focused { (look.bar, look.ink) } else { (look.bar_unfocused, look.ink_unfocused) };
+            caption.ground = Some(rgba(bar));
+            caption.ink = rgba(ink);
+            caption.button_ink = rgba(look.button);
+            // widgets' points as the document's pixels (96 / 72)
+            if look.size > 0.0 {
+                caption.size = look.size * 96.0 / 72.0;
+            }
+        }
+        caption
     }
 
     pub fn reload(&mut self, document: Document) {
@@ -682,11 +703,23 @@ impl Boot {
         }
         if self.chrome.hosted.is_some() && !self.dump.as_ref().is_some_and(|d| d.chrome.is_some()) {
             let controls = Some(makepad_hal::host_window_controls().unwrap_or(makepad_hal::WindowControls::None));
-            if self.chrome.hosted != controls {
+            let look = makepad_hal::host_caption();
+            if self.chrome.hosted != controls || self.caption_look != look {
                 self.chrome.hosted = controls;
+                self.caption_look = look;
                 if let Some(renderer) = &mut self.renderer {
                     renderer.dirty = true;
                 }
+            }
+        }
+        // the app's title for the caption, as soon as the app names its window
+        let title = self.window.and_then(|window| {
+            Hal::global().with_world(|w| w.session(HOST).and_then(|s| s.windows.get(HOST, window).ok()).and_then(|w| w.val.app_title.clone()))
+        }).filter(|t| !t.is_empty());
+        if title != self.app_title {
+            self.app_title = title;
+            if let Some(renderer) = &mut self.renderer {
+                renderer.dirty = true;
             }
         }
         let hal = Hal::global();
@@ -759,8 +792,9 @@ impl Boot {
                         let focused = *focused;
                         if self.focused != focused {
                             self.focused = focused;
+                            // the caption's title ink and ground follow focus
                             if let Some(renderer) = &mut self.renderer {
-                                renderer.redraw = true;
+                                renderer.dirty = true;
                             }
                         }
                     }
@@ -952,6 +986,7 @@ impl Boot {
         if self.offscreen && !self.field_mode() {
             return;
         }
+        let halted_caption = self.caption();
         let Some(renderer) = &mut self.renderer else {
             return;
         };
@@ -973,7 +1008,7 @@ impl Boot {
         if !renderer.redraw && !renderer.dirty {
             return;
         }
-        let caption = self.chrome.caption(self.geometry[2], self.environment.touch);
+        let caption = halted_caption;
         let focus = self.focused as u8 as f32;
         if renderer.dirty {
             renderer.layout(
@@ -1020,6 +1055,17 @@ impl Boot {
                 &mut data[ICON],
             );
         }
+        if let Some(ground) = caption.ground.filter(|_| caption.height > 0.0) {
+            program.pipes[ERROR_BAND].instances.write(
+                &[
+                    (id!(rect), &[0.0, 0.0, self.geometry[2], caption.height]),
+                    (id!(clip_rect), &frame),
+                    (id!(accent), &[CAPTION_GROUND]),
+                    (id!(tint), &ground),
+                ],
+                &mut data[ERROR_BAND],
+            );
+        }
         for card in renderer.layout.visible_cards(scroll) {
             let mut rect = card.rect;
             let bounds = if card.fixed { frame } else { clip };
@@ -1036,6 +1082,8 @@ impl Boot {
                     (id!(accent), &[card.accent]),
                     (id!(action), &[button_glyph(card.action, caption.lights)]),
                     (id!(block), &[if card.accent == CAPTION_BUTTON { focus } else { 0.0 }]),
+                    (id!(beat), &[(card.accent == CAPTION_BUTTON && caption.ground.is_some()) as u8 as f32]),
+                    (id!(tint), &caption.button_ink),
                     (
                         id!(pressed),
                         &[(renderer.pressed == Some(card.action)) as u8 as f32],
@@ -1588,6 +1636,12 @@ impl Boot {
         common(&program.pipes[GLYPH], &mut glyph_uniforms);
         // the caption's window buttons (the field's only cards)
         let mut buttons = Vec::new();
+        if let Some(ground) = caption.ground.filter(|_| caption.height > 0.0) {
+            program.pipes[ERROR_BAND].instances.write(
+                &[(id!(rect), &[0.0, 0.0, viewport[0], caption.height]), (id!(accent), &[CAPTION_GROUND]), (id!(tint), &ground)],
+                &mut buttons,
+            );
+        }
         for card in renderer.layout.cards.iter().filter(|c| c.accent == CAPTION_BUTTON) {
             program.pipes[ERROR_BAND].instances.write(
                 &[
@@ -1596,6 +1650,8 @@ impl Boot {
                     (id!(accent), &[card.accent]),
                     (id!(action), &[button_glyph(card.action, caption.lights)]),
                     (id!(block), &[focus]),
+                    (id!(beat), &[caption.ground.is_some() as u8 as f32]),
+                    (id!(tint), &caption.button_ink),
                     (id!(pressed), &[(renderer.pressed == Some(card.action)) as u8 as f32]),
                 ],
                 &mut buttons,
@@ -1809,6 +1865,13 @@ impl Layout {
 
 /// `Card::accent` of a window button of the caption.
 const CAPTION_BUTTON: f32 = 4.0;
+/// `error_band.accent` of the caption's ground (the app's caption bar colour).
+const CAPTION_GROUND: f32 = 7.0;
+
+/// 0xRRGGBBAA as the document's colours.
+fn rgba(c: u32) -> [f32; 4] {
+    [(c >> 24) as f32 / 255.0, ((c >> 16) & 0xff) as f32 / 255.0, ((c >> 8) & 0xff) as f32 / 255.0, (c & 0xff) as f32 / 255.0]
+}
 /// `error_band.accent` of the JIT ring (ring.rs) and of its tooltip's plate.
 const RING: f32 = 5.0;
 const TIP: f32 = 6.0;

@@ -926,6 +926,66 @@ pub fn resolution_diff(want: &[String], got: &[String], limit: usize) -> Vec<Str
     out
 }
 
+/// The stock caption a window draws under a style sheet, as the sheet resolves it: the bar's
+/// colour (the window's ground where the bar is clear, as the caption shows it), the title's,
+/// each with focus and without, and the title's font size. Colours 0xRRGGBBAA.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CaptionLook {
+    pub bar: u32,
+    pub bar_unfocused: u32,
+    pub ink: u32,
+    pub ink_unfocused: u32,
+    pub size: f64,
+    /// The window buttons' glyph colour (minimise / maximise / close at rest).
+    pub button: u32,
+}
+
+/// The stock caption of `mod.widgets.Window` in `vm` as its theme and sheet left it.
+pub fn caption_look(vm: &mut ScriptVm) -> CaptionLook {
+    let widgets = vm.module(id!(widgets));
+    let window = vm.value(widgets, id!(Window));
+    let path = |vm: &mut ScriptVm, ids: &[LiveId]| {
+        let mut at = window;
+        for id in ids {
+            match at.as_object() {
+                Some(obj) => at = vm.value(obj, *id),
+                None => return ScriptValue::NIL,
+            }
+        }
+        at
+    };
+    // `uniform(vec4(-1.0))`, the template's "no colour of its own": anything not a colour
+    let color = |vm: &mut ScriptVm, ids: &[LiveId]| path(vm, ids).as_color();
+    let ground = color(vm, &[id!(pass), id!(clear_color)]).unwrap_or(0);
+    let over_ground = |c: u32| if c & 0xff == 0 { ground } else { c };
+    let bar = over_ground(color(vm, &[id!(caption_bar), id!(draw_bg), id!(color)]).unwrap_or(0));
+    let bar_unfocused = color(vm, &[id!(caption_bar), id!(draw_bg), id!(color_unfocused)]).map_or(bar, over_ground);
+    let ink = color(vm, &[id!(caption_bar), id!(caption_label), id!(label), id!(draw_text), id!(color)]).unwrap_or(0xff);
+    let ink_unfocused = color(vm, &[id!(caption_bar), id!(caption_label), id!(label), id!(draw_text), id!(color_unfocused)]).unwrap_or(ink);
+    // a text style takes what it leaves out from its prototype (the theme's face)
+    let style = path(vm, &[id!(caption_bar), id!(caption_label), id!(label), id!(draw_text), id!(text_style)]);
+    let size = TextStyle::script_from_value(vm, style).font_size as f64;
+    let button = color(vm, &[id!(caption_bar), id!(windows_buttons), id!(min), id!(draw_bg), id!(color)]).unwrap_or(ink);
+    CaptionLook { bar, bar_unfocused, ink, ink_unfocused, size, button }
+}
+
+/// [`caption_look`] under `sheet`, in a VM of its own made as a child process makes its
+/// library (the sheet installed, then the theme and the widgets under it), freed after. What
+/// a window manager hands what draws its caption without widgets (`makepad run`'s load screen).
+pub fn caption_look_of(cx: &mut Cx, sheet: &StyleSheet) -> CaptionLook {
+    use crate::widget_async::CxSplashVmExt;
+    let sheet = sheet.clone();
+    let vm_id = cx.alloc_splash_vm_with_ui(false, Box::new(move |vm: &mut ScriptVm| {
+        install(vm, sheet);
+        crate::theme_mod(vm);
+        crate::isolate_widgets_mod_with(vm, &[]);
+        apply_widgets(vm);
+    }));
+    let look = cx.with_script_vm_id(vm_id, caption_look);
+    cx.free_splash_vm(vm_id);
+    look
+}
+
 /// Window provides the common receive path, including apps with no WM API dependency.
 pub fn handle_event(cx: &mut Cx, event: &Event) {
     let Event::Custom(json) = event else {
@@ -974,6 +1034,21 @@ mod tests {
         cx.with_vm(|vm| put_back(vm, before));
         send(&mut cx, "macos-dark");
         assert_eq!(cx.with_vm(current_name).as_deref(), Some("macos-dark"), "put_back turned the system's sheet into a pick");
+    }
+
+    /// The caption a sheet resolves for the load screen is the one a window draws: printed per
+    /// sheet, and the macOS sheet's own lines land.
+    #[test]
+    fn caption_look_reads_the_sheets_caption() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        for entry in catalogue() {
+            let look = caption_look_of(&mut cx, &StyleSheet::load(entry));
+            println!("{}: {:08x} {:08x} {:08x} {:08x} {} {:08x}", entry.id, look.bar, look.bar_unfocused, look.ink, look.ink_unfocused, look.size, look.button);
+            assert!(look.size > 0.0 && look.bar & 0xff != 0, "{}: {look:?}", entry.id);
+        }
+        let mac = caption_look_of(&mut cx, &StyleSheet::named("macos").unwrap());
+        assert_eq!((mac.bar, mac.bar_unfocused, mac.ink, mac.ink_unfocused), (0xededf0ff, 0xf6f6f6ff, 0x242426ff, 0x98989eff));
     }
 
     /// A row of fields is one height, under every sheet in the catalogue.

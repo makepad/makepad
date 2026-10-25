@@ -64,7 +64,7 @@ pub mod threadcpu;
 pub mod session;
 pub mod types;
 pub mod window_controls;
-pub use window_controls::{host_window_controls, WindowControls};
+pub use window_controls::{host_caption, host_window_controls, HostCaption, WindowControls};
 
 #[cfg(target_vendor = "apple")]
 pub use backend::apple::media::{can_play_type, video_h264_probe};

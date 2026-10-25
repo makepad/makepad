@@ -233,6 +233,9 @@ pub struct WindowObj {
     pub base_frame: Option<(u32, Id, u64)>,
     /// Session 0's window: the caption the app drawing it reports (`WindowCaption`).
     pub app_caption: Option<AppCaption>,
+    /// Session 0's window: the title the app drawing it gave its window (`WindowTitle` on the
+    /// lent window), which `makepad run`'s load screen titles its caption with.
+    pub app_title: Option<String>,
     /// Session 0's window: its badge that takes the pointer (`window_style::BADGE_INPUT`) and
     /// the badge's rect (window points), and whether the pointer is over it (1) or a press
     /// begun on it is held (2).

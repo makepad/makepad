@@ -640,6 +640,16 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             return;
         }
         HalCmd::WindowTitle { id, title } => {
+            // a lent window's title is the host window's too: session 0 titles its caption by it
+            let lent = world.session(sid).and_then(|s| {
+                let host = s.windows.get(sid, id).ok()?.val.alias_of?;
+                Some((host, s.string(title).unwrap_or("").to_string()))
+            });
+            if let Some((host, text)) = lent {
+                if let Some(h) = world.session_mut(HOST).and_then(|s| s.windows.get_mut(HOST, host).ok()) {
+                    h.val.app_title = Some(text);
+                }
+            }
             let Some(s) = world.session_mut(sid) else { return };
             let embedded = match s.windows.get_mut(sid, id) {
                 Ok(e) => {

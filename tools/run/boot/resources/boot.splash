@@ -131,7 +131,10 @@ let backdrop_px = fn(d: vec2, half: vec2, rel: vec2, view: vec4, fault: float, c
 // a window button of the caption, drawn as the stock caption's (widgets' DesktopButton): the
 // glyph a one-pixel line in a 9-point square, the face lit on hover and press; close lights red.
 // glyph: 0 minimise, 1 maximise / restore, 2 close
-let caption_button_px = fn(p: vec2, s: vec2, glyph: float, hover: float, down: float, dp: float, px: vec2) -> vec4 {
+// stock: 1 on the app's caption ground (under a makepad WM): drawn as the app's own stock
+// buttons there (widgets' window.rs `windows_buttons`): glyph in `tint` at rest, hover face
+// #e9e9e9 (pressed #cccccc) with a black glyph, close #e81123 (pressed #f1707a) with a white one.
+let caption_button_px = fn(p: vec2, s: vec2, glyph: float, hover: float, down: float, stock: float, tint: vec4, dp: float, px: vec2) -> vec4 {
     let d = p - s * 0.5
     let h = 4.5
     let minimise = bar(d, h, dp)
@@ -141,9 +144,13 @@ let caption_button_px = fn(p: vec2, s: vec2, glyph: float, hover: float, down: f
     let cross = max(bar(r, h * 1.41421356, dp), bar(vec2(r.y, r.x), h * 1.41421356, dp))
     let close = step(1.5, glyph)
     let g = mix(mix(minimise, outline, step(0.5, glyph)), cross, close)
-    let face_a = mix(mix(0.0, 0.10, hover), 0.18, down) * (1.0 - close) + mix(mix(0.0, 1.0, hover), 0.75, down) * close
-    let face = mix(#ece6ff, mix(#e81123, #f1707a, down), close)
-    let ink = mix(#ece6ff * 0.85, #ffffff, close * max(hover, down))
+    let lit = max(hover, down)
+    let field_a = mix(mix(0.0, 0.10, hover), 0.18, down) * (1.0 - close) + mix(mix(0.0, 1.0, hover), 0.75, down) * close
+    let face_a = mix(field_a, lit, stock)
+    let face = mix(mix(#ece6ff, mix(#e9e9e9, #cccccc, down), stock), mix(#e81123, #f1707a, down), close)
+    let field_ink = mix(#ece6ff * 0.85, #ffffff, close * lit)
+    let stock_ink = mix(tint, mix(#000000, #ffffff, close), lit)
+    let ink = mix(field_ink, stock_ink, stock)
     var col = face.rgb * face_a
     var alpha = face_a
     col = col * (1.0 - g) + ink.rgb * g
@@ -318,7 +325,7 @@ let Quad = {
     // a card of the halted view, a row of a collapsed group, a touch button, or a window button
     // of the caption. accent: 0 follow-on card, 1 root cause / panic card, 2 member row, 3 button,
     // 4 caption window button (action: its glyph, 3..5 a traffic light; selected: hover;
-    // block: the window has focus), 5 the JIT ring (selected:
+    // block: the window has focus), 7 the caption's ground (tint), 5 the JIT ring (selected:
     // its fill, block: its mode, pressed: opacity, action: its spin, beat: hover, ink: on a dark
     // caption), 6 the ring's tooltip plate (pressed: opacity, ink)
     error_band: Quad{
@@ -331,11 +338,16 @@ let Quad = {
         block: instance(0.0)
         beat: instance(0.0)
         ink: instance(0.0)
+        tint: instance(vec4(0.0))
         pixel: fn() {
             let s = self.rect.zw
             let p = self.pos * s
             let dp = max(self.dpi, 1.0)
             let px = (self.rect.xy + p) * dp
+            if self.accent > 6.5 {
+                // the caption's ground: the app's caption bar colour (`tint`, opaque)
+                return vec4(self.tint.rgb * self.tint.a, self.tint.a)
+            }
             if self.accent > 5.5 {
                 return jit_tip_px(p, s, self.pressed, self.ink, dp)
             }
@@ -346,7 +358,7 @@ let Quad = {
                 if self.action > 2.5 {
                     return caption_light_px(p, s, self.action, self.selected, self.pressed, self.block, dp)
                 }
-                return caption_button_px(p, s, self.action, self.selected, self.pressed, dp, px)
+                return caption_button_px(p, s, self.action, self.selected, self.pressed, self.beat, self.tint, dp, px)
             }
             let row = step(1.5, self.accent) * (1.0 - step(2.5, self.accent))
             let button = step(2.5, self.accent)

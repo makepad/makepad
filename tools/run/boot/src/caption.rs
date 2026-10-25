@@ -62,6 +62,17 @@ pub struct Caption {
     pub buttons: Vec<(Action, [f32; 4])>,
     /// The buttons are traffic lights (else the Windows-style buttons).
     pub lights: bool,
+    /// The app's window title, once the app gave its window one (else the run's package name).
+    pub title: Option<String>,
+    /// The title's colour and font size: the app's caption's under a makepad WM (its sheet's,
+    /// `makepad_hal::host_caption`), else the field's soft ink at 10.
+    pub ink: [f32; 4],
+    pub size: f32,
+    /// The strip's ground, the app's caption bar colour (under a makepad WM); `None`: the field.
+    pub ground: Option<[f32; 4]>,
+    /// With a ground: the window buttons' glyph colour; they are drawn as the app's stock ones
+    /// on it (a light face on hover, close red).
+    pub button_ink: [f32; 4],
 }
 
 impl Chrome {
@@ -79,7 +90,7 @@ impl Chrome {
                     .map(|(i, action)| (action, [LIGHT_LEFT + i as f32 * LIGHT_PITCH, top, LIGHT, LIGHT]))
                     .collect();
                 let room = LIGHT_LEFT * 2.0 + LIGHT_PITCH * 3.0;
-                return Caption { height: LIGHT_STRIP, gap: [room.min(width), width], buttons, lights: true };
+                return Caption { height: LIGHT_STRIP, gap: [room.min(width), width], buttons, lights: true, ..Default::default() };
             }
             Some(WindowControls::None) => return Caption::default(),
             None => self.client,
@@ -92,7 +103,7 @@ impl Chrome {
                 .enumerate()
                 .map(|(i, action)| (action, [x0 + i as f32 * BUTTON[0], 0.0, BUTTON[0], BUTTON[1]]))
                 .collect();
-            return Caption { height: BUTTON[1], gap: [0.0, x0], buttons, lights: false };
+            return Caption { height: BUTTON[1], gap: [0.0, x0], buttons, ..Default::default() };
         }
         let [x, y, w, h] = self.native;
         if !(w > 0.0 && h > 0.0) {
@@ -101,7 +112,7 @@ impl Chrome {
         // the buttons sit at one end of the strip (the left on macOS, the right in a
         // right-to-left layout): the title has the rest
         let gap = if x + w * 0.5 < width * 0.5 { [x + w, width] } else { [0.0, x] };
-        Caption { height: (y.max(0.0) * 2.0 + h).round(), gap, buttons: Vec::new(), lights: false }
+        Caption { height: (y.max(0.0) * 2.0 + h).round(), gap, ..Default::default() }
     }
 }
 
