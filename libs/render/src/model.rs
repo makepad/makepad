@@ -1722,7 +1722,26 @@ pub(crate) fn gltf_material_surface(json:&Val,bin:&[u8],index:usize)->Option<cra
         // shader reads only the top projection there.
         triplanar:(material.get("extras").and_then(|e|e.get("makepadTriplanar")).and_then(Val::f64).unwrap_or(0.0).max(0.0) as f32)
             *if material.get("extras").and_then(|e|e.get("makepadTriplanarFlat")).is_some_and(|v|matches!(v,Val::Bool(true))){-1.0}else{1.0},
+        splat:material.get("extras").and_then(|e|e.get("makepadSplat")).and_then(|s|gltf_splat(json,bin,s)).map(std::sync::Arc::new),
     })
+}
+
+/// A generated terrain tile's paint (gen level glb.rs `splat_material`):
+/// `weights` (a texture index), `map` [x, z, cell, width, rows] and per
+/// layer its `albedo` (or flat sRGB `color`), `normal` and `bump`, `scale`
+/// (1/metres), `roughness`, `metallic`.
+fn gltf_splat(json:&Val,bin:&[u8],splat:&Val)->Option<crate::material_surface::SplatSurface> {
+    let texture=|v:Option<&Val>|v.and_then(Val::usize).and_then(|i|json.get("textures")?.idx(i)?.get("source")?.usize()).and_then(|i|gltf_embedded_png(json,bin,i));
+    let num=|v:&Val,key:&str,default:f32|v.get(key).and_then(Val::f64).map_or(default,|f|f as f32);
+    let map=splat.get("map")?;
+    let m=|i:usize|map.idx(i).and_then(Val::f64).map(|v|v as f32);
+    let layers=splat.get("layers")?.arr().iter().map(|l|crate::material_surface::SplatLayer{
+        albedo_png:texture(l.get("albedo")),
+        color:std::array::from_fn(|i|l.get("color").and_then(|c|c.idx(i)).and_then(Val::f64).unwrap_or(0.5) as f32),
+        normal_png:texture(l.get("normal")),
+        scale:num(l,"scale",1.0),roughness:num(l,"roughness",0.9),metallic:num(l,"metallic",0.0),bump:num(l,"bump",0.0),
+    }).collect::<Vec<_>>();
+    Some(crate::material_surface::SplatSurface{layers,weights_png:texture(splat.get("weights"))?,origin:[m(0)?,m(1)?],cell:m(2)?,width:m(3)?,rows:m(4)?})
 }
 
 impl PrimSpan {

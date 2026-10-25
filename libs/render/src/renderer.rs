@@ -426,14 +426,18 @@ pub struct Renderer {
     /// frame (else foliage stays on the PBR lane).
     foliage_draw: Option<Box<crate::shaders::DrawSceneFoliageLit>>,
     foliage_ready: bool,
+    /// The terrain paint lane's shader, and whether it can draw this frame
+    /// (else painted tiles draw their main layer on the PBR lane).
+    splat_draw: Option<Box<crate::shaders::DrawSceneSplat>>,
+    splat_ready: bool,
     /// Multiplier on every model's stand-in distance (`makepadShading.impostor`):
     /// the quality tier's say in where trees turn into impostors.
     impostor_scale: f32,
     /// The tier's grass radius multiplier and kept blade fraction.
     grass_radius_scale: f32,
     grass_density: f32,
-    /// The tier's reach of terrain paint overlays (quality_tier.rs).
-    terrain_overlay_reach: f32,
+    /// The tier's reach of terrain paint blending (quality_tier.rs).
+    terrain_blend_reach: f32,
     graphics_tier: crate::quality_tier::GraphicsTier,
     grass_rings: [Vec<(f32, f32)>; 3],
     /// The PBR pipeline can draw this frame (`draw_models_inner`).
@@ -743,10 +747,12 @@ impl Default for Renderer {
             grass_draw: None,
             foliage_draw: None,
             foliage_ready: false,
+            splat_draw: None,
+            splat_ready: false,
             impostor_scale: crate::quality_tier::GraphicsTier::High.budget().impostor_scale,
             grass_radius_scale: 1.0,
             grass_density: 1.0,
-            terrain_overlay_reach: f32::MAX,
+            terrain_blend_reach: f32::MAX,
             graphics_tier: crate::quality_tier::GraphicsTier::High,
             grass_rings: Default::default(),
             pbr_ready: false,

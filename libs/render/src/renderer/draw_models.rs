@@ -319,6 +319,7 @@ impl Renderer {
             ModelDraw::Diffuse(_) => Some(variants::ModelLane::Diffuse),
             ModelDraw::Pbr(_) => Some(variants::ModelLane::Pbr),
             ModelDraw::Foliage(_) => Some(variants::ModelLane::Foliage),
+            ModelDraw::Splat(_) => Some(variants::ModelLane::Splat),
             _ => None,
         };
         let opaque = match (&mut draw, model_lane) {
@@ -342,6 +343,11 @@ impl Renderer {
         // its shader is ready, and in no other.
         let foliage_lane = matches!(draw, ModelDraw::Foliage(_));
         let foliage_ready = self.foliage_ready && matches!(lane, WorldModelLane::Placed);
+        // Terrain tiles with paint draw in the splat lane once its shader is
+        // ready, and in no other; until then the PBR lane draws their main
+        // layer (their base texture).
+        let splat_lane = matches!(draw, ModelDraw::Splat(_));
+        let splat_ready = self.splat_ready && matches!(lane, WorldModelLane::Placed);
         // A model's far stand-in draws through the impostor shader, which has
         // the foliage/PBR lanes' layout: the lane swaps only the shader id
         // for that layer. Without it (the diffuse lane, or before its
@@ -354,7 +360,7 @@ impl Renderer {
             None
         };
         let impostor_scale = self.impostor_scale;
-        let terrain_overlay_reach = self.terrain_overlay_reach;
+        let terrain_blend_reach = self.terrain_blend_reach;
         let occluder_focus = self.occluder.focus();
         // Dynamic lights. STATICS share one transient-only block (their
         // lamp light is baked; only the dl_split prefix reaches them, so a
@@ -459,6 +465,8 @@ impl Renderer {
                 let inv_height = 1.0 / root.max.y.max(0.5);
                 let sways = foliage_ready && std::iter::once(&root.material).chain(root.extra_draws.iter().map(|l| &l.4))
                     .any(|m| m.surface.as_ref().is_some_and(|s| s.definition.wind > 0.0));
+                let paints = splat_ready && std::iter::once(&root.material).chain(root.extra_draws.iter().map(|l| &l.4))
+                    .any(|m| m.surface.as_ref().is_some_and(|s| s.splat.is_some()));
                 let distance=distances[i];
                 let mut fur_budget = 12_000usize.min(96_000usize.saturating_sub(stats.fur_triangles));
                 let loaded=if lod_index==0{root}else{&root.lods[lod_index-1].1};
@@ -476,7 +484,7 @@ impl Renderer {
                     if let (ModelDraw::Custom(_, d), Some(material)) = (&mut draw, wanted_custom) {
                         d.draw.set_params(cx.cx, material.params);
                     }
-                } else if wanted_custom.is_some() || sways != foliage_lane || (!foliage_lane && uses_pbr_lane != pbr_lane) {
+                } else if wanted_custom.is_some() || sways != foliage_lane || paints != splat_lane || (!foliage_lane && !splat_lane && uses_pbr_lane != pbr_lane) {
                     continue;
                 }
                 // Hoisted: `loaded` borrows self, and the per-instance light
@@ -662,11 +670,6 @@ impl Renderer {
                 let impostor_at = impostor_shader.map_or(0.0, |_| layer_draws().filter_map(|l| l.4.surface.as_ref().map(|s| s.definition.impostor)).fold(0.0f32, f32::max) * impostor_scale);
                 for (geometry_id, texture, detail, dscale, material) in layer_draws().skip(layer_pass).take(1) {
                     let stand_in = material.surface.as_ref().is_some_and(|s| s.definition.impostor > 0.0);
-                    // A far terrain tile's paint overlays (alpha-cut layers over
-                    // the dominant one) only within the tier's reach.
-                    if terrain && tile_distance > terrain_overlay_reach && material.surface.as_ref().is_some_and(|s| s.definition.alpha_mode == 1) {
-                        continue;
-                    }
                     let mut layer_window = 0.0f32;
                     if impostor_at > 0.0 {
                         match chain_fade_windows(impostor_at, distance).filter(|_| window <= 0.0) {
@@ -680,6 +683,13 @@ impl Renderer {
                     draw.base().draw_vars.draw_shader_id = if stand_in { impostor_shader } else { lane_shader };
                     draw.base().draw_vars.geometry_id = Some(geometry_id);
                     draw.base().draw_vars.set_texture(0, texture);
+                    // A painted tile's slot 0 is its layers' albedo array; a
+                    // far one paints its heaviest layer only, beyond the
+                    // tier's reach.
+                    if let Some(p) = material.surface.as_ref().and_then(|s| s.splat.as_ref()).filter(|_| splat_lane) {
+                        draw.base().draw_vars.set_texture(0, &p.albedo);
+                        draw.base().draw_vars.set_uniform(cx.cx, live_id!(splat_blend), &[if tile_distance > terrain_blend_reach { 0.0 } else { 1.0 }]);
+                    }
                     draw.base().draw_vars.set_texture(5, detail);
                     draw.base().draw_vars.set_uniform(cx.cx, live_id!(detail_st), &[dscale[0], dscale[1]]);
                     // An IBL material reads its environment on the detail slot.

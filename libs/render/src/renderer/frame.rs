@@ -1352,6 +1352,7 @@ impl Renderer {
             }
             let instances = std::mem::take(&mut self.placed_models);
             self.prepare_foliage_lane(cx.cx);
+            self.prepare_splat_lane(cx.cx);
             self.draw_models_inner(
                 cx,
                 ModelDraw::Diffuse(draw),
@@ -1373,6 +1374,8 @@ impl Renderer {
                 frustum,
                 &mut stats,
             );
+            self.draw_splat_models(cx, camera_pos, &instances, WorldModelLane::Placed,
+                (fog_color, fog_density), &sun, frustum, &mut stats);
             self.draw_foliage_models(cx, camera_pos, &instances, WorldModelLane::Placed,
                 (fog_color, fog_density), &sun, frustum, &mut stats);
             self.draw_custom_models(cx, camera_pos, &instances, WorldModelLane::Placed,

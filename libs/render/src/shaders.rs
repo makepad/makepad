@@ -14,6 +14,7 @@ mod pbr;
 mod city;
 mod grass;
 mod foliage;
+mod splat;
 mod impostor;
 mod skinned_gpu;
 mod world;
@@ -35,6 +36,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     city::script_mod(vm);
     grass::script_mod(vm);
     foliage::script_mod(vm);
+    splat::script_mod(vm);
     impostor::script_mod(vm);
     skinned_gpu::script_mod(vm);
     world::script_mod(vm);
@@ -403,6 +405,16 @@ pub struct DrawSceneGrass {
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawSceneFoliageLit {
+    #[deref]
+    pub pbr: DrawScenePbr,
+}
+
+/// A generated terrain tile's paint lane (`shaders/splat.rs`): DrawScenePbr's
+/// vertex stage, binding and lighting with a pixel that blends the tile's
+/// layers. No instance lanes of its own.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawSceneSplat {
     #[deref]
     pub pbr: DrawScenePbr,
 }
@@ -1235,6 +1247,7 @@ mod shader_registration_tests {
                 ("DrawSceneCity", DrawSceneCity::script_new_with_default(vm).pbr.skinned.draw_vars),
                 ("DrawSceneGrass", DrawSceneGrass::script_new_with_default(vm).pbr.skinned.draw_vars),
                 ("DrawSceneFoliageLit", DrawSceneFoliageLit::script_new_with_default(vm).pbr.skinned.draw_vars),
+                ("DrawSceneSplat", DrawSceneSplat::script_new_with_default(vm).pbr.skinned.draw_vars),
                 ("DrawSceneImpostor", DrawSceneImpostor::script_new_with_default(vm).pbr.skinned.draw_vars),
                 ("DrawSceneCustom", custom.pbr.skinned.draw_vars),
                 ("DrawSceneSkinnedGpu", DrawSceneSkinnedGpu::script_new_with_default(vm).draw_vars),
@@ -1332,6 +1345,7 @@ mod shader_registration_tests {
                 ("city", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneCity)})),
                 ("grass", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneGrass)})),
                 ("foliage", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneFoliageLit)})),
+                ("splat", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneSplat)})),
                 ("impostor", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneImpostor)})),
             ] {
                 let errors = vm.heap().string_with(result, |_heap, value| value.to_string()).unwrap();
@@ -1500,6 +1514,16 @@ mod shader_registration_tests {
             let mapping = &cx.draw_shaders[id.index].mapping;
             assert_eq!(mapping.textures[0].id, live_id!(tex));
             assert_eq!(mapping.textures[1].id, live_id!(ao_map));
+            // The splat lane retypes PBR slots in place (tex and normal_map
+            // become arrays): the same slots, so the lane's generic slot-0
+            // binding and the name lookups keep working, and no slot more.
+            let splat = DrawSceneSplat::script_new_with_default(vm);
+            let id = splat.pbr.skinned.draw_vars.draw_shader_id.expect("registered splat shader");
+            let cx = vm.cx();
+            let splat_textures = &cx.draw_shaders[id.index].mapping.textures;
+            let pbr_textures = &cx.draw_shaders[pbr.skinned.draw_vars.draw_shader_id.unwrap().index].mapping.textures;
+            assert_eq!(splat_textures.iter().map(|t| t.id).collect::<Vec<_>>(), pbr_textures.iter().map(|t| t.id).collect::<Vec<_>>());
+            assert_eq!(splat_textures[0].id, live_id!(tex));
             // Vertex attributes: only the geometry is fetched as vertex
             // attributes (vec4 chunks); the backends read instance records
             // from the instance buffer by instance index (GL ES and WebGL 2
@@ -1512,6 +1536,7 @@ mod shader_registration_tests {
                 ("city", DrawSceneCity::script_new_with_default(vm).pbr.skinned.draw_vars.draw_shader_id),
                 ("grass", DrawSceneGrass::script_new_with_default(vm).pbr.skinned.draw_vars.draw_shader_id),
                 ("foliage", DrawSceneFoliageLit::script_new_with_default(vm).pbr.skinned.draw_vars.draw_shader_id),
+                ("splat", DrawSceneSplat::script_new_with_default(vm).pbr.skinned.draw_vars.draw_shader_id),
                 ("impostor", DrawSceneImpostor::script_new_with_default(vm).pbr.skinned.draw_vars.draw_shader_id),
             ];
             for (name, id) in lanes {

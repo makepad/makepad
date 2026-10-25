@@ -37,11 +37,10 @@ pub struct TierBudget {
     pub ssao: bool,
     /// The largest render scale the host's automatic scale may use.
     pub render_scale: f32,
-    /// How far a level terrain tile draws its blended paint layers (the
-    /// alpha-cut overlays over each triangle's dominant material, up to a
-    /// dozen full-shaded passes over the same pixels); beyond it the
-    /// dominant layer alone. A tile GPU pays per covered layer.
-    pub terrain_overlay_reach: f32,
+    /// How far a level terrain tile blends its paint layers (the splat
+    /// lane's per-pixel layer walk, a texture read per candidate layer);
+    /// beyond it the heaviest layer alone.
+    pub terrain_blend_reach: f32,
 }
 
 impl GraphicsTier {
@@ -58,10 +57,10 @@ impl GraphicsTier {
 
     pub fn budget(self) -> TierBudget {
         match self {
-            GraphicsTier::Low => TierBudget { impostor_scale: 0.8, grass_radius: 0.55, grass_density: 0.5, csm_resolution: 1024, csm_range: 40.0, ssao: false, render_scale: 0.75, terrain_overlay_reach: 150.0 },
-            GraphicsTier::Medium => TierBudget { impostor_scale: 1.25, grass_radius: 0.8, grass_density: 0.75, csm_resolution: 1536, csm_range: 60.0, ssao: false, render_scale: 1.0, terrain_overlay_reach: 450.0 },
-            GraphicsTier::High => TierBudget { impostor_scale: 1.6, grass_radius: 1.0, grass_density: 1.0, csm_resolution: 2048, csm_range: 80.0, ssao: true, render_scale: 1.0, terrain_overlay_reach: f32::MAX },
-            GraphicsTier::Ultra => TierBudget { impostor_scale: 2.4, grass_radius: 1.4, grass_density: 1.0, csm_resolution: 4096, csm_range: 120.0, ssao: true, render_scale: 1.0, terrain_overlay_reach: f32::MAX },
+            GraphicsTier::Low => TierBudget { impostor_scale: 0.8, grass_radius: 0.55, grass_density: 0.5, csm_resolution: 1024, csm_range: 40.0, ssao: false, render_scale: 0.75, terrain_blend_reach: 150.0 },
+            GraphicsTier::Medium => TierBudget { impostor_scale: 1.25, grass_radius: 0.8, grass_density: 0.75, csm_resolution: 1536, csm_range: 60.0, ssao: false, render_scale: 1.0, terrain_blend_reach: 450.0 },
+            GraphicsTier::High => TierBudget { impostor_scale: 1.6, grass_radius: 1.0, grass_density: 1.0, csm_resolution: 2048, csm_range: 80.0, ssao: true, render_scale: 1.0, terrain_blend_reach: f32::MAX },
+            GraphicsTier::Ultra => TierBudget { impostor_scale: 2.4, grass_radius: 1.4, grass_density: 1.0, csm_resolution: 4096, csm_range: 120.0, ssao: true, render_scale: 1.0, terrain_blend_reach: f32::MAX },
         }
     }
 

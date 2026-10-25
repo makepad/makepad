@@ -605,6 +605,32 @@ impl Renderer {
         self.foliage_draw = Some(draw);
     }
 
+    /// The terrain paint pass (shaders/splat.rs): the same instance list,
+    /// taking only the models with a painted layer. Until its pipeline
+    /// exists they stay on the PBR lane (their main layer).
+    pub(super) fn draw_splat_models(
+        &mut self, cx: &mut Cx3d, eye: Vec3f, instances: &[ModelInstance],
+        lane: WorldModelLane, fog: (Vec3f, f32), sun: &SunLight,
+        frustum: Option<&Frustum>, stats: &mut RenderStats,
+    ) {
+        if !self.splat_ready { return; }
+        let Some(mut draw) = self.splat_draw.take() else { return };
+        self.draw_models_inner(cx, ModelDraw::Splat(&mut draw), eye, instances, lane, fog, sun, frustum, stats);
+        self.splat_draw = Some(draw);
+    }
+
+    /// Decide once per frame, before any model pass, whether painted
+    /// terrain takes its own lane this frame.
+    pub(super) fn prepare_splat_lane(&mut self, cx: &mut Cx) {
+        if self.splat_draw.is_none() {
+            self.splat_draw = cx.try_with_vm(|vm| Box::new(crate::shaders::DrawSceneSplat::script_new_with_default(vm)));
+        }
+        let hdr = self.hdr_output;
+        let stock = self.splat_draw.as_ref().and_then(|d| d.pbr.skinned.draw_vars.draw_shader_id);
+        let shader = if stock.is_some() { self.lane_shaders(cx, super::variants::ModelLane::Splat, stock).0 } else { None };
+        self.splat_ready = self.pbr_materials_enabled && shader.is_some_and(|id| cx.draw_shader_ready(id, hdr));
+    }
+
     /// Decide once per frame, before any model pass, whether foliage takes
     /// its own lane this frame.
     pub(super) fn prepare_foliage_lane(&mut self, cx: &mut Cx) {

@@ -5287,13 +5287,13 @@ mod tests {
 
     #[test]
     fn parses_vendored_knight_if_present() {
-        // Real-asset smoke: skips (with a hint) when the download hasn't run.
+        // Real-asset smoke: skips when the optional KayKit fixture is absent.
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../apps/commercial/sandbox/resources/characters/knight.glb"
+            "/../../apps/commercial/sandbox/resources/characters/knight.glb"
         );
         let Ok(bytes) = std::fs::read(path) else {
-            println!("SKIP: knight.glb absent — run apps/commercial/sandbox/download_assets.sh");
+            println!("SKIP: optional KayKit knight fixture absent at {path}");
             return;
         };
         let model = SkinnedModel::parse_glb(&bytes).expect("knight.glb must parse");

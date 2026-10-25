@@ -285,11 +285,51 @@ script_mod! {
             return self.shade(albedo, surf.w)
         }
 
-        // The lit surface: occlusion, sun, lamps, GI and the material's
-        // composition of them, then emission, the finish, fog and the
-        // debug views. Its own function so an unlit program's variant can
+        // The lit surface: the layer's metal/roughness and mapped normal,
+        // then shade_mr. Its own function so an unlit program's variant can
         // replace it with shade_unlit (renderer/variants.rs).
         shade: fn(albedo: vec3, surf_w: float) -> vec4 {
+            // The material. Factor x map, per the glTF spec; orm_on is 0 for
+            // a factors-only material so the sample folds out to 1.
+            // Factors only (orm_on 0): the map would fold out, so it is not read.
+            var orm = vec4(1.0, 1.0, 1.0, 1.0)
+            if self.orm_on > 0.0 { orm = self.orm_map.sample_repeat(self.v_uv) }
+            // Roughness floored at 0.045: a2 goes to zero below that and the
+            // GGX denominator collapses to a single blown-out pixel that
+            // aliases into a crawling white dot as the camera moves.
+            let mr = self.mat_metal_rough(vec2(
+                clamp(self.metallic * mix(1.0, orm.z, self.orm_on), 0.0, 1.0),
+                clamp(self.roughness * mix(1.0, orm.y, self.orm_on), 0.045, 1.0)
+            ))
+            var n=normalize(self.v_csm_n)
+            if self.double_sided>0.5 && dot(n,self.eye.xyz-self.v_csm.xyz)<0.0 {n=n*(-1.0)}
+            if self.surface_on>0.5 && abs(self.normal_scale)>0.00001 {
+                let dp1=dFdx(self.v_csm.xyz)
+                let dp2=dFdy(self.v_csm.xyz)
+                let du1=dFdx(self.v_uv)
+                let du2=dFdy(self.v_uv)
+                let determinant=du1.x*du2.y-du1.y*du2.x
+                if abs(determinant)>0.00000001 {
+                    let orientation=sign(determinant)
+                    let tangent=normalize(dp1*du2.y-dp2*du1.y)*orientation
+                    let bitangent=normalize(dp2*du1.x-dp1*du2.x)*orientation
+                    // Tangent-space X and Y; Z is rebuilt (BC5 normal maps store only XY).
+                    let xy=self.normal_map.sample_repeat(self.v_uv).xy*2.0-vec2(1.0,1.0)
+                    let mapped=vec3(xy.x,xy.y,sqrt(max(1.0-dot(xy,xy),0.0)))
+                    n=normalize(tangent*(mapped.x*self.normal_scale)+bitangent*(mapped.y*self.normal_scale)+n*mapped.z)
+                }
+            }
+            n = self.mat_normal(n)
+            return self.shade_mr(albedo, surf_w, mr, n)
+        }
+
+        // Occlusion, sun, lamps, GI and the material's composition of them,
+        // then emission, the finish, fog and the debug views, for a surface
+        // of metal/roughness `mr` and shading normal `n` (true world): the
+        // splat lane (shaders/splat.rs) comes here with its own.
+        shade_mr: fn(albedo: vec3, surf_w: float, mr: vec2, n: vec3) -> vec4 {
+            let rough = mr.y
+            let metal = mr.x
             // Occlusion, sun visibility and lamps: verbatim from
             // DrawSceneSkinned, so a PBR prop sits in the same light as the
             // wall behind it.
@@ -346,41 +386,6 @@ script_mod! {
             if self.cluster_on > 0.5 { local = vec3(0.0,0.0,0.0) }
             let sun_lit = self.sun_filled(sun_all, local)
 
-            // The material. Factor x map, per the glTF spec; orm_on is 0 for
-            // a factors-only material so the sample folds out to 1.
-            // Factors only (orm_on 0): the map would fold out, so it is not read.
-            var orm = vec4(1.0, 1.0, 1.0, 1.0)
-            if self.orm_on > 0.0 { orm = self.orm_map.sample_repeat(self.v_uv) }
-            // Roughness floored at 0.045: a2 goes to zero below that and the
-            // GGX denominator collapses to a single blown-out pixel that
-            // aliases into a crawling white dot as the camera moves.
-            let mr = self.mat_metal_rough(vec2(
-                clamp(self.metallic * mix(1.0, orm.z, self.orm_on), 0.0, 1.0),
-                clamp(self.roughness * mix(1.0, orm.y, self.orm_on), 0.045, 1.0)
-            ))
-            let rough = mr.y
-            let metal = mr.x
-
-            // TRUE world space for all three vectors.
-            var n=normalize(self.v_csm_n)
-            if self.double_sided>0.5 && dot(n,self.eye.xyz-self.v_csm.xyz)<0.0 {n=n*(-1.0)}
-            if self.surface_on>0.5 && abs(self.normal_scale)>0.00001 {
-                let dp1=dFdx(self.v_csm.xyz)
-                let dp2=dFdy(self.v_csm.xyz)
-                let du1=dFdx(self.v_uv)
-                let du2=dFdy(self.v_uv)
-                let determinant=du1.x*du2.y-du1.y*du2.x
-                if abs(determinant)>0.00000001 {
-                    let orientation=sign(determinant)
-                    let tangent=normalize(dp1*du2.y-dp2*du1.y)*orientation
-                    let bitangent=normalize(dp2*du1.x-dp1*du2.x)*orientation
-                    // Tangent-space X and Y; Z is rebuilt (BC5 normal maps store only XY).
-                    let xy=self.normal_map.sample_repeat(self.v_uv).xy*2.0-vec2(1.0,1.0)
-                    let mapped=vec3(xy.x,xy.y,sqrt(max(1.0-dot(xy,xy),0.0)))
-                    n=normalize(tangent*(mapped.x*self.normal_scale)+bitangent*(mapped.y*self.normal_scale)+n*mapped.z)
-                }
-            }
-            n = self.mat_normal(n)
             let l = normalize(self.light_dir)
             let v = normalize(self.eye.xyz - self.v_csm.xyz)
             let h = normalize(l + v)

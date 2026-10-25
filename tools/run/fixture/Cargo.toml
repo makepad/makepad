@@ -35,6 +35,11 @@ path = "src/guard.rs"
 name = "relax-unwind-probe"
 path = "src/unwind_probe.rs"
 
+# the program's own stderr while the session transcript cannot be written (stderr_full.sh)
+[[bin]]
+name = "relax-stderr-flood"
+path = "src/stderr_flood.rs"
+
 # makepad inspect's code versions, inlined copies and tier pins against a live program (inspect_tiers.sh)
 [[bin]]
 name = "relax-inspect-tiers"

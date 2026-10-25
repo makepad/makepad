@@ -44,6 +44,9 @@ pub enum TyKey {
     FnPtr,
     /// trait objects by principal trait (`impl Debug for dyn ActionTrait`)
     Dyn(DefId),
+    /// a self type that failed to resolve (rustc fast_reject's SimplifiedType::Error): its
+    /// impls are no blanket impls, so they never answer another type's goals
+    Error,
     Other,
 }
 
@@ -388,6 +391,7 @@ pub fn ty_key(tys: &Types, t: TyId) -> TyKey {
         TyKind::Tuple(_) => TyKey::Tuple,
         TyKind::FnPtr(..) => TyKey::FnPtr,
         TyKind::Dyn(d, ..) => TyKey::Dyn(*d),
+        TyKind::Error => TyKey::Error,
         _ => TyKey::Other,
     }
 }

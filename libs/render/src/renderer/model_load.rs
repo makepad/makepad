@@ -128,20 +128,21 @@ impl Renderer {
         // Identical images (within this model, and across every model and
         // chunk already resident) share one GPU texture.
         let cache=&mut self.texture_cache;
-        let mut shared=|cx:&mut Cx,prepared:std::sync::Arc<crate::material_surface::PreparedTexture>|->Texture{
+        fn shared(cx:&mut Cx,cache:&mut std::collections::HashMap<u64,Texture>,prepared:std::sync::Arc<crate::material_surface::PreparedTexture>)->Texture{
             if let Some(texture)=cache.get(&prepared.hash){return texture.clone();}
             std::sync::Arc::try_unwrap(prepared).unwrap_or_else(|arc|(*arc).clone()).upload_cached(cx,cache)
-        };
+        }
         let mut upload=|layer:PreparedStaticLayer| {
             let geometry=Geometry::new(cx);geometry.update(cx,layer.indices,layer.vertices);
             let shiny=layer.orm_on||layer.pbr.is_shiny();
             // Surface maps (normal, occlusion, emissive) share by content too:
             // terrain tiles carry the same material maps.
             let surface=layer.surface.map(|s|crate::material_surface::UploadedSurface{definition:std::sync::Arc::new(s.definition),
-                normal:shared(cx,std::sync::Arc::new(s.normal)),occlusion:shared(cx,std::sync::Arc::new(s.occlusion)),emissive:shared(cx,std::sync::Arc::new(s.emissive))});
+                normal:shared(cx,cache,std::sync::Arc::new(s.normal)),occlusion:shared(cx,cache,std::sync::Arc::new(s.occlusion)),emissive:shared(cx,cache,std::sync::Arc::new(s.emissive)),
+                splat:s.splat.map(|p|p.upload(cx,cache))});
             let material=LayerMaterial{surface,metallic:if shiny{layer.pbr.metallic}else{0.0},roughness:layer.pbr.roughness,
-                orm:shared(cx,layer.orm),orm_on:layer.orm_on,mag_nearest:layer.pbr.mag_nearest,cutout:layer.cutout};
-            (std::rc::Rc::new(geometry),shared(cx,layer.texture),shared(cx,layer.detail),layer.detail_scale,material)
+                orm:shared(cx,cache,layer.orm),orm_on:layer.orm_on,mag_nearest:layer.pbr.mag_nearest,cutout:layer.cutout};
+            (std::rc::Rc::new(geometry),shared(cx,cache,layer.texture),shared(cx,cache,layer.detail),layer.detail_scale,material)
         };
         let wants_pbr=!prepared.prelit&&(prepared.main.orm_on||prepared.main.pbr.is_shiny()||prepared.extra.iter().any(|l|l.orm_on||l.pbr.is_shiny())||prepared.anim_parts.iter().flat_map(|p|&p.draws).chain(prepared.driven_parts.iter().flat_map(|p|&p.draws)).any(|l|l.orm_on||l.pbr.is_shiny()));
         let (geometry,texture,detail,detail_scale,material)=upload(prepared.main);
@@ -158,7 +159,6 @@ impl Renderer {
         let sdf=prepared.sdf.map(|atlas|Self::upload_sdf_atlas(cx,atlas));
         let bake_geometry=prepared.bake_stream.map(|(indices,vertices)|{let g=Geometry::new(cx);g.update(cx,indices,vertices);std::rc::Rc::new(g)});
         let morph=prepared.morph.map(|m|m.upload(cx));
-        drop(shared);
         let lods=prepared.lods.into_iter().map(|(distance,model)|(distance,self.upload_static_preview(cx,model))).collect();
         UploadedStaticPreview{lods,morph,ao,sdf,bake_geometry,lm_source:prepared.lm_source,emitters:prepared.emitters,geometry,texture,detail,detail_scale,material,wants_pbr,
             prelit:prepared.prelit,triangles:prepared.mesh_indices.len()/3,min:prepared.min,max:prepared.max,
@@ -204,6 +204,12 @@ impl Renderer {
                 out.push(t.texture_id());
                 out.push(d.texture_id());
                 out.push(mat.orm.texture_id());
+                if let Some(s) = &mat.surface {
+                    out.extend([s.normal.texture_id(), s.occlusion.texture_id(), s.emissive.texture_id()]);
+                    if let Some(p) = &s.splat {
+                        out.extend([p.albedo.texture_id(), p.normal.texture_id(), p.weights.texture_id()]);
+                    }
+                }
             };
             layer(&m.texture, &m.detail, &m.material);
             for (_, t, d, _, mat) in m.extra_draws.iter()

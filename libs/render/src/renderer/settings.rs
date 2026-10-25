@@ -379,7 +379,7 @@ impl Renderer {
         self.impostor_scale = b.impostor_scale;
         self.grass_radius_scale = b.grass_radius;
         self.grass_density = b.grass_density;
-        self.terrain_overlay_reach = b.terrain_overlay_reach;
+        self.terrain_blend_reach = b.terrain_blend_reach;
         self.set_csm_config(b.csm_resolution, b.csm_range);
     }
 

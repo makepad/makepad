@@ -38,6 +38,39 @@ pub struct MaterialSurface {
     /// the lamp fully lit, and each copy scales it by its own vehicle's
     /// brake and reverse state ([`lamp_gain`]).
     pub lamp: Option<makepad_gltf::GlbLamp>,
+    /// A generated terrain tile's paint (glTF extras `makepadSplat`): the
+    /// layers it blends per pixel, drawn by the splat lane (shaders/splat.rs).
+    pub splat: Option<std::sync::Arc<SplatSurface>>,
+}
+
+/// The most layers a terrain tile blends (gen level mesh.rs SPLAT_LAYERS).
+pub const SPLAT_LAYERS: usize = 8;
+
+/// A terrain tile's paint: its layers in paint order (a later one covers an
+/// earlier one) and the weight map, texel (x, z) at world xz `origin +
+/// (x, z) * cell`, layers 4p..4p+3 in the RGBA of page p (pages stacked
+/// along z, `rows` each).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SplatSurface {
+    pub layers: Vec<SplatLayer>,
+    pub weights_png: Vec<u8>,
+    pub origin: [f32; 2],
+    pub cell: f32,
+    pub width: f32,
+    pub rows: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SplatLayer {
+    /// Albedo with the height in alpha; None paints `color` (sRGB).
+    pub albedo_png: Option<Vec<u8>>,
+    pub color: [f32; 3],
+    pub normal_png: Option<Vec<u8>>,
+    /// UV scale, 1/metres.
+    pub scale: f32,
+    pub roughness: f32,
+    pub metallic: f32,
+    pub bump: f32,
 }
 
 /// How lit a signal lamp of `role` is on a copy whose vehicle shows
@@ -66,7 +99,7 @@ impl MaterialSurface {
 }
 impl Default for MaterialSurface {
     fn default()->Self {Self{wind:0.0,clearcoat:0.0,flake:0.0,rim:0.0,impostor:0.0,plate:false,lamp:None,fur:None,normal_png:None,normal_scale:1.0,occlusion_png:None,occlusion_strength:1.0,
-        emissive_png:None,emissive:[0.0;3],alpha_mode:0,alpha_cutoff:0.5,base_alpha:1.0,double_sided:false,triplanar:0.0}}
+        emissive_png:None,emissive:[0.0;3],alpha_mode:0,alpha_cutoff:0.5,base_alpha:1.0,double_sided:false,triplanar:0.0,splat:None}}
 }
 
 pub(crate) fn fur_params(fur: Option<makepad_gltf::GlbFurMaterial>) -> makepad_draw::Vec4f {
@@ -516,9 +549,131 @@ fn coverage_lut(level:&[u32;256],reference:&[u32;256])->[u8;256]{
 }
 
 #[derive(Clone)]
-pub struct PreparedSurface {pub definition:MaterialSurface,pub normal:PreparedTexture,pub occlusion:PreparedTexture,pub emissive:PreparedTexture}
+pub struct PreparedSurface {pub definition:MaterialSurface,pub normal:PreparedTexture,pub occlusion:PreparedTexture,pub emissive:PreparedTexture,pub splat:Option<PreparedSplat>}
 #[derive(Clone)]
-pub struct UploadedSurface {pub definition:std::sync::Arc<MaterialSurface>,pub normal:Texture,pub occlusion:Texture,pub emissive:Texture}
+pub struct UploadedSurface {pub definition:std::sync::Arc<MaterialSurface>,pub normal:Texture,pub occlusion:Texture,pub emissive:Texture,pub splat:Option<UploadedSplat>}
+
+/// A terrain paint's pixels: each layer's albedo (height in alpha) and
+/// normal map at one size per kind, so each kind uploads as one 2D array,
+/// and the weight map.
+#[derive(Clone)]
+pub struct PreparedSplat {
+    pub albedo: Vec<std::sync::Arc<PreparedTexture>>,
+    pub normal: Vec<std::sync::Arc<PreparedTexture>>,
+    pub weights: PreparedTexture,
+    pub params: [[f32; 4]; SPLAT_LAYERS],
+    pub map: [f32; 4],
+    pub size: [f32; 4],
+}
+
+/// The splat lane's bindings (shaders/splat.rs): the albedo and normal
+/// arrays (shared by every tile with the same layers), the weight map, and
+/// per layer (UV scale, roughness, metallic, normal strength).
+#[derive(Clone)]
+pub struct UploadedSplat {
+    pub albedo: Texture,
+    pub normal: Texture,
+    pub weights: Texture,
+    pub params: [[f32; 4]; SPLAT_LAYERS],
+    /// Weight map: world x, z of texel 0, texels per metre.
+    pub map: [f32; 4],
+    /// Weight map: texels per row, rows per page, pages, layers.
+    pub size: [f32; 4],
+}
+
+/// One kind's layers at a common size: the first texture's (a layer
+/// of another size is resampled to it, nearest).
+fn splat_kind(sources: Vec<Option<Vec<u8>>>, fill: &dyn Fn(usize) -> u32, semantic: PixelSemantic, remaining: &mut usize) -> Result<Vec<std::sync::Arc<PreparedTexture>>, String> {
+    let decode = |bytes: &[u8], budget: usize| -> Result<ImageBuffer, String> {
+        if crate::texture_pack::is_ktx2(bytes) { return Err("terrain paint layers are PNG images".into()); }
+        texture_work(TextureWork::DecodeMip, || crate::renderer::decode_generated_png(bytes, 4096, budget))
+    };
+    let mut prepared: Vec<Option<std::sync::Arc<PreparedTexture>>> = Vec::new();
+    for bytes in &sources {
+        prepared.push(match bytes {
+            Some(bytes) => {
+                let hash = texture_work(TextureWork::Hash, || image_content_hash(bytes));
+                let budget = *remaining;
+                Some(prepared_once((hash, bytes.len(), semantic as u8), || { let image = decode(bytes, budget)?; Ok(texture_work(TextureWork::DecodeMip, || PreparedTexture::prepare(image, semantic))) })?)
+            }
+            None => None,
+        });
+    }
+    let (w, h) = prepared.iter().flatten().next().map_or((1, 1), |t| (t.width, t.height));
+    let mut out = Vec::with_capacity(sources.len());
+    for (i, (bytes, texture)) in sources.iter().zip(prepared).enumerate() {
+        let texture = match (bytes, texture) {
+            (_, Some(t)) if t.width == w && t.height == h => t,
+            (Some(bytes), _) => {
+                let image = decode(bytes, *remaining)?;
+                let mut out = ImageBuffer::default();
+                out.width = w;
+                out.height = h;
+                out.data = (0..w * h).map(|k| image.data[(k / w) * image.height / h * image.width + (k % w) * image.width / w]).collect();
+                std::sync::Arc::new(PreparedTexture::prepare(out, semantic))
+            }
+            (None, _) => {
+                let mut image = ImageBuffer::default();
+                image.width = w;
+                image.height = h;
+                image.data = vec![fill(i); w * h];
+                std::sync::Arc::new(PreparedTexture::prepare(image, semantic))
+            }
+        };
+        *remaining = remaining.checked_sub(texture.bytes()).ok_or("material maps exceed texture byte budget")?;
+        out.push(texture);
+    }
+    Ok(out)
+}
+
+impl PreparedSplat {
+    pub fn prepare(splat: &SplatSurface, remaining: &mut usize) -> Result<Self, String> {
+        let layers = &splat.layers[..splat.layers.len().min(SPLAT_LAYERS)];
+        if layers.is_empty() { return Err("terrain paint without layers".into()); }
+        let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+        // A flat-colour layer: its colour at half height.
+        let albedo = splat_kind(layers.iter().map(|l| l.albedo_png.clone()).collect(), &|i| { let c = layers[i].color; 0x8000_0000 | byte(c[0]) << 16 | byte(c[1]) << 8 | byte(c[2]) }, PixelSemantic::MaskedColor, remaining)?;
+        let normal = splat_kind(layers.iter().map(|l| l.normal_png.clone()).collect(), &|_| 0xff80_80ff, PixelSemantic::Normal, remaining)?;
+        let image = texture_work(TextureWork::DecodeMip, || crate::renderer::decode_generated_png(&splat.weights_png, 4096, *remaining))?;
+        let weights = PreparedTexture::prepare(image, PixelSemantic::Data);
+        *remaining = remaining.checked_sub(weights.bytes()).ok_or("material maps exceed texture byte budget")?;
+        let mut params = [[0.0f32; 4]; SPLAT_LAYERS];
+        for (p, l) in params.iter_mut().zip(layers) {
+            *p = [l.scale, l.roughness, l.metallic, if l.normal_png.is_some() { l.bump } else { 0.0 }];
+        }
+        let pages = layers.len().div_ceil(4) as f32;
+        Ok(Self { albedo, normal, weights, params, map: [splat.origin[0], splat.origin[1], 1.0 / splat.cell.max(1e-6), 0.0], size: [splat.width, splat.rows, pages, layers.len() as f32] })
+    }
+
+    /// Upload, sharing the arrays (by their layers' content) and the
+    /// weight map (by its own) through the renderer's texture cache.
+    pub fn upload(self, cx: &mut Cx, cache: &mut std::collections::HashMap<u64, Texture>) -> UploadedSplat {
+        let array = |cx: &mut Cx, cache: &mut std::collections::HashMap<u64, Texture>, layers: &[std::sync::Arc<PreparedTexture>]| -> Texture {
+            let key = layers.iter().fold(0x5b1a_7a77_u64 ^ layers.len() as u64, |h, t| (h ^ t.hash).wrapping_mul(0x100_0000_01b3).rotate_left(29));
+            if let Some(t) = cache.get(&key) { return t.clone(); }
+            let first = &layers[0];
+            let texture = match &first.compressed {
+                Some((format, _)) if layers.iter().all(|t| t.compressed.as_ref().is_some_and(|(f, _)| f == format)) => {
+                    let data = layers.iter().flat_map(|t| t.compressed.as_ref().map(|(_, b)| b.iter().copied()).into_iter().flatten()).collect();
+                    Texture::new_with_format(cx, TextureFormat::VecArrayMipCompressed { width: first.width, height: first.height, layers: layers.len(), format: *format, data: Some(data), max_level: Some(first.max_level), wrap: TextureWrap::Repeat, updated: TextureUpdated::Full })
+                }
+                _ => {
+                    let data = layers.iter().flat_map(|t| t.data.iter().copied()).collect();
+                    Texture::new_with_format(cx, TextureFormat::VecArrayMipBGRAu8_32 { width: first.width, height: first.height, layers: layers.len(), data: Some(data), max_level: Some(first.max_level), wrap: TextureWrap::Repeat, updated: TextureUpdated::Full })
+                }
+            };
+            cache.insert(key, texture.clone());
+            texture
+        };
+        let albedo = array(cx, cache, &self.albedo);
+        let normal = array(cx, cache, &self.normal);
+        let weights = self.weights.upload_cached(cx, cache);
+        UploadedSplat { albedo, normal, weights, params: self.params, map: self.map, size: self.size }
+    }
+
+    pub fn bytes(&self) -> usize { self.albedo.iter().chain(&self.normal).map(|t| t.bytes()).sum::<usize>() + self.weights.bytes() }
+}
+
 impl PreparedSurface {
     pub fn prepare(mut definition:MaterialSurface,remaining:&mut usize)->Result<Self,String>{
         let mut image=|bytes:Option<Vec<u8>>,fallback,semantic|->Result<PreparedTexture,String>{
@@ -543,10 +698,12 @@ impl PreparedSurface {
         let normal=image(definition.normal_png.take(),0xff80_80ff,PixelSemantic::Normal)?;
         let occlusion=image(definition.occlusion_png.take(),0xffff_ffff,PixelSemantic::Data)?;
         let emissive=image(definition.emissive_png.take(),0xffff_ffff,PixelSemantic::Color)?;
-        Ok(Self{definition,normal,occlusion,emissive})
+        // The paint's bytes go with its pixels: the definition keeps none.
+        let splat=definition.splat.take().map(|s|PreparedSplat::prepare(&s,remaining)).transpose()?;
+        Ok(Self{definition,normal,occlusion,emissive,splat})
     }
-    pub fn bytes(&self)->usize{self.normal.bytes()+self.occlusion.bytes()+self.emissive.bytes()}
-    pub fn upload(self,cx:&mut Cx)->UploadedSurface {UploadedSurface{definition:std::sync::Arc::new(self.definition),normal:self.normal.upload(cx),occlusion:self.occlusion.upload(cx),emissive:self.emissive.upload(cx)}}
+    pub fn bytes(&self)->usize{self.normal.bytes()+self.occlusion.bytes()+self.emissive.bytes()+self.splat.as_ref().map_or(0,PreparedSplat::bytes)}
+    pub fn upload(self,cx:&mut Cx)->UploadedSurface {UploadedSurface{definition:std::sync::Arc::new(self.definition),normal:self.normal.upload(cx),occlusion:self.occlusion.upload(cx),emissive:self.emissive.upload(cx),splat:self.splat.map(|s|s.upload(cx,&mut Default::default()))}}
 }
 
 #[cfg(test)]
