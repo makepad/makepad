@@ -1332,6 +1332,21 @@ pub unsafe fn _mm_cmpgt_epi32(a: __m128i, b: __m128i) -> __m128i {
 }
 
 #[inline(always)]
+pub unsafe fn _mm_cmplt_epi8(a: __m128i, b: __m128i) -> __m128i {
+    _mm_cmpgt_epi8(b, a)
+}
+
+#[inline(always)]
+pub unsafe fn _mm_cmplt_epi16(a: __m128i, b: __m128i) -> __m128i {
+    _mm_cmpgt_epi16(b, a)
+}
+
+#[inline(always)]
+pub unsafe fn _mm_cmplt_epi32(a: __m128i, b: __m128i) -> __m128i {
+    _mm_cmpgt_epi32(b, a)
+}
+
+#[inline(always)]
 pub unsafe fn _mm_cmpgt_ps(a: __m128, b: __m128) -> __m128 {
     vx::vx_binary(a, b, 50, 32)
 }
@@ -1346,6 +1361,16 @@ pub unsafe fn _mm_cmplt_ps(a: __m128, b: __m128) -> __m128 {
     vx::vx_binary(a, b, 48, 32)
 }
 
+#[inline(always)]
+pub unsafe fn _mm_cmpord_ps(a: __m128, b: __m128) -> __m128 {
+    _mm_and_ps(_mm_cmpeq_ps(a, a), _mm_cmpeq_ps(b, b))
+}
+
+#[inline(always)]
+pub unsafe fn _mm_cmpunord_ps(a: __m128, b: __m128) -> __m128 {
+    _mm_or_ps(_mm_cmpneq_ps(a, a), _mm_cmpneq_ps(b, b))
+}
+
 pub unsafe fn _mm_cvtss_f32(a: __m128) -> f32 {
     a.0[0]
 }
@@ -1357,6 +1382,11 @@ pub unsafe fn _mm_div_ps(a: __m128, b: __m128) -> __m128 {
 
 pub unsafe fn _mm_loadl_epi64(mem_addr: *const __m128i) -> __m128i {
     __m128i([crate::ptr::read_unaligned(mem_addr as *const i64), 0])
+}
+
+#[inline(always)]
+pub unsafe fn _mm_load_ps(mem_addr: *const f32) -> __m128 {
+    vx::vx_load(mem_addr as *const u8)
 }
 
 #[inline(always)]
@@ -1413,6 +1443,19 @@ pub unsafe fn _mm_rsqrt_ps(a: __m128) -> __m128 {
 #[inline(always)]
 pub unsafe fn _mm_set1_ps(a: f32) -> __m128 {
     vx::vx_splat(a.to_bits() as u64, 32)
+}
+
+#[inline(always)]
+pub unsafe fn _mm_set_ps1(a: f32) -> __m128 {
+    _mm_set1_ps(a)
+}
+
+pub unsafe fn _mm_set_ps(e3: f32, e2: f32, e1: f32, e0: f32) -> __m128 {
+    __m128([e0, e1, e2, e3])
+}
+
+pub unsafe fn _mm_set_ss(a: f32) -> __m128 {
+    __m128([a, 0.0, 0.0, 0.0])
 }
 
 pub unsafe fn _mm_setr_epi8(
@@ -1512,6 +1555,11 @@ pub unsafe fn _mm_srli_epi64<const IMM8: i32>(a: __m128i) -> __m128i {
 #[inline(always)]
 pub unsafe fn _mm_sqrt_ps(a: __m128) -> __m128 {
     vx::vx_unary(a, 7, 32, 0)
+}
+
+#[inline(always)]
+pub unsafe fn _mm_store_ps(mem_addr: *mut f32, a: __m128) {
+    vx::vx_store(mem_addr as *mut u8, a)
 }
 
 #[inline(always)]
@@ -2586,6 +2634,40 @@ pub const _MM_FROUND_TO_NEG_INF: i32 = 0x01;
 pub const _MM_FROUND_TO_POS_INF: i32 = 0x02;
 pub const _MM_FROUND_TO_ZERO: i32 = 0x03;
 pub const _MM_FROUND_CUR_DIRECTION: i32 = 0x04;
+pub const _MM_FROUND_RAISE_EXC: i32 = 0x00;
+pub const _MM_FROUND_NO_EXC: i32 = 0x08;
+pub const _CMP_EQ_OQ: i32 = 0x00;
+pub const _CMP_LT_OS: i32 = 0x01;
+pub const _CMP_LE_OS: i32 = 0x02;
+pub const _CMP_UNORD_Q: i32 = 0x03;
+pub const _CMP_NEQ_UQ: i32 = 0x04;
+pub const _CMP_NLT_US: i32 = 0x05;
+pub const _CMP_NLE_US: i32 = 0x06;
+pub const _CMP_ORD_Q: i32 = 0x07;
+pub const _CMP_EQ_UQ: i32 = 0x08;
+pub const _CMP_NGE_US: i32 = 0x09;
+pub const _CMP_NGT_US: i32 = 0x0a;
+pub const _CMP_FALSE_OQ: i32 = 0x0b;
+pub const _CMP_NEQ_OQ: i32 = 0x0c;
+pub const _CMP_GE_OS: i32 = 0x0d;
+pub const _CMP_GT_OS: i32 = 0x0e;
+pub const _CMP_TRUE_UQ: i32 = 0x0f;
+pub const _CMP_EQ_OS: i32 = 0x10;
+pub const _CMP_LT_OQ: i32 = 0x11;
+pub const _CMP_LE_OQ: i32 = 0x12;
+pub const _CMP_UNORD_S: i32 = 0x13;
+pub const _CMP_NEQ_US: i32 = 0x14;
+pub const _CMP_NLT_UQ: i32 = 0x15;
+pub const _CMP_NLE_UQ: i32 = 0x16;
+pub const _CMP_ORD_S: i32 = 0x17;
+pub const _CMP_EQ_US: i32 = 0x18;
+pub const _CMP_NGE_UQ: i32 = 0x19;
+pub const _CMP_NGT_UQ: i32 = 0x1a;
+pub const _CMP_FALSE_OS: i32 = 0x1b;
+pub const _CMP_NEQ_OS: i32 = 0x1c;
+pub const _CMP_GE_OQ: i32 = 0x1d;
+pub const _CMP_GT_OQ: i32 = 0x1e;
+pub const _CMP_TRUE_US: i32 = 0x1f;
 
 /// This thread's MXCSR (stmxcsr): rounding, flush-to-zero, denormals-are-zero, the exception
 /// masks and flags.
@@ -2943,4 +3025,282 @@ pub unsafe fn _mm_cmpneq_ps(a: __m128, b: __m128) -> __m128 {
 #[inline(always)]
 pub unsafe fn _mm_srai_epi64<const IMM8: i32>(a: __m128i) -> __m128i {
     vx::vx_unary(a, 3, 64, IMM8)
+}
+
+#[inline(always)]
+pub unsafe fn _mm_blendv_ps(a: __m128, b: __m128, mask: __m128) -> __m128 {
+    let m: __m128 = vx::vx_unary(mask, 3, 32, 31);
+    _mm_or_ps(_mm_and_ps(m, b), _mm_andnot_ps(m, a))
+}
+
+#[inline(always)]
+pub unsafe fn _mm_cvtepu8_epi16(a: __m128i) -> __m128i {
+    _mm_unpacklo_epi8(a, _mm_setzero_si128())
+}
+
+pub unsafe fn _mm_mullo_epi32(a: __m128i, b: __m128i) -> __m128i {
+    let a = lanes128_i32(a);
+    let b = lanes128_i32(b);
+    from128_i32([
+        a[0].wrapping_mul(b[0]),
+        a[1].wrapping_mul(b[1]),
+        a[2].wrapping_mul(b[2]),
+        a[3].wrapping_mul(b[3]),
+    ])
+}
+
+pub unsafe fn _mm_rcp_ps(a: __m128) -> __m128 {
+    __m128([1.0 / a.0[0], 1.0 / a.0[1], 1.0 / a.0[2], 1.0 / a.0[3]])
+}
+
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[inline(always)]
+pub unsafe fn _mm_round_ps<const ROUNDING: i32>(a: __m128) -> __m128 {
+    if ROUNDING & 4 != 0 {
+        match mxcsr_rm() {
+            0 => vx::vx_unary(a, 11, 32, 0),
+            1 => vx::vx_unary(a, 11, 32, 1),
+            2 => vx::vx_unary(a, 11, 32, 2),
+            _ => vx::vx_unary(a, 11, 32, 3),
+        }
+    } else {
+        vx::vx_unary(a, 11, 32, ROUNDING & 3)
+    }
+}
+
+#[inline(always)]
+pub unsafe fn _mm_floor_ps(a: __m128) -> __m128 {
+    vx::vx_unary(a, 11, 32, 1)
+}
+
+#[inline(always)]
+pub unsafe fn _mm_ceil_ps(a: __m128) -> __m128 {
+    vx::vx_unary(a, 11, 32, 2)
+}
+
+pub unsafe fn _mm_sll_epi32(a: __m128i, count: __m128i) -> __m128i {
+    let c = count.0[0] as u64;
+    if c > 31 {
+        return _mm_setzero_si128();
+    }
+    let a = lanes128_u32(a);
+    let s = c as u32;
+    from128_u32([a[0] << s, a[1] << s, a[2] << s, a[3] << s])
+}
+
+pub unsafe fn _mm_sllv_epi32(a: __m128i, count: __m128i) -> __m128i {
+    let a = lanes128_u32(a);
+    let c = lanes128_u32(count);
+    let s = |x: u32, n: u32| if n < 32 { x << n } else { 0 };
+    from128_u32([s(a[0], c[0]), s(a[1], c[1]), s(a[2], c[2]), s(a[3], c[3])])
+}
+
+pub unsafe fn _mm_srl_epi16(a: __m128i, count: __m128i) -> __m128i {
+    let c = count.0[0] as u64;
+    if c > 15 {
+        return _mm_setzero_si128();
+    }
+    let a = lanes128_u16(a);
+    let s = c as u32;
+    from128_u16([a[0] >> s, a[1] >> s, a[2] >> s, a[3] >> s, a[4] >> s, a[5] >> s, a[6] >> s, a[7] >> s])
+}
+
+pub unsafe fn _mm_srl_epi32(a: __m128i, count: __m128i) -> __m128i {
+    let c = count.0[0] as u64;
+    if c > 31 {
+        return _mm_setzero_si128();
+    }
+    let a = lanes128_u32(a);
+    let s = c as u32;
+    from128_u32([a[0] >> s, a[1] >> s, a[2] >> s, a[3] >> s])
+}
+
+pub unsafe fn _mm256_add_epi8(a: __m256i, b: __m256i) -> __m256i {
+    i_join(_mm_add_epi8(i_lo(&a), i_lo(&b)), _mm_add_epi8(i_hi(&a), i_hi(&b)))
+}
+
+pub unsafe fn _mm256_sub_epi8(a: __m256i, b: __m256i) -> __m256i {
+    i_join(_mm_sub_epi8(i_lo(&a), i_lo(&b)), _mm_sub_epi8(i_hi(&a), i_hi(&b)))
+}
+
+pub unsafe fn _mm256_cmpeq_epi16(a: __m256i, b: __m256i) -> __m256i {
+    i_join(_mm_cmpeq_epi16(i_lo(&a), i_lo(&b)), _mm_cmpeq_epi16(i_hi(&a), i_hi(&b)))
+}
+
+pub unsafe fn _mm256_cmpeq_epi32(a: __m256i, b: __m256i) -> __m256i {
+    i_join(_mm_cmpeq_epi32(i_lo(&a), i_lo(&b)), _mm_cmpeq_epi32(i_hi(&a), i_hi(&b)))
+}
+
+pub unsafe fn _mm256_cmpgt_epi16(a: __m256i, b: __m256i) -> __m256i {
+    i_join(_mm_cmpgt_epi16(i_lo(&a), i_lo(&b)), _mm_cmpgt_epi16(i_hi(&a), i_hi(&b)))
+}
+
+pub unsafe fn _mm256_cmpgt_epi32(a: __m256i, b: __m256i) -> __m256i {
+    i_join(_mm_cmpgt_epi32(i_lo(&a), i_lo(&b)), _mm_cmpgt_epi32(i_hi(&a), i_hi(&b)))
+}
+
+pub unsafe fn _mm256_max_epu8(a: __m256i, b: __m256i) -> __m256i {
+    i_join(_mm_max_epu8(i_lo(&a), i_lo(&b)), _mm_max_epu8(i_hi(&a), i_hi(&b)))
+}
+
+pub unsafe fn _mm256_max_epu16(a: __m256i, b: __m256i) -> __m256i {
+    i_join(_mm_max_epu16(i_lo(&a), i_lo(&b)), _mm_max_epu16(i_hi(&a), i_hi(&b)))
+}
+
+pub unsafe fn _mm256_max_epu32(a: __m256i, b: __m256i) -> __m256i {
+    i_join(_mm_max_epu32(i_lo(&a), i_lo(&b)), _mm_max_epu32(i_hi(&a), i_hi(&b)))
+}
+
+pub unsafe fn _mm256_min_epu8(a: __m256i, b: __m256i) -> __m256i {
+    i_join(_mm_min_epu8(i_lo(&a), i_lo(&b)), _mm_min_epu8(i_hi(&a), i_hi(&b)))
+}
+
+pub unsafe fn _mm256_min_epu16(a: __m256i, b: __m256i) -> __m256i {
+    i_join(_mm_min_epu16(i_lo(&a), i_lo(&b)), _mm_min_epu16(i_hi(&a), i_hi(&b)))
+}
+
+pub unsafe fn _mm256_min_epu32(a: __m256i, b: __m256i) -> __m256i {
+    i_join(_mm_min_epu32(i_lo(&a), i_lo(&b)), _mm_min_epu32(i_hi(&a), i_hi(&b)))
+}
+
+pub unsafe fn _mm256_cvtepu8_epi16(a: __m128i) -> __m256i {
+    let z = _mm_setzero_si128();
+    i_join(_mm_unpacklo_epi8(a, z), _mm_unpackhi_epi8(a, z))
+}
+
+pub unsafe fn _mm256_cvttps_epi32(a: __m256) -> __m256i {
+    i_join(_mm_cvttps_epi32(ps_lo(&a)), _mm_cvttps_epi32(ps_hi(&a)))
+}
+
+pub unsafe fn _mm256_srl_epi16(a: __m256i, count: __m128i) -> __m256i {
+    i_join(_mm_srl_epi16(i_lo(&a), count), _mm_srl_epi16(i_hi(&a), count))
+}
+
+pub unsafe fn _mm256_srlv_epi32(a: __m256i, count: __m256i) -> __m256i {
+    let a = lanes256_i32(a);
+    let c = lanes256_i32(count);
+    let mut r = [0i32; 8];
+    let mut i = 0;
+    while i < 8 {
+        let n = c[i] as u32;
+        r[i] = if n < 32 { ((a[i] as u32) >> n) as i32 } else { 0 };
+        i += 1;
+    }
+    from256_i32(r)
+}
+
+pub unsafe fn _mm256_setr_epi32(
+    e0: i32,
+    e1: i32,
+    e2: i32,
+    e3: i32,
+    e4: i32,
+    e5: i32,
+    e6: i32,
+    e7: i32,
+) -> __m256i {
+    from256_i32([e0, e1, e2, e3, e4, e5, e6, e7])
+}
+
+pub unsafe fn _mm256_setr_m128(lo: __m128, hi: __m128) -> __m256 {
+    ps_join(lo, hi)
+}
+
+pub unsafe fn _mm256_setr_m128i(lo: __m128i, hi: __m128i) -> __m256i {
+    i_join(lo, hi)
+}
+
+pub unsafe fn _mm256_blendv_ps(a: __m256, b: __m256, mask: __m256) -> __m256 {
+    ps_join(_mm_blendv_ps(ps_lo(&a), ps_lo(&b), ps_lo(&mask)), _mm_blendv_ps(ps_hi(&a), ps_hi(&b), ps_hi(&mask)))
+}
+
+pub unsafe fn _mm256_sqrt_ps(a: __m256) -> __m256 {
+    ps_join(_mm_sqrt_ps(ps_lo(&a)), _mm_sqrt_ps(ps_hi(&a)))
+}
+
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+pub unsafe fn _mm256_round_ps<const ROUNDING: i32>(a: __m256) -> __m256 {
+    ps_join(_mm_round_ps::<ROUNDING>(ps_lo(&a)), _mm_round_ps::<ROUNDING>(ps_hi(&a)))
+}
+
+pub unsafe fn _mm256_floor_ps(a: __m256) -> __m256 {
+    ps_join(_mm_floor_ps(ps_lo(&a)), _mm_floor_ps(ps_hi(&a)))
+}
+
+pub unsafe fn _mm256_ceil_ps(a: __m256) -> __m256 {
+    ps_join(_mm_ceil_ps(ps_lo(&a)), _mm_ceil_ps(ps_hi(&a)))
+}
+
+pub unsafe fn _mm256_unpacklo_ps(a: __m256, b: __m256) -> __m256 {
+    ps_join(_mm_unpacklo_ps(ps_lo(&a), ps_lo(&b)), _mm_unpacklo_ps(ps_hi(&a), ps_hi(&b)))
+}
+
+pub unsafe fn _mm256_unpackhi_ps(a: __m256, b: __m256) -> __m256 {
+    ps_join(_mm_unpackhi_ps(ps_lo(&a), ps_lo(&b)), _mm_unpackhi_ps(ps_hi(&a), ps_hi(&b)))
+}
+
+pub unsafe fn _mm256_movemask_ps(a: __m256) -> i32 {
+    _mm_movemask_ps(ps_lo(&a)) | (_mm_movemask_ps(ps_hi(&a)) << 4)
+}
+
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+pub unsafe fn _mm256_permute2f128_ps<const IMM8: i32>(a: __m256, b: __m256) -> __m256 {
+    let pick = |c: i32| -> __m128 {
+        if c & 8 != 0 {
+            _mm_setzero_ps()
+        } else {
+            match c & 3 {
+                0 => ps_lo(&a),
+                1 => ps_hi(&a),
+                2 => ps_lo(&b),
+                _ => ps_hi(&b),
+            }
+        }
+    };
+    ps_join(pick(IMM8 & 15), pick((IMM8 >> 4) & 15))
+}
+
+pub unsafe fn _mm256_permutevar8x32_ps(a: __m256, idx: __m256i) -> __m256 {
+    let idx = lanes256_i32(idx);
+    let mut r = [0f32; 8];
+    let mut i = 0;
+    while i < 8 {
+        r[i] = a.0[(idx[i] as usize) & 7];
+        i += 1;
+    }
+    __m256(r)
+}
+
+#[inline(always)]
+unsafe fn ps_ones() -> __m128 {
+    vx::vx_splat(u32::MAX as u64, 32)
+}
+
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[inline(always)]
+pub unsafe fn _mm_cmp_ps<const IMM5: i32>(a: __m128, b: __m128) -> __m128 {
+    let ones = ps_ones();
+    match IMM5 & 15 {
+        0 => _mm_cmpeq_ps(a, b),
+        1 => _mm_cmplt_ps(a, b),
+        2 => _mm_cmple_ps(a, b),
+        3 => _mm_cmpunord_ps(a, b),
+        4 => _mm_cmpneq_ps(a, b),
+        5 => _mm_xor_ps(_mm_cmplt_ps(a, b), ones),
+        6 => _mm_xor_ps(_mm_cmple_ps(a, b), ones),
+        7 => _mm_cmpord_ps(a, b),
+        8 => _mm_or_ps(_mm_cmpeq_ps(a, b), _mm_cmpunord_ps(a, b)),
+        9 => _mm_xor_ps(_mm_cmpge_ps(a, b), ones),
+        10 => _mm_xor_ps(_mm_cmpgt_ps(a, b), ones),
+        11 => _mm_setzero_ps(),
+        12 => _mm_andnot_ps(_mm_cmpeq_ps(a, b), _mm_cmpord_ps(a, b)),
+        13 => _mm_cmpge_ps(a, b),
+        14 => _mm_cmpgt_ps(a, b),
+        _ => ones,
+    }
+}
+
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+pub unsafe fn _mm256_cmp_ps<const IMM5: i32>(a: __m256, b: __m256) -> __m256 {
+    ps_join(_mm_cmp_ps::<IMM5>(ps_lo(&a), ps_lo(&b)), _mm_cmp_ps::<IMM5>(ps_hi(&a), ps_hi(&b)))
 }

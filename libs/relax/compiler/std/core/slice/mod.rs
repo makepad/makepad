@@ -509,6 +509,46 @@ pub fn trim_ascii(s: &[u8]) -> &[u8] {
     trim_ascii_end(trim_ascii_start(s))
 }
 
+#[derive(Clone)]
+pub struct EscapeAscii<'a> {
+    inner: Iter<'a, u8>,
+    cur: Option<crate::ascii::EscapeDefault>,
+}
+
+pub const fn escape_ascii(s: &[u8]) -> EscapeAscii<'_> {
+    EscapeAscii { inner: Iter::new(s), cur: None }
+}
+
+impl<'a> Iterator for EscapeAscii<'a> {
+    type Item = u8;
+    fn next(&mut self) -> Option<u8> {
+        loop {
+            if let Some(ref mut cur) = self.cur {
+                if let Some(b) = cur.next() {
+                    return Some(b);
+                }
+            }
+            let b = *self.inner.next()?;
+            self.cur = Some(crate::ascii::escape_default(b));
+        }
+    }
+}
+
+impl<'a> crate::fmt::Display for EscapeAscii<'a> {
+    fn fmt(&self, f: &mut crate::fmt::Formatter<'_>) -> crate::fmt::Result {
+        for b in self.clone() {
+            f.write_char(b as char)?;
+        }
+        Ok(())
+    }
+}
+
+impl<'a> crate::fmt::Debug for EscapeAscii<'a> {
+    fn fmt(&self, f: &mut crate::fmt::Formatter<'_>) -> crate::fmt::Result {
+        f.debug_struct("EscapeAscii").finish_non_exhaustive()
+    }
+}
+
 // ---------------------------------------------------------------- comparison impls on [T]
 
 #[cfg(not(relax_check))]

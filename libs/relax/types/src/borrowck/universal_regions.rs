@@ -24,7 +24,7 @@ impl UniversalRegions {
     pub fn to_region_vid(&self, tys: &crate::types::Types, r: crate::types::RegionId) -> RegionVid {
         match tys.region_kind(r) {
             crate::types::RegionKind::ReVar(v) => v as RegionVid,
-            crate::types::RegionKind::ReStatic | crate::types::RegionKind::ReError => self.fr_static,
+            crate::types::RegionKind::ReStatic | crate::types::RegionKind::ReError | crate::types::RegionKind::ReErased => self.fr_static,
             _ => self.indices.iter().find(|(o, _)| *o == r).map(|(_, v)| *v).unwrap_or_else(|| panic!("cannot convert `{:?}` to a region vid", tys.region_kind(r))),
         }
     }

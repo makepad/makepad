@@ -93,6 +93,7 @@ impl f64 {
     pub const fn from_be_bytes(b: [u8; 8]) -> f64 { f64::from_bits(u64::from_be_bytes(b)) }
     pub const fn from_ne_bytes(b: [u8; 8]) -> f64 { f64::from_bits(u64::from_ne_bytes(b)) }
     pub const fn midpoint(self, other: f64) -> f64 { ((self as f64 + other as f64) / 2.0) as f64 }
+    pub unsafe fn to_int_unchecked<Int>(self) -> Int where Self: crate::convert::FloatToInt<Int> { unsafe { crate::convert::FloatToInt::<Int>::to_int_unchecked(self) } }
 }
 
 #[cfg(not(relax_check))]
@@ -181,5 +182,6 @@ impl f32 {
     pub const fn from_be_bytes(b: [u8; 4]) -> f32 { f32::from_bits(u32::from_be_bytes(b)) }
     pub const fn from_ne_bytes(b: [u8; 4]) -> f32 { f32::from_bits(u32::from_ne_bytes(b)) }
     pub const fn midpoint(self, other: f32) -> f32 { ((self as f64 + other as f64) / 2.0) as f32 }
+    pub unsafe fn to_int_unchecked<Int>(self) -> Int where Self: crate::convert::FloatToInt<Int> { unsafe { crate::convert::FloatToInt::<Int>::to_int_unchecked(self) } }
 }
 

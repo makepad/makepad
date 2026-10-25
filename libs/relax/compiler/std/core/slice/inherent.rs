@@ -603,6 +603,9 @@ impl [u8] {
     pub const fn trim_ascii(&self) -> &[u8] {
         super::trim_ascii(self)
     }
+    pub const fn escape_ascii(&self) -> super::EscapeAscii<'_> {
+        super::escape_ascii(self)
+    }
 }
 
 /// (number of U, number of trailing T) for `len` Ts starting U-aligned: whole groups of

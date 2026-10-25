@@ -126,6 +126,13 @@ pub struct SmallVec<A: Array> {
 unsafe impl<A: Array> Send for SmallVec<A> where A::Item: Send {}
 unsafe impl<A: Array> Sync for SmallVec<A> where A::Item: Sync {}
 
+impl<T, const N: usize> SmallVec<[T; N]> {
+    /// Construct an empty vector without a heap allocation.
+    pub const fn new_const() -> SmallVec<[T; N]> {
+        SmallVec { capacity: 0, data: SmallVecData { inline: ManuallyDrop::new(MaybeUninit::uninit()) } }
+    }
+}
+
 impl<A: Array> SmallVec<A> {
     /// Construct an empty vector
     pub fn new() -> SmallVec<A> {

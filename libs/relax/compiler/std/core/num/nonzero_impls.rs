@@ -3,7 +3,7 @@
 //! Per-type NonZero<T> API (constants, bit queries, checked/saturating arithmetic, conversions, BitOr), as real core's nonzero.rs macros generate it.
 
 use super::nonzero::NonZero;
-use crate::ops::{BitOr, BitOrAssign};
+use crate::ops::{BitOr, BitOrAssign, Div, DivAssign, Rem, RemAssign};
 
 impl NonZero<u8> {
     pub const MIN: NonZero<u8> = unsafe { NonZero::new_unchecked(1) };
@@ -346,4 +346,65 @@ impl BitOr<isize> for NonZero<isize> { type Output = NonZero<isize>; fn bitor(se
 impl BitOr<NonZero<isize>> for isize { type Output = NonZero<isize>; fn bitor(self, rhs: NonZero<isize>) -> NonZero<isize> { unsafe { NonZero::new_unchecked(self | rhs.get()) } } }
 impl BitOrAssign for NonZero<isize> { fn bitor_assign(&mut self, rhs: NonZero<isize>) { *self = *self | rhs; } }
 impl BitOrAssign<isize> for NonZero<isize> { fn bitor_assign(&mut self, rhs: isize) { *self = *self | rhs; } }
+
+impl From<NonZero<u8>> for NonZero<u16> { fn from(v: NonZero<u8>) -> NonZero<u16> { unsafe { NonZero::new_unchecked(v.get() as u16) } } }
+impl From<NonZero<u8>> for NonZero<u32> { fn from(v: NonZero<u8>) -> NonZero<u32> { unsafe { NonZero::new_unchecked(v.get() as u32) } } }
+impl From<NonZero<u8>> for NonZero<u64> { fn from(v: NonZero<u8>) -> NonZero<u64> { unsafe { NonZero::new_unchecked(v.get() as u64) } } }
+impl From<NonZero<u8>> for NonZero<u128> { fn from(v: NonZero<u8>) -> NonZero<u128> { unsafe { NonZero::new_unchecked(v.get() as u128) } } }
+impl From<NonZero<u8>> for NonZero<usize> { fn from(v: NonZero<u8>) -> NonZero<usize> { unsafe { NonZero::new_unchecked(v.get() as usize) } } }
+impl From<NonZero<u8>> for NonZero<i16> { fn from(v: NonZero<u8>) -> NonZero<i16> { unsafe { NonZero::new_unchecked(v.get() as i16) } } }
+impl From<NonZero<u8>> for NonZero<i32> { fn from(v: NonZero<u8>) -> NonZero<i32> { unsafe { NonZero::new_unchecked(v.get() as i32) } } }
+impl From<NonZero<u8>> for NonZero<i64> { fn from(v: NonZero<u8>) -> NonZero<i64> { unsafe { NonZero::new_unchecked(v.get() as i64) } } }
+impl From<NonZero<u8>> for NonZero<i128> { fn from(v: NonZero<u8>) -> NonZero<i128> { unsafe { NonZero::new_unchecked(v.get() as i128) } } }
+impl From<NonZero<u8>> for NonZero<isize> { fn from(v: NonZero<u8>) -> NonZero<isize> { unsafe { NonZero::new_unchecked(v.get() as isize) } } }
+impl From<NonZero<u16>> for NonZero<u32> { fn from(v: NonZero<u16>) -> NonZero<u32> { unsafe { NonZero::new_unchecked(v.get() as u32) } } }
+impl From<NonZero<u16>> for NonZero<u64> { fn from(v: NonZero<u16>) -> NonZero<u64> { unsafe { NonZero::new_unchecked(v.get() as u64) } } }
+impl From<NonZero<u16>> for NonZero<u128> { fn from(v: NonZero<u16>) -> NonZero<u128> { unsafe { NonZero::new_unchecked(v.get() as u128) } } }
+impl From<NonZero<u16>> for NonZero<usize> { fn from(v: NonZero<u16>) -> NonZero<usize> { unsafe { NonZero::new_unchecked(v.get() as usize) } } }
+impl From<NonZero<u16>> for NonZero<i32> { fn from(v: NonZero<u16>) -> NonZero<i32> { unsafe { NonZero::new_unchecked(v.get() as i32) } } }
+impl From<NonZero<u16>> for NonZero<i64> { fn from(v: NonZero<u16>) -> NonZero<i64> { unsafe { NonZero::new_unchecked(v.get() as i64) } } }
+impl From<NonZero<u16>> for NonZero<i128> { fn from(v: NonZero<u16>) -> NonZero<i128> { unsafe { NonZero::new_unchecked(v.get() as i128) } } }
+impl From<NonZero<u32>> for NonZero<u64> { fn from(v: NonZero<u32>) -> NonZero<u64> { unsafe { NonZero::new_unchecked(v.get() as u64) } } }
+impl From<NonZero<u32>> for NonZero<u128> { fn from(v: NonZero<u32>) -> NonZero<u128> { unsafe { NonZero::new_unchecked(v.get() as u128) } } }
+impl From<NonZero<u32>> for NonZero<i64> { fn from(v: NonZero<u32>) -> NonZero<i64> { unsafe { NonZero::new_unchecked(v.get() as i64) } } }
+impl From<NonZero<u32>> for NonZero<i128> { fn from(v: NonZero<u32>) -> NonZero<i128> { unsafe { NonZero::new_unchecked(v.get() as i128) } } }
+impl From<NonZero<u64>> for NonZero<u128> { fn from(v: NonZero<u64>) -> NonZero<u128> { unsafe { NonZero::new_unchecked(v.get() as u128) } } }
+impl From<NonZero<u64>> for NonZero<i128> { fn from(v: NonZero<u64>) -> NonZero<i128> { unsafe { NonZero::new_unchecked(v.get() as i128) } } }
+impl From<NonZero<i8>> for NonZero<i16> { fn from(v: NonZero<i8>) -> NonZero<i16> { unsafe { NonZero::new_unchecked(v.get() as i16) } } }
+impl From<NonZero<i8>> for NonZero<i32> { fn from(v: NonZero<i8>) -> NonZero<i32> { unsafe { NonZero::new_unchecked(v.get() as i32) } } }
+impl From<NonZero<i8>> for NonZero<i64> { fn from(v: NonZero<i8>) -> NonZero<i64> { unsafe { NonZero::new_unchecked(v.get() as i64) } } }
+impl From<NonZero<i8>> for NonZero<i128> { fn from(v: NonZero<i8>) -> NonZero<i128> { unsafe { NonZero::new_unchecked(v.get() as i128) } } }
+impl From<NonZero<i8>> for NonZero<isize> { fn from(v: NonZero<i8>) -> NonZero<isize> { unsafe { NonZero::new_unchecked(v.get() as isize) } } }
+impl From<NonZero<i16>> for NonZero<i32> { fn from(v: NonZero<i16>) -> NonZero<i32> { unsafe { NonZero::new_unchecked(v.get() as i32) } } }
+impl From<NonZero<i16>> for NonZero<i64> { fn from(v: NonZero<i16>) -> NonZero<i64> { unsafe { NonZero::new_unchecked(v.get() as i64) } } }
+impl From<NonZero<i16>> for NonZero<i128> { fn from(v: NonZero<i16>) -> NonZero<i128> { unsafe { NonZero::new_unchecked(v.get() as i128) } } }
+impl From<NonZero<i16>> for NonZero<isize> { fn from(v: NonZero<i16>) -> NonZero<isize> { unsafe { NonZero::new_unchecked(v.get() as isize) } } }
+impl From<NonZero<i32>> for NonZero<i64> { fn from(v: NonZero<i32>) -> NonZero<i64> { unsafe { NonZero::new_unchecked(v.get() as i64) } } }
+impl From<NonZero<i32>> for NonZero<i128> { fn from(v: NonZero<i32>) -> NonZero<i128> { unsafe { NonZero::new_unchecked(v.get() as i128) } } }
+impl From<NonZero<i64>> for NonZero<i128> { fn from(v: NonZero<i64>) -> NonZero<i128> { unsafe { NonZero::new_unchecked(v.get() as i128) } } }
+
+impl Div<NonZero<u8>> for u8 { type Output = u8; fn div(self, rhs: NonZero<u8>) -> u8 { self / rhs.get() } }
+impl DivAssign<NonZero<u8>> for u8 { fn div_assign(&mut self, rhs: NonZero<u8>) { *self = *self / rhs; } }
+impl Rem<NonZero<u8>> for u8 { type Output = u8; fn rem(self, rhs: NonZero<u8>) -> u8 { self % rhs.get() } }
+impl RemAssign<NonZero<u8>> for u8 { fn rem_assign(&mut self, rhs: NonZero<u8>) { *self = *self % rhs; } }
+impl Div<NonZero<u16>> for u16 { type Output = u16; fn div(self, rhs: NonZero<u16>) -> u16 { self / rhs.get() } }
+impl DivAssign<NonZero<u16>> for u16 { fn div_assign(&mut self, rhs: NonZero<u16>) { *self = *self / rhs; } }
+impl Rem<NonZero<u16>> for u16 { type Output = u16; fn rem(self, rhs: NonZero<u16>) -> u16 { self % rhs.get() } }
+impl RemAssign<NonZero<u16>> for u16 { fn rem_assign(&mut self, rhs: NonZero<u16>) { *self = *self % rhs; } }
+impl Div<NonZero<u32>> for u32 { type Output = u32; fn div(self, rhs: NonZero<u32>) -> u32 { self / rhs.get() } }
+impl DivAssign<NonZero<u32>> for u32 { fn div_assign(&mut self, rhs: NonZero<u32>) { *self = *self / rhs; } }
+impl Rem<NonZero<u32>> for u32 { type Output = u32; fn rem(self, rhs: NonZero<u32>) -> u32 { self % rhs.get() } }
+impl RemAssign<NonZero<u32>> for u32 { fn rem_assign(&mut self, rhs: NonZero<u32>) { *self = *self % rhs; } }
+impl Div<NonZero<u64>> for u64 { type Output = u64; fn div(self, rhs: NonZero<u64>) -> u64 { self / rhs.get() } }
+impl DivAssign<NonZero<u64>> for u64 { fn div_assign(&mut self, rhs: NonZero<u64>) { *self = *self / rhs; } }
+impl Rem<NonZero<u64>> for u64 { type Output = u64; fn rem(self, rhs: NonZero<u64>) -> u64 { self % rhs.get() } }
+impl RemAssign<NonZero<u64>> for u64 { fn rem_assign(&mut self, rhs: NonZero<u64>) { *self = *self % rhs; } }
+impl Div<NonZero<u128>> for u128 { type Output = u128; fn div(self, rhs: NonZero<u128>) -> u128 { self / rhs.get() } }
+impl DivAssign<NonZero<u128>> for u128 { fn div_assign(&mut self, rhs: NonZero<u128>) { *self = *self / rhs; } }
+impl Rem<NonZero<u128>> for u128 { type Output = u128; fn rem(self, rhs: NonZero<u128>) -> u128 { self % rhs.get() } }
+impl RemAssign<NonZero<u128>> for u128 { fn rem_assign(&mut self, rhs: NonZero<u128>) { *self = *self % rhs; } }
+impl Div<NonZero<usize>> for usize { type Output = usize; fn div(self, rhs: NonZero<usize>) -> usize { self / rhs.get() } }
+impl DivAssign<NonZero<usize>> for usize { fn div_assign(&mut self, rhs: NonZero<usize>) { *self = *self / rhs; } }
+impl Rem<NonZero<usize>> for usize { type Output = usize; fn rem(self, rhs: NonZero<usize>) -> usize { self % rhs.get() } }
+impl RemAssign<NonZero<usize>> for usize { fn rem_assign(&mut self, rhs: NonZero<usize>) { *self = *self % rhs; } }
 

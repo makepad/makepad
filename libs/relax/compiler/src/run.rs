@@ -153,7 +153,7 @@ pub fn cmd_run(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
     }
     if !args.iter().any(|a| a == "--check") {
         let _k = crate::zone_alloc::kept();
-        *GANDALF_CONSOLE.lock().unwrap() = Some(crate::gandalf_out::Console::start(crate::diag::enabled(), args.iter().any(|a| a == "--quiet")));
+        *GANDALF_CONSOLE.lock().unwrap() = Some(crate::gandalf_out::Console::start(crate::diag::enabled(), args.iter().any(|a| a == "--quiet" || a == "--silent")));
     }
     let host = MAIN_HOST.get().filter(|_| {
         !sess.runtime.boot_only && std::env::var_os("MAKEPAD_RUN_SCRIPT_DEPTH").is_none()
@@ -196,7 +196,7 @@ fn hosted_program(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> boo
         match args[i].as_str() {
             // a build script's child (a saved graph) or a re-run: not a host decision made here
             "--units" => return true,
-            "--report-to" | "--run-dir" | "--cfg" | "--boundary" => i += 2,
+            "--report-to" | "--run-dir" | "--workspace-dir" | "--cfg" | "--boundary" => i += 2,
             _ => i += 1,
         }
     }
@@ -571,6 +571,10 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
                 crate::dirs::set_relax_dir(std::path::PathBuf::from(&args[i + 1]));
                 i += 1;
             }
+            "--workspace-dir" if i + 1 < args.len() => {
+                crate::dirs::set_workspace_dir(args[i + 1].clone());
+                i += 1;
+            }
             // nothing of Relax's own on stderr but errors (a program re-running itself)
             "--silent" => {
                 QUIET.store(true, Ordering::Relaxed);
@@ -627,8 +631,8 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     if driver_options.verbose { crate::tui::track_for_verbose(); }
     // the boot progress line (tui.rs): a terminal run of a program, with nothing asking for plain output
     unsafe { std::env::remove_var("MAKEPAD_RUN_PROGRESS") };
-    // a test harness is a terminal program: no progress line, no inspect socket, no live session
-    let hosted = !entries.is_empty() || !export_names.is_empty() || harness;
+    // a test harness or silent child is a terminal program: no progress line, no inspect socket, no live session
+    let hosted = !entries.is_empty() || !export_names.is_empty() || harness || SILENT.load(Ordering::Relaxed);
     // the `unused_macros` lints need the macro uses of the whole load
     if check { relax_types::macros::uses::record(true); relax_front::program::set_record_import_uses(true); }
     if !check && !watch && session.is_none() && !hosted {
@@ -713,6 +717,9 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     while k < args.len() && args[k] != "--" {
         cargo_flags.push(args[k].clone());
         k += 1;
+    }
+    if harness && cargo_flags.iter().any(|f| f == "--bin" || f.starts_with("--bin=")) && !cargo_flags.iter().any(|f| f == "--bins") {
+        cargo_flags.push("--bins".to_string());
     }
     if k < args.len() {
         // the program's arguments as given (bytes; `args` is Relax's lossy view)
@@ -1619,7 +1626,8 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         let label = |ci: usize| {
             let p = &g.crates[ci].src_path;
             let rel = p.strip_prefix(pkg_dir.as_str()).map_or(p.as_str(), |r| r.trim_start_matches(['/', '\\']));
-            if g.crates[ci].bin { rel.to_string() } else { format!("unittests {rel}") }
+            let is_test_target = units.units.iter().any(|u| &u.src_path == p && u.kind.iter().any(|k| k == "test"));
+            if is_test_target { rel.to_string() } else { format!("unittests {rel}") }
         };
         let mut groups = vec![(label(g.root), root)];
         for &b in &g.bins {

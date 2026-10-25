@@ -37,6 +37,7 @@ pub(super) fn is_builtin(name: &[u8]) -> bool {
             | b"assert_eq"
             | b"assert_ne"
             | b"vec"
+            | b"smallvec"
             | b"dbg"
     )
 }
@@ -333,6 +334,30 @@ impl<'a> Parser<'a> {
                             tg!(&mut g; #expr(e) ,);
                         }
                         tg!(&mut g; #close_bracket() #close() #close());
+                    }
+                }
+            }
+            "smallvec" => {
+                if self.pos >= hi {
+                    tg!(&mut g; smallvec :: SmallVec :: new ());
+                } else {
+                    let first = self.expr()?;
+                    if self.eat(T::Semi) {
+                        let n = self.expr()?;
+                        tg!(&mut g; smallvec :: SmallVec :: from_elem (#expr(first), #expr(n)));
+                    } else {
+                        let mut v = vec![first];
+                        while self.eat(T::Comma) {
+                            if self.pos >= hi {
+                                break;
+                            }
+                            v.push(self.expr()?);
+                        }
+                        tg!(&mut g; smallvec :: SmallVec :: from_vec #open() < [_] > :: into_vec #open() #core() :: boxed :: Box :: new #open() #open_bracket());
+                        for e in v {
+                            tg!(&mut g; #expr(e) ,);
+                        }
+                        tg!(&mut g; #close_bracket() #close() #close() #close());
                     }
                 }
             }

@@ -391,6 +391,12 @@ impl From<alloc::ffi::NulError> for Error {
     }
 }
 
+impl From<core::collections::TryReserveError> for Error {
+    fn from(e: core::collections::TryReserveError) -> Error {
+        Error::new(ErrorKind::OutOfMemory, e)
+    }
+}
+
 /// `"<strerror text>"` for the Debug output of an OS error.
 struct OsMessage(i32);
 

@@ -279,6 +279,53 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
     for (ci, c) in crates.iter().enumerate() {
         env[ci].push(("CARGO_CRATE_NAME".to_string(), c.name.clone()));
     }
+    // cargo's integration-test environment: CARGO_TARGET_TMPDIR and CARGO_BIN_EXE_<bin>
+    let integration_tests: Vec<usize> = test_crates.iter().copied().filter(|&ci| crates[ci].bin && units.iter().any(|u| crate::vfs::normalize_path(&u.src_path) == crate_paths[ci] && u.kind.iter().any(|k| k == "test"))).collect();
+    if !integration_tests.is_empty() {
+        let target_dir = crate::dirs::relax_dir();
+        let tmpdir = target_dir.join("tmp");
+        let _ = std::fs::create_dir_all(&tmpdir);
+        let tmpdir_str = tmpdir.display().to_string();
+        for &ci in &integration_tests {
+            env[ci].push(("CARGO_TARGET_TMPDIR".to_string(), tmpdir_str.clone()));
+        }
+        if !g.bins.is_empty() {
+            if let Ok(exe) = self_exe() {
+                let (pkg_dir, pkg_name, _) = &pkg[integration_tests[0]];
+                let bin_dir = target_dir.join("relax-bin");
+                let _ = std::fs::create_dir_all(&bin_dir);
+                let td_str = target_dir.display().to_string();
+                let exe_str = exe.display().to_string();
+                let sh_quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+                let allow_c = if std::env::var("MAKEPAD_RUN_ALLOW_C").ok().as_deref() == Some("1") { " --allow-c" } else { "" };
+                for bin_name in &g.bins {
+                    let wrapper = bin_dir.join(if cfg!(windows) { format!("{bin_name}.cmd") } else { bin_name.clone() });
+                    let script = if cfg!(windows) {
+                        format!("@echo off\r\nset MAKEPAD_RUN_SELF_EXEC=\r\nset MAKEPAD_RUN_SELF_EXEC_SILENT_ADDED=\r\n\"{}\" run --quiet --silent --no-live{} --run-dir \"{}\" --workspace-dir \"{}\" \"{}\" --bin \"{}\" -- %*\r\n",
+                            exe_str, allow_c, td_str, pkg_dir, pkg_name, bin_name)
+                    } else {
+                        format!("#!/bin/sh\nunset MAKEPAD_RUN_SELF_EXEC MAKEPAD_RUN_SELF_EXEC_SILENT_ADDED\nexec {} run --quiet --silent --no-live{} --run-dir {} --workspace-dir {} {} --bin {} -- \"$@\"\n",
+                            sh_quote(&exe_str), allow_c, sh_quote(&td_str), sh_quote(pkg_dir), sh_quote(pkg_name), sh_quote(bin_name))
+                    };
+                    if std::fs::read(&wrapper).ok().as_deref() != Some(script.as_bytes()) {
+                        let tmp = bin_dir.join(format!(".{}.tmp{}", bin_name, std::process::id()));
+                        if std::fs::write(&tmp, script.as_bytes()).is_ok() {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt;
+                                let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755));
+                            }
+                            let _ = std::fs::rename(&tmp, &wrapper);
+                        }
+                    }
+                    let wrapper_str = wrapper.display().to_string();
+                    for &ci in &integration_tests {
+                        env[ci].push((format!("CARGO_BIN_EXE_{bin_name}"), wrapper_str.clone()));
+                    }
+                }
+            }
+        }
+    }
     crate::crates::disambiguate_multi_version_crates(&mut crates);
     let mut cfgs = vec![Vec::new(); n];
     for &ci in &test_crates {

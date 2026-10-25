@@ -348,7 +348,7 @@ fn take_privileged(raw: &mut Vec<Vec<u8>>) -> bool {
                 raw.remove(i);
                 return true;
             }
-            b"--units" | b"--report-to" | b"--entry" | b"--boundary" | b"--run-dir" | b"--cfg" => i += 2,
+            b"--units" | b"--report-to" | b"--entry" | b"--boundary" | b"--run-dir" | b"--workspace-dir" | b"--cfg" => i += 2,
             w if w.starts_with(b"--") => i += 1,
             _ => return false,
         }
@@ -362,7 +362,7 @@ fn run_package(words: &[String]) -> Option<String> {
     while i < words.len() {
         let w = words[i].as_str();
         match w {
-            "--units" | "--report-to" | "--entry" | "--boundary" | "--run-dir" | "--cfg" => i += 2,
+            "--units" | "--report-to" | "--entry" | "--boundary" | "--run-dir" | "--workspace-dir" | "--cfg" => i += 2,
             _ if w.starts_with("--") => i += 1,
             _ => return Some(w.to_string()),
         }
@@ -452,7 +452,7 @@ fn run_src(words: &[String]) -> i32 {
                 i += 2;
                 continue;
             }
-            "--units" | "--report-to" | "--entry" | "--boundary" | "--run-dir" | "--cfg" => 2,
+            "--units" | "--report-to" | "--entry" | "--boundary" | "--run-dir" | "--workspace-dir" | "--cfg" => 2,
             _ => 1,
         };
         opts.extend(words[i..(i + n).min(words.len())].iter().cloned());

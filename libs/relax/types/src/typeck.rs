@@ -4651,27 +4651,36 @@ impl<'a> Fcx<'a> {
             None => return None,
         };
         let args = self.seg_args(path, n - 1, d, 0);
+        let has_args = args.is_some();
         match prog.def(d).kind {
             DefKind::Prim(p) => Some(self.tcx.tys.prim(p)),
             DefKind::Struct | DefKind::Enum | DefKind::Union => {
                 let ng = self.tcx.adts.get(&d).map_or(0, |a| a.n_generics);
                 let mut a = args.unwrap_or_default();
-                while a.len() < ng as usize {
-                    a.push(self.fresh_arg(d, a.len()));
-                }
                 let mut regions = Vec::new();
                 for _ in &self.tcx.generic_indices_of(prog, d).lifetimes { regions.push(self.fresh_region()); }
                 // the lifetimes written on the prefix segment (`A::<'a>::new`)
                 let written = self.seg_lifetimes(path, n - 1);
                 if written.len() == regions.len() { regions = written; }
-                Some(self.tcx.tys.intern(TyKind::Adt(d, self.tcx.tys.mk_list(&a), self.tcx.tys.intern_region_args(&regions))))
+                let regions = self.tcx.tys.intern_region_args(&regions);
+                if has_args && a.len() < ng as usize {
+                    let _ = self.tcx.fill_type_defaults(&self.cx.with_infcx(&self.infcx), prog, d, &mut a, Some(regions));
+                }
+                while a.len() < ng as usize {
+                    a.push(self.fresh_arg(d, a.len()));
+                }
+                Some(self.tcx.tys.intern(TyKind::Adt(d, self.tcx.tys.mk_list(&a), regions)))
             }
             DefKind::TypeAlias => {
                 let t = self.tcx.alias_ty(&self.cx.with_infcx(&self.infcx), prog, d);
                 let mut a = args.unwrap_or_default();
+                // `Alias::<A>::f`: trailing parameters with defaults take their defaults;
                 // `Alias::f` without generic args: the alias's parameters are inferred like a
                 // struct's (`FxHashSet::default()`)
                 let need = self.tcx.item_env(prog, d).names.len();
+                if has_args && a.len() < need {
+                    let _ = self.tcx.fill_type_defaults(&self.cx.with_infcx(&self.infcx), prog, d, &mut a, None);
+                }
                 while a.len() < need {
                     a.push(self.fresh_arg(d, a.len()));
                 }
@@ -5019,9 +5028,10 @@ impl<'a> Fcx<'a> {
                 let ta = self.check_expr(*a, None);
                 self.check_lhs_assignable(*a, true);
                 let sa = self.shallow(ta);
-                // rustc_hir_typeck/src/op.rs:29-44: parameters and aliases keep
-                // the overloaded decision, even when an instance is primitive.
-                if matches!(self.tcx.tys.kind(sa), TyKind::Adt(..) | TyKind::Ref(..) | TyKind::Tuple(..) | TyKind::Array(..) | TyKind::Param(_) | TyKind::Alias(..)) {
+                let sa = if matches!(self.tcx.tys.kind(sa), TyKind::Infer(_)) { self.retry_goals(false); self.shallow(sa) } else { sa };
+                // rustc_hir_typeck/src/op.rs:29-44: parameters, aliases, and unresolved type
+                // variables keep the overloaded decision, even when an instance is primitive.
+                if matches!(self.tcx.tys.kind(sa), TyKind::Adt(..) | TyKind::Ref(..) | TyKind::Tuple(..) | TyKind::Array(..) | TyKind::Param(_) | TyKind::Alias(..) | TyKind::Infer(_)) {
                     // `a op= b` on a non-primitive: core::ops::<Op>Assign
                     self.cur_binop = e.0;
                     self.check_op_trait(*op, sa, *b, lo, true);
@@ -6272,9 +6282,10 @@ impl<'a> Fcx<'a> {
                 let sa0 = self.shallow(ta);
                 let ta = self.peel_prim_refs(sa0);
                 let sa = self.shallow(ta);
+                let sa = if matches!(self.tcx.tys.kind(sa), TyKind::Infer(_)) { self.retry_goals(false); self.shallow(sa) } else { sa };
                 // parameters and aliases are operator trait calls (rustc op.rs is_builtin_binop:
                 // only primitive operands are built in), as for `a op= b` below
-                if matches!(self.tcx.tys.kind(sa), TyKind::Adt(..) | TyKind::Ref(..) | TyKind::Tuple(..) | TyKind::Array(..) | TyKind::Param(_) | TyKind::Alias(..)) {
+                if matches!(self.tcx.tys.kind(sa), TyKind::Adt(..) | TyKind::Ref(..) | TyKind::Tuple(..) | TyKind::Array(..) | TyKind::Param(_) | TyKind::Alias(..) | TyKind::Infer(_)) {
                     self.cur_binop = e.0;
                     return self.check_op_trait(op, sa, b, lo, false);
                 }

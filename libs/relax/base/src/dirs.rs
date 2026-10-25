@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 static SET: OnceLock<PathBuf> = OnceLock::new();
+static SET_WORKSPACE: OnceLock<String> = OnceLock::new();
 static DEFAULT: OnceLock<PathBuf> = OnceLock::new();
 
 /// The run dir handed over by a parent run (`makepad run --run-dir`). Set before anything
@@ -35,9 +36,19 @@ pub fn set_relax_dir(dir: PathBuf) {
     let _ = SET.set(crate::zone_alloc::kept_clone(&dir));
 }
 
-/// The workspace: MAKEPAD_RUN_WORKSPACE (a git run's virtual folder, vfs.rs; it does not exist on disk,
-/// so it cannot be the current folder), else the current folder.
+/// The workspace dir handed over by a parent run (`makepad run --workspace-dir`), leaving the
+/// process's OS working directory unchanged.
+pub fn set_workspace_dir(dir: String) {
+    let _ = SET_WORKSPACE.set(crate::zone_alloc::kept_clone(&dir));
+}
+
+/// The workspace: `--workspace-dir` (`set_workspace_dir`), else MAKEPAD_RUN_WORKSPACE (a git run's
+/// virtual folder, vfs.rs; it does not exist on disk, so it cannot be the current folder), else
+/// the current folder.
 pub fn workspace_dir() -> String {
+    if let Some(w) = SET_WORKSPACE.get() {
+        return w.clone();
+    }
     if let Some(w) = std::env::var_os("MAKEPAD_RUN_WORKSPACE").filter(|w| !w.is_empty()) {
         return w.to_string_lossy().into_owned();
     }

@@ -484,6 +484,12 @@ impl<T> Vec<T> {
         Ok(())
     }
 
+    pub fn push_mut(&mut self, value: T) -> &mut T {
+        self.push(value);
+        let idx = self.len - 1;
+        unsafe { &mut *im::ptr_add_mut(self.ptr.as_ptr(), idx) }
+    }
+
     pub fn pop(&mut self) -> Option<T> {
         if self.len == 0 {
             None

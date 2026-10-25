@@ -118,9 +118,24 @@ pub fn run(core: &str) {
 
     let mut z = String::new();
     header(&mut z, "Per-type NonZero<T> API (constants, bit queries, checked/saturating arithmetic, conversions, BitOr), as real core's nonzero.rs macros generate it.");
-    z.push_str("use super::nonzero::NonZero;\nuse crate::ops::{BitOr, BitOrAssign};\n\n");
+    z.push_str("use super::nonzero::NonZero;\nuse crate::ops::{BitOr, BitOrAssign, Div, DivAssign, Rem, RemAssign};\n\n");
     for t in INTS.iter().filter(|t| t.pw != 32) {
         gen_nonzero(&mut z, t);
+    }
+    for from in INTS.iter().filter(|t| t.pw != 32) {
+        for to in INTS.iter().filter(|t| t.pw != 32) {
+            if from.name != to.name && has_from(from, to) {
+                let (f, t) = (from.name, to.name);
+                let _ = writeln!(z, "impl From<NonZero<{f}>> for NonZero<{t}> {{ fn from(v: NonZero<{f}>) -> NonZero<{t}> {{ unsafe {{ NonZero::new_unchecked(v.get() as {t}) }} }} }}");
+            }
+        }
+    }
+    for t in INTS.iter().filter(|t| t.pw != 32 && !t.signed) {
+        let n = t.name;
+        let _ = writeln!(z, "impl Div<NonZero<{n}>> for {n} {{ type Output = {n}; fn div(self, rhs: NonZero<{n}>) -> {n} {{ self / rhs.get() }} }}");
+        let _ = writeln!(z, "impl DivAssign<NonZero<{n}>> for {n} {{ fn div_assign(&mut self, rhs: NonZero<{n}>) {{ *self = *self / rhs; }} }}");
+        let _ = writeln!(z, "impl Rem<NonZero<{n}>> for {n} {{ type Output = {n}; fn rem(self, rhs: NonZero<{n}>) -> {n} {{ self % rhs.get() }} }}");
+        let _ = writeln!(z, "impl RemAssign<NonZero<{n}>> for {n} {{ fn rem_assign(&mut self, rhs: NonZero<{n}>) {{ *self = *self % rhs; }} }}");
     }
     std::fs::write(format!("{}/num/nonzero_impls.rs", core), z).expect("write nonzero_impls.rs");
     eprintln!("gen_num: wrote num/int_impls.rs, num/float_impls.rs, num/prim_traits.rs, num/nonzero_impls.rs");
@@ -656,7 +671,7 @@ fn gen_int_traits(o: &mut String, t: &Int) {
         &[("Add", "add", "+"), ("Sub", "sub", "-"), ("Mul", "mul", "*"), ("Div", "div", "/"), ("Rem", "rem", "%"), ("BitAnd", "bitand", "&"), ("BitOr", "bitor", "|"), ("BitXor", "bitxor", "^")],
     );
     let mut rhs_types: Vec<&str> = vec![n];
-    for r in ["u32", "i32", "usize"] {
+    for r in ["u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize"] {
         if r != n {
             rhs_types.push(r);
         }

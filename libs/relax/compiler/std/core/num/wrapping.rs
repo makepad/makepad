@@ -141,6 +141,16 @@ impl<T: BitAnd<Output = T> + Copy> BitAndAssign for Wrapping<T> {
         self.0 = self.0 & rhs.0;
     }
 }
+impl<T: Shl<usize, Output = T> + Copy> ShlAssign<usize> for Wrapping<T> {
+    fn shl_assign(&mut self, rhs: usize) {
+        self.0 = self.0 << rhs;
+    }
+}
+impl<T: Shr<usize, Output = T> + Copy> ShrAssign<usize> for Wrapping<T> {
+    fn shr_assign(&mut self, rhs: usize) {
+        self.0 = self.0 >> rhs;
+    }
+}
 
 /// Saturating<T>: the operator impls of core::num::saturating (binops with a `Saturating` rhs, the
 /// `op=` impls with either rhs, Not), through the integer's saturating methods.
