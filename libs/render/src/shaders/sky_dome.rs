@@ -23,10 +23,14 @@ script_mod! {
             self.v_dir = self.geom.geom_pos
             let view_pos = self.draw_pass.camera_view * self.world
             let clip = self.draw_pass.camera_projection * view_pos
-            // Pin the sky to the far plane (z ~= w) — the skybox trick Godot's
-            // background pass amounts to: the dome never clips against the far
-            // plane no matter its world size, and everything else wins depth.
-            self.vertex_pos = vec4(clip.x, clip.y, clip.w * 0.99995, clip.w)
+            // Pin the sky ON the far plane (z = w, depth exactly 1.0, the
+            // cleared value): the dome never clips against the far plane no
+            // matter its world size, and every depth test is LessEqual, so
+            // anything inside the frustum wins. Not z = 0.99995 w: with the
+            // perspective depth curve that depth is reached long before the
+            // far plane (2 near (1/d - 1/far) = 5e-5: ~11 km of a 24 km far
+            // at near 0.48), and the dome painted over all terrain past it.
+            self.vertex_pos = vec4(clip.x, clip.y, clip.w, clip.w)
         }
 
         pixel: fn() {
@@ -79,10 +83,9 @@ script_mod! {
             self.v_dir = self.geom.geom_pos
             let view_pos = self.draw_pass.camera_view * self.world
             let clip = self.draw_pass.camera_projection * view_pos
-            // Pin to the far plane (z ~= w) — same skybox trick as
-            // DrawSceneSky: never clips against the far plane, everything
-            // else wins depth.
-            self.vertex_pos = vec4(clip.x, clip.y, clip.w * 0.99995, clip.w)
+            // On the far plane (z = w), as DrawSceneSky: never clips
+            // against it, and everything inside the frustum wins depth.
+            self.vertex_pos = vec4(clip.x, clip.y, clip.w, clip.w)
         }
 
         pixel: fn() {

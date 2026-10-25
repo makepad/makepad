@@ -780,16 +780,21 @@ script_mod! {
                 return 1.0 - exp(0.0 - kd * kd)
             }
             let k = self.fog_ctl.y
-            // Optical depth of exp(-(h - h0) k) along the segment, written
-            // with both exponents bounded (no overflow from high cameras).
-            // (e^a - e^b)/dy with b = a - dy, written as e^a (1 - e^-dy)/dy:
-            // the difference of two exponentials cancels catastrophically
-            // on near-level rays under fast math (rings round the camera).
-            let a = min((self.fog_ctl.x - self.fog_eye.y) * k, 30.0)
+            // Optical depth of exp(-(h - h0) k) along the segment: with a and
+            // b = a - dy the exponents at the eye and at the point, it is
+            // (e^a - e^b)/dy = e^hi (1 - e^-|dy|)/|dy|, hi = max(a, b). Every
+            // exponential is bounded: e^hi <= e^30 and e^-|dy| <= 1. (Not
+            // e^a (1 - e^-dy)/dy: looking down from above ~3.5 km, dy < -88
+            // overflows e^-dy to inf while e^a underflows to 0, and the NaN
+            // drew the far ground and sea black.) The difference of two
+            // exponentials would cancel catastrophically on near-level rays
+            // under fast math (rings round the camera): the series covers them.
+            let a = (self.fog_ctl.x - self.fog_eye.y) * k
             let dy = d.y * k
-            var slope = 1.0 - dy * 0.5 + dy * dy * 0.1666667
-            if abs(dy) > 0.05 { slope = (1.0 - exp(0.0 - dy)) / dy }
-            let layer = exp(a) * slope
+            let x = abs(dy)
+            var slope = 1.0 - x * 0.5 + x * x * 0.1666667
+            if x > 0.05 { slope = (1.0 - exp(0.0 - x)) / x }
+            let layer = exp(min(max(a, a - dy), 30.0)) * slope
             return 1.0 - exp(0.0 - length(d) * density * layer)
         }
         cluster_x: uniform(vec4(1.0,0.0,0.0,0.0))

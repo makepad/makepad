@@ -257,12 +257,15 @@ script_mod! {
             var fog = self.v_fog
             if self.water_fog.w > 0.5 {
                 let d = p - eye
+                // The clustered scene_fog's bounded form (clustered.rs): no
+                // inf x 0 = NaN (black sea) from high cameras.
                 let k = self.water_fog.y
-                let fa = min((self.water_fog.x - eye.y) * k, 30.0)
+                let fa = (self.water_fog.x - eye.y) * k
                 let dy = d.y * k
-                var slope = 1.0 - dy * 0.5 + dy * dy * 0.1666667
-                if abs(dy) > 0.05 { slope = (1.0 - exp(0.0 - dy)) / dy }
-                fog = 1.0 - exp(0.0 - length(d) * self.fog_density * exp(fa) * slope)
+                let x = abs(dy)
+                var slope = 1.0 - x * 0.5 + x * x * 0.1666667
+                if x > 0.05 { slope = (1.0 - exp(0.0 - x)) / x }
+                fog = 1.0 - exp(0.0 - length(d) * self.fog_density * exp(min(max(fa, fa - dy), 30.0)) * slope)
             }
             return vec4(mix(rgb, self.fog_color * a, fog), a)
         }
