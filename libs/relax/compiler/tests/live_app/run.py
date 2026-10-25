@@ -6,11 +6,11 @@ usage: run.py --makepad <makepad binary> [--warm]   (MAKEPAD_RUN_STD in the envi
 Copies pkg/ to a temporary dir, runs it (a working tree: live) and edits src/helper.rs while it runs:
   1. body edit: value() returns 2                  -> stdout shows 2, stderr "patched"
   2. type error in value()                          -> stderr "NOT applied" + the error; output stays 2
-  3. struct field added to Conf (a Copy struct)     -> "restart to apply"; the test sends `makepad inspect
-                                                     <app> session relaunch` (restart-rung edits never
-                                                     restart on their own): a state-preserving restart,
-                                                     the program gets its tick count back and runs the
-                                                     new code (value 1 + extra 5 = 6)
+  3. struct field added to Conf (a Copy struct)     -> a Restart rung: makepad restarts for real on its
+                                                     own (cargo first checks the makepad binary is
+                                                     current; up to 300 s if it has to build): a
+                                                     state-preserving restart, the program gets its tick
+                                                     count back and runs the new code (value 1 + extra 5 = 6)
   4. the struct back + value() returns 999          -> the program sees 999 and exits
 Each step waits up to 20 s. Prints PASS/FAIL per step; exit 1 on any FAIL.
 """
@@ -90,23 +90,9 @@ n_err = len(err)
 n_before = max((int(l.split()[2]) for l in out if l.startswith("out tick ")), default=0)
 layout = base.replace("    pub base: u64,\n", "    pub base: u64,\n    pub extra: u8,\n").replace("Conf { base: 1 }", "Conf { base: 1, extra: 5 }").replace("conf().base\n", "conf().base + conf().extra as u64\n")
 save(layout)
-def app_pid():
-    # the app this test started: the pid makepad-remote names, checked to be p or below it
-    for l in err:
-        if l.startswith("makepad-remote: pid "):
-            pid = q = int(l.split()[2])
-            while q > 1:
-                if q == p.pid:
-                    return pid
-                r = subprocess.run(["ps", "-o", "ppid=", "-p", str(q)], capture_output=True, text=True)
-                q = int(r.stdout.strip() or 0)
-    return None
-pending = wait(lambda: any("restart to apply" in l for l in err[n_err:]))
-pid = app_pid() if pending else None
-relaunch = subprocess.run([relax, "inspect", str(pid), "session", "relaunch"], capture_output=True, text=True, timeout=60) if pid else None
-step("layout edit waits for `session relaunch`, which is accepted (%s)" % ((relaunch.stdout + relaunch.stderr).strip()[:160] if relaunch else "no app pid"),
-     bool(relaunch) and relaunch.returncode == 0)
-ok = wait(lambda: last_value() == 6)
+restarting = wait(lambda: any("restarting makepad" in l for l in err[n_err:]))
+step("layout edit restarts makepad on its own (no `session relaunch`)", restarting)
+ok = wait(lambda: last_value() == 6, 300)
 restored = [int(l.split()[2]) for l in out if l.startswith("out restored ")]
 step("layout edit: state-preserving restart (restored tick %s, before %d), new code runs" % (restored[-1] if restored else None, n_before), ok and bool(restored) and restored[-1] >= n_before)
 save(layout.replace("conf().base + conf().extra as u64\n", "999\n"))

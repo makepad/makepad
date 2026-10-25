@@ -1,5 +1,6 @@
 //! Changes a running process cannot take in place: the provided crates built into makepad, std,
-//! makepad run's own sources, the Cargo graph, build scripts. The loader is rebuilt with cargo in
+//! makepad run's own sources, the Cargo graph, build scripts, and program edits the patcher cannot
+//! absorb (a Restart rung: a layout, a signature). The loader is rebuilt with cargo in
 //! the background (nice) while the app keeps running the code it has, then the process truly
 //! restarts: the rebuilt binary replaces it (exec) with the same command line, and an app that
 //! restarts with its state (std::relax::restart_supported) is asked first, at its next safe point
@@ -185,7 +186,7 @@ fn build_loop() {
             Ok(c) => c,
             Err(e) => return fail(format!("{why}; cannot rebuild makepad: {e}; the app runs the previous code -- restart it by hand")),
         };
-        eprintln!("makepad live: {why}; rebuilding makepad in the background (`{shown}`); the app keeps running the previous code");
+        eprintln!("makepad live: {why}; restarting makepad: it builds first in the background (`{shown}`, a no-op when makepad is current); the app keeps running the previous code");
         super::live_log(&format!("{{\"event\":\"host_rebuild\",\"started\":true,\"why\":{}}}", super::json_str(&why)));
         let t0 = Instant::now();
         let out = match cmd.output() {

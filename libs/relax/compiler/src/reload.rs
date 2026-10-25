@@ -3449,17 +3449,6 @@ pub(crate) fn domain_loaded(inputs: Option<Inputs>) {
     DOMAIN_LOADING.store(false, std::sync::atomic::Ordering::Release);
 }
 
-fn restart_domain(reason: String) -> bool {
-    if crate::run::app_domain().is_none() { return false; }
-    *RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()) = reason;
-    if RESTART_SUPPORTED.load(std::sync::atomic::Ordering::SeqCst) {
-        RESTART_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
-        wake_program();
-    } else if let Err(e) = crate::run::relaunch() {
-        eprintln!("makepad live: relaunch: {e}");
-    }
-    true
-}
 
 pub extern "C" fn __relax_live_edit_enabled() -> bool {
     crate::layout::LIVE_SESSION.load(std::sync::atomic::Ordering::Relaxed)
@@ -3693,10 +3682,15 @@ pub(crate) fn settle_verdicts(up: *mut Unit, pending: &mut Vec<PendingPatch>, un
     back
 }
 
-/// MAKEPAD_RUN_AUTO_RELAUNCH=1: a change that cannot apply live relaunches the app domain at once
-/// (the old default). Off: it waits for `session relaunch`.
-fn auto_relaunch() -> bool {
-    std::env::var("MAKEPAD_RUN_AUTO_RELAUNCH").is_ok_and(|v| v == "1")
+/// An edit that needs a restart: makepad restarts for real into a current binary (host::request;
+/// cargo's check is a no-op when makepad is up to date). Where this run cannot restart itself
+/// (no cargo-built loader, Windows) the edit waits for `session relaunch`.
+fn restart_for_edit(what: &str, lines: &[String], inputs: &Inputs) {
+    let why = format!("{}: {}", what, lines.first().cloned().unwrap_or_default());
+    if let Err(e) = host::request(format!("{why} (needs a restart)"), inputs.process_paths()) {
+        note_restart_pending(&why);
+        eprintln!("makepad live: {what}: restart to apply (reasons below); the app keeps running the previous code -- `makepad inspect <app> session relaunch` applies it ({e})");
+    }
 }
 
 /// Edits waiting for a relaunch (`session` in inspect lists them).
@@ -4279,7 +4273,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
                 log_edit(&f.0, &o, f.2.map(|s| s.0), seen);
                 match o.rung {
                     Rung::Refuse => eprintln!("makepad live: {}: NOT applied (errors below); the app runs the previous code", f.0),
-                    _ => eprintln!("makepad live: {}: needs a restart (reasons below); the app runs the previous code", f.0),
+                    _ => restart_for_edit(&f.0, &o.lines, &inputs),
                 }
                 for l in &o.lines { eprintln!("makepad live:   {}", l); }
                 patch_refused_event(&f.0, o.rung == Rung::Refuse, &o.lines);
@@ -4395,12 +4389,6 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
                 }
                 Err(e) => eprintln!("makepad live: cannot rebuild and restart makepad here: {e}"),
             }
-            if auto_relaunch() && !inputs.host_restart_required(changed.iter().map(|&k| files[k].0.as_str())) && restart_domain(reason.to_string()) {
-                eprintln!("makepad live: {reason}; relaunching the app domain (window kept)");
-                restart_required = true;
-                stalled.clear();
-                continue;
-            }
             let package = std::env::var("MAKEPAD_RUN_PACKAGE").unwrap_or_else(|_| "<pkg>".into());
             let what = if changed.iter().any(|&k| std::path::Path::new(&files[k].0).is_dir()) { "source inputs" } else { "files" };
             // provided crates and std are built into this binary: cargo rebuilds it on the way
@@ -4492,23 +4480,9 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
                 o.ms.iter().sum::<f64>()
             ),
             Rung::Refuse => eprintln!("makepad live: {}: NOT applied (errors below); the app runs the previous code", what),
-            // a change that cannot apply live never relaunches on its own (a relaunch lost the
-            // user's session): the old code keeps running until a relaunch is asked for
-            // (`session relaunch`, or MAKEPAD_RUN_AUTO_RELAUNCH=1)
-            Rung::Restart if auto_relaunch() && restart_domain(format!("{}: {}", what, o.lines.first().cloned().unwrap_or_default())) => {
-                restart_required = true;
-                eprintln!("makepad live: {what}: relaunching the app domain (window kept)");
-            }
-            Rung::Restart if auto_relaunch() && RESTART_SUPPORTED.load(std::sync::atomic::Ordering::SeqCst) => {
-                // the program restarts itself at its next safe point, carrying its state over
-                *RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()) = format!("{}: {}", what, o.lines.first().cloned().unwrap_or_default());
-                RESTART_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
-                eprintln!("makepad live: {}: restarting with state at the app's next safe point (reasons below)", what);
-            }
-            Rung::Restart => {
-                note_restart_pending(&format!("{}: {}", what, o.lines.first().cloned().unwrap_or_default()));
-                eprintln!("makepad live: {}: restart to apply (reasons below); the app keeps running the previous code -- `makepad inspect <app> session relaunch` applies it", what)
-            }
+            // an edit the patcher cannot absorb: makepad restarts for real (the app is asked at its
+            // next safe point and keeps its state); it runs the previous code until then
+            Rung::Restart => restart_for_edit(&what, &o.lines, &inputs),
         }
         for l in &o.lines {
             eprintln!("makepad live:   {}", l);
