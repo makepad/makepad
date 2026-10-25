@@ -10,7 +10,7 @@
 //! kbps = 0                # 0: by picture size
 //! fps = 120               # the cap: the stream runs at the lowest of it, the screen's refresh
 //!                         # and the watching viewers' displays
-//! key_every = 10          # seconds between scheduled key frames while pictures flow (0: only
+//! key_every = 2           # seconds between scheduled key frames while pictures flow (0: only
 //!                         # on a new viewer, a request or a lost picture)
 //! fleet_dir =             # fleet.key + revoked; default: ~/.makepad/weights/fleet (the AI hub's)
 //! ```
@@ -33,7 +33,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { enabled: false, host: "0.0.0.0".into(), port: makepad_desk_link::DEFAULT_PORT, kbps: 0, fps: 120, key_every: 10, fleet_dir: None, allow_peers: Vec::new() }
+        Settings { enabled: false, host: "0.0.0.0".into(), port: makepad_desk_link::DEFAULT_PORT, kbps: 0, fps: 120, key_every: 2, fleet_dir: None, allow_peers: Vec::new() }
     }
 }
 
@@ -135,7 +135,7 @@ mod tests {
     fn off_unless_enabled_and_lan_only() {
         assert!(!Settings::parse("").enabled);
         let s = Settings::parse("enabled = on\nhost = 10.0.0.230\nfps = 0\nallow_peers = 10.0.0.222");
-        assert!(s.enabled && s.fps == 120 && s.key_every == 10 && s.listen_addr().is_ok());
+        assert!(s.enabled && s.fps == 120 && s.key_every == 2 && s.listen_addr().is_ok());
         assert_eq!(Settings::parse("key_every = 0").key_every, 0);
         assert_eq!(s.allow_peers, vec!["10.0.0.222".parse::<IpAddr>().unwrap()]);
         assert!(Settings::parse("host = 1.1.1.1").listen_addr().is_err());

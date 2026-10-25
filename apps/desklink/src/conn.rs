@@ -548,6 +548,8 @@ fn decode_loop(rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal
     // parallel), so a picture of N tiles takes about one tile's decode, not N
     let gathering: Arc<Mutex<Assembly>> = Arc::new(Mutex::new(Assembly::default()));
     let mut workers: Vec<Sender<Packet>> = Vec::new();
+    // how many streams the desktop sends (a single one is checked for missing pictures)
+    let streams = Arc::new(AtomicUsize::new(0));
     loop {
         let packet = match rx.recv_timeout(Duration::from_millis(500)) {
             Ok(p) => {
@@ -560,9 +562,10 @@ fn decode_loop(rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal
         let s = packet.stream as usize;
         while workers.len() <= s {
             let (tx, wrx) = channel::<Packet>();
-            let (latest2, signal2, shared2, cmd2, gathering2) = (latest.clone(), signal.clone(), shared.clone(), cmd.clone(), gathering.clone());
+            let (latest2, signal2, shared2, cmd2, gathering2, streams2) = (latest.clone(), signal.clone(), shared.clone(), cmd.clone(), gathering.clone(), streams.clone());
             let index = workers.len();
-            let spawned = std::thread::Builder::new().name(format!("desklink-dec-{index}")).spawn(move || decode_stream(index, wrx, latest2, signal2, shared2, cmd2, gathering2));
+            streams.store(index + 1, Ordering::Release);
+            let spawned = std::thread::Builder::new().name(format!("desklink-dec-{index}")).spawn(move || decode_stream(index, wrx, latest2, signal2, shared2, cmd2, gathering2, streams2));
             if let Err(e) = spawned {
                 shared.lock().unwrap().warning = Some(format!("decoder thread: {e}"));
                 return;
@@ -600,13 +603,28 @@ impl Assembly {
 /// One encoder stream's decoder: waits for its key frame after a failure; a whole picture
 /// goes out at once, a tile once its picture's other tiles are here (never a torn picture; a
 /// tile of a newer picture drops an incomplete older one).
-fn decode_stream(s: usize, rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal: SignalToUI, shared: Arc<Mutex<Shared>>, cmd: Sender<ClientMsg>, gathering: Arc<Mutex<Assembly>>) {
+fn decode_stream(s: usize, rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal: SignalToUI, shared: Arc<Mutex<Shared>>, cmd: Sender<ClientMsg>, gathering: Arc<Mutex<Assembly>>, streams: Arc<AtomicUsize>) {
     let mut decoder: Option<VideoStreamDecoder> = None;
     let mut waiting_key = false;
+    // the last picture of a single-stream desktop: a picture missing in between means the next
+    // ones would decode against a reference this decoder never had
+    let mut last_frame: Option<u32> = None;
     while let Ok(packet) = rx.recv() {
         if waiting_key && !packet.key {
             continue;
         }
+        if streams.load(Ordering::Acquire) == 1 && packet.parts <= 1 && !packet.key {
+            if let Some(last) = last_frame {
+                if packet.frame != last.wrapping_add(1) {
+                    eprintln!("desklink: picture {} follows {last} (missing in between); asking for a key frame", packet.frame);
+                    waiting_key = true;
+                    last_frame = None;
+                    let _ = cmd.send(ClientMsg::RequestKeyframe);
+                    continue;
+                }
+            }
+        }
+        last_frame = Some(packet.frame);
         if decoder.is_none() || packet.key && waiting_key {
             match VideoStreamDecoder::new_gpu(StreamVideoCodec::H264) {
                 Ok(d) => decoder = Some(d),

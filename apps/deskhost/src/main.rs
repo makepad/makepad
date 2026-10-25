@@ -286,6 +286,8 @@ fn run(desktop: &mut dyn Desktop) {
     // the last key frame sent (scheduled ones follow `key_every` while pictures flow)
     let mut last_key = Instant::now();
     loop {
+        #[cfg(target_os = "macos")]
+        let _pool = macos::Pool::new();
         // nobody watches: sleep until a session says something (no polling while idle)
         if viewers.is_empty() {
             let _ = wake_rx.recv_timeout(Duration::from_secs(1));
@@ -493,10 +495,13 @@ fn run(desktop: &mut dyn Desktop) {
         }
         if std::mem::take(&mut key_wanted) || unsynced {
             enc.request_keyframe();
+            last_key = Instant::now();
         }
         // the encode is synchronous: the frame (its surface) is held until it returns
         let push_ns = clock_ns();
-        let pushed = enc.push_shared_texture(frame.handle, GpuReady::Done, frame_no as i64);
+        // its time is the capture's (100 ns units): the encoder's rate control spends its bits by
+        // it (picture numbers as times read as ten million pictures a second: starved pictures)
+        let pushed = enc.push_shared_texture(frame.handle, GpuReady::Done, (frame.captured_ns / 100) as i64);
         timing.add(push_ns.saturating_sub(frame.captured_ns), clock_ns() - push_ns, enc.stages());
         if timing.since.elapsed() >= Duration::from_secs(10) {
             log(&timing.line());
@@ -512,6 +517,7 @@ fn run(desktop: &mut dyn Desktop) {
                     if dropped == 1 || dropped % 1000 == 0 {
                         log(&format!("encoder: gave nothing for {dropped} pictures so far ({}x{} at {fps} a second); a key frame follows", size[0], size[1]));
                     }
+                    continue;
                 }
                 let encoded_ns = clock_ns();
                 for p in packets {

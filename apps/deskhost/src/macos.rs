@@ -81,6 +81,23 @@ fn pixel_size(id: CGDirectDisplayID) -> (u32, u32) {
     }
 }
 
+/// An autorelease pool for one pass of the host's loop: it runs no AppKit event loop, so
+/// nothing else drains what AppKit and VideoToolbox autorelease (the cursor queries alone, 125
+/// times a second, grew the host to 3 GB in an afternoon).
+pub struct Pool(*mut c_void);
+
+impl Pool {
+    pub fn new() -> Pool {
+        Pool(unsafe { makepad_objc_sys::runtime::objc_autoreleasePoolPush() })
+    }
+}
+
+impl Drop for Pool {
+    fn drop(&mut self) {
+        unsafe { makepad_objc_sys::runtime::objc_autoreleasePoolPop(self.0) }
+    }
+}
+
 /// A CoreFoundation object kept alive while a frame waits for the encoder.
 struct Retained(*const c_void);
 unsafe impl Send for Retained {}
@@ -172,6 +189,9 @@ impl MacDesktop {
         }
         let mut standard_cursors = Vec::new();
         for (sel_name, shape) in [
+            // the arrow first: cursors with its hot spot and size (not-allowed) cannot be told
+            // apart from it this way, and the arrow is by far the likelier one
+            ("arrowCursor", "Default"),
             ("IBeamCursor", "Text"),
             ("pointingHandCursor", "Hand"),
             ("crosshairCursor", "Crosshair"),
@@ -180,7 +200,6 @@ impl MacDesktop {
             ("resizeLeftRightCursor", "EwResize"),
             ("resizeUpDownCursor", "NsResize"),
             ("operationNotAllowedCursor", "NotAllowed"),
-            ("arrowCursor", "Default"),
         ] {
             unsafe {
                 let cursor: ObjcId = match sel_name {

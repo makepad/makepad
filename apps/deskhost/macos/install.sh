@@ -121,8 +121,9 @@ else
 fi
 [ -s "$HOME/.makepad/weights/fleet/fleet.key" ] || echo "note: no fleet key in ~/.makepad/weights/fleet yet: the host waits for it (checks every 10 s)"
 
-# 4. (re)load the agent
-launchctl bootout "gui/$(id -u)/$ID" 2>/dev/null
+# 4. (re)load the agent: the same plist restarts the running host; a new one is loaded anew
+# (bootout returns before launchd has let go of the job: wait for that, a bootstrap at once fails)
+loaded() { launchctl print "gui/$(id -u)/$ID" >/dev/null 2>&1; }
 mkdir -p "$HOME/Library/LaunchAgents"
 cat > "$AGENT.new" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -140,8 +141,17 @@ cat > "$AGENT.new" <<EOF
 </dict>
 </plist>
 EOF
-mv "$AGENT.new" "$AGENT" || fail "agent plist"
-launchctl bootstrap "gui/$(id -u)" "$AGENT" || fail "launchctl bootstrap"
+if loaded && cmp -s "$AGENT.new" "$AGENT"; then
+  rm -f "$AGENT.new"
+  launchctl kickstart -k "gui/$(id -u)/$ID" || fail "kickstart"
+else
+  launchctl bootout "gui/$(id -u)/$ID" 2>/dev/null
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do loaded || break; sleep 0.5; done
+  mv "$AGENT.new" "$AGENT" || fail "agent plist"
+  ok=0
+  for i in 1 2 3 4 5; do launchctl bootstrap "gui/$(id -u)" "$AGENT" 2>/dev/null && { ok=1; break; }; sleep 1; done
+  [ $ok = 1 ] || fail "launchctl bootstrap"
+fi
 sleep 3
 echo "status: $(cat "$HOME/.makepad/deskhost.status" 2>/dev/null)"
 echo "DESKHOST-INSTALL-OK $APP"
