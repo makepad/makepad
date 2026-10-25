@@ -140,6 +140,14 @@ pub struct TextureObj {
     pub lent: Option<LentRef>,
 }
 
+impl TextureObj {
+    /// Six square colour layers are a cube, unless the texture was created as an array
+    /// ([`usage::ARRAY`]); every other layered texture is a 2D array.
+    pub fn is_cube(&self) -> bool {
+        self.depth == 6 && self.w == self.h && !format::is_depth(self.format) && self.usage & usage::ARRAY == 0
+    }
+}
+
 /// What an alias texture of the parent stands for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LentRef {
@@ -1387,5 +1395,23 @@ impl World {
                 Kind::Window => s.windows.len(),
             })
             .sum()
+    }
+}
+
+#[cfg(test)]
+mod texture_kind_tests {
+    use super::*;
+
+    fn tex(w: u32, h: u32, layers: u32, fmt: u32, usage: u16) -> TextureObj {
+        TextureObj { format: fmt, w, h, depth: layers, mips: 1, usage, bytes: 0, imported: false, uploaded: 0, lent: None }
+    }
+
+    #[test]
+    fn six_square_colour_layers_are_a_cube_unless_made_as_an_array() {
+        assert!(tex(64, 64, 6, format::BGRA8, usage::SAMPLED).is_cube());
+        assert!(!tex(64, 64, 6, format::BGRA8, usage::SAMPLED | usage::ARRAY).is_cube());
+        assert!(!tex(64, 32, 6, format::BGRA8, usage::SAMPLED).is_cube());
+        assert!(!tex(64, 64, 4, format::BGRA8, usage::SAMPLED).is_cube());
+        assert!(!tex(64, 64, 6, format::DEPTH32F, usage::SAMPLED).is_cube());
     }
 }

@@ -719,12 +719,12 @@ impl IrFnCompiler {
                 self.push(ShaderType::Pod(pods.pod_vec4f), e);
             }
             id!(sample_grad) => {
-                if exprs.len() != 3 || !matches!(tex_type, TextureType::Texture2d) {
-                    script_err_invalid_args!(self.trap, "texture.sample_grad(coord, dx, dy) takes 3 args, on a 2D texture");
+                if exprs.len() != 3 || !matches!(tex_type, TextureType::Texture2d | TextureType::Texture2dArray) {
+                    script_err_invalid_args!(self.trap, "texture.sample_grad(coord, dx, dy) takes 3 args, on a 2D texture or 2D array (coord.z = layer)");
                     return self.push(ShaderType::Pod(pods.pod_vec4f), NO_EXPR);
                 }
                 let sampler = output.get_or_create_sampler(ShaderSampler::default());
-                let coord = self.settle_float(output, exprs[0], 2);
+                let coord = self.settle_float(output, exprs[0], coord_lanes(tex_type));
                 let dx = self.settle_float(output, exprs[1], 2);
                 let dy = self.settle_float(output, exprs[2], 2);
                 let s = IrSample {

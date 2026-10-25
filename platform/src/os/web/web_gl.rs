@@ -522,6 +522,31 @@ impl Cx {
                                         }),
                                     });
                                 }
+                                // Level 0 only, as VecMipBGRAu8_32 above: the layers'
+                                // level 0s must be contiguous (no mip chain in the data).
+                                TextureFormat::VecArrayMipBGRAu8_32 {
+                                    width,
+                                    height,
+                                    layers,
+                                    data,
+                                    max_level,
+                                    ..
+                                } => {
+                                    if max_level.unwrap_or(0) > 0 {
+                                        crate::error!("web: a 2D-array texture with mips is not uploaded (give max_level 0)");
+                                        continue;
+                                    }
+                                    self.os.from_wasm(FromWasmAllocTextureArray_BGRAu8_32 {
+                                        texture_id: texture_id.0,
+                                        width: *width,
+                                        height: *height,
+                                        layers: *layers,
+                                        data: WasmPtrU32::new(match data {
+                                            Some(data) => data,
+                                            None => continue,
+                                        }),
+                                    });
+                                }
                                 TextureFormat::VecCubeBGRAu8_32 {
                                     width,
                                     height,

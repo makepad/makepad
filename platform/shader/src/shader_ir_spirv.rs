@@ -1843,27 +1843,8 @@ impl<'a> Gen<'a> {
     fn sample(&mut self, s: &IrSample, ty: TyId) -> Result<u32, String> {
         let si = self.sampled_image(s.tex, s.sampler)?;
         let coord = self.value(s.coord)?;
-        let (_, _, arrayed) = image_shape(s.tex_type);
-        let coord = if arrayed {
-            // The layer is the coordinate's last lane truncated (WGSL's
-            // `i32(coord.z)`), then exact as a float.
-            let ct = self.ety(s.coord);
-            let n = self.lanes(ct);
-            let f = self.b.type_f32();
-            let i = self.b.type_i32();
-            let layer = self.ins_id(OP_COMPOSITE_EXTRACT, f, &[coord, n - 1]);
-            let li = self.ins_id(OP_CONVERT_F_TO_S, i, &[layer]);
-            let lf = self.ins_id(OP_CONVERT_S_TO_F, f, &[li]);
-            let mut args = Vec::new();
-            for k in 0..n - 1 {
-                args.push(self.ins_id(OP_COMPOSITE_EXTRACT, f, &[coord, k]));
-            }
-            args.push(lf);
-            let vt = self.vec_id(IrScalar::F32, n);
-            self.ins_id(OP_COMPOSITE_CONSTRUCT, vt, &args)
-        } else {
-            coord
-        };
+        // An arrayed image takes the layer as the coordinate's last lane, rounded to nearest by
+        // the sampler (as GLSL, HLSL and Metal take it).
         let v4 = self.vec_id(IrScalar::F32, 4);
         let f32t = self.b.type_f32();
         let r = match s.kind {

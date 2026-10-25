@@ -512,6 +512,9 @@ pub mod usage {
     pub const SAMPLED: u16 = 2;
     pub const SHARED: u16 = 4;
     pub const TRANSIENT: u16 = 8;
+    /// a layered texture that is a 2D array even with six square colour layers (otherwise those
+    /// are a cube: [`crate::session::TextureObj::is_cube`])
+    pub const ARRAY: u16 = 16;
 }
 
 /// Buffer kinds (`BufferCreate` flags).

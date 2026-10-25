@@ -70,7 +70,7 @@ pub fn create_texture(device: ObjcId, t: &TextureObj, gen: u32, label: &str) -> 
     let depth = format::is_depth(t.format);
     let descriptor = RcObjcId::from_owned(NonNull::new(unsafe { msg_send![class!(MTLTextureDescriptor), new] }).ok_or("no texture descriptor")?);
     let d = descriptor.as_id();
-    let texture_type = if t.depth == 6 && !depth {
+    let texture_type = if t.is_cube() {
         MTLTextureType::Cube
     } else if t.depth > 1 {
         MTLTextureType::D2Array

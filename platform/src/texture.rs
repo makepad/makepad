@@ -530,6 +530,14 @@ pub enum CompressedTextureFormat {
 }
 
 impl CompressedTextureFormat {
+    fn pixel(self) -> TexturePixel {
+        match self {
+            CompressedTextureFormat::Bc7 => TexturePixel::Bc7,
+            CompressedTextureFormat::Bc5 => TexturePixel::Bc5,
+            CompressedTextureFormat::Astc4x4 => TexturePixel::Astc4x4,
+        }
+    }
+
     /// Bytes of one mip level of `width` x `height` texels.
     pub fn level_bytes(width: usize, height: usize) -> usize {
         width.max(1).div_ceil(4) * height.max(1).div_ceil(4) * 16
@@ -583,6 +591,31 @@ pub enum TextureFormat {
     VecMipCompressed {
         width: usize,
         height: usize,
+        format: CompressedTextureFormat,
+        data: Option<Vec<u8>>,
+        max_level: Option<usize>,
+        wrap: TextureWrap,
+        updated: TextureUpdated,
+    },
+    /// A sampled 2D array (`texture_2d_array` in a shader; the layer is the
+    /// coordinate's z, an integer). `layers` images of `width` x `height`,
+    /// layer-major: each layer's mip chain as in [`TextureFormat::VecMipBGRAu8_32`]
+    /// (levels 0..=max_level concatenated), then the next layer's.
+    VecArrayMipBGRAu8_32 {
+        width: usize,
+        height: usize,
+        layers: usize,
+        data: Option<Vec<u32>>,
+        max_level: Option<usize>,
+        wrap: TextureWrap,
+        updated: TextureUpdated,
+    },
+    /// The block-compressed [`TextureFormat::VecArrayMipBGRAu8_32`]: each
+    /// layer's mip chain as in [`TextureFormat::VecMipCompressed`], layer-major.
+    VecArrayMipCompressed {
+        width: usize,
+        height: usize,
+        layers: usize,
         format: CompressedTextureFormat,
         data: Option<Vec<u8>>,
         max_level: Option<usize>,
@@ -708,6 +741,14 @@ impl std::fmt::Debug for TextureFormat {
                 f,
                 "TextureFormat::VecMipRGBAf32(width:{width},height:{height})"
             ),
+            TextureFormat::VecArrayMipBGRAu8_32 { width, height, layers, .. } => write!(
+                f,
+                "TextureFormat::VecArrayMipBGRAu8_32(width:{width},height:{height},layers:{layers})"
+            ),
+            TextureFormat::VecArrayMipCompressed { width, height, layers, format, .. } => write!(
+                f,
+                "TextureFormat::VecArrayMipCompressed({format:?},width:{width},height:{height},layers:{layers})"
+            ),
             TextureFormat::VecMipCompressed { width, height, format, .. } => write!(
                 f,
                 "TextureFormat::VecMipCompressed({format:?},width:{width},height:{height})"
@@ -800,6 +841,8 @@ pub enum TextureCategory {
     Vec,
     VecMip,
     VecCube,
+    /// a sampled 2D array of this many layers
+    VecArray(usize),
     Render,
     RenderCube,
     DepthBuffer,
@@ -826,6 +869,7 @@ impl PartialEq for TextureCategory {
                     false
                 }
             }
+            Self::VecArray(n) => matches!(other, Self::VecArray(m) if m == n),
             Self::VecCube { .. } => {
                 if let Self::VecCube { .. } = other {
                     true
@@ -962,6 +1006,8 @@ impl CxTexture {
             TextureFormat::VecMipBGRAu8_32 { updated, .. } => updated,
             TextureFormat::VecMipRGBAf32 { updated, .. } => updated,
             TextureFormat::VecMipCompressed { updated, .. } => updated,
+            TextureFormat::VecArrayMipBGRAu8_32 { updated, .. } => updated,
+            TextureFormat::VecArrayMipCompressed { updated, .. } => updated,
             TextureFormat::VecRGBAf32 { updated, .. } => updated,
             TextureFormat::VecRu8 { updated, .. } => updated,
             TextureFormat::VecRGu8 { updated, .. } => updated,
@@ -994,6 +1040,8 @@ impl CxTexture {
             TextureFormat::VecMipBGRAu8_32 { updated, .. } => updated,
             TextureFormat::VecMipRGBAf32 { updated, .. } => updated,
             TextureFormat::VecMipCompressed { updated, .. } => updated,
+            TextureFormat::VecArrayMipBGRAu8_32 { updated, .. } => updated,
+            TextureFormat::VecArrayMipCompressed { updated, .. } => updated,
             TextureFormat::VecRGBAf32 { updated, .. } => updated,
             TextureFormat::VecRu8 { updated, .. } => updated,
             TextureFormat::VecRGu8 { updated, .. } => updated,
@@ -1122,7 +1170,8 @@ impl TextureFormat {
             TextureFormat::VecRu8 { data, .. } | TextureFormat::VecRGu8 { data, .. } => {
                 data.as_ref().map_or(0, |data| data.capacity())
             }
-            TextureFormat::VecMipCompressed { data, .. } => data.as_ref().map_or(0, |data| data.capacity()),
+            TextureFormat::VecMipCompressed { data, .. } | TextureFormat::VecArrayMipCompressed { data, .. } => data.as_ref().map_or(0, |data| data.capacity()),
+            TextureFormat::VecArrayMipBGRAu8_32 { data, .. } => data.as_ref().map_or(0, |data| data.capacity().saturating_mul(4)),
             _ => 0,
         }
     }
@@ -1140,6 +1189,7 @@ impl TextureFormat {
             Self::VecMipBGRAu8_32 { .. } => true,
             Self::VecMipRGBAf32 { .. } => true,
             Self::VecMipCompressed { .. } => true,
+            Self::VecArrayMipBGRAu8_32 { .. } | Self::VecArrayMipCompressed { .. } => true,
             Self::VecRGBAf32 { .. } => true,
             Self::VecRu8 { .. } => true,
             Self::VecRGu8 { .. } => true,
@@ -1194,7 +1244,8 @@ impl TextureFormat {
     /// so OpenGL matches the shader's `sample_*_repeat` sampler.
     pub fn wrap(&self) -> TextureWrap {
         match self {
-            Self::VecMipBGRAu8_32 { wrap, .. } | Self::VecMipCompressed { wrap, .. } => *wrap,
+            Self::VecMipBGRAu8_32 { wrap, .. } | Self::VecMipCompressed { wrap, .. }
+            | Self::VecArrayMipBGRAu8_32 { wrap, .. } | Self::VecArrayMipCompressed { wrap, .. } => *wrap,
             _ => TextureWrap::ClampToEdge,
         }
     }
@@ -1206,6 +1257,7 @@ impl TextureFormat {
             Self::VecMipBGRAu8_32 { width, height, .. } => Some((*width, *height)),
             Self::VecMipRGBAf32 { width, height, .. } => Some((*width, *height)),
             Self::VecMipCompressed { width, height, .. } => Some((*width, *height)),
+            Self::VecArrayMipBGRAu8_32 { width, height, .. } | Self::VecArrayMipCompressed { width, height, .. } => Some((*width, *height)),
             Self::VecRGBAf32 { width, height, .. } => Some((*width, *height)),
             Self::VecRu8 { width, height, .. } => Some((*width, *height)),
             Self::VecRGu8 { width, height, .. } => Some((*width, *height)),
@@ -1264,12 +1316,20 @@ impl TextureFormat {
             Self::VecMipCompressed { width, height, format, .. } => Some(TextureAlloc {
                 width: *width,
                 height: *height,
-                pixel: match format {
-                    CompressedTextureFormat::Bc7 => TexturePixel::Bc7,
-                    CompressedTextureFormat::Bc5 => TexturePixel::Bc5,
-                    CompressedTextureFormat::Astc4x4 => TexturePixel::Astc4x4,
-                },
+                pixel: format.pixel(),
                 category: TextureCategory::VecMip,
+            }),
+            Self::VecArrayMipBGRAu8_32 { width, height, layers, .. } => Some(TextureAlloc {
+                width: *width,
+                height: *height,
+                pixel: TexturePixel::BGRAu8,
+                category: TextureCategory::VecArray(*layers),
+            }),
+            Self::VecArrayMipCompressed { width, height, layers, format, .. } => Some(TextureAlloc {
+                width: *width,
+                height: *height,
+                pixel: format.pixel(),
+                category: TextureCategory::VecArray(*layers),
             }),
             Self::VecRu8 { width, height, .. } => Some(TextureAlloc {
                 width: *width,

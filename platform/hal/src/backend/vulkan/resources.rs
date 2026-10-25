@@ -75,7 +75,7 @@ impl Image {
         }
         if !features.contains(needed) { return Err(format!("texture format {} lacks device features {needed:?}", desc.format)); }
         let info = vk::ImageCreateInfo::default()
-            .flags(if desc.depth == 6 && desc.w == desc.h && !format::is_depth(desc.format) { vk::ImageCreateFlags::CUBE_COMPATIBLE } else { vk::ImageCreateFlags::empty() })
+            .flags(if desc.is_cube() { vk::ImageCreateFlags::CUBE_COMPATIBLE } else { vk::ImageCreateFlags::empty() })
             .image_type(vk::ImageType::TYPE_2D).format(fmt)
             .extent(vk::Extent3D { width: desc.w, height: desc.h, depth: 1 })
             .mip_levels(desc.mips).array_layers(desc.depth).samples(vk::SampleCountFlags::TYPE_1)
@@ -117,7 +117,7 @@ impl Image {
         out.array_view = out.dev.raw.create_image_view(&info, None).map_err(error)?;
         out.view = out.dev.raw.create_image_view(&info.view_type(vk::ImageViewType::TYPE_2D)
             .subresource_range(vk::ImageSubresourceRange::default().aspect_mask(sampled_aspect).level_count(out.desc.mips).layer_count(1)), None).map_err(error)?;
-        if out.desc.depth == 6 && out.desc.w == out.desc.h && !format::is_depth(out.desc.format) {
+        if out.desc.is_cube() {
             out.cube_view = out.dev.raw.create_image_view(&info.view_type(vk::ImageViewType::CUBE), None).map_err(error)?;
         }
         if out.desc.usage & usage::RENDER_TARGET != 0 {

@@ -548,9 +548,11 @@ fn as_bytes<T: Copy>(data: &[T]) -> &[u8] {
 /// How a vec texture's CPU data is laid out for upload.
 enum VecLayout {
     Plain,
-    Mip { max_level: usize },
+    /// `layers` mip chains (levels 0..=max_level each), layer-major; 1 layer
+    /// unless the texture is a 2D array
+    Mip { max_level: usize, layers: usize },
     Cube,
-    Compressed { max_level: usize },
+    Compressed { max_level: usize, layers: usize },
 }
 
 struct VecImage<'a> {
@@ -565,7 +567,9 @@ impl VecImage<'_> {
     /// The mip levels whose data is present, from level 0 (at least 1).
     fn levels(&self) -> usize {
         let max_level = match self.layout {
-            VecLayout::Mip { max_level } | VecLayout::Compressed { max_level } => max_level,
+            // an array's layers sit at a fixed stride: their chains are complete
+            VecLayout::Mip { max_level, layers } | VecLayout::Compressed { max_level, layers } if layers > 1 => return max_level + 1,
+            VecLayout::Mip { max_level, .. } | VecLayout::Compressed { max_level, .. } => max_level,
             VecLayout::Plain | VecLayout::Cube => return 1,
         };
         let (mut w, mut h, mut offset) = (self.width.max(1), self.height.max(1), 0usize);
@@ -591,13 +595,19 @@ fn vec_image(format: &TextureFormat) -> Option<VecImage<'_>> {
         TextureFormat::VecBGRAu8_32 { width, height, data: Some(d), .. } => img(*width, *height, 4, VecLayout::Plain, as_bytes(d)),
         TextureFormat::VecCubeBGRAu8_32 { width, height, data: Some(d), .. } => img(*width, *height, 4, VecLayout::Cube, as_bytes(d)),
         TextureFormat::VecMipBGRAu8_32 { width, height, data: Some(d), max_level, .. } => {
-            img(*width, *height, 4, VecLayout::Mip { max_level: max_level.unwrap_or(0) }, as_bytes(d))
+            img(*width, *height, 4, VecLayout::Mip { max_level: max_level.unwrap_or(0), layers: 1 }, as_bytes(d))
         }
         TextureFormat::VecMipRGBAf32 { width, height, data: Some(d), max_level, .. } => {
-            img(*width, *height, 16, VecLayout::Mip { max_level: max_level.unwrap_or(0) }, as_bytes(d))
+            img(*width, *height, 16, VecLayout::Mip { max_level: max_level.unwrap_or(0), layers: 1 }, as_bytes(d))
         }
         TextureFormat::VecMipCompressed { width, height, data: Some(d), max_level, .. } => {
-            img(*width, *height, 0, VecLayout::Compressed { max_level: max_level.unwrap_or(0) }, d)
+            img(*width, *height, 0, VecLayout::Compressed { max_level: max_level.unwrap_or(0), layers: 1 }, d)
+        }
+        TextureFormat::VecArrayMipBGRAu8_32 { width, height, layers, data: Some(d), max_level, .. } => {
+            img(*width, *height, 4, VecLayout::Mip { max_level: max_level.unwrap_or(0), layers: (*layers).max(1) }, as_bytes(d))
+        }
+        TextureFormat::VecArrayMipCompressed { width, height, layers, data: Some(d), max_level, .. } => {
+            img(*width, *height, 0, VecLayout::Compressed { max_level: max_level.unwrap_or(0), layers: (*layers).max(1) }, d)
         }
         TextureFormat::VecRGBAf32 { width, height, data: Some(d), .. } => img(*width, *height, 16, VecLayout::Plain, as_bytes(d)),
         TextureFormat::VecRu8 { width, height, data: Some(d), .. } => img(*width, *height, 1, VecLayout::Plain, d),
@@ -653,6 +663,7 @@ impl Cx {
         };
         let (layers, mips) = match (&alloc.category, &self.textures[id].format) {
             (TextureCategory::VecCube, _) => (6, 1),
+            (TextureCategory::VecArray(layers), format) => ((*layers).max(1), vec_image(format).map_or(1, |image| image.levels())),
             // Only the levels the data holds: the HAL generates no mips for a sampled vec
             // texture, so a level without data would sample as zeros (a minified image drawn
             // transparent).
@@ -666,7 +677,8 @@ impl Cx {
         let mut fresh = false;
         if reallocated || !known {
             let origin = self.textures[id].origin.clone();
-            fb.texture_create(slot, gen, usage::SAMPLED, fmt, alloc.width, alloc.height, layers, mips, &origin);
+            let array = if matches!(alloc.category, TextureCategory::VecArray(_)) { usage::ARRAY } else { 0 };
+            fb.texture_create(slot, gen, usage::SAMPLED | array, fmt, alloc.width, alloc.height, layers, mips, &origin);
             fresh = true;
         }
         let hal_id = fb.tex[&slot].id;
@@ -730,38 +742,36 @@ impl Cx {
                     uploaded += full as u64;
                 }
             }
-            VecLayout::Mip { max_level } => {
-                let (mut lw, mut lh, mut offset) = (w.max(1), h.max(1), 0usize);
-                for level in 0..=max_level {
-                    let len = lw * lh * image.bpp;
-                    if offset + len > bytes.len() {
-                        if level == 0 {
-                            crate::error!("mip texture upload: {} bytes for a {}x{} level 0 needing {}", bytes.len(), w, h, len);
-                        }
-                        break;
-                    }
-                    fb.w.texture_update(hal_id, level as u16, [0, 0, lw as u32, lh as u32], 0, &bytes[offset..offset + len]);
-                    uploaded += len as u64;
-                    offset += len;
+            VecLayout::Mip { max_level, layers } | VecLayout::Compressed { max_level, layers } => {
+                let compressed = matches!(image.layout, VecLayout::Compressed { .. });
+                let level_len = |lw: usize, lh: usize| if compressed { CompressedTextureFormat::level_bytes(lw, lh) } else { lw * lh * image.bpp };
+                // one layer's chain: the stride between an array's layers
+                let (mut lw, mut lh, mut stride) = (w.max(1), h.max(1), 0usize);
+                for _ in 0..=max_level {
+                    stride += level_len(lw, lh);
                     lw = (lw / 2).max(1);
                     lh = (lh / 2).max(1);
                 }
-            }
-            VecLayout::Compressed { max_level } => {
-                let (mut lw, mut lh, mut offset) = (w.max(1), h.max(1), 0usize);
-                for level in 0..=max_level {
-                    let len = CompressedTextureFormat::level_bytes(lw, lh);
-                    if offset + len > bytes.len() {
-                        if level == 0 {
-                            crate::error!("compressed texture upload: {} bytes for a {}x{} level 0 needing {}", bytes.len(), w, h, len);
+                if layers > 1 && bytes.len() < stride * layers {
+                    crate::error!("array texture upload: {} bytes for {} layers of {}x{} ({} levels) needing {}", bytes.len(), layers, w, h, max_level + 1, stride * layers);
+                    return hal_id;
+                }
+                for layer in 0..layers {
+                    let (mut lw, mut lh, mut offset) = (w.max(1), h.max(1), layer * stride);
+                    for level in 0..=max_level {
+                        let len = level_len(lw, lh);
+                        if offset + len > bytes.len() {
+                            if level == 0 {
+                                crate::error!("mip texture upload: {} bytes for a {}x{} level 0 needing {}", bytes.len(), w, h, len);
+                            }
+                            break;
                         }
-                        break;
+                        fb.w.texture_update(hal_id, level as u16, [0, 0, lw as u32, lh as u32], layer as u32, &bytes[offset..offset + len]);
+                        uploaded += len as u64;
+                        offset += len;
+                        lw = (lw / 2).max(1);
+                        lh = (lh / 2).max(1);
                     }
-                    fb.w.texture_update(hal_id, level as u16, [0, 0, lw as u32, lh as u32], 0, &bytes[offset..offset + len]);
-                    uploaded += len as u64;
-                    offset += len;
-                    lw = (lw / 2).max(1);
-                    lh = (lh / 2).max(1);
                 }
             }
         }

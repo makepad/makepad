@@ -251,6 +251,7 @@ impl DrawShaderTextureInput {
         let ty = match self.tex_type {
             TextureType::TextureDepth => "sampler2DShadow",
             TextureType::TextureCube | TextureType::TextureCubeArray => "samplerCube",
+            TextureType::Texture2dArray => "sampler2DArray",
             _ => "sampler2D",
         };
         WTextureInput {
@@ -453,6 +454,16 @@ pub struct FromWasmAllocTextureCube_BGRAu8_32 {
     pub texture_id: usize,
     pub width: usize,
     pub height: usize,
+    pub data: WasmPtrU32,
+}
+
+/// A 2D array's level 0: `layers` images of width x height, layer-major.
+#[derive(FromWasm)]
+pub struct FromWasmAllocTextureArray_BGRAu8_32 {
+    pub texture_id: usize,
+    pub width: usize,
+    pub height: usize,
+    pub layers: usize,
     pub data: WasmPtrU32,
 }
 

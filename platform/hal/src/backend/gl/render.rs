@@ -681,10 +681,10 @@ pub(super) fn face(target: GLenum, layer: u32) -> GLenum {
     if target == sys::TEXTURE_CUBE_MAP { sys::TEXTURE_CUBE_MAP_POSITIVE_X + layer } else { target }
 }
 
-/// Six square colour layers are a cube; other layered textures are arrays.
+/// A cube ([`TextureObj::is_cube`]); other layered textures are arrays.
 pub(super) fn texture_target(t: &TextureObj) -> GLenum {
     if t.depth == 1 { sys::TEXTURE_2D }
-    else if t.depth == 6 && t.w == t.h && !format::is_depth(t.format) { sys::TEXTURE_CUBE_MAP }
+    else if t.is_cube() { sys::TEXTURE_CUBE_MAP }
     else { sys::TEXTURE_2D_ARRAY }
 }
 
