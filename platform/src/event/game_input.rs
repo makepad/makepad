@@ -63,6 +63,100 @@ pub struct GamepadState {
 
     pub left_stick: Vec2,
     pub right_stick: Vec2,
+
+    /// Presses per button since the device connected (wrapping), in [`gamepad_button`] order.
+    /// The values above are the latest sample; these count every press the platform saw, so a
+    /// tap shorter than a frame is never lost (see [`PressLatch`]).
+    pub presses: [u16; gamepad_button::COUNT],
+}
+
+/// The digital buttons of a [`GamepadState`], as indexes into `presses` and bits of
+/// [`GamepadState::held_mask`].
+/// The same order as the HAL's `media::game::gamepad_button` (the wire between them).
+pub mod gamepad_button {
+    pub const A: usize = 0;
+    pub const B: usize = 1;
+    pub const X: usize = 2;
+    pub const Y: usize = 3;
+    pub const LEFT_SHOULDER: usize = 4;
+    pub const RIGHT_SHOULDER: usize = 5;
+    pub const LEFT_TRIGGER: usize = 6;
+    pub const RIGHT_TRIGGER: usize = 7;
+    pub const SELECT: usize = 8;
+    pub const START: usize = 9;
+    pub const HOME: usize = 10;
+    pub const LEFT_THUMB: usize = 11;
+    pub const RIGHT_THUMB: usize = 12;
+    pub const DPAD_UP: usize = 13;
+    pub const DPAD_DOWN: usize = 14;
+    pub const DPAD_LEFT: usize = 15;
+    pub const DPAD_RIGHT: usize = 16;
+    pub const COUNT: usize = 17;
+}
+
+impl GamepadState {
+    /// A button's value by [`gamepad_button`] index.
+    pub fn button_mut(&mut self, button: usize) -> Option<&mut f32> {
+        Some(match button {
+            0 => &mut self.a, 1 => &mut self.b, 2 => &mut self.x, 3 => &mut self.y,
+            4 => &mut self.left_shoulder, 5 => &mut self.right_shoulder,
+            6 => &mut self.left_trigger, 7 => &mut self.right_trigger,
+            8 => &mut self.select, 9 => &mut self.start, 10 => &mut self.home,
+            11 => &mut self.left_thumb, 12 => &mut self.right_thumb,
+            13 => &mut self.dpad_up, 14 => &mut self.dpad_down, 15 => &mut self.dpad_left, 16 => &mut self.dpad_right,
+            _ => return None,
+        })
+    }
+
+    /// The buttons past half travel, one bit per [`gamepad_button`] index.
+    pub fn held_mask(&self) -> u32 {
+        let mut s = self.clone();
+        (0..gamepad_button::COUNT).filter(|b| s.button_mut(*b).is_some_and(|v| *v >= 0.5)).fold(0, |m, b| m | 1 << b)
+    }
+
+    /// Shows the buttons of `mask` held (a press the reader has not seen yet).
+    pub fn hold(&mut self, mask: u32) {
+        for b in 0..gamepad_button::COUNT {
+            if mask & (1 << b) != 0 {
+                if let Some(v) = self.button_mut(b) {
+                    *v = v.max(1.0);
+                }
+            }
+        }
+    }
+
+    /// The buttons pressed since `presses` (an earlier `self.presses`), one bit each.
+    pub fn pressed_since(&self, presses: &[u16; gamepad_button::COUNT]) -> u32 {
+        (0..gamepad_button::COUNT).filter(|b| self.presses[*b] != presses[*b]).fold(0, |m, b| m | 1 << b)
+    }
+}
+
+/// Keeps a tap visible for one frame. Platform states are the latest sample, and apps read them
+/// once a frame (or once a fixed tick) and find presses as state changes: a press and release
+/// between two reads would vanish. The latch shows any button pressed since the last frame as
+/// held through the next frame, so every per-frame reader sees exactly one press.
+#[derive(Clone, Debug, Default)]
+pub struct PressLatch {
+    /// The presses as of the last frame (None until the device's first state).
+    base: Option<[u16; gamepad_button::COUNT]>,
+}
+
+impl PressLatch {
+    /// What readers see of `truth` this frame.
+    pub fn view(&mut self, truth: &GameInputState) -> GameInputState {
+        let GameInputState::Gamepad(pad) = truth else { return truth.clone() };
+        let base = *self.base.get_or_insert(pad.presses);
+        let mut out = pad.clone();
+        out.hold(pad.pressed_since(&base));
+        GameInputState::Gamepad(out)
+    }
+
+    /// A frame was delivered: what was pressed before it has been seen.
+    pub fn frame_end(&mut self, truth: &GameInputState) {
+        if let GameInputState::Gamepad(pad) = truth {
+            self.base = Some(pad.presses);
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -383,6 +477,9 @@ impl From<makepad_studio_protocol::RemoteGameInput> for GameInputState {
                 dpad_right: p.dpad_right,
                 left_stick: vec2(p.left_stick_x, p.left_stick_y),
                 right_stick: vec2(p.right_stick_x, p.right_stick_y),
+                // the Studio wire carries states only; the receiver's latch still holds a tap
+                // that arrives as two messages
+                presses: Default::default(),
             }),
             RemoteGameInput::Wheel(w) => GameInputState::Wheel(WheelState {
                 steering: w.steering,
@@ -446,7 +543,49 @@ mod tests {
             dpad_right: 0.17,
             left_stick: crate::makepad_math::vec2(0.18, 0.19),
             right_stick: crate::makepad_math::vec2(0.20, 0.21),
+            presses: Default::default(),
         }
+    }
+
+    fn pad(a: f32, presses_a: u16) -> GameInputState {
+        let mut p = GamepadState { a, ..Default::default() };
+        p.presses[gamepad_button::A] = presses_a;
+        GameInputState::Gamepad(p)
+    }
+    fn a_of(s: &GameInputState) -> f32 {
+        match s { GameInputState::Gamepad(p) => p.a, _ => -1.0 }
+    }
+
+    #[test]
+    fn a_tap_between_two_frames_is_seen_for_exactly_one_frame() {
+        let mut latch = PressLatch::default();
+        // frame 0: idle
+        assert_eq!(a_of(&latch.view(&pad(0.0, 0))), 0.0);
+        latch.frame_end(&pad(0.0, 0));
+        // a 5 ms tap lands between frames 0 and 1: press and release before the frame reads
+        assert_eq!(a_of(&latch.view(&pad(1.0, 1))), 1.0);
+        assert_eq!(a_of(&latch.view(&pad(0.0, 1))), 1.0, "frame 1 still sees the tap as held");
+        latch.frame_end(&pad(0.0, 1));
+        assert_eq!(a_of(&latch.view(&pad(0.0, 1))), 0.0, "frame 2 sees it released: one press");
+        // a held press is just held, and its release is a release
+        assert_eq!(a_of(&latch.view(&pad(1.0, 2))), 1.0);
+        latch.frame_end(&pad(1.0, 2));
+        assert_eq!(a_of(&latch.view(&pad(0.0, 2))), 0.0);
+    }
+
+    #[test]
+    fn a_device_first_seen_mid_count_is_no_tap() {
+        let mut latch = PressLatch::default();
+        assert_eq!(a_of(&latch.view(&pad(0.0, 41))), 0.0);
+    }
+
+    #[test]
+    fn held_masks_and_holds_cover_every_button() {
+        let mut p = GamepadState::default();
+        assert_eq!(p.held_mask(), 0);
+        p.hold((1 << gamepad_button::COUNT) - 1);
+        assert_eq!(p.held_mask(), (1 << gamepad_button::COUNT) - 1);
+        assert_eq!((p.a, p.start, p.dpad_right), (1.0, 1.0, 1.0));
     }
 
     #[test]

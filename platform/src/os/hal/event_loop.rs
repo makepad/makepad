@@ -568,6 +568,9 @@ impl Cx {
         self.hal.beat_phases[0][1] = next_start;
         if !self.new_next_frames.is_empty() {
             self.call_next_frame_event(time_now);
+            // the frame saw this beat's game input taps (held for it); later frames see them released
+            #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
+            self.hal.game.frame_end();
             self.hal.beat_phases[1] = [next_start, makepad_hal::clock_ns()];
         }
         let walk_start = makepad_hal::clock_ns();

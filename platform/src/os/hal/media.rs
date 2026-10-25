@@ -22,7 +22,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
 use crate::{
-    event::game_input::{ForceTarget, GameInputConnectedEvent, GameInputForce, GameInputInfo, GameInputOutput, GameInputState, GamepadHapticCapabilities, GamepadHapticPulse, GamepadState, JoystickState, WheelState},
+    event::game_input::{PressLatch, ForceTarget, GameInputConnectedEvent, GameInputForce, GameInputInfo, GameInputOutput, GameInputState, GamepadHapticCapabilities, GamepadHapticPulse, GamepadState, JoystickState, WheelState},
     game_input::CxGameInputApi,
     makepad_math::Vec2,
 };
@@ -35,8 +35,23 @@ use makepad_hal::media::{game, game_output};
 #[derive(Default)]
 pub(crate) struct GameClient {
     infos: Vec<GameInputInfo>,
+    /// What the app reads: `truth` with this frame's taps held (`latches`).
     states: Vec<GameInputState>,
+    /// The latest states the HAL reported.
+    truth: Vec<GameInputState>,
+    latches: Vec<PressLatch>,
     devices: Vec<game::GameDevice>,
+}
+
+#[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
+impl GameClient {
+    /// A frame was delivered to the app: the taps it saw as held are released.
+    pub(crate) fn frame_end(&mut self) {
+        for ((latch, truth), state) in self.latches.iter_mut().zip(&self.truth).zip(&mut self.states) {
+            latch.frame_end(truth);
+            *state = latch.view(truth);
+        }
+    }
 }
 
 #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
@@ -62,6 +77,7 @@ fn cx_state(s: game::GameState) -> GameInputState {
             dpad_right: p.dpad_right,
             left_stick: Vec2 { x: p.left_stick[0], y: p.left_stick[1] },
             right_stick: Vec2 { x: p.right_stick[0], y: p.right_stick[1] },
+            presses: p.presses,
         }),
         game::GameState::Wheel(w) => GameInputState::Wheel(WheelState { steering: w.steering, throttle: w.throttle, brake: w.brake, clutch: w.clutch, steer_force: w.steer_force, buttons: w.buttons }),
         game::GameState::Joystick(j) => GameInputState::Joystick(JoystickState { x: j.x, y: j.y, twist: j.twist, throttle: j.throttle, hat: j.hat, buttons: j.buttons }),
@@ -566,14 +582,29 @@ impl Cx {
                 let list = game::read_devices(devices);
                 let old: Vec<GameInputInfo> = std::mem::take(&mut self.hal.game.infos);
                 let old_states = std::mem::take(&mut self.hal.game.states);
+                let old_truth = std::mem::take(&mut self.hal.game.truth);
+                let old_latches = std::mem::take(&mut self.hal.game.latches);
                 let mut infos = Vec::new();
                 let mut states = Vec::new();
+                let (mut truth, mut latches) = (Vec::new(), Vec::new());
                 for d in &list {
                     let info = GameInputInfo { id: LiveId(d.id), name: d.name.clone() };
-                    // a device that stays keeps its state until the HAL reports a new one
-                    let state = old.iter().position(|o| o.id == info.id).map(|i| old_states[i].clone()).unwrap_or_else(|| GameInputState::Gamepad(GamepadState::default()));
+                    // a device that stays keeps its state (and its latch) until the HAL reports a new one
+                    match old.iter().position(|o| o.id == info.id) {
+                        Some(i) => {
+                            states.push(old_states[i].clone());
+                            truth.push(old_truth[i].clone());
+                            latches.push(old_latches[i].clone());
+                        }
+                        None => {
+                            let idle = GameInputState::Gamepad(GamepadState::default());
+                            states.push(idle.clone());
+                            truth.push(idle);
+                            // its first report sets the latch's base: counts before it are no taps
+                            latches.push(PressLatch::default());
+                        }
+                    }
                     infos.push(info);
-                    states.push(state);
                 }
                 let announced = |l: &[game::GameDevice], id: u64| l.iter().any(|d| d.id == id && d.announce);
                 let was: Vec<game::GameDevice> = std::mem::take(&mut self.hal.game.devices);
@@ -581,6 +612,8 @@ impl Cx {
                 let new: Vec<GameInputInfo> = infos.iter().filter(|i| announced(&list, i.id.0) && !announced(&was, i.id.0)).cloned().collect();
                 self.hal.game.infos = infos;
                 self.hal.game.states = states;
+                self.hal.game.truth = truth;
+                self.hal.game.latches = latches;
                 self.hal.game.devices = list;
                 for info in gone {
                     self.call_event_handler(&Event::GameInputConnected(GameInputConnectedEvent::Disconnected(info)));
@@ -592,7 +625,9 @@ impl Cx {
             #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
             HalEvent::GameInput { device, state } => {
                 if let (Some(index), Some(state)) = (self.hal.game.infos.iter().position(|i| i.id.0 == device), game::read_state(state)) {
-                    self.hal.game.states[index] = cx_state(state);
+                    let truth = cx_state(state);
+                    self.hal.game.states[index] = self.hal.game.latches[index].view(&truth);
+                    self.hal.game.truth[index] = truth;
                 }
             }
             #[cfg(target_vendor = "apple")]

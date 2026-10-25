@@ -431,6 +431,7 @@ fn pad_state(g: &XINPUT_GAMEPAD) -> GamepadState {
         dpad_right: b(XINPUT_GAMEPAD_DPAD_RIGHT),
         left_stick: [axis(g.sThumbLX), axis(g.sThumbLY)],
         right_stick: [axis(g.sThumbRX), axis(g.sThumbRY)],
+        presses: Default::default(),
     }
 }
 
@@ -518,7 +519,13 @@ impl Poller {
                 }
                 continue;
             }
-            let state = GameState::Gamepad(pad_state(&x.Gamepad));
+            // XInput is a state API sampled every POLL: a tap shorter than that is not seen at
+            // all. Every press it does see is counted, so the publish/take below never loses one.
+            let mut pad = pad_state(&x.Gamepad);
+            if let Some(GameState::Gamepad(prev)) = index.and_then(|i| self.states.get(i)) {
+                pad.count_presses_since(prev);
+            }
+            let state = GameState::Gamepad(pad);
             match index {
                 Some(i) => {
                     if self.states[i] != state {

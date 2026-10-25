@@ -290,7 +290,13 @@ impl Decoder {
                 fed.overran = true;
             } else if event.kind == 0 && event.code == 0 {
                 if self.dropped { self.resync(kernel)?; self.dropped = false; }
-                if self.state != self.published { self.published = self.state.clone(); fed.changed = true; }
+                if self.state != self.published {
+                    // Counted per report, so a tap folded into one read (or one snapshot the
+                    // HAL takes later) still arrives as a press.
+                    self.state.count_presses_since(&self.published);
+                    self.published = self.state.clone();
+                    fed.changed = true;
+                }
             } else if !self.dropped {
                 match event.kind { 1 => self.key(event.code, event.value), 3 => self.axis(event.code, event.value), _ => {} }
             }
@@ -370,6 +376,23 @@ mod tests {
         assert_eq!(d.published.start, 0.0);
         d.feed(&[key(BTN_START, 1), syn()], &mut k).unwrap();
         assert_eq!(d.published.start, 1.0, "the next real press is a press");
+    }
+
+    #[test]
+    fn a_tap_inside_one_read_is_counted() {
+        use crate::media::game::gamepad_button as button;
+        let mut d = decoder();
+        let mut k = Fake::default();
+        // A 5 ms tap: press and release reports in the same read, before anyone samples.
+        let fed = d.feed(&[key(BTN_A, 1), syn(), key(BTN_A, 0), syn()], &mut k).unwrap();
+        assert_eq!(d.published.a, 0.0, "the latest state is up again");
+        assert!(fed.changed, "the press is news");
+        assert_eq!(d.published.presses[button::A], 1);
+        d.feed(&[key(BTN_A, 1), syn(), key(BTN_A, 0), syn(), key(BTN_A, 1), syn()], &mut k).unwrap();
+        assert_eq!((d.published.a, d.published.presses[button::A]), (1.0, 3));
+        // A resync's unseen press is no press, and keeps the count.
+        d.feed(&[key(BTN_A, 0), syn(), dropped(), syn()], &mut Fake::default().hold(BTN_START)).unwrap();
+        assert_eq!((d.published.presses[button::A], d.published.presses[button::START]), (3, 0));
     }
 
     #[test]
