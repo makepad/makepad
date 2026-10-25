@@ -1490,14 +1490,14 @@ impl<'a> Parser<'a> {
     fn no_item_macro(&self, path: &Path) -> bool {
         const EXPR_MACROS: &[&str] = &[
             "format_args", "format", "print", "println", "eprint", "eprintln", "write", "writeln", "panic", "unreachable", "todo",
-            "unimplemented", "assert", "assert_eq", "assert_ne", "debug_assert", "debug_assert_eq", "debug_assert_ne", "vec", "dbg",
+            "unimplemented", "assert", "assert_eq", "assert_ne", "debug_assert", "debug_assert_eq", "debug_assert_ne", "vec", "smallvec", "dbg",
             "matches", "concat", "stringify", "line", "column", "file", "module_path", "env", "option_env", "include_str", "include_bytes", "cfg",
         ];
         let segs = self.ast.segs(path.segs);
         let Some(last) = segs.last() else { return false };
         let ok_path = match segs.len() {
             1 => !path.global(),
-            2 => matches!(self.bytes(segs[0].name.lo, segs[0].name.hi), b"std" | b"core" | b"alloc"),
+            2 => matches!(self.bytes(segs[0].name.lo, segs[0].name.hi), b"std" | b"core" | b"alloc" | b"smallvec"),
             _ => false,
         };
         let name = String::from_utf8_lossy(self.bytes(last.name.lo, last.name.hi)).trim_start_matches("r#").to_string();
