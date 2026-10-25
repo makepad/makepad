@@ -461,6 +461,7 @@ fn make_turn_dir() -> Result<PathBuf, String> {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let parent = std::env::temp_dir().join("makepad-claude-cli");
     std::fs::create_dir_all(&parent).map_err(|e| format!("turn dir: {e}"))?;
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
     let mut random = [0u8; 8];
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -590,7 +591,10 @@ fn tap(system: &str, prompt: &str, reply: &str) {
     let path = Path::new(&dir).join(format!("turn-{}-{}.txt", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
     let text = format!("==== SYSTEM ====\n{system}\n==== STDIN ====\n{prompt}\n==== REPLY ====\n{reply}\n");
     let _ = std::fs::create_dir_all(&dir);
+    #[cfg(not(target_arch = "wasm32"))]
     let _ = makepad_network::tls::write_private(&path, text.as_bytes());
+    #[cfg(target_arch = "wasm32")]
+    let _ = (path, text);
 }
 
 /// One chat turn through the CLI: the reply text. When the app defines tool
@@ -800,6 +804,7 @@ pub fn selftest_with(config: &ClaudeCliConfig) -> Result<String, String> {
     std::fs::create_dir_all(&base).map_err(|e| e.to_string())?;
     let canary = base.join("created-by-a-tool");
     let secret_file = base.join("secret.txt");
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
     let mut random = [0u8; 16];
     #[cfg(not(target_arch = "wasm32"))]
     {

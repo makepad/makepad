@@ -458,6 +458,7 @@ pub struct FromWasmAllocTextureCube_BGRAu8_32 {
 }
 
 /// A 2D array's level 0: `layers` images of width x height, layer-major.
+#[allow(non_camel_case_types)]
 #[derive(FromWasm)]
 pub struct FromWasmAllocTextureArray_BGRAu8_32 {
     pub texture_id: usize,

@@ -21,7 +21,7 @@ pub enum Platform {
     Desktop,
 }
 impl Platform {
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Self::Web => "web",
             Self::Mobile => "mobile",
@@ -375,10 +375,16 @@ pub fn target_checks(
         if ty != BuildTy::BinaryBuildStd && !host.targets.iter().any(|s| s == t) {
             skip = Some("not installed".into());
         }
+        // .cargo/config.toml gives host targets `-C target-cpu=native`; checked from another
+        // machine (x86_64 rows from an arm64 Mac) that names this machine's CPU, which the target
+        // does not have (rustc: "target feature `x87` must be enabled" on every crate). A set
+        // RUSTFLAGS replaces the config's flags (cargo merges a CARGO_TARGET_*_RUSTFLAGS
+        // variable into them instead); with --target it reaches the target's artifacts only.
+        let rustflags = String::from("RUSTFLAGS");
         result.push(TargetCheck {
             label: t.into(),
             ty, platform, args,
-            env: vec![("MAKEPAD_BUILD".into(), makepad.into())],
+            env: vec![("MAKEPAD_BUILD".into(), makepad.into()), (rustflags, String::new())],
             toolchain, skip,
         });
     }

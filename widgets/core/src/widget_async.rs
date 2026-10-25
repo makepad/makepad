@@ -2716,8 +2716,9 @@ mod isolate_shader_tests {
         // Answered at registration, in the isolate: the frame needs no VM to ask.
         if cfg!(target_os = "macos") {
             let loc = mapping.source_loc.clone().expect("the HAL's trace location");
-            // the first of fragment, pixel, vertex: the quad's own fragment fn
-            assert!(loc.contains("draw_quad.rs"), "the quad's fragment fn, not {loc}");
+            // the first of pixel, fragment, vertex (draw_shader.rs read_source): this quad's own
+            // pixel fn, written above
+            assert!(loc.contains("widget_async.rs"), "the quad's pixel fn, not {loc}");
         }
         cx.free_splash_vm(vm_id);
     }

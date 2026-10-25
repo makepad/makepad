@@ -105,6 +105,8 @@ pub struct KernelStream {
 
 enum Link {
     Plain(std::net::TcpStream),
+    /// a fleet TLS link (native only: never made on the web)
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     Tls(makepad_network::SocketStream),
 }
 
@@ -155,9 +157,14 @@ fn open_link(base_url: &str) -> Result<(Link, Vec<u8>), String> {
     use std::io::{Read, Write};
     let url = crate::http_client::parse_url(&format!("{base_url}/kernel/stream")).map_err(|e| e.to_string())?;
     let host_port = format!("{}:{}", url.host, url.port);
-    let (mut link, authorization) = if url.https {
-        let (s, auth) = makepad_network::tls::connect_fleet(&url.host, &url.port.to_string()).map_err(|e| format!("{host_port}: {e}"))?;
-        (Link::Tls(s), auth)
+    let (mut link, authorization): (Link, Option<String>) = if url.https {
+        #[cfg(target_arch = "wasm32")]
+        return Err(format!("{host_port}: fleet TLS links are native-only"));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (s, auth) = makepad_network::tls::connect_fleet(&url.host, &url.port.to_string()).map_err(|e| format!("{host_port}: {e}"))?;
+            (Link::Tls(s), auth)
+        }
     } else {
         let addr = std::net::ToSocketAddrs::to_socket_addrs(&host_port).map_err(|e| e.to_string())?.next().ok_or("no address")?;
         let s = makepad_network::lan::connect_timeout("ai-hub kernel stream", &addr, Duration::from_secs(5)).map_err(|e| format!("{host_port}: {e}"))?;

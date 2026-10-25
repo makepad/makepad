@@ -6,7 +6,7 @@ use std::process::Command;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-use makepad_platform::thread::{CancellationToken, Lane, SignalToUI, TaskHandle, TaskPool, ThreadOptions, ThreadSpawner};
+use makepad_platform::thread::{CancellationToken, Lane, SignalToUI, TaskHandle, TaskPool, ThreadSpawner};
 use makepad_platform::Cx;
 
 use crate::hub::ClientId;
@@ -105,6 +105,7 @@ fn wait_exit_handle(child: &Child) -> Option<impl FnOnce() + Send + 'static> {
 /// Wake the UI loop when `child` exits (a build ends, an app dies before
 /// it ever connected): the owner then polls its exit, so no timer has to
 /// watch for it. The worker blocks in the OS; it ends with the process.
+#[cfg(any(unix, windows))]
 pub fn signal_on_exit(spawner: &ThreadSpawner, child: &Child, name: String) -> Result<(), String> {
     #[cfg(unix)]
     let wait = {
@@ -114,13 +115,19 @@ pub fn signal_on_exit(spawner: &ThreadSpawner, child: &Child, name: String) -> R
     #[cfg(windows)]
     let Some(wait) = wait_exit_handle(child) else { return Err("exit watch: no handle".to_string()) };
     let task = spawner
-        .spawn_worker(ThreadOptions { name: Some(name.into()), ..Default::default() }, move || {
+        .spawn_worker(makepad_platform::thread::ThreadOptions { name: Some(name.into()), ..Default::default() }, move || {
             wait();
             SignalToUI::set_ui_signal();
         })
         .map_err(|error| format!("exit watch: {error}"))?;
     task.detach();
     Ok(())
+}
+
+/// The web has no child processes to watch.
+#[cfg(not(any(unix, windows)))]
+pub fn signal_on_exit(_spawner: &ThreadSpawner, _child: &Child, _name: String) -> Result<(), String> {
+    Err("exit watch: no child processes on this platform".to_string())
 }
 
 /// What a child needs to find the hub as client `id`: `STUDIO_HOST`,

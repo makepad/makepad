@@ -2,6 +2,9 @@
 
 use super::auth::Role;
 
+/// The front's peer stamp header (see front.rs); a web build only reads it.
+pub const HEADER_PEER: &str = "X-Makepad-Peer";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Caller {
     pub client_id: String,

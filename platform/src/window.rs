@@ -1515,6 +1515,7 @@ mod tests {
                 macos: MacosWindowConfig::floating_panel(),
                 wayland_decorations: WaylandDecorationPreference::ClientSide,
                 caption_bar_height_override: None,
+                dropdown: false,
             };
 
             script_window.on_after_apply(vm, &Apply::New, &mut Scope::empty(), NIL);

@@ -168,6 +168,7 @@ pub fn is_window_manager() -> bool {
 
 static HAL_WINDOW_MANAGER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+#[cfg(not(target_arch = "wasm32"))]
 /// The HAL session says its shell is a makepad window manager's client (`info_flags::WM_HOSTED`:
 /// `makepad run` on the WM, whose HAL shell is the WM tile this app draws into).
 pub(crate) fn set_hal_window_manager(on: bool) {

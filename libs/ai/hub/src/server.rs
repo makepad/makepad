@@ -3474,6 +3474,7 @@ fn execute_live_job(
 }
 
 /// A model whose files the prefetcher completed is Ready (not Absent) from now on.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn note_model_files_present(shared: &Arc<ServiceShared>, model_id: &str) {
     let absent = matches!(shared.models.lock().unwrap().get(model_id), Some(ModelTrack::Absent));
     if absent {

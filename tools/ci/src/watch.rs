@@ -44,6 +44,12 @@ pub struct Config {
     /// Run every crate's tests, not only the platform's own. Off by default.
     pub deep_tests: bool,
     pub machines: BTreeMap<String, crate::machine::Machine>,
+    /// `yield_to`: commands wait (and running ones pause) while this directory holds a `*.cmd`
+    /// file; see process::set_yield_to.
+    pub yield_to: Option<PathBuf>,
+    /// `deny_warnings` (default true): a compiler warning fails its tile (red), as an error does;
+    /// false keeps warnings orange.
+    pub deny_warnings: bool,
 }
 impl Config {
     pub fn load(base: &Path, control: &Control) -> Result<Self> {
@@ -74,7 +80,11 @@ impl Config {
             }
         }
         let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
-        Self::parse(&text, base, installed)
+        let config = Self::parse(&text, base, installed)?;
+        if let Some(dir) = &config.yield_to {
+            process::set_yield_to(dir.clone());
+        }
+        Ok(config)
     }
     /// The checkout's own `local/ci/ci.toml` when it has one, else the
     /// defaults, without writing one (a developer's checkout, for preflight).
@@ -179,6 +189,16 @@ impl Config {
                 .transpose()?
                 .unwrap_or(false),
             machines,
+            deny_warnings: doc
+                .root
+                .get("deny_warnings")
+                .map(|v| v.as_bool().ok_or("deny_warnings must be true or false"))
+                .transpose()?
+                .unwrap_or(true),
+            yield_to: match string("yield_to", "")? {
+                s if s.is_empty() => None,
+                s => Some(PathBuf::from(s)),
+            },
         })
     }
 }

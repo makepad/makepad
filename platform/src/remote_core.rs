@@ -1918,6 +1918,7 @@ mod tests {
             ("net", 1),
             ("midi", 1),
             ("cursor", 1),
+            ("focus", 1),
         ];
         for (line, used) in routes {
             let r = resolve(&words(line)).unwrap_or_else(|e| panic!("{line}: {e}"));

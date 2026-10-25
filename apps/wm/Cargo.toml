@@ -47,7 +47,7 @@ makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = 
 makepad-studio-protocol = { path = "../../platform/studio" }
 makepad-network = { path = "../../platform/network" }
 makepad-wm-api = { path = "../../libs/wm_api" }
-makepad-desk-link = { path = "../../libs/desk_link", features = ["server"] }
+makepad-desk-link = { path = "../../libs/desk_link" }
 makepad-app-registry = { path = "../../libs/app_registry" }
 makepad-app-host = { path = "../../libs/app_host" }
 # The AI services wire only: the WM relays frames between the aichat child and the apps.
@@ -72,4 +72,6 @@ makepad-wayland-server = { path = "../../libs/wayland_server" }
 makepad-xkb-keymap = { path = "../../libs/xkb_keymap" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Serving Desk Link (listener, TLS, fleet credentials): native desktops only
+makepad-desk-link = { path = "../../libs/desk_link", features = ["server"] }
 makepad-hal = { path = "../../platform/hal" }

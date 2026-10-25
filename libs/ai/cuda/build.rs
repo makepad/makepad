@@ -124,7 +124,11 @@ fn build_cuda_backends(target_os: &str, require_cuda: bool) {
     println!("cargo:rerun-if-changed={}", manifest_dir.join("kernels/launch_profile.cuh").display());
 
     let Some(cuda_root) = cuda_root(target_os) else {
-        cuda_unavailable(require_cuda, "CUDA toolkit root not found");
+        // No toolkit is the normal case of a machine without an NVIDIA GPU: built without CUDA,
+        // silently (no cargo warning on every build). A toolkit that fails still warns below.
+        if require_cuda {
+            cuda_unavailable(true, "CUDA toolkit root not found");
+        }
         return;
     };
 

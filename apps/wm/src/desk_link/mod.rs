@@ -339,9 +339,9 @@ mod native {
             let st = cx.global::<CaptureState>();
             let desktop = st.desktop_px;
             let mut out = Vec::new();
-            let mut primary = 0;
             #[cfg(target_os = "linux")]
-            {
+            let primary = {
+                let mut primary = 0;
                 let snapshot = cx.linux_display_snapshot();
                 for o in snapshot.outputs.iter().filter(|o| o.active && o.width > 0) {
                     let Some((x, y)) = o.desktop_position else { continue };
@@ -350,7 +350,10 @@ mod native {
                     }
                     out.push(ScreenInfo { name: o.name.clone(), x, y, width: o.width, height: o.height });
                 }
-            }
+                primary
+            };
+            #[cfg(not(target_os = "linux"))]
+            let primary = 0;
             if out.is_empty() {
                 out.push(ScreenInfo { name: "desktop".into(), x: 0, y: 0, width: desktop[0], height: desktop[1] });
             }
@@ -404,11 +407,11 @@ mod native {
             self.settings.as_ref().is_some_and(|s| s.full_chroma) && self.viewers.iter().filter(|v| !v.paused.load(Ordering::Acquire)).all(|v| v.full_chroma)
         }
 
-        /// The most the stream may take (kbit/s): by its size (`stream_kbps`: the settings'
-        /// `max_mbps` included) and the watching viewers' own caps.
-        fn rate_ceiling(&self, size: [u32; 2], full_chroma: bool) -> u32 {
-            let by_size = self.settings.as_ref().map_or(super::rate::START_KBPS, |s| s.stream_kbps(size, self.fps, full_chroma));
-            self.viewers.iter().filter(|v| !v.paused.load(Ordering::Acquire) && v.cap_mbps > 0).map(|v| v.cap_mbps as u32 * 1000).fold(by_size, u32::min).max(1)
+        /// The most the stream may take (kbit/s): the settings' `max_mbps` and the watching
+        /// viewers' own caps (none by default: the adaptive rate alone decides).
+        fn rate_ceiling(&self, _size: [u32; 2], _full_chroma: bool) -> u32 {
+            let base = self.settings.as_ref().map_or(u32::MAX, |s| s.ceiling_kbps());
+            self.viewers.iter().filter(|v| !v.paused.load(Ordering::Acquire) && v.cap_mbps > 0).map(|v| v.cap_mbps as u32 * 1000).fold(base, u32::min).max(1)
         }
 
         /// The whole stream's rate now (kbit/s, the encoder splits it over the tiles): the

@@ -14,7 +14,7 @@ struct Permit(Arc<AtomicUsize>);
 
 impl Permit {
     fn take(counter: &Arc<AtomicUsize>, limit: usize) -> Option<Self> {
-        counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+        counter.try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
             (count < limit).then_some(count + 1)
         }).ok()?;
         Some(Self(counter.clone()))

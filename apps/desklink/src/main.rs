@@ -368,15 +368,13 @@ impl App {
             // pixel a whole block, nothing resampled)
             lines.push(format!("window {}x{} px{} · scale {:.4}{}", self.window_px[0], self.window_px[1], if self.fullscreen { " (fullscreen)" } else { "" }, view.scale, if view.whole { " whole-pixel" } else { " resampled" }));
         }
-        lines.push(view::rate_line(fps, mbps, stream_fps, crate::conn::DISPLAY_HZ.load(std::sync::atomic::Ordering::Acquire), self.shown_rate));
-        if let Some(rate) = stream_rate {
-            lines.push(view::stream_rate_line(rate));
-        }
+        lines.insert(0, view::summary_line(self.shown_rate, mbps, stream_rate));
         // view only (the desktop cannot inject input): always said, never a silent dead mouse
         if let Some(w) = welcome.as_ref().filter(|w| !w.input) {
             lines.push(if w.input_note.is_empty() { "input unavailable on this host".to_string() } else { w.input_note.clone() });
         }
         if self.details {
+            lines.push(view::rate_details_line(fps, stream_fps, crate::conn::DISPLAY_HZ.load(std::sync::atomic::Ordering::Acquire), stream_rate));
             lines.push(view::latency_line(&self.latency));
             lines.push(view::flow_line(read_gap_ms, decode_queue));
         }
@@ -845,11 +843,12 @@ impl AppMain for App {
                 c.send(ClientMsg::Stats { frame, decode_us, present_us });
             }
             if self.stats_log {
-                let (fps, mbps, rtt, stream_fps, gap, queue) = self.current().map(|c| {
+                let (fps, mbps, rtt, stream_fps, gap, queue, rate) = self.current().map(|c| {
                     let s = c.shared.lock().unwrap();
-                    (s.fps, s.mbps, s.rtt_ms.unwrap_or(0.0), s.stream_fps, s.read_gap_ms, s.decode_queue)
+                    (s.fps, s.mbps, s.rtt_ms.unwrap_or(0.0), s.stream_fps, s.read_gap_ms, s.decode_queue, s.stream_rate)
                 }).unwrap_or_default();
-                eprintln!("desklink stats: rtt {rtt:.2} ms · {} · {} · {}", view::latency_line(&self.latency), view::rate_line(fps, mbps, stream_fps, crate::conn::DISPLAY_HZ.load(std::sync::atomic::Ordering::Acquire), self.shown_rate), view::flow_line(gap, queue));
+                let display = crate::conn::DISPLAY_HZ.load(std::sync::atomic::Ordering::Acquire);
+                eprintln!("desklink stats: rtt {rtt:.2} ms · {} · {} · {} · {}", view::latency_line(&self.latency), view::summary_line(self.shown_rate, mbps, rate), view::rate_details_line(fps, stream_fps, display, rate), view::flow_line(gap, queue));
             }
         }
         if let Event::Draw(_) = event {

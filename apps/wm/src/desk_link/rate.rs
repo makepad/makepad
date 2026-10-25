@@ -7,8 +7,8 @@
 //!   most of a picture's time): a 4:4:4 stream at that size goes 4:2:0 (about half the encode
 //!   work), the picture rate stays. It tries 4:4:4 again once 4:2:0 has run well clear of the
 //!   budget for a while (twice as long after every try that failed).
-//! - Clean: the rate creeps back up, to the ceiling (the size's own rate, the settings'
-//!   `max_mbps`, the viewers' caps).
+//! - Clean: the rate creeps back up, to the ceiling (the settings'
+//!   `max_mbps` when set, the viewers' caps; none by default).
 //!
 //! The rate starts at [`START_KBPS`] (or the ceiling, if lower). A fixed `kbps` setting turns
 //! all of this off.

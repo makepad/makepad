@@ -22,6 +22,7 @@ Options:
 
 static STOP: AtomicBool = AtomicBool::new(false);
 
+#[cfg(unix)]
 extern "C" fn on_signal(_signal: i32) {
     STOP.store(true, Ordering::SeqCst);
 }

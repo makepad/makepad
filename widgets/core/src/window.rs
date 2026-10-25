@@ -96,7 +96,7 @@ pub enum ResolvedChrome {
 /// The family's controls are the platform's table (`makepad_hal::WindowControls`), which
 /// `makepad run`'s load screen draws its caption by too.
 pub fn resolve_chrome(declared: WindowChrome, has_drag_region: bool, host: Option<crate::desktop_style::DesktopStyle>) -> ResolvedChrome {
-    use makepad_platform::makepad_hal::WindowControls;
+    use makepad_platform::window_controls::WindowControls;
     match declared {
         WindowChrome::None => ResolvedChrome::None,
         WindowChrome::Custom => ResolvedChrome::Custom,

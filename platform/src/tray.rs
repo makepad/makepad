@@ -125,6 +125,7 @@ impl Cx {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// The tray as a hosted relay carries it to the host (`ChildRelay::SetTray`).
 pub(crate) fn relay_tray(tray: &TrayIcon) -> crate::studio::RelayTray {
     use crate::studio::RelayTrayItem;

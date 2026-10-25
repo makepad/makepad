@@ -2067,6 +2067,13 @@ const WRITTEN: &[Written] = {
             ink: "color_label_inner_hover",
             need: READABLE,
         },
+        // the recent-files list: a hovered row's name, in the page's text colour
+        Written {
+            widgets: &["recent_list.rs"],
+            grounds: &["color_outset_hover"],
+            ink: "color_text",
+            need: READABLE,
+        },
         Written {
             widgets: FACES,
             grounds: &["color_outset_down", "color_outset_1_down", "color_outset_2_down"],

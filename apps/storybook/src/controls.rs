@@ -851,7 +851,6 @@ mod tests {
     #[test]
     fn nothing_a_sheet_sets_reaches_the_controls_panel() {
         use crate::makepad_widgets::desktop_style::{everything_sheet, install, resolution, resolution_diff, uninstall};
-        use crate::makepad_widgets::makepad_script::trap::NoTrap;
         let read = |vm: &mut ScriptVm| {
             let storybook = vm.module(id!(storybook));
             let value = vm.value(storybook, id!(ControlsPanel));

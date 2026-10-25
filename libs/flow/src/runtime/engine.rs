@@ -771,7 +771,7 @@ impl EngineHandle {
         // for its terminal reply.
         if self
             .reply_credits
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |credits| credits.checked_sub(1))
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |credits| credits.checked_sub(1))
             .is_err()
         {
             return Submit::Full(command);
@@ -1793,7 +1793,7 @@ impl Worker {
     /// can travel.
     fn reserve(&self, counter: &AtomicUsize, bytes: usize) -> bool {
         counter
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 (current == 0 || current + bytes <= self.lane_max_bytes).then_some(current + bytes)
             })
             .is_ok()

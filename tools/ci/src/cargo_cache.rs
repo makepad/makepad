@@ -16,6 +16,10 @@ pub enum Outcome {
 struct Package {
     libraries: BTreeSet<String>,
     bins: BTreeSet<String>,
+    /// `[package.metadata.makepad] platforms = ["desktop", "mobile", "web"]`: the platforms an
+    /// app is built for, declared once in its Cargo.toml (none declared: all of them). A check
+    /// row of another platform does not apply to it.
+    platforms: Option<BTreeSet<String>>,
 }
 #[derive(Default)]
 pub struct Cache {
@@ -51,10 +55,25 @@ fn catalog(run: &mut Run, cache: &mut Cache, manifest: &Path) -> Result<BTreeMap
                 package.libraries.insert(name.into());
             }
         }
+        package.platforms = declared_platforms(p).map_err(|e| format!("{name}: {e}"))?;
         packages.insert(name.into(), package);
     }
     cache.catalogs.insert(manifest.into(), packages.clone());
     Ok(packages)
+}
+
+/// An app's `[package.metadata.makepad] platforms` (its cargo metadata `package` object).
+fn declared_platforms(package: &Value) -> Result<Option<BTreeSet<String>>> {
+    let Some(list) = package.get("metadata").and_then(|m| m.get("makepad")).and_then(|m| m.get("platforms")) else { return Ok(None) };
+    let list = list.as_arr().ok_or("[package.metadata.makepad] platforms must be an array")?;
+    let mut platforms = BTreeSet::new();
+    for v in list {
+        match v.as_str() {
+            Some(s @ ("desktop" | "mobile" | "web")) => { platforms.insert(s.to_string()); }
+            _ => return Err("[package.metadata.makepad] platforms takes \"desktop\", \"mobile\", \"web\"".into()),
+        }
+    }
+    Ok(Some(platforms))
 }
 
 /// Preserve every row's flags while replacing just its package selection.
@@ -195,7 +214,7 @@ pub fn checks(
     let shared = run.cargo_cache.clone();
     let mut cache = shared.lock().map_err(|e| e.to_string())?;
     // User-supplied environment changes must not reuse a canonical warm verdict.
-    let memoize = opts.env.iter().all(|(key, _)| key == "MAKEPAD_BUILD" || key == "CARGO_TARGET_DIR");
+    let memoize = opts.env.iter().all(|(key, _)| key == "MAKEPAD_BUILD" || key == "CARGO_TARGET_DIR" || key == "RUSTFLAGS");
     if !workspace && memoize && packages.iter().all(|p| cache.checks.contains_key(&(p.clone(), check.label.clone()))) {
         return Ok(packages.iter().map(|p| (p.clone(), cache.checks[&(p.clone(), check.label.clone())].clone())).collect());
     }
@@ -209,7 +228,9 @@ pub fn checks(
         for (package, info) in &members {
             let cached = memoize.then(|| cache.checks.get(&(package.clone(), check.label.clone()))).flatten();
             let outcome = if let Some(outcome) = cached { Some(outcome.clone()) }
-            else if check.ty == cargo::BuildTy::Lib && missing_libs.contains(package) {
+            else if info.platforms.as_ref().is_some_and(|p| !p.contains(check.platform.name())) {
+                Some(Outcome::NotApplicable(format!("{package} is not built for {} (Cargo.toml [package.metadata.makepad] platforms)", check.platform.name())))
+            } else if check.ty == cargo::BuildTy::Lib && missing_libs.contains(package) {
                 Some(Outcome::NotApplicable(check.no_lib_detail(&[package.clone()])))
             } else { check.skip.clone().map(Outcome::Warning) };
             if let Some(outcome) = outcome { outcomes.insert(package.clone(), outcome); }
@@ -282,6 +303,16 @@ pub fn warm_builds(run: &mut Run, host: &Host, packages: &[String], opts: &Optio
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_app_declares_its_platforms_once() {
+        let parse = |text: &str| declared_platforms(&json::parse_depth(text.as_bytes(), 16).unwrap());
+        assert_eq!(parse(r#"{"metadata":null}"#).unwrap(), None);
+        assert_eq!(parse(r#"{"metadata":{"makepad":{"desktop":{}}}}"#).unwrap(), None);
+        assert_eq!(parse(r#"{"metadata":{"makepad":{"platforms":["desktop","mobile"]}}}"#).unwrap(),
+            Some(BTreeSet::from(["desktop".to_string(), "mobile".to_string()])));
+        assert!(parse(r#"{"metadata":{"makepad":{"platforms":["browser"]}}}"#).is_err());
+    }
+
     use super::*;
     fn host() -> Host {
         Host { target: "aarch64-apple-darwin".into(), targets: cargo::matrix_targets("aarch64-apple-darwin"), nightly: Some("nightly".into()) }

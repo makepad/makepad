@@ -310,6 +310,12 @@ impl Widget for RemoteView {
             self.draw_cursor.draw_abs(cx, Rect { pos, size: dvec2(12.0, 18.0) });
         }
         let mut y = view.pos.y + 6.0;
+        // the lines on a dark plate of their own: readable over any picture, never mixed with
+        // what the desktop draws under them (its own icons)
+        if !self.lines.is_empty() {
+            let chars = self.lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as f64;
+            self.draw_note_bg.draw_abs(cx, Rect { pos: dvec2(view.pos.x + 4.0, y - 3.0), size: dvec2(chars * 6.6 + 10.0, self.lines.len() as f64 * 15.0 + 5.0) });
+        }
         for line in &self.lines {
             self.draw_label.draw_abs(cx, dvec2(view.pos.x + 8.0, y), line);
             y += 15.0;
@@ -426,38 +432,40 @@ impl Widget for ConnList {
     }
 }
 
-/// The overlay's rate line (always shown): fixed field widths in a monospaced face, so it
-/// never jitters as the digits change.
-/// Pictures shown a second and the rate, then what the desktop streams at (`stream`: its `Rate`)
-/// and this display's refresh (`display`, 0 = not measured yet).
-/// `fps`: pictures that arrived a second; `shown`: (pictures drawn, decoded but never shown) a
-/// second, over the last second.
-pub fn rate_line(fps: f64, mbps: f64, stream: Option<u16>, display: u32, shown: (u32, u32)) -> String {
-    let stream = stream.map_or("…".to_string(), |s| s.to_string());
-    let display = if display == 0 { "…".to_string() } else { display.to_string() };
-    format!(
-        "{:>3.0} fps {:>6.1} Mbit/s · shown {:>3}/s (dropped {:>3}) · stream {stream}/s · display {display} Hz",
-        fps.clamp(0.0, 999.0),
-        mbps.clamp(0.0, 9999.9),
-        shown.0.min(999),
-        shown.1.min(999)
-    )
+/// The overlay's one line (always shown): pictures shown a second, the rate that arrives, the
+/// stream's chroma, and what limits it only when something does (dropped pictures only when
+/// there are any). Fixed field widths in a monospaced face, so it never jitters.
+pub fn summary_line(shown: (u32, u32), mbps: f64, stream_rate: Option<(u32, u8, bool)>) -> String {
+    use makepad_desk_link::limit;
+    let mut line = format!("{:>3} fps · {:>4.0} Mbit/s", shown.0.min(999), mbps.clamp(0.0, 9999.0));
+    if let Some((_, l, full_chroma)) = stream_rate {
+        line.push_str(if full_chroma { " · H.264 4:4:4" } else { " · H.264 4:2:0" });
+        let why = match l {
+            limit::LINK => " · link-bound",
+            limit::ENCODER => " · encoder-bound",
+            limit::CAP => " · capped",
+            limit::FIXED => " · fixed rate",
+            _ => "",
+        };
+        line.push_str(why);
+    }
+    if shown.1 > 0 {
+        line.push_str(&format!(" · dropped {}", shown.1.min(999)));
+    }
+    line
 }
 
-/// The desktop's stream rate (its `Rate`): the rate, the chroma, and what holds it.
-pub fn stream_rate_line((kbps, limit, full_chroma): (u32, u8, bool)) -> String {
-    use makepad_desk_link::limit;
-    let why = match limit {
-        limit::START => "starting",
-        limit::CLEAN => "clean: rising to its cap",
-        limit::LINK => "link-bound: lowered",
-        limit::ENCODER => "encoder-bound",
-        limit::CAP => "at its cap",
-        limit::FIXED => "fixed by the desktop",
-        _ => "",
+/// The rate details ("Latency details"): pictures that arrived a second, what the desktop
+/// streams at (`stream`: its `Rate`), this display's refresh (`display`, 0 = not measured yet)
+/// and the stream's rate target.
+pub fn rate_details_line(fps: f64, stream: Option<u16>, display: u32, stream_rate: Option<(u32, u8, bool)>) -> String {
+    let stream = stream.map_or("…".to_string(), |s| s.to_string());
+    let display = if display == 0 { "…".to_string() } else { display.to_string() };
+    let target = match stream_rate {
+        Some((0, _, _)) | None => "…".to_string(),
+        Some((kbps, _, _)) => format!("{}", kbps / 1000),
     };
-    let rate = if kbps == 0 { "by size".to_string() } else { format!("{} Mbit/s", kbps / 1000) };
-    format!("rate {rate} {} · {why}", if full_chroma { "4:4:4" } else { "4:2:0" })
+    format!("arrived {:>3.0}/s · stream {stream}/s · display {display} Hz · target {target} Mbit/s", fps.clamp(0.0, 999.0))
 }
 
 /// The per-stage latency line ("Latency details"), fixed widths too.

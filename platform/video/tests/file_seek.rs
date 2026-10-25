@@ -289,6 +289,5 @@ fn seek_lands_on_the_requested_frame_on_both_clip_kinds() {
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[test]
 fn seek_is_explicitly_unsupported_elsewhere() {
-    let mut decoder = VideoFileDecoder::open("nonexistent.mp4").unwrap_err();
-    let _ = &mut decoder;
+    assert!(VideoFileDecoder::open("nonexistent.mp4").is_err());
 }

@@ -185,7 +185,7 @@ impl Outbox {
 fn reserve_lane_bytes(context: &LaneContext, bytes: usize) -> bool {
     context
         .lane_bytes
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
             (current == 0 || current + bytes <= context.lane_max_bytes).then_some(current + bytes)
         })
         .is_ok()

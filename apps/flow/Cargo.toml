@@ -25,6 +25,12 @@ path = "src/main.rs"
 name = "makepad-flow-server"
 path = "src/bin/makepad-flow-server.rs"
 
+# The platforms Flow is built for (tools/ci reads this; one place): not the web -- the app is a
+# client of a flow server (libs/flow `client`/`host`, blocking sockets and an embedded server), which
+# libs/flow builds natively only.
+[package.metadata.makepad]
+platforms = ["desktop", "mobile"]
+
 [package.metadata.makepad.desktop]
 name = "Makepad Flow"
 identifier = "nl.makepad.flow"

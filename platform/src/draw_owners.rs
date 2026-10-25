@@ -35,8 +35,10 @@ pub struct DrawLabels {
     index: HashMap<String, u32>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Packets kept for a reader that has not asked yet.
 const KEEP_PACKETS: usize = 64;
+#[cfg(not(target_arch = "wasm32"))]
 /// Frames a recording stays on without a reader before it turns itself off.
 const MAX_FRAMES: u32 = 8;
 
@@ -46,13 +48,17 @@ pub struct DrawOwners {
     pub current: u64,
     /// (list, item) -> (instance offset in floats where a widget's instances start, uid)
     notes: HashMap<(usize, usize), Vec<(usize, u64)>>,
+    #[cfg(not(target_arch = "wasm32"))]
     /// the packet being built: serial and its rows [draw index, first instance, count, uid]
     packet: Option<(u64, u32, Vec<[u64; 4]>)>,
     /// finished packets: serial -> rows
     pub packets: VecDeque<(u64, Vec<[u64; 4]>)>,
+    #[cfg(not(target_arch = "wasm32"))]
     frames: u32,
+    #[cfg(not(target_arch = "wasm32"))]
     /// a frame capture asked (packets are kept for its `draw_owners` query)
     capture: bool,
+    #[cfg(not(target_arch = "wasm32"))]
     /// a GPU profiler recording runs: stays armed (no packets) until it stops
     prof: bool,
 }
@@ -69,6 +75,7 @@ impl DrawOwners {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn begin_packet(&mut self, serial: u64) {
         // only a capture reads the rows; a profiler recording names each draw as it is emitted
         if self.capture {
@@ -76,6 +83,7 @@ impl DrawOwners {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// The owner of most instances of the draw of `(list, item)` with `count` instances of
     /// `slots` floats (0: none noted). A draw batched across owners is named by its largest.
     pub(crate) fn dominant(&self, list: usize, item: usize, slots: usize, count: usize) -> u64 {
@@ -91,6 +99,7 @@ impl DrawOwners {
         best
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// The draw the builder emits next for `(list, item)`, of `count` instances of `slots` floats.
     pub(crate) fn draw(&mut self, list: usize, item: usize, slots: usize, count: usize) {
         let Some((_, index, rows)) = self.packet.as_mut() else { return };
@@ -106,6 +115,7 @@ impl DrawOwners {
         *index += 1;
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn end_packet(&mut self) {
         if let Some((serial, _, rows)) = self.packet.take() {
             self.packets.push_back((serial, rows));
@@ -120,9 +130,13 @@ impl Cx {
     /// Records which widget draws each instance range from now until the HAL's `draw_owners` query
     /// reads it (or a few frames pass unread). See [`DrawOwners`].
     pub fn arm_draw_owners(&mut self) {
-        let o = self.draw_owners.get_or_insert_with(Box::default);
-        o.capture = true;
-        o.frames = 0;
+        let _o = self.draw_owners.get_or_insert_with(Box::default);
+        // the web build has no HAL frame builder to read a capture
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            _o.capture = true;
+            _o.frames = 0;
+        }
     }
 
     /// Owners are being recorded (a capture or a profiler recording): a drawer names its draws
@@ -174,6 +188,7 @@ impl Cx {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// The name an owner key reads as: a label's name, or a widget's path (`None`: unknown).
     pub(crate) fn draw_owner_name(&self, key: u64) -> Option<String> {
         if key & LABEL_BIT != 0 {
@@ -183,6 +198,7 @@ impl Cx {
         paths(self, &[key]).into_iter().next().map(|(_, path, kind)| if path.is_empty() { kind } else { path })
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Once per frame build: owners are recorded while the HAL's GPU profiler records, so every
     /// draw it sees carries its owner's name. Arming redraws everything once (retained lists
     /// note their owners only when they are drawn again); a stopped recording disarms. One
@@ -205,6 +221,7 @@ impl Cx {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// One frame was built while armed: a capture nobody reads turns itself off.
     pub(crate) fn draw_owners_frame_done(&mut self) {
         if let Some(o) = self.draw_owners.as_mut().filter(|o| o.capture) {
@@ -219,6 +236,7 @@ impl Cx {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// The `draw_owners` query's answer: `p <serial> <draw> <first> <count> <uid>` rows, then
     /// `w <uid>\t<path>\t<kind>` for every uid named. Ends the capture (a profiler recording
     /// keeps owners armed).

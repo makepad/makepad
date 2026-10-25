@@ -216,6 +216,14 @@ pub use ::windows;
 #[cfg(not(target_arch = "wasm32"))]
 pub use makepad_hal;
 
+/// The window-controls table of a desktop family: the HAL's, compiled in directly on the web
+/// (no HAL there), so widgets' caption code has one table on every target.
+#[cfg(not(target_arch = "wasm32"))]
+pub use makepad_hal::window_controls;
+#[cfg(target_arch = "wasm32")]
+#[path = "../hal/src/window_controls.rs"]
+pub mod window_controls;
+
 pub use makepad_futures;
 pub use makepad_script_std::makepad_network;
 pub use makepad_script_std::makepad_script;

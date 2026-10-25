@@ -447,6 +447,8 @@ pub struct FrameJob<T> {
 }
 
 enum FrameJobInner<T> {
+    /// A pool task (natively and in a threaded web build).
+    #[cfg_attr(all(target_arch = "wasm32", not(target_feature = "atomics")), allow(dead_code))]
     Task(TaskHandle<T>),
     /// Not run yet, or run and not taken (the page without threads).
     #[cfg_attr(not(all(target_arch = "wasm32", not(target_feature = "atomics"))), allow(dead_code))]

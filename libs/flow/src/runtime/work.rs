@@ -118,7 +118,7 @@ impl HostWork for StdHostWork {
         let live = self.loops_live.clone();
         let max = self.loops_max;
         if live
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| (count < max).then_some(count + 1))
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| (count < max).then_some(count + 1))
             .is_err()
         {
             return Err(SpawnRefused::Budget(body));

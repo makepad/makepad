@@ -3,7 +3,7 @@
 
 use makepad_csg_boolean::classify::{classify_triangles, TriLocation};
 use makepad_csg_boolean::corefine::corefine;
-use makepad_csg_math::{dvec3, Mat4d, Vec3d};
+use makepad_csg_math::{dvec3, Mat4d};
 use makepad_csg_mesh::mesh::{make_unit_cube, TriMesh};
 use makepad_csg_mesh::validate::validate_mesh;
 use makepad_csg_mesh::volume::mesh_volume;

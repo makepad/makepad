@@ -112,9 +112,8 @@ example, no `/dev/uinput` access); `input_note` says why.
   move), at most one per `1/fps` seconds (`fps = 60` by default). A change that comes too soon is
   encoded when it is due. An idle desktop sends nothing.
 - **Rate control.** VBR at one rate for the whole stream, split over the tiles by area. A fixed
-  `kbps` setting, or adaptive: it starts at 250 Mbit/s (or the size's own rate, about 0.45 bit per
-  pixel per picture at 4:4:4, if lower), goes down below what got out when a viewer falls behind
-  (link-bound), and creeps back up when clean, up to the size's rate, `max_mbps` and
+  `kbps` setting, or adaptive: it starts at 250 Mbit/s, goes down below what got out when a viewer falls behind
+  (link-bound), and creeps back up when clean, with no ceiling but the desktop's `max_mbps` setting (none by default) and
   the viewers' `RateCap`. When the encoder cannot keep a picture's time at 4:4:4 (its slowest
   tile takes most of it and frames wait for it), that size streams 4:2:0 at the same picture
   rate, and tries 4:4:4 again after a while. `Rate` tells the viewers each change.

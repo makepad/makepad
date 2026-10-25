@@ -337,7 +337,15 @@ impl crate::cx::Cx {
     /// The room at the right of a window's caption that `makepad run`'s JIT ring takes
     /// (zero in a rustc build, which has no ring): app caption controls keep out of it.
     pub fn caption_badge_room(&self) -> f64 {
-        if cfg!(relax) { makepad_hal::CAPTION_BADGE_ROOM as f64 } else { 0.0 }
+        // the web build has no HAL and no ring
+        #[cfg(all(relax, not(target_arch = "wasm32")))]
+        {
+            makepad_hal::CAPTION_BADGE_ROOM as f64
+        }
+        #[cfg(not(all(relax, not(target_arch = "wasm32"))))]
+        {
+            0.0
+        }
     }
 }
 
