@@ -297,6 +297,29 @@ impl<'a> CxDraw<'a> {
         dvec2(f64::NAN, f64::NAN)
     }
 
+    /// The density of the window the current pass draws for (`owning_window_or_root_pass_size`'s
+    /// window): what content laid out in that window's points rasterises at, whatever pass it is
+    /// nested in. A pixel-addressed target (a `RenderTarget`, dpi 1) in between does not change
+    /// it: a window's content drawn into a pass under one is still drawn at the window's dpi.
+    /// Without a window, the current pass's dpi.
+    pub fn owning_window_dpi_factor(&self) -> f64 {
+        let Some(stack_item) = self.pass_stack.last() else {
+            return 1.0;
+        };
+        let mut pass_id = stack_item.pass_id;
+        for _ in 0..25 {
+            match self.passes[pass_id].parent {
+                CxDrawPassParent::Window(window_id) => {
+                    let dpi = self.windows[window_id].window_geom.dpi_factor;
+                    return if dpi.is_finite() && dpi > 0.0 { dpi } else { self.current_dpi_factor() };
+                }
+                CxDrawPassParent::DrawPass(parent) => pass_id = parent,
+                _ => break,
+            }
+        }
+        self.current_dpi_factor()
+    }
+
     /// The paint-order depth the current pass adds per draw call: what a
     /// drawer that splits one call into several must take back off through
     /// `draw_depth` for its later calls to keep the depth of the one call.

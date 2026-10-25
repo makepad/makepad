@@ -12,6 +12,10 @@ mod render;
 mod sys;
 mod terminal;
 mod touchpad;
+pub(crate) use render::request_scanout;
+
+/// This process drives the displays itself (the DRM/KMS direct shell is connected).
+pub(crate) fn connected() -> bool { STATE.get().is_some() }
 
 use super::{io, lock, Key, Op, OsCmd, Protocol, Shared, Shell};
 use crate::{backend::vulkan::{surface::{FramePresenter, SurfaceState, VkSurfaceSource}, Device, Image},

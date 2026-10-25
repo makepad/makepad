@@ -29,6 +29,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("cap time", "[n=15] [repeat=16]", "per-draw GPU time measured in replay (each draw repeated in place)"),
     ("cap save", "<path.mkcap>", "write the newest capture to a file"),
     ("cap list", "", "the captures this process keeps"),
+    ("cap scanout", "[png=<path>] [timeout=3000]", "direct display only: the next image handed to the display plane, read back from the swapchain image, compared with the desktop frame it was copied from (1:1 or scaled, pixels that differ); writes both PNGs"),
 ];
 
 /// The replay of one capture and what has been measured on it, kept between questions.
@@ -407,6 +408,73 @@ fn write_png(req: &Req, default: &str, img: &Image) -> Result<String, String> {
     Ok(path)
 }
 
+// ------------------------------------------------------------------ the scanout
+
+/// `cap scanout`: what the display plane shows, against the desktop frame it came from.
+#[cfg(target_os = "linux")]
+fn scanout(req: &Req) -> Result<String, String> {
+    use crate::backend::linux::direct;
+    if !direct::connected() {
+        return Err("cap scanout reads the direct display's swapchain: this process is not the direct-display shell".into());
+    }
+    let rx = direct::request_scanout();
+    // the presenter answers at its next present: every session draws a frame
+    let hal = crate::Hal::global();
+    for sid in hal.with_world(|w| w.session_ids()) {
+        hal.with_events(sid, |q| q.redraw(Id::NONE, false));
+    }
+    hal.wake();
+    let timeout = Duration::from_millis(req.num("timeout", 3000));
+    let s = rx.recv_timeout(timeout).map_err(|_| format!("no present within {} ms", timeout.as_millis()))??;
+    let png = match req.get("png") {
+        Some(p) => p.to_string(),
+        None => {
+            let dir = std::env::temp_dir().join("makepad-framecap");
+            let _ = std::fs::create_dir_all(&dir);
+            dir.join(format!("scanout-{}.png", s.output)).to_string_lossy().into_owned()
+        }
+    };
+    let frame_png = png.strip_suffix(".png").map_or_else(|| format!("{png}.frame.png"), |stem| format!("{stem}.frame.png"));
+    std::fs::write(&png, crate::automation::png_rgba(s.mode[0], s.mode[1], &s.rgba)).map_err(|e| format!("cannot write {png}: {e}"))?;
+    let [sx, sy, sw, sh] = s.op.source;
+    let [dx, dy, dw, dh] = s.op.destination;
+    let path = if s.op.copied { "1:1 copy".to_string() } else if (sw, sh) == (dw, dh) { "1:1 blit (format conversion)".to_string() } else {
+        format!("SCALED blit {:.3}x{:.3}", dw as f64 / sw.max(1) as f64, dh as f64 / sh.max(1) as f64)
+    };
+    let mut verdict = format!("scanout {} {}x{} {:?}: {path} of desktop frame {}x{} rect {sx},{sy} {sw}x{sh} -> {dx},{dy} {dw}x{dh}{}",
+        s.output, s.mode[0], s.mode[1], s.format, s.frame[0], s.frame[1], if s.bridged { " (across the GPU bridge)" } else { "" });
+    let mut lines = Vec::new();
+    match &s.frame_rgba {
+        Some(frame) if (sw, sh) == (dw, dh) => {
+            let mut differ = 0u64;
+            let mut first = None;
+            for y in 0..dh {
+                for x in 0..dw {
+                    let a = (((sy + y) * s.frame[0] + sx + x) * 4) as usize;
+                    let b = (((dy + y) * s.mode[0] + dx + x) * 4) as usize;
+                    if frame[a..a + 3] != s.rgba[b..b + 3] {
+                        differ += 1;
+                        first.get_or_insert((dx + x, dy + y));
+                    }
+                }
+            }
+            verdict.push_str(&format!(", {} of {} pixels differ{}", differ, dw as u64 * dh as u64,
+                first.map_or(String::new(), |(x, y)| format!(" (first at {x},{y})"))));
+            std::fs::write(&frame_png, crate::automation::png_rgba(s.frame[0], s.frame[1], frame)).map_err(|e| format!("cannot write {frame_png}: {e}"))?;
+            lines.push(format!("frame: {frame_png}"));
+        }
+        Some(_) => verdict.push_str(", not compared (scaled)"),
+        None => verdict.push_str(", not compared (bridged or not 8-bit)"),
+    }
+    lines.insert(0, format!("scanout: {png}"));
+    Ok(std::iter::once(verdict).chain(lines).collect::<Vec<_>>().join("\n"))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn scanout(_: &Req) -> Result<String, String> {
+    Err("cap scanout reads the Linux direct display's swapchain".into())
+}
+
 // ------------------------------------------------------------------ the commands
 
 /// `cap ...`; true when this was a capture command.
@@ -425,6 +493,7 @@ pub fn dispatch(req: &Req, out: &mut Out) -> bool {
             t
         }),
         "list" => Ok(list_text()),
+        "scanout" => scanout(req),
         "save" => match (latest(), req.pos.get(1)) {
             (Some(c), Some(p)) => std::fs::write(p, file::encode(&c)).map(|_| format!("saved F{} of {} to {p}", c.frame, c.app)).map_err(|e| format!("cannot write {p}: {e}")),
             (None, _) => Err("no capture yet; try: cap grab".into()),
@@ -445,7 +514,7 @@ pub fn dispatch(req: &Req, out: &mut Out) -> bool {
         _ => Err(format!("no cap command `{sub}`; try: cap grab | frame | draws | draw D<k> | code D<k> | rt D<k> | pixel x,y | overdraw | mesh D<k> | tex X<k> | time | save | list")),
     };
     let src = match sub {
-        "grab" => "live",
+        "grab" | "scanout" => "live",
         "list" | "save" => "process",
         _ if req.get("file").is_some() => "file",
         _ => "replay",

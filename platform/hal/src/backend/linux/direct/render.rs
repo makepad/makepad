@@ -4,7 +4,7 @@ use crate::wide_desktop;
 use super::{dma_buf, drm_sys as drm, gpu_bridge::GpuBridge, kms::*,
     Command, Frame, Key, Snapshot, State};
 use super::super::{io, lock};
-use crate::{backend::vulkan::{Device, Image}, direct::*, session::TextureObj, types::{format, usage}};
+use crate::{backend::vulkan::{buffer_usage, Buffer, Device, Image}, direct::*, session::TextureObj, types::{format, usage}};
 use makepad_vulkan::vk;
 use std::{collections::{HashMap, HashSet, VecDeque}, fs::{File, OpenOptions},
     os::fd::{AsRawFd, IntoRawFd}, path::{Path, PathBuf}, sync::{Arc, atomic::Ordering}, time::{Duration, Instant}};
@@ -239,7 +239,7 @@ fn transition(dev:&Device,cb:vk::CommandBuffer,image:vk::Image,old:vk::ImageLayo
 /// copied, not blitted: a copy is the cheaper GPU path, and across GPUs half the bytes of
 /// a clear plus a blit. `same_format`: both images have the same Vulkan format.
 fn blit_full(dev:&Device,cb:vk::CommandBuffer,source:vk::Image,source_layout:vk::ImageLayout,source_size:[u32;2],
-    destination:vk::Image,destination_layout:vk::ImageLayout,size:[u32;2],placement:Option<wide_desktop::SliceRect>,same_format:bool) {
+    destination:vk::Image,destination_layout:vk::ImageLayout,size:[u32;2],placement:Option<wide_desktop::SliceRect>,same_format:bool) -> ScanoutOp {
     let sub = vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1);
     let (src,dst) = if let Some(r) = placement.filter(|r| r.x + r.width <= source_size[0] && r.y + r.height <= source_size[1]) {
         ([r.x,r.y,r.width,r.height],[0,0,size[0],size[1]])
@@ -264,11 +264,60 @@ fn blit_full(dev:&Device,cb:vk::CommandBuffer,source:vk::Image,source_layout:vk:
             dev.raw.cmd_blit_image(cb,source,source_layout,destination,destination_layout,&[blit],vk::Filter::NEAREST);
         }
     }
+    ScanoutOp { source: src, destination: dst, copied: same_format && src[2] == dst[2] && src[3] == dst[3] }
+}
+
+/// What one `blit_full` did: the source rectangle, where it landed in the destination, and
+/// whether it was a 1:1 copy (else a blit, which scales when the two rectangles differ).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ScanoutOp { pub source: [u32;4], pub destination: [u32;4], pub copied: bool }
+
+/// `cap scanout` (framecap): one output's next presented image, read back from the swapchain
+/// image after the presenter's copy into it, i.e. the pixels the display plane scans out.
+pub(crate) struct Scanout {
+    pub output: String, pub mode: [u32;2], pub format: vk::Format,
+    /// the desktop frame the copy read (its size), and the copy itself
+    pub frame: [u32;2], pub op: ScanoutOp,
+    /// across GPUs: the frame first crossed the bridge into a local image of the mode's size
+    pub bridged: bool,
+    /// RGBA8 rows of `mode` (10-bit formats are reduced to 8 bits)
+    pub rgba: Vec<u8>,
+    /// the desktop frame itself, RGBA8 rows of `frame`, read in the same submission (same GPU only)
+    pub frame_rgba: Option<Vec<u8>>,
+}
+type ScanoutReply = std::sync::mpsc::Sender<Result<Scanout,String>>;
+static SCANOUT: std::sync::Mutex<Vec<ScanoutReply>> = std::sync::Mutex::new(Vec::new());
+
+/// Ask for the next presented image of any output (the first that presents answers).
+pub(crate) fn request_scanout() -> std::sync::mpsc::Receiver<Result<Scanout,String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    lock(&SCANOUT).push(tx);
+    rx
+}
+
+/// Swapchain pixels as RGBA8.
+fn scanout_rgba(format: vk::Format, bytes: &[u8]) -> Result<Vec<u8>,String> {
+    let mut out = Vec::with_capacity(bytes.len());
+    for p in bytes.chunks_exact(4) {
+        match format {
+            vk::Format::B8G8R8A8_UNORM | vk::Format::B8G8R8A8_SRGB => out.extend_from_slice(&[p[2],p[1],p[0],255]),
+            vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB | vk::Format::A8B8G8R8_UNORM_PACK32 => out.extend_from_slice(&[p[0],p[1],p[2],255]),
+            vk::Format::A2B10G10R10_UNORM_PACK32 => {
+                let v = u32::from_le_bytes([p[0],p[1],p[2],p[3]]);
+                let c = |shift: u32| (((v >> shift) & 0x3ff) >> 2) as u8;
+                out.extend_from_slice(&[c(0),c(10),c(20),255]);
+            }
+            other => return Err(format!("scanout readback: no decoder for {other:?}")),
+        }
+    }
+    Ok(out)
 }
 
 struct Peer {
     source: Arc<Device>, destination: Arc<Device>, bridge: Option<GpuBridge>, local: Arc<Image>,
     sent: u64, received: u64, keep: Option<Arc<Image>>, valid: bool,
+    /// the last frame's copy into the bridge (`cap scanout` reports it)
+    sent_op: Option<ScanoutOp>,
     /// profile: when the last send / receive was submitted
     sent_at: u64, received_at: u64,
 }
@@ -281,7 +330,7 @@ impl Peer {
         let local = Image::new(destination.clone(),TextureObj { format:format::BGRA8,w:size[0],h:size[1],depth:1,mips:1,
             usage:usage::RENDER_TARGET | usage::SAMPLED,bytes:0,imported:false,uploaded:0,lent:None })?;
         let bridge = GpuBridge::new(&source,&destination,vk::Extent2D { width:size[0],height:size[1] })?;
-        Ok(Self { source,destination,bridge:Some(bridge),local,sent:0,received:0,keep:None,valid:false,sent_at:0,received_at:0 })
+        Ok(Self { source,destination,bridge:Some(bridge),local,sent:0,received:0,keep:None,valid:false,sent_op:None,sent_at:0,received_at:0 })
     }
     fn service(&mut self,frame:&Frame,placement:Option<wide_desktop::SliceRect>) -> Result<bool,String> {
         let bridge = self.bridge.as_mut().unwrap();
@@ -307,9 +356,11 @@ impl Peer {
             if self.sent != frame.generation && bridge.writable(&self.source,&self.destination)? {
                 let image = &frame.image;
                 let size = bridge.extent();
+                let mut op = None;
                 bridge.send_commands(&self.source,|cb,shared| {
-                    blit_full(&self.source,cb,image.image,vk::ImageLayout::TRANSFER_SRC_OPTIMAL,[image.desc.w,image.desc.h],shared,vk::ImageLayout::GENERAL,[size.width,size.height],placement,true); Ok(())
+                    op = Some(blit_full(&self.source,cb,image.image,vk::ImageLayout::TRANSFER_SRC_OPTIMAL,[image.desc.w,image.desc.h],shared,vk::ImageLayout::GENERAL,[size.width,size.height],placement,true)); Ok(())
                 })?;
+                self.sent_op = op;
                 self.keep = Some(image.clone()); self.sent = frame.generation; self.sent_at = crate::clock_ns();
             }
         }
@@ -333,6 +384,8 @@ struct Output {
     acquire:vk::Fence, acquired:Option<u32>, acquire_ready:bool, job:CopyJob, peer:Option<Peer>,
     placement:Option<wide_desktop::SliceRect>, generation:u64, serial:u64, pending:Option<u64>,
     complete:u64, last_present:u64, rebuild:bool,
+    /// The swapchain images can be copied from (`cap scanout`).
+    readable:bool,
     progress:(u64,u64,Option<u32>,bool), progress_at:Instant,
     /// profile: the present's submit, the cross-GPU receive's submit
     present_at:u64, peer_at:u64,
@@ -341,7 +394,7 @@ impl Output {
     fn new(dev:Arc<Device>,compositor:Arc<Device>,connector:DrmConnector,display:vk::DisplayKHR,requested:Option<String>,mode:DisplayMode,plane:PlaneCandidate) -> Result<Self,String> {
         let job = CopyJob::new(dev.clone())?;
         let mut out = Self { dev,connector,display,requested,error:None,plane:plane.plane_index,mode,format:vk::Format::UNDEFINED,surface:vk::SurfaceKHR::null(),chain:vk::SwapchainKHR::null(),images:Vec::new(),signals:Vec::new(),
-            acquire:vk::Fence::null(),acquired:None,acquire_ready:false,job,peer:None,placement:None,generation:0,serial:0,pending:None,complete:0,last_present:0,rebuild:false,
+            acquire:vk::Fence::null(),acquired:None,acquire_ready:false,job,peer:None,placement:None,generation:0,serial:0,pending:None,complete:0,last_present:0,rebuild:false,readable:false,
             progress:(0,0,None,false),progress_at:Instant::now(),present_at:0,peer_at:0 };
         out.surface = create_plane_surface(&out.dev.instance,&out.mode,&plane)?;
         if !unsafe { out.dev.instance.get_physical_device_surface_support(out.dev.physical,out.dev.family,out.surface) }.map_err(|e| format!("surface support: {}",error(e)))? { return Err("graphics queue cannot present to the display plane".into()); }
@@ -355,12 +408,14 @@ impl Output {
         });
         let format = choose_output_format(&formats)?;
         out.format = format.format;
+        out.readable = caps.supported_usage_flags.contains(vk::ImageUsageFlags::TRANSFER_SRC);
+        let usage = if out.readable { vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC } else { vk::ImageUsageFlags::TRANSFER_DST };
         let count = if caps.max_image_count == 0 { caps.min_image_count + 1 } else { (caps.min_image_count+1).min(caps.max_image_count) };
         let alpha = [vk::CompositeAlphaFlagsKHR::OPAQUE,vk::CompositeAlphaFlagsKHR::INHERIT].into_iter().find(|a| caps.supported_composite_alpha.contains(*a)).ok_or("display has no opaque composite alpha")?;
         unsafe {
             out.chain = out.dev.raw.create_swapchain(&vk::SwapchainCreateInfoKHR::default().surface(out.surface).min_image_count(count)
                 .image_format(format.format).image_color_space(format.color_space).image_extent(out.mode.extent).image_array_layers(1)
-                .image_usage(vk::ImageUsageFlags::TRANSFER_DST).image_sharing_mode(vk::SharingMode::EXCLUSIVE)
+                .image_usage(usage).image_sharing_mode(vk::SharingMode::EXCLUSIVE)
                 .pre_transform(caps.current_transform).composite_alpha(alpha).present_mode(vk::PresentModeKHR::FIFO).clipped(true),None).map_err(|e| format!("create swapchain {}x{} @ {:.3} Hz: {}",out.mode.extent.width,out.mode.extent.height,out.mode.refresh_mhz as f64 / 1000.0,error(e)))?;
             out.images = out.dev.raw.get_swapchain_images(out.chain).map_err(error)?;
             for _ in &out.images { out.signals.push(out.dev.raw.create_semaphore(&vk::SemaphoreCreateInfo::default(),None).map_err(error)?); }
@@ -430,10 +485,13 @@ impl Output {
         self.job.begin()?;
         let destination = self.images[index as usize];
         transition(&self.dev,self.job.cb,destination,vk::ImageLayout::UNDEFINED,vk::ImageLayout::TRANSFER_DST_OPTIMAL);
-        blit_full(&self.dev,self.job.cb,image.image,vk::ImageLayout::TRANSFER_SRC_OPTIMAL,[image.desc.w,image.desc.h],destination,vk::ImageLayout::TRANSFER_DST_OPTIMAL,self.size(),placement,self.format == vk::Format::B8G8R8A8_UNORM);
-        transition(&self.dev,self.job.cb,destination,vk::ImageLayout::TRANSFER_DST_OPTIMAL,vk::ImageLayout::PRESENT_SRC_KHR);
+        let op = blit_full(&self.dev,self.job.cb,image.image,vk::ImageLayout::TRANSFER_SRC_OPTIMAL,[image.desc.w,image.desc.h],destination,vk::ImageLayout::TRANSFER_DST_OPTIMAL,self.size(),placement,self.format == vk::Format::B8G8R8A8_UNORM);
+        let shot = self.record_scanout(destination,frame,op)?;
+        transition(&self.dev,self.job.cb,destination,if shot.is_some() { vk::ImageLayout::TRANSFER_SRC_OPTIMAL } else { vk::ImageLayout::TRANSFER_DST_OPTIMAL },vk::ImageLayout::PRESENT_SRC_KHR);
         let ready = self.signals[index as usize];
+        let frame_format = image.desc.format;
         self.job.submit(ready,image)?;
+        if let Some((reply,staging,scanout)) = shot { self.finish_scanout(reply,staging,scanout,frame_format); }
         self.serial += 1;
         let ids = [self.serial]; let mut present_id = vk::PresentIdKHR::default().present_ids(&ids);
         let waits = [ready]; let chains = [self.chain]; let indices = [index];
@@ -449,6 +507,54 @@ impl Output {
             crate::profile::since(crate::profile::Metric::ToPresent, frame.taken);
         }
         self.generation = frame.generation; self.pending = Some(frame.generation); Ok(())
+    }
+    /// A pending `cap scanout`: after the copy into the swapchain image, that image is copied
+    /// on into a host buffer in the same submission (read once its fence signals).
+    fn record_scanout(&self,destination:vk::Image,frame:&Frame,op:ScanoutOp) -> Result<Option<(ScanoutReply,[Option<Arc<Buffer>>;2],Scanout)>,String> {
+        let Some(reply) = lock(&SCANOUT).pop() else { return Ok(None); };
+        if !self.readable {
+            let _ = reply.send(Err(format!("{}: the display surface does not offer TRANSFER_SRC swapchain images",self.connector.name)));
+            return Ok(None);
+        }
+        let [w,h] = self.size();
+        let staging = Buffer::scratch(self.dev.clone(),w as u64 * h as u64 * 4,buffer_usage())?;
+        transition(&self.dev,self.job.cb,destination,vk::ImageLayout::TRANSFER_DST_OPTIMAL,vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+        let region = vk::BufferImageCopy::default()
+            .image_subresource(vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1))
+            .image_extent(vk::Extent3D { width:w,height:h,depth:1 });
+        // the frame the copy read, on the same GPU: for the pixel-identity check
+        let source = if self.peer.is_none() && matches!(frame.image.desc.format,format::BGRA8 | format::RGBA8) {
+            let [fw,fh] = [frame.image.desc.w,frame.image.desc.h];
+            let staging = Buffer::scratch(self.dev.clone(),fw as u64 * fh as u64 * 4,buffer_usage())?;
+            let region = region.image_extent(vk::Extent3D { width:fw,height:fh,depth:1 });
+            unsafe { self.dev.raw.cmd_copy_image_to_buffer(self.job.cb,frame.image.image,vk::ImageLayout::TRANSFER_SRC_OPTIMAL,staging.buffer,&[region]); }
+            Some(staging)
+        } else { None };
+        unsafe {
+            self.dev.raw.cmd_copy_image_to_buffer(self.job.cb,destination,vk::ImageLayout::TRANSFER_SRC_OPTIMAL,staging.buffer,&[region]);
+            self.dev.raw.cmd_pipeline_barrier(self.job.cb,vk::PipelineStageFlags::TRANSFER,vk::PipelineStageFlags::HOST,vk::DependencyFlags::empty(),
+                &[vk::MemoryBarrier::default().src_access_mask(vk::AccessFlags::TRANSFER_WRITE).dst_access_mask(vk::AccessFlags::HOST_READ)],&[],&[]);
+        }
+        let (frame_size,op,bridged) = match &self.peer {
+            Some(peer) => ([frame.image.desc.w,frame.image.desc.h],peer.sent_op.unwrap_or(op),true),
+            None => ([frame.image.desc.w,frame.image.desc.h],op,false),
+        };
+        Ok(Some((reply,[Some(staging),source],Scanout { output:self.connector.name.clone(),mode:[w,h],format:self.format,frame:frame_size,op,bridged,rgba:Vec::new(),frame_rgba:None })))
+    }
+    /// Debug tooling only: the presenter waits for this one submission (a few ms).
+    fn finish_scanout(&self,reply:ScanoutReply,staging:[Option<Arc<Buffer>>;2],mut scanout:Scanout,frame_format:u32) {
+        let result = (|| {
+            unsafe { self.dev.raw.wait_for_fences(&[self.job.fence],true,2_000_000_000) }.map_err(error)?;
+            let [out,source] = staging;
+            scanout.rgba = scanout_rgba(self.format,&out.unwrap().read(scanout.mode[0] as usize * scanout.mode[1] as usize * 4)?)?;
+            if let Some(source) = source {
+                let bytes = source.read(scanout.frame[0] as usize * scanout.frame[1] as usize * 4)?;
+                let vk_format = if frame_format == format::BGRA8 { vk::Format::B8G8R8A8_UNORM } else { vk::Format::R8G8B8A8_UNORM };
+                scanout.frame_rgba = Some(scanout_rgba(vk_format,&bytes)?);
+            }
+            Ok(scanout)
+        })();
+        let _ = reply.send(result);
     }
     fn busy(&self,frame:Option<&Frame>) -> bool {
         self.job.pending || self.pending.is_some() || (self.acquired.is_some() && !self.acquire_ready)

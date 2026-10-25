@@ -220,7 +220,7 @@ impl Drop for Image {
     }
 }
 
-pub(super) struct Buffer {
+pub(crate) struct Buffer {
     pub dev: Arc<Device>,
     pub buffer: vk::Buffer,
     pub memory: vk::DeviceMemory,
@@ -318,7 +318,7 @@ impl Drop for Buffer {
     }
 }
 
-pub(super) fn buffer_usage() -> vk::BufferUsageFlags {
+pub(crate) fn buffer_usage() -> vk::BufferUsageFlags {
     vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::UNIFORM_BUFFER
         | vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST
 }

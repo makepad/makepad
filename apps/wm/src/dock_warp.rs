@@ -130,7 +130,10 @@ impl WindowFrame {
         if std::env::var_os("MAKEPAD_WM_TRACE_WARP").is_some() {
             log!("warp: capture begin {:?}", rect);
         }
-        let dpi = cx.current_dpi_factor();
+        // The window's content, at the window's density: also under a pixel-addressed target
+        // (Desk Link draws the desktop C inside its dpi-1 picture pass; at the picture's dpi C
+        // was half the screen's pixels at 2.0 and the panel and the stream showed it magnified).
+        let dpi = cx.owning_window_dpi_factor();
         let root_size = cx.owning_window_or_root_pass_size();
         self.pass.set_size(cx, rect.size);
         cx.set_pass_shift_scale(&self.pass, rect.pos, dvec2(1.0, 1.0));
@@ -264,6 +267,43 @@ impl DockWarp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Desk Link capture C (a `WindowFrame`) is drawn inside the dpi-1 picture target; its
+    /// pass rasterises at the window's dpi, so at 2.0 C is the screen's own pixels and the
+    /// window pass shows it 1:1 (it was dpi 1: half the pixels, magnified, on the panel and in
+    /// the stream; WMSHARP).
+    #[test]
+    fn a_window_frame_under_a_pixel_target_rasterises_at_the_windows_dpi() {
+        use makepad_widgets::makepad_draw::render_target::{RenderTarget, RenderTargetFormat};
+        use makepad_widgets::makepad_draw::cx_draw::CxDraw;
+        for dpi in [1.0, 1.3, 2.0, 2.07] {
+            let mut cx = Cx::new(Box::new(|_, _| {}));
+            let window = WindowHandle::new(&mut cx);
+            let window_id = window.window_id();
+            cx.windows[window_id].is_created = true;
+            cx.windows[window_id].window_geom.inner_size = dvec2(1920.0, 1080.0);
+            cx.windows[window_id].window_geom.dpi_factor = dpi;
+            let root_pass = DrawPass::new(&mut cx);
+            window.set_pass(&mut cx, &root_pass);
+            let mut picture = RenderTarget::new(&mut cx, "picture");
+            picture.ensure(&mut cx, (960, 6480), RenderTargetFormat::SharedBgra8);
+            let mut frame = WindowFrame::new_with_name(&mut cx, "c");
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(&mut cx, &event);
+            draw.begin_pass(&root_pass, Some(dpi));
+            {
+                let mut cx = Cx2d::new(&mut draw);
+                picture.begin(&mut cx, vec4(0.0, 0.0, 0.0, 0.0));
+                frame.begin(&mut cx, Rect { pos: dvec2(0.0, 0.0), size: dvec2(1920.0, 1080.0) });
+                assert_eq!(cx.current_dpi_factor(), dpi, "C draws at the window's dpi {dpi}");
+                frame.end(&mut cx);
+                picture.end(&mut cx);
+            }
+            draw.end_pass(&root_pass);
+            drop(draw);
+            assert_eq!(cx.passes[frame.pass_id()].dpi_factor, Some(dpi));
+        }
+    }
     #[test]
     fn reversal_keeps_the_same_surface_and_progress() {
         let source = Rect {

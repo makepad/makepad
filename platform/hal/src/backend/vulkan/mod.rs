@@ -33,7 +33,7 @@ use crate::session::*;
 use crate::types::*;
 use device::Worker;
 use pipeline::{PassKey, RenderPass, State};
-use resources::{buffer_usage, Buffer};
+pub(crate) use resources::{buffer_usage, Buffer};
 use submit::{Batch, Event, Mailbox, Token};
 use crate::FastMap;
 use std::collections::HashSet;
