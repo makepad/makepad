@@ -99,6 +99,8 @@ pub mod web;
 pub mod web32;
 pub mod coverage;
 pub mod owner;
+#[cfg(unix)]
+pub mod forkexec;
 pub mod lifeline;
 pub mod postframe;
 mod nounwind;

@@ -164,12 +164,30 @@ mod imp {
         }
     }
 
-    /// sigaltstack for the calling thread (64 KB above a guard page)
-    pub fn this_thread() {
+    /// sigaltstack for the calling thread (64 KB above a guard page); its stack pointer for
+    /// `this_thread_done`.
+    pub fn this_thread() -> u64 {
         unsafe {
             let stack = super::guarded_altstack(1 << 16);
             let ss = StackT { sp: stack as *mut u8, flags: 0, pad: 0, size: 1 << 16 };
             sigaltstack(&ss, std::ptr::null_mut());
+            stack
+        }
+    }
+
+    /// The calling thread ends: its fault stack `sp` (this_thread's) is switched off and freed,
+    /// unless something else replaced it since.
+    pub fn this_thread_done(sp: u64) {
+        const SS_DISABLE: i32 = 2;
+        unsafe {
+            let mut old = StackT { sp: std::ptr::null_mut(), flags: 0, pad: 0, size: 0 };
+            if sigaltstack(std::ptr::null(), &mut old) != 0 || old.sp as u64 != sp || old.flags & SS_DISABLE != 0 {
+                return;
+            }
+            let off = StackT { sp: std::ptr::null_mut(), flags: SS_DISABLE, pad: 0, size: 0 };
+            if sigaltstack(&off, std::ptr::null_mut()) == 0 {
+                super::free_altstack(sp, old.size);
+            }
         }
     }
 
@@ -325,12 +343,30 @@ mod imp {
         }
     }
 
-    /// sigaltstack for the calling thread (64 KB above a guard page)
-    pub fn this_thread() {
+    /// sigaltstack for the calling thread (64 KB above a guard page); its stack pointer for
+    /// `this_thread_done`.
+    pub fn this_thread() -> u64 {
         unsafe {
             let stack = super::guarded_altstack(1 << 16);
             let ss = StackT { sp: stack as *mut u8, flags: 0, pad: 0, size: 1 << 16 };
             sigaltstack(&ss, std::ptr::null_mut());
+            stack
+        }
+    }
+
+    /// The calling thread ends: its fault stack `sp` (this_thread's) is switched off and freed,
+    /// unless something else replaced it since.
+    pub fn this_thread_done(sp: u64) {
+        const SS_DISABLE: i32 = 2;
+        unsafe {
+            let mut old = StackT { sp: std::ptr::null_mut(), flags: 0, pad: 0, size: 0 };
+            if sigaltstack(std::ptr::null(), &mut old) != 0 || old.sp as u64 != sp || old.flags & SS_DISABLE != 0 {
+                return;
+            }
+            let off = StackT { sp: std::ptr::null_mut(), flags: SS_DISABLE, pad: 0, size: 0 };
+            if sigaltstack(&off, std::ptr::null_mut()) == 0 {
+                super::free_altstack(sp, old.size);
+            }
         }
     }
 
@@ -611,13 +647,31 @@ mod imp {
         }
     }
 
-    /// sigaltstack for the calling thread (64 KB above a guard page)
-    pub fn this_thread() {
+    /// sigaltstack for the calling thread (64 KB above a guard page); its stack pointer for
+    /// `this_thread_done`.
+    pub fn this_thread() -> u64 {
         unsafe {
             let size = 1 << 16;
             let stack = super::guarded_altstack(size);
             let ss = StackT { sp: stack as *mut u8, size, flags: 0 };
             sigaltstack(&ss, std::ptr::null_mut());
+            stack
+        }
+    }
+
+    /// The calling thread ends: its fault stack `sp` (this_thread's) is switched off and freed,
+    /// unless something else replaced it since.
+    pub fn this_thread_done(sp: u64) {
+        const SS_DISABLE: i32 = 4;
+        unsafe {
+            let mut old = StackT { sp: std::ptr::null_mut(), size: 0, flags: 0 };
+            if sigaltstack(std::ptr::null(), &mut old) != 0 || old.sp as u64 != sp || old.flags & SS_DISABLE != 0 {
+                return;
+            }
+            let off = StackT { sp: std::ptr::null_mut(), size: 0, flags: SS_DISABLE };
+            if sigaltstack(&off, std::ptr::null_mut()) == 0 {
+                super::free_altstack(sp, old.size);
+            }
         }
     }
 
@@ -785,12 +839,16 @@ mod imp {
     }
 
     /// The stack-overflow handler runs in the thread's guaranteed stack area (64 KB).
-    pub fn this_thread() {
+    pub fn this_thread() -> u64 {
         let mut size: u32 = 1 << 16;
         unsafe {
             SetThreadStackGuarantee(&mut size);
         }
+        0
     }
+
+    /// The guarantee goes with the thread.
+    pub fn this_thread_done(_sp: u64) {}
 
     pub fn install() {
         unsafe {
@@ -843,10 +901,18 @@ pub fn watchdog_signal() -> i32 { SIG_WATCHDOG }
 /// mapping lies below it.
 #[cfg(unix)]
 fn guarded_altstack(size: usize) -> u64 {
-    const PAGE: usize = 16 << 10;
-    let base = crate::os::mem::alloc_rw(size + PAGE);
-    crate::os::mem::guard_page(base, PAGE);
-    base + PAGE as u64
+    let base = crate::os::mem::alloc_rw(size + ALTSTACK_GUARD);
+    crate::os::mem::guard_page(base, ALTSTACK_GUARD);
+    base + ALTSTACK_GUARD as u64
+}
+
+#[cfg(unix)]
+const ALTSTACK_GUARD: usize = 16 << 10;
+
+/// Gives back what `guarded_altstack` made (`sp` above its guard, `size` bytes).
+#[cfg(unix)]
+fn free_altstack(sp: u64, size: usize) {
+    crate::os::mem::free(sp - ALTSTACK_GUARD as u64, size + ALTSTACK_GUARD);
 }
 
 /// The highest address of the calling thread's stack (0: unknown). Called in normal context

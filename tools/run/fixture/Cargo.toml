@@ -59,3 +59,8 @@ path = "src/inspect_probe.rs"
 [[bin]]
 name = "relax-inspect-eval"
 path = "src/inspect_eval.rs"
+
+# forks with pre_exec closures (std's fork path) while the JIT is busy: the child must reach exec (fork_busy.sh)
+[[bin]]
+name = "relax-fork-busy"
+path = "src/fork_busy.rs"

@@ -143,6 +143,19 @@ pub fn why_hung(req: &Req, out: &mut Out) {
         }).collect();
         findings.push(("deadlock", format!("wait cycle: {} -> back to the first", steps.join(" -> "))));
     }
+    // a forked child that has not reached its exec (Relax std's fork for a pre_exec spawn,
+    // forkexec.rs): the thread that spawned it waits on the child's CLOEXEC pipe meanwhile
+    #[cfg(unix)]
+    for f in crate::forkexec::in_flight().iter().filter(|f| f.age_ns >= 2_000_000_000) {
+        let by = caps.iter().find(|c| c.t.handle == f.thread).map(|c| c.t.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| thread_label(f.thread, &list));
+        let what = match f.state {
+            crate::forkexec::STATE_FORKING => "the fork itself has not returned (the loader's fork waits for compile jobs to park)".to_string(),
+            crate::forkexec::STATE_UNBUILT => format!("it reached `{}`, which was not built before the fork, and ended (exit 127)", crate::jit::slot_name(f.slot).unwrap_or_default()),
+            _ => "it runs its pre_exec closures or blocks in them (a closure waits, or reached a lock another thread held at the fork)".to_string(),
+        };
+        let pid = if f.pid == 0 { "(no pid yet)".to_string() } else { f.pid.to_string() };
+        findings.push(("fork without exec", format!("forked child {} of thread {} has not reached exec after {:.1} s: {} -- the spawn in that thread waits for it", pid, by, f.age_ns as f64 / 1e9, what)));
+    }
     let parked = super::events::parked_now();
     for (id, os_id, thread, message, location) in &parked {
         let name = caps.iter().find(|c| c.t.os_id == *os_id).map(|c| c.t.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| thread.clone());
