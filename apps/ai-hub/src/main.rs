@@ -24,6 +24,11 @@
 //!               (shell, file read, fetch) through it plus a sandbox read
 //!               probe with the real binary, print PASS/FAIL, exit.
 //!
+//!   --prefetch  one prefetch pass over this cache and exit (no service; safe next to a
+//!               running hub): every model this machine can run, from fleet peers, then
+//!               Hugging Face. Settings: MAKEPAD_AI_PREFETCH (default all),
+//!               MAKEPAD_AI_PREFETCH_LICENCES, MAKEPAD_AI_PREFETCH_MBPS (libs/ai/hub/src/prefetch.rs).
+//!
 //!   env HF_TOKEN                     bearer token for gated HF repos (flux1-dev)
 //!   env MAKEPAD_ASSET_AI_HF_BASE   alternate HF endpoint / LAN mirror
 //! ```
@@ -52,6 +57,7 @@ fn run() -> Result<(), AssetAiError> {
     let mut fleet_identity = false;
     let mut claude_cli = makepad_ai_hub::claude_cli::requested_by_env();
     let mut claude_selftest = false;
+    let mut prefetch = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -103,13 +109,16 @@ fn run() -> Result<(), AssetAiError> {
             "--claude-cli" => {
                 claude_cli = true;
             }
+            "--prefetch" => {
+                prefetch = true;
+            }
             "--claude-cli-selftest" => {
                 claude_cli = true;
                 claude_selftest = true;
             }
             "--help" | "-h" => {
                 println!(
-                    "{SERVICE_NAME} {SERVICE_VERSION}\nusage: {SERVICE_NAME} [--port N] [--host ADDR] [--fleet NAME] [--cache-dir PATH] [--registry PATH] [--machine] [--fleet-identity] [--activity-probe SECONDS] [--claude-cli] [--claude-cli-selftest]"
+                    "{SERVICE_NAME} {SERVICE_VERSION}\nusage: {SERVICE_NAME} [--port N] [--host ADDR] [--fleet NAME] [--cache-dir PATH] [--registry PATH] [--machine] [--fleet-identity] [--activity-probe SECONDS] [--claude-cli] [--claude-cli-selftest] [--prefetch]"
                 );
                 return Ok(());
             }
@@ -155,6 +164,30 @@ fn run() -> Result<(), AssetAiError> {
             Registry::embedded()?
         }
     };
+
+    if prefetch {
+        let var = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+        let config = makepad_ai_hub::prefetch::PrefetchConfig::parse(
+            Some(var("MAKEPAD_AI_PREFETCH").as_deref().unwrap_or("all")),
+            var("MAKEPAD_AI_PREFETCH_LICENCES").as_deref(),
+            var("MAKEPAD_AI_PREFETCH_MBPS").as_deref(),
+        )
+        .ok_or_else(|| AssetAiError::Io("MAKEPAD_AI_PREFETCH is off".into()))?;
+        makepad_ai_hub::prefetch::describe(&config);
+        // Peers are found by their beacons; give the roster a few beacon intervals.
+        let _ = makepad_ai_hub::discovery::start_listener();
+        std::thread::sleep(std::time::Duration::from_secs(8));
+        let node = makepad_ai_hub::prefetch::PrefetchNode {
+            registry: &registry,
+            cache_dir: &cache_dir,
+            downloader: Downloader::from_env()?,
+            node_key: makepad_ai_hub::server::load_or_create_node_key(&cache_dir),
+            secret: makepad_ai_hub::peer::TransferSecret::resolve(None, &cache_dir),
+            reserve_mb: makepad_ai_hub::residency::ResidencyConfig::from_env().reserve_mb,
+        };
+        print!("{}", makepad_ai_hub::prefetch::run_pass(&node, &config, &mut |_| {}));
+        return Ok(());
+    }
 
     // The machine node is machine-local by definition: loopback bind, no
     // matter what --host said.

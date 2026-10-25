@@ -442,6 +442,11 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
     // None at one lane: nothing is ever admitted into the chat class there
     // (see `route_post`), so a worker would be a thread that only ever times
     // out. A box that has not opted into lanes stays exactly as it was.
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(prefetch) = crate::prefetch::PrefetchConfig::from_env() {
+        crate::prefetch::start(shared.clone(), prefetch);
+    }
+
     let chat_lanes = crate::llm_backend::configured_lane_count();
     let chat_lanes = if chat_lanes > 1 { chat_lanes } else { 0 };
     shared
@@ -608,7 +613,7 @@ impl FleetMode {
 /// Durable worker identity: 32 lowercase hex chars persisted as `node-key`
 /// in the cache dir. Survives restarts and exe swaps; a coordinator keys a
 /// worker on this, while the per-start `node_id` reveals restarts.
-fn load_or_create_node_key(cache_dir: &Path) -> String {
+pub fn load_or_create_node_key(cache_dir: &Path) -> String {
     let path = cache_dir.join("node-key");
     if let Ok(text) = fs::read_to_string(&path) {
         let text = text.trim();
@@ -2275,6 +2280,7 @@ fn model_inventory_json(shared: &Arc<ServiceShared>) -> ModelInventoryJson {
         node_key: shared.node_key.clone(),
         peer_serving: shared.peer.serving_enabled(),
         chunk_bytes: shared.peer.chunk_max,
+        serve_mbps: Some(shared.peer.throttle.as_ref().map_or(0.0, |t| t.mb_per_sec_value())),
         artifacts,
     }
 }
@@ -3364,6 +3370,14 @@ fn execute_live_job(
     }
 
     result.map(|()| Vec::new())
+}
+
+/// A model whose files the prefetcher completed is Ready (not Absent) from now on.
+pub(crate) fn note_model_files_present(shared: &Arc<ServiceShared>, model_id: &str) {
+    let absent = matches!(shared.models.lock().unwrap().get(model_id), Some(ModelTrack::Absent));
+    if absent {
+        set_model_state(shared, model_id, ModelTrack::Ready);
+    }
 }
 
 fn set_model_state(shared: &Arc<ServiceShared>, model_id: &str, state: ModelTrack) {

@@ -34,7 +34,7 @@ and credentials: roles `node` and `lan`, read-only sync routes.
     that certificate, which is useless against a real node.
 - **Roles and ownership.**
   - `lan` (people's apps) reaches the whole job API.
-  - `node` reaches model blobs and `/health` only.
+  - `node` reaches model blobs, `/v1/model_inventory` and `/health` only.
   - `device` reaches its own job routes only.
   - Jobs belong to the credential that submitted them. Only that client can
     cancel them, keep their leases alive or say `/bye` for them.
@@ -68,8 +68,16 @@ cargo build --release -p makepad-ai-hub --bin ai-fleet
 ```
 
 **Enrol a node.** Copy `fleet.key` and `node.credential` (from
-`node-files`) into `<cache>/fleet/`, readable only by the node's account,
-and restart the node.
+`node-files`) into `<cache>/fleet/` and `peer-secret` into `<cache>/`,
+readable only by the node's account, and restart the node. `peer-secret`
+signs model-blob tickets: without it the node serves no blobs to its peers.
+
+**Keep every node's models complete.** `models = all` in the WM's
+`ai-hub.conf` (or `MAKEPAD_AI_PREFETCH=all` for a bare hub) fetches every
+registry model the node can run, from the peers that hold each file, then
+Hugging Face; `models_licences` (default `none,community`) names the licence
+classes it may fetch (`non-commercial`, `restricted`, `gated` are opt-in),
+`models_mbps` paces it (default 60). Each pass writes `<cache>/prefetch.status`.
 
 **Enrol a person or app.** Run `ai-fleet issue <id> lan --out <file>`. On
 the client, the file becomes `~/.makepad/ai-hub/client.credential` (mode

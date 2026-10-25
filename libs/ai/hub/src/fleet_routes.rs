@@ -29,7 +29,8 @@ pub fn route_allowed(role: Role, edge: bool, method: &str, path: &str) -> bool {
             || path == "/control/model"
             || path == "/llm/context",
         // Nodes fetch model blobs from each other (and check health).
-        Role::Node => (method == "GET" && path.starts_with(crate::peer_serve::BLOB_PATH_PREFIX)) || (method == "GET" && path == "/health"),
+        // Nodes fetch blobs, and read inventories to pick who to fetch from (prefetch).
+        Role::Node => method == "GET" && (path.starts_with(crate::peer_serve::BLOB_PATH_PREFIX) || path == "/health" || path == "/v1/model_inventory"),
     }
 }
 
@@ -53,6 +54,8 @@ mod tests {
         assert!(!route_allowed(Role::Device, true, "GET", "/v1/model_blob/00"));
         assert!(!route_allowed(Role::Device, false, "GET", "/v1/model_inventory"));
         assert!(route_allowed(Role::Node, false, "GET", "/v1/model_blob/00"));
+        assert!(route_allowed(Role::Node, false, "GET", "/v1/model_inventory"));
+        assert!(!route_allowed(Role::Node, true, "GET", "/v1/model_inventory"));
         assert!(!route_allowed(Role::Node, false, "POST", "/generate"));
         // The edge narrows even a LAN credential to the device set.
         assert!(!route_allowed(Role::Lan, true, "GET", "/jobs"));

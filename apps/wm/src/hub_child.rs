@@ -30,6 +30,9 @@
 //! pin = kokoro,whisper-large-v3-turbo   # models kept loaded besides the chat model
 //! nice = 10                       # the build's and the hub's scheduling priority (Unix)
 //! compute = auto                  # compute jobs: auto (a game pauses them) | ui-first | ai-first | unavailable
+//! models = all                    # keep every model this node can run in its cache (or a list of ids)
+//! models_licences = none,community   # licence classes `models` fetches (+ non-commercial, restricted, gated)
+//! models_mbps = 60                # its download pacing, MB/s
 //! target_dir = /home/arch/makepad-target-hub     # its own cargo target (a CUDA build env differs from the apps')
 //! env MAKEPAD_CUDA_ROOT = /opt/cuda              # any other variable for the build and the hub
 //! ```
@@ -65,6 +68,10 @@ pub struct HubSettings {
     /// Whether this node takes compute jobs (the panel's picker; `local_use`).
     pub compute: ComputeMode,
     pub target_dir: Option<String>,
+    /// Prefetch (`MAKEPAD_AI_PREFETCH`): `all`, or model ids; None = off.
+    pub models: Option<String>,
+    pub models_licences: Option<String>,
+    pub models_mbps: Option<String>,
     pub env: Vec<(String, String)>,
 }
 
@@ -83,6 +90,9 @@ impl Default for HubSettings {
             nice: 10,
             compute: ComputeMode::Automatic,
             target_dir: None,
+            models: None,
+            models_licences: None,
+            models_mbps: None,
             env: Vec::new(),
         }
     }
@@ -146,6 +156,9 @@ impl HubSettings {
                 "nice" => value.parse().map(|n| s.nice = n).is_ok(),
                 "compute" => ComputeMode::parse(value).map(|m| s.compute = m).is_some(),
                 "target_dir" => { s.target_dir = Some(value.to_string()).filter(|v| !v.is_empty()); true }
+                "models" => { s.models = Some(value.to_string()).filter(|v| !v.is_empty()); true }
+                "models_licences" => { s.models_licences = Some(value.to_string()).filter(|v| !v.is_empty()); true }
+                "models_mbps" => value.parse::<f64>().map(|_| s.models_mbps = Some(value.to_string())).is_ok(),
                 _ => match key.strip_prefix("env ").map(str::trim) {
                     Some(var) if !var.is_empty() && !var.contains(char::is_whitespace) => {
                         s.env.push((var.to_string(), value.to_string()));
@@ -185,6 +198,11 @@ impl HubSettings {
         out.push_str(&format!("compute = {}\n", self.compute.name()));
         if let Some(dir) = &self.target_dir {
             out.push_str(&format!("target_dir = {dir}\n"));
+        }
+        for (key, value) in [("models", &self.models), ("models_licences", &self.models_licences), ("models_mbps", &self.models_mbps)] {
+            if let Some(value) = value {
+                out.push_str(&format!("{key} = {value}\n"));
+            }
         }
         for (k, v) in &self.env {
             out.push_str(&format!("env {k} = {v}\n"));
@@ -229,6 +247,11 @@ impl HubSettings {
         }
         if let Some(dir) = &self.target_dir {
             env.push(("CARGO_TARGET_DIR".to_string(), dir.clone()));
+        }
+        for (key, value) in [("MAKEPAD_AI_PREFETCH", &self.models), ("MAKEPAD_AI_PREFETCH_LICENCES", &self.models_licences), ("MAKEPAD_AI_PREFETCH_MBPS", &self.models_mbps)] {
+            if let Some(value) = value {
+                env.push((key.to_string(), value.clone()));
+            }
         }
         env.extend(self.env.iter().cloned());
         // The hub's GPU models need its CUDA kernels, and makepad-ai-cuda builds them only
@@ -746,7 +769,7 @@ mod tests {
     fn settings_read_what_the_service_ran_with_and_write_back_the_same() {
         let text = "port = 8123\nhost = 0.0.0.0\ncache_dir = /home/arch/.makepad/weights-chat\nmodel = qwen3.8-27b # the 27B\n\
                     context = 32768\ncontext_max = 81920\nkv = q8_0\npin = kokoro, whisper-large-v3-turbo\nnice = 10\ncompute = ai-first\n\
-                    target_dir = /home/arch/makepad-target-hub\nenv MAKEPAD_CUDA_ROOT = /opt/cuda\nenv MAKEPAD_AI_UI_RESERVE_MB = 1536\nbogus = 1\n";
+                    target_dir = /home/arch/makepad-target-hub\nmodels = all\nmodels_licences = none,community,non-commercial\nmodels_mbps = 40\nenv MAKEPAD_CUDA_ROOT = /opt/cuda\nenv MAKEPAD_AI_UI_RESERVE_MB = 1536\nbogus = 1\n";
         let s = HubSettings::parse(text);
         assert!(s.enabled);
         assert_eq!(s.compute, ComputeMode::AiFirst);
@@ -758,6 +781,7 @@ mod tests {
         assert_eq!(get("MAKEPAD_AI_PIN_MODELS"), Some("qwen3.8-27b,kokoro,whisper-large-v3-turbo"));
         assert_eq!((get("MAKEPAD_ASSET_AI_LLM_CONTEXT"), get("MAKEPAD_ASSET_AI_LLM_CONTEXT_MAX"), get("MAKEPAD_ASSET_AI_LLM_KV")), (Some("32768"), Some("81920"), Some("q8_0")));
         assert_eq!((get("CARGO_TARGET_DIR"), get("MAKEPAD_CUDA_ROOT"), get("MAKEPAD_AI_UI_RESERVE_MB")), (Some("/home/arch/makepad-target-hub"), Some("/opt/cuda"), Some("1536")));
+        assert_eq!((get("MAKEPAD_AI_PREFETCH"), get("MAKEPAD_AI_PREFETCH_LICENCES"), get("MAKEPAD_AI_PREFETCH_MBPS")), (Some("all"), Some("none,community,non-commercial"), Some("40")));
         assert_eq!(HubSettings::parse(&s.render()), s);
         // Nothing set: the defaults, loopback http when asked for.
         let d = HubSettings::parse("host = 127.0.0.1\nenabled = off\n");

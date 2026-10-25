@@ -1254,6 +1254,10 @@ pub struct ModelInventoryJson {
     pub peer_serving: bool,
     /// Max bytes per blob response; receivers loop ranged requests.
     pub chunk_bytes: u64,
+    /// The serve pacing in MB/s (`MAKEPAD_AI_PEER_MBPS`), 0 = unpaced; absent
+    /// from older hubs (pacing unknown). A prefetching receiver prefers fast
+    /// holders and leaves a trickle (or an unknown) to upstream.
+    pub serve_mbps: Option<f64>,
     pub artifacts: Vec<ModelInventoryArtifactJson>,
 }
 

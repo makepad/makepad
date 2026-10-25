@@ -1,10 +1,11 @@
 //! ai-fleet: the fleet key's tool (admin machine only).
 //!
-//!   ai-fleet init                                   create the fleet key
+//!   ai-fleet init                                   create the fleet key and the peer transfer secret
 //!   ai-fleet issue <client_id> <lan|node|device> --out <file> [--days N]
 //!                                                   write a client credential (0600)
 //!   ai-fleet node-files <name> --out <dir> [--days N]
-//!                                                   fleet.key + node.credential for a node's <cache>/fleet
+//!                                                   fleet.key + node.credential for a node's <cache>/fleet,
+//!                                                   peer-secret for its <cache>
 //!   ai-fleet revoke <client_id>                     add an id to the revocation list
 //!
 //! The fleet key lives in ~/.makepad/ai-hub/admin/fleet.key (0600) and on
@@ -15,6 +16,10 @@ use makepad_network::fleet::auth::{client_dir, now_secs, FleetKey, Role, FLEET_K
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+
+/// The fleet's model-blob transfer secret (peer tickets, `makepad_ai_hub::peer`): in the
+/// admin directory and in every node's `<cache>/peer-secret`.
+const PEER_SECRET: &str = "peer-secret";
 
 fn admin_dir() -> PathBuf {
     client_dir().join("admin")
@@ -43,11 +48,18 @@ fn main() -> ExitCode {
     let load = || FleetKey::load(&key_path).map_err(|e| format!("{}: {e} (run `ai-fleet init`)", key_path.display()));
     let result: Result<(), String> = (|| match args.first().map(String::as_str) {
         Some("init") => {
-            if key_path.exists() {
-                return Err(format!("{} already exists", key_path.display()));
+            let peer_secret = admin_dir().join(PEER_SECRET);
+            if !key_path.exists() {
+                FleetKey::generate().and_then(|k| k.save(&key_path)).map_err(|e| e.to_string())?;
+                println!("fleet key created in {}", key_path.display());
             }
-            FleetKey::generate().and_then(|k| k.save(&key_path)).map_err(|e| e.to_string())?;
-            println!("fleet key created in {}", key_path.display());
+            if !peer_secret.exists() {
+                let mut bytes = [0u8; 32];
+                makepad_network::tls::os_random(&mut bytes).map_err(|e| e.to_string())?;
+                let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+                makepad_network::tls::write_private(&peer_secret, hex.as_bytes()).map_err(|e| e.to_string())?;
+                println!("peer transfer secret created in {}", peer_secret.display());
+            }
             Ok(())
         }
         Some("issue") if args.len() >= 3 => {
@@ -69,6 +81,11 @@ fn main() -> ExitCode {
             makepad_network::tls::write_private(&out.join(NODE_CREDENTIAL), format!("{text}\n").as_bytes()).map_err(|e| e.to_string())?;
             log_issue(&id, Role::Node, expiry);
             println!("{} and {} for {id} written to {}", FLEET_KEY, NODE_CREDENTIAL, out.display());
+            // The model-blob transfer secret (peer tickets): without it a node serves no blobs.
+            let peer_secret = admin_dir().join(PEER_SECRET);
+            let secret = fs::read(&peer_secret).map_err(|e| format!("{}: {e} (run `ai-fleet init`)", peer_secret.display()))?;
+            makepad_network::tls::write_private(&out.join(PEER_SECRET), &secret).map_err(|e| e.to_string())?;
+            println!("{PEER_SECRET} written to {} (it goes in the node's <cache>/, next to fleet/)", out.display());
             Ok(())
         }
         Some("revoke") if args.len() == 2 => {

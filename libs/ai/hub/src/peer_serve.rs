@@ -165,6 +165,10 @@ impl Throttle {
         }
     }
 
+    pub fn mb_per_sec_value(&self) -> f64 {
+        self.bytes_per_sec / (1024.0 * 1024.0)
+    }
+
     /// Reserves transmission time for `len` bytes and sleeps until this
     /// worker's reservation starts. First chunk goes immediately; sustained
     /// load converges to the configured rate.
