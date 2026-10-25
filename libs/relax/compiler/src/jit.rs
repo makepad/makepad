@@ -7046,9 +7046,10 @@ unsafe fn compile_slot_on_stack_inner(up: *mut Unit, id: u32) -> u64 {
         }
     }
     LAZY_FRONTS.fetch_add(1, Ordering::Relaxed);
-    if twin_ran && crate::inspect::flightrec::on() {
+    if crate::inspect::flightrec::on() && (twin_ran || TWINS_RAN.load(Ordering::Relaxed) > 0 && (&*up).plain_twin_of(id).is_some()) {
         // (the twin could not lend its code: why the base compiles on this thread)
-        crate::inspect::flightrec::event("specv.lazy-base", &format!("#{} {}: first call of a base slot whose twin ran, compiled on the calling thread", id, short_name(&(&*up).fns[id as usize].name)), id as u64, 0);
+        let why = if twin_ran { "its twin ran" } else { "its twin ran only inlined into twin code" };
+        crate::inspect::flightrec::event("specv.lazy-base", &format!("#{} {}: first call of a base slot ({}), compiled on the calling thread", id, short_name(&(&*up).fns[id as usize].name), why), id as u64, twin_ran as u64);
     }
     let t = wall_ns();
     typeck_ahead_slot(up, id);
@@ -8876,6 +8877,9 @@ fn o2_thread(runtime: &crate::options::RuntimeOptions) {
             };
             if let Some((up, w)) = begin {
                 let done = w.run();
+                if let Ok(Ok((_, _, c))) = &done.built {
+                    prebuild_callees(up, &c.relocs);
+                }
                 owner::publish(|| o2_finish(up, done));
             }
         }));
@@ -14215,6 +14219,8 @@ static BORROW_QUEUE: relax_session::sync::Mutex<std::collections::VecDeque<(usiz
 /// SPEC-V: slot `id` runs borrowed twin code: its own build in the background (O2 worker: the
 /// cache's entry when it has one, else an O2 build). Owner thread.
 unsafe fn borrow_build_enqueue(up: *mut Unit, id: u32) {
+    // (an O2 build: marked hot, as o2_base marks the slots it queues)
+    (&*up).fns[id as usize].hot_hint.store(true, Ordering::Relaxed);
     O2_SEEN.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert((up as usize, id));
     {
         let _q = O2_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
@@ -14222,6 +14228,76 @@ unsafe fn borrow_build_enqueue(up: *mut Unit, id: u32) {
         O2_WAKE.notify_one();
     }
     o2_start(up);
+}
+
+/// SPEC-V: at most this many callees are built ahead of one replacement's install (prebuild_callees)
+const PREBUILD_MAX: usize = 256;
+/// callees built ahead of a replacement's install (inspect stats)
+pub(crate) static SPECV_PREBUILT: AtomicU64 = AtomicU64::new(0);
+
+/// SPEC-V: whether uncompiled slot `c` ran inside twin code without code of its own: its twin was
+/// lowered (an O3 inline candidate of twin code) but has no standalone code to lend (borrow_twin).
+fn ran_in_twin_code(u: &Unit, c: u32) -> bool {
+    u.plain_twin_of(c).is_some_and(|t| u.fns[t as usize].rir.is_some() && !u.fns[t as usize].compiled)
+}
+
+/// SPEC-V: a background replacement (O3 build, O2 worker build) about to be installed calls, through
+/// `relocs`, base slots that have no code yet. Those whose twins have code borrow it (borrow_twin);
+/// those that ran only inlined into twin code (ran_in_twin_code) get an O2 build here, on this
+/// worker, before the swap -- and so do theirs, up to PREBUILD_MAX -- so the program's first calls
+/// into the new code never compile on its threads. After the first present only (startup stays
+/// lazy). Called off the owner, between a build and its install.
+unsafe fn prebuild_callees(up: *mut Unit, relocs: &[relax_backend::rir::RelocAt]) {
+    if !borrow_on() || !FIRST_PRESENT.load(Ordering::Acquire) || TWINS_RAN.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let calls = |relocs: &[relax_backend::rir::RelocAt]| -> Vec<u32> {
+        let mut v: Vec<u32> = relocs.iter().filter_map(|r| match r.target { relax_backend::rir::Reloc::Call(c) => Some(c), _ => None }).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let mut todo = calls(relocs);
+    let mut seen: Vec<u32> = Vec::new();
+    let mut built = 0usize;
+    while !todo.is_empty() && built < PREBUILD_MAX {
+        let cands = std::mem::take(&mut todo);
+        let need: Vec<u32> = owner::publish(|| {
+            let u = &mut *up;
+            cands.into_iter().filter(|&c| {
+                (c as usize) < u.fns.len() && !u.fns[c as usize].compiled && u.fns[c as usize].build_err.is_none()
+                    && matches!(u.fns[c as usize].key, FnKey::Inst(..) | FnKey::Closure(..))
+                    && (!u.fns[c as usize].twin_ran.load(Ordering::Relaxed) || u.borrow_twin(c).is_none())
+                    && ran_in_twin_code(u, c)
+            }).collect()
+        });
+        for c in need {
+            if seen.contains(&c) || built >= PREBUILD_MAX {
+                continue;
+            }
+            seen.push(c);
+            built += 1;
+            // (an O2 build: marked hot, as o2_base marks the slots it queues)
+            let front = owner::publish(|| {
+                (&*up).fns[c as usize].hot_hint.store(true, Ordering::Relaxed);
+                (&*up).front.clone()
+            });
+            let Some(w) = take_prefronted(&front, || o2_begin(up, c)).flatten() else { continue };
+            let done = w.run();
+            if let Ok(Ok((_, _, cc))) = &done.built {
+                todo.extend(calls(&cc.relocs));
+            }
+            owner::publish(|| o2_finish(up, done));
+            if owner::publish(|| (&*up).fns[c as usize].compiled) {
+                SPECV_PREBUILT.fetch_add(1, Ordering::Relaxed);
+            }
+            if specv_trace() {
+                let n = owner::publish(|| short_name(&(&*up).fns[c as usize].name).to_string());
+                eprintln!("specv @{:.3} #{} {} built ahead of a replacement that calls it (it ran inside twin code)", wall_ns() as f64 / 1e9, c, n);
+            }
+        }
+        todo.retain(|c| !seen.contains(c));
+    }
 }
 
 /// MAKEPAD_RUN_SPECV_TRACE=1: SPEC-V verdict sweeps (slots turning verified) and twins tiering up,
@@ -16916,6 +16992,12 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
     let t2 = cpu_ns();
     if let Some(m) = measure.as_mut() { m.phase(2, t2); }
     trace_tier1_phase(id, "built");
+    // SPEC-V: callees this replacement calls that have no code yet but ran inside twin code get
+    // theirs before the swap (prebuild_callees)
+    // (not for an O3-always first build: that is a program thread's lazy compile)
+    if let (Ok(Ok((_, _, relocs, _))), false) = (&built, o3_first()) {
+        prebuild_callees(up, relocs);
+    }
     // (an O3-always first build is a program thread's lazy compile: its finish is foreground)
     let ok = owner::publish(|| {
         let ti0 = cpu_ns();
@@ -17175,6 +17257,14 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                 crate::inspect::patches::code_installed(u, id);
                 let slot = SlotWord::of(&u.slots, id);
                 slot.store(at, Ordering::SeqCst);
+                // SPEC-V: a base borrowing this twin runs its O3 code; this code's uncompiled callees
+                // whose twins ran borrow their code (as Unit::install_unchecked does)
+                if matches!(u.fns[id as usize].key, FnKey::Plain(_)) {
+                    u.follow_twin(id);
+                }
+                if TWINS_RAN.load(Ordering::Relaxed) > 0 {
+                    u.borrow_callees(relocs.iter().filter_map(|r| match r.target { relax_backend::rir::Reloc::Call(c) => Some(c), _ => None }));
+                }
                 o3_owner(3, tx);
                 let tn = cpu_ns();
                 // deterministic O3: the decisions this build took (its inlined callees by key)
