@@ -94,6 +94,9 @@ mod native {
         out: std::sync::mpsc::Sender<Out>,
         backlog: Arc<AtomicUsize>,
         paused: Arc<AtomicBool>,
+        /// From its last `Stats`: pictures it was behind the last one sent, its decode and
+        /// present time (µs).
+        shown: Option<(u32, u32, u32)>,
     }
 
 
@@ -106,9 +109,9 @@ mod native {
         subscribers: Subscribers,
         /// The encoder thread (started with the first picture).
         encoder: Option<Encoder>,
-        /// The picture texture registered for the encoder (Linux: a DMA-BUF of the copy
-        /// registry) and the texture it is.
-        picture: Option<(u64, Texture)>,
+        /// The picture textures registered for the encoder (Linux: DMA-BUFs of the copy
+        /// registry) and the textures they are (the capture's two, drawn in turn).
+        pictures: Vec<(u64, Texture)>,
         screen: usize,
         /// The picture texture is not exported yet: the frame clock that tries again.
         export_next: NextFrame,
@@ -258,7 +261,7 @@ mod native {
             });
             if spawned.is_ok() {
                 self.dump_gone = Some(gone);
-                self.viewers.push(Viewer { session: 0, name: "dump".into(), peer: String::new(), full_chroma: true, refresh_hz: 0, since: std::time::Instant::now(), out: tx, backlog, paused: Arc::new(AtomicBool::new(false)) });
+                self.viewers.push(Viewer { session: 0, name: "dump".into(), peer: String::new(), full_chroma: true, refresh_hz: 0, since: std::time::Instant::now(), out: tx, backlog, paused: Arc::new(AtomicBool::new(false)), shown: None });
                 self.sync_subscribers();
             }
         }
@@ -322,9 +325,11 @@ mod native {
             self.settings.as_ref().is_some_and(|s| s.full_chroma) && self.viewers.iter().filter(|v| !v.paused.load(Ordering::Acquire)).all(|v| v.full_chroma)
         }
 
-        /// The capture follows the viewers: wanted while one watches and none is behind.
+        /// A viewer behind on pictures holds the pictures back (the capture, its texture and the
+        /// stream stay: no key frame when it caught up, the owed picture follows).
         fn set_congested(&mut self, cx: &mut Cx, on: bool) {
             self.congested = on;
+            cx.global::<CaptureState>().hold = on;
             let now = cx.seconds_since_app_start();
             match (on, self.tl_congested_at.take()) {
                 (true, _) => self.tl_congested_at = Some(now),
@@ -334,7 +339,8 @@ mod native {
         }
 
         /// One line a second while a viewer watches: WM frames drawn, pictures captured (and held
-        /// back as too soon), the time capture stood still for a viewer behind, pictures encoded
+        /// back: too soon, or `behind`: a viewer or the encoder was behind), the time a viewer was
+        /// behind, pictures encoded
         /// (refinements, the slowest submit -> bitstream), pictures written to sockets (rate,
         /// the slowest single write), the stream rate.
         fn timeline_line(&mut self, cx: &mut Cx) {
@@ -344,6 +350,7 @@ mod native {
                 *at = now;
             }
             let held = std::mem::take(&mut cx.global::<CaptureState>().held);
+            let behind = std::mem::take(&mut cx.global::<CaptureState>().held_behind);
             let e = &self.encode_stats;
             let (encoded, refined, enc_max) = (e.pictures.swap(0, Ordering::Relaxed), e.refined.swap(0, Ordering::Relaxed), e.encode_us_max.swap(0, Ordering::Relaxed));
             let (sent, bytes, write_max) = match &self.server {
@@ -351,8 +358,10 @@ mod native {
                 None => (0, 0, 0),
             };
             let backlog = self.viewers.iter().map(|v| v.backlog.load(Ordering::Acquire)).max().unwrap_or(0);
+            // the viewer furthest behind (pictures sent that it has not shown yet, from its Stats)
+            let viewer = self.viewers.iter_mut().filter_map(|v| v.shown.take()).max_by_key(|s| s.0).map_or(String::new(), |(behind, decode, present)| format!(" · viewer behind {behind} (decode {:.1} ms, present {:.1} ms)", decode as f64 / 1000.0, present as f64 / 1000.0));
             super::note(&format!(
-                "desk link 1s: frames {} · captured {} (held {held}) · congested {:.0} ms · encoded {encoded} (refined {refined}, max {:.1} ms) · sent {sent} ({:.0} Mbit/s, write max {:.1} ms) · backlog {backlog} · rate {}",
+                "desk link 1s: frames {} · captured {} (held {held}, behind {behind}) · congested {:.0} ms · encoded {encoded} (refined {refined}, max {:.1} ms) · sent {sent} ({:.0} Mbit/s, write max {:.1} ms) · backlog {backlog} · rate {}{viewer}",
                 std::mem::take(&mut self.tl_frames),
                 std::mem::take(&mut self.tl_captured),
                 std::mem::take(&mut self.tl_congested_s) * 1000.0,
@@ -380,7 +389,7 @@ mod native {
             }
             let (screens, _) = self.screens(cx);
             let screen = screens.get(self.screen).or(screens.first()).cloned();
-            let want = match (self.watching() && !self.congested, screen.filter(|s| s.width >= 16 && s.height >= 16)) {
+            let want = match (self.watching(), screen.filter(|s| s.width >= 16 && s.height >= 16)) {
                 (true, Some(s)) => Some(Want { screen_px: [s.x, s.y, s.width, s.height], stream: Self::stream_size_of(&s), full_chroma: self.full_chroma() }),
                 _ => None,
             };
@@ -409,10 +418,10 @@ mod native {
             cx.redraw_all();
         }
 
-        /// The picture texture's registration goes after the pictures queued before it: the
-        /// encoder thread releases it in order (pictures still queued are encoded first).
+        /// The picture textures' registrations go after the pictures queued before them: the
+        /// encoder thread releases them in order (pictures still queued are encoded first).
         fn release_picture(&mut self) {
-            if let Some((_handle, _)) = self.picture.take() {
+            for (_handle, _) in std::mem::take(&mut self.pictures) {
                 match &self.encoder {
                     Some(e) => e.send(Job::Release(_handle)),
                     #[cfg(target_os = "linux")]
@@ -426,12 +435,13 @@ mod native {
         /// The picture texture's handle for the encoder: its DMA-BUF in the copy registry
         /// (Linux), registered once per texture. None until the texture is exported.
         fn picture_handle(&mut self, cx: &mut Cx, texture: &Texture) -> Option<u64> {
-            if let Some((handle, t)) = &self.picture {
-                if t == texture {
-                    return Some(*handle);
-                }
+            if let Some((handle, _)) = self.pictures.iter().find(|(_, t)| t == texture) {
+                return Some(*handle);
             }
-            self.release_picture();
+            // a texture of the capture made again: the registrations of the old ones go
+            if self.pictures.len() >= 2 {
+                self.release_picture();
+            }
             #[cfg(target_os = "linux")]
             {
                 use std::os::fd::IntoRawFd;
@@ -441,7 +451,7 @@ mod native {
                     super::note("desk link stream: the picture's DMA-BUF was refused");
                     return None;
                 }
-                self.picture = Some((handle, texture.clone()));
+                self.pictures.push((handle, texture.clone()));
                 return Some(handle);
             }
             #[cfg(not(target_os = "linux"))]
@@ -454,12 +464,11 @@ mod native {
         /// A picture was drawn in the frame just submitted: to the encoder with that frame's
         /// fence (the encoder reads the texture once the frame's GPU work is done).
         fn picture_done(&mut self, cx: &mut Cx) {
-            let (want, texture) = {
+            // dropped on every way out below: the texture may be drawn again
+            let (want, texture, held) = {
                 let st = cx.global::<CaptureState>();
-                if !std::mem::take(&mut st.painted) {
-                    return;
-                }
-                (st.want, st.picture())
+                let Some(held) = st.painted.take() else { return };
+                (st.want, st.picture(), held)
             };
             let (Some(want), Some(texture)) = (want, texture) else { return };
             let Some(handle) = self.picture_handle(cx, &texture) else {
@@ -489,7 +498,7 @@ mod native {
             }
             let settings = self.settings.clone().unwrap_or_default();
             if let Some(e) = &self.encoder {
-                e.send(Job::Picture { handle, size: want.stream, fence, built_ns: makepad_hal::clock_ns(), fps: self.fps, kbps: settings.kbps, split: settings.split, full_chroma: want.full_chroma, refine: false });
+                e.send(Job::Picture { handle, held, size: want.stream, fence, built_ns: makepad_hal::clock_ns(), fps: self.fps, kbps: settings.kbps, split: settings.split, full_chroma: want.full_chroma, refine: false });
                 self.tl_captured += 1;
             }
             // still for REFINE_AFTER s: the same picture again, near lossless
@@ -499,18 +508,16 @@ mod native {
         /// The desktop held still since the last picture: the picture again at a near-lossless
         /// QP (text and edges sharp once the motion stops).
         fn refine(&mut self, cx: &mut Cx) {
-            let (want, texture) = {
+            let (want, texture, held) = {
                 let st = cx.global::<CaptureState>();
-                (st.want, st.picture())
+                (st.want, st.picture(), st.hold_last())
             };
-            let (Some(want), Some(texture), Some((handle, t))) = (want, texture, self.picture.clone()) else { return };
-            if t != texture {
-                return;
-            }
+            let (Some(want), Some(texture)) = (want, texture) else { return };
+            let Some(&(handle, _)) = self.pictures.iter().find(|(_, t)| *t == texture) else { return };
             let settings = self.settings.clone().unwrap_or_default();
             if let Some(e) = &self.encoder {
                 // the picture's frame finished long ago: nothing to wait for
-                e.send(Job::Picture { handle, size: want.stream, fence: Fence::None, built_ns: makepad_hal::clock_ns(), fps: self.fps, kbps: settings.kbps, split: settings.split, full_chroma: want.full_chroma, refine: true });
+                e.send(Job::Picture { handle, held, size: want.stream, fence: Fence::None, built_ns: makepad_hal::clock_ns(), fps: self.fps, kbps: settings.kbps, split: settings.split, full_chroma: want.full_chroma, refine: true });
             }
         }
 
@@ -572,7 +579,7 @@ mod native {
                         let _ = out.send(Out::Msg(ServerMsg::Rate { fps: self.fps as u16 }.encode()));
                         // the address without its port
                         let ip = peer.rsplit_once(':').map_or(peer.as_str(), |(ip, _)| ip).trim_matches(|c| c == '[' || c == ']').to_string();
-                        self.viewers.push(Viewer { session, name, peer: ip, full_chroma: caps & proto::caps::FULL_CHROMA != 0, refresh_hz: 0, since: std::time::Instant::now(), out, backlog, paused: Arc::new(AtomicBool::new(paused)) });
+                        self.viewers.push(Viewer { session, name, peer: ip, full_chroma: caps & proto::caps::FULL_CHROMA != 0, refresh_hz: 0, since: std::time::Instant::now(), out, backlog, paused: Arc::new(AtomicBool::new(paused)), shown: None });
                         self.generation = self.generation.wrapping_add(1);
                         self.sync_subscribers();
                         self.cursor = None;
@@ -618,7 +625,11 @@ mod native {
                                 self.viewers[i].refresh_hz = hz;
                             }
                             Control::Clipboard(text) => cx.copy_to_clipboard(&text),
-                            Control::Stats { .. } => {}
+                            Control::Stats { frame, decode_us, present_us } => {
+                                let behind = self.encode_stats.last_frame.load(Ordering::Relaxed).wrapping_sub(frame);
+                                self.viewers[i].shown = Some((behind, decode_us, present_us));
+                                continue;
+                            }
                         }
                         self.update_capture(cx);
                     }

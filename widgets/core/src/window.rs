@@ -499,6 +499,10 @@ pub struct Window {
     drag_last_press: Option<(f64, Vec2d)>,
     #[rust]
     caption_has_content: Option<bool>,
+    /// An app's `caption_window_gap` in its caption bar (empty when it has none), looked up
+    /// once per apply: the sync that shows or hides it runs on every draw.
+    #[rust]
+    caption_window_gap: Option<WidgetRef>,
     /// Whether this widget should create its native surface during initial
     /// construction. The stable window id and widget tree still exist when
     /// false, so the owner can explicitly create the surface later.
@@ -696,6 +700,7 @@ impl ScriptHook for Window {
         _value: ScriptValue,
     ) {
         self.caption_has_content = None;
+        self.caption_window_gap = None;
         self.caption_centering_inputs = None;
         // A host window manager reads it from the drag query's answer.
         self.window.handle.set_double_click_fullscreen(vm.cx_mut(), self.double_click == WindowDoubleClick::Fullscreen);
@@ -1172,26 +1177,28 @@ impl Window {
             // Under the WM every makepad window draws its own caption, as on macOS: its
             // theme's chrome (`resolve_chrome`), `Follow` taking the WM's style (the sheet it
             // hands every app, whatever theme the app picked). The WM draws no title bar for
-            // it. A fullscreen window draws no caption; a chromeless one never does.
+            // it. A fullscreen window keeps only an app's caption content; a chromeless one never has one.
             let host = if wm { crate::desktop_style::system_style(cx) } else { None };
             let chrome = resolve_chrome(self.chrome, self.drag_region.is_some(), host);
-            let stock = wm && self.show_caption_bar && !cx.hosted_fullscreen(self.window.window_id())
+            // Fullscreen, a title-only caption goes, but an app's controls stay as a content
+            // toolbar without window controls (as macOS keeps them): they are its only way in.
+            let fullscreen = cx.hosted_fullscreen(self.window.window_id());
+            let stock = wm && self.show_caption_bar && (!fullscreen || has_content)
                 && match chrome {
                     ResolvedChrome::Lights | ResolvedChrome::Buttons => true,
                     // A tiling host has no window controls: the caption is the app's toolbar.
                     ResolvedChrome::Bare => has_content,
                     ResolvedChrome::Custom | ResolvedChrome::None => false,
                 };
+            let controls = stock && !fullscreen;
             self.view(cx, ids!(caption_bar)).set_visible(cx, stock);
-            self.view(cx, ids!(windows_buttons)).set_visible(cx, stock && chrome == ResolvedChrome::Buttons);
-            self.hosted_mac_controls = stock && chrome == ResolvedChrome::Lights;
+            self.view(cx, ids!(windows_buttons)).set_visible(cx, controls && chrome == ResolvedChrome::Buttons);
+            self.hosted_mac_controls = controls && chrome == ResolvedChrome::Lights;
             self.view(cx, ids!(hosted_controls_gap)).set_visible(cx, self.hosted_mac_controls);
-            // The lights' room is the window's (above): an app's own macOS gap, by the
-            // name apps give it, stands down so the room is not kept twice.
-            if self.hosted_mac_controls {
-                self.view(cx, ids!(caption_window_gap)).set_visible(cx, false);
-            }
-            let _ = has_content;
+            // An app's own macOS gap (by the name apps give it) is room for the traffic
+            // lights macOS draws itself: under the WM the window's own gap (above) keeps the
+            // lights' room, so it is never wanted here.
+            self.set_caption_window_gap(cx, false);
             return;
         }
         // Natively a theme that names traffic lights gets them where the window draws its
@@ -1247,8 +1254,23 @@ impl Window {
             _ => (),
         }
         self.view(cx, ids!(hosted_controls_gap)).set_visible(cx, self.hosted_mac_controls);
-        if self.hosted_mac_controls {
-            self.view(cx, ids!(caption_window_gap)).set_visible(cx, false);
+        // An app's own gap for the traffic lights macOS draws over the caption's left
+        // (`caption_window_gap`, by the name apps give it): only there, and not while
+        // fullscreen hides them. Where the window draws the lights (`hosted_controls_gap`)
+        // or its buttons sit at the right, the room goes back to the app's controls.
+        let os_lights = matches!(cx.os_type(), OsType::Macos) && !self.window.handle.is_fullscreen(cx);
+        self.set_caption_window_gap(cx, os_lights && !self.hosted_mac_controls);
+    }
+
+    /// Shows or hides an app's `caption_window_gap`, anywhere in its caption bar.
+    fn set_caption_window_gap(&mut self, cx: &mut Cx, visible: bool) {
+        if self.caption_window_gap.is_none() {
+            let bar = self.view.child(id!(caption_bar));
+            self.caption_window_gap = Some(bar.widget(cx, ids!(caption_window_gap)));
+        }
+        let Some(gap) = &self.caption_window_gap else { return };
+        if !gap.is_empty() && gap.visible() != visible {
+            gap.set_visible(cx, visible);
         }
     }
 
@@ -1344,26 +1366,48 @@ impl Window {
     /// views (a toolbar group, a spacer that fills the bar) are looked into,
     /// not counted whole, and text and icons are not controls: the gaps
     /// between buttons, the title, a logo and status text all drag like the
-    /// empty bar.
-    fn caption_app_rects(&mut self, cx: &mut Cx) -> Vec<Rect> {
-        fn collect(cx: &mut Cx, children: Vec<WidgetRef>, rects: &mut Vec<Rect>) {
+    /// empty bar. With `text`, text and icons count too: what the title must not be
+    /// drawn over.
+    fn caption_app_rects(&mut self, cx: &mut Cx, text: bool) -> Vec<Rect> {
+        // `clip`: the visible part of the clipping views above (a scrolled toolbar's
+        // controls out of its view are neither controls nor obstacles there).
+        fn collect(cx: &mut Cx, children: Vec<WidgetRef>, rects: &mut Vec<Rect>, text: bool, clip: Option<(Vec2d, Vec2d)>) {
+            let push = |rects: &mut Vec<Rect>, rect: Rect| {
+                let rect = match clip { Some(c) => rect.clip(c), None => rect };
+                if rect.size.x > 0.0 && rect.size.y > 0.0 {
+                    rects.push(rect);
+                }
+            };
             for child in children {
                 if !child.visible() {
                     continue;
                 }
-                let inner = child.borrow::<View>().map(|view| view.children.iter().map(|(_, c)| c.clone()).collect::<Vec<_>>());
-                if let Some(inner) = inner {
-                    collect(cx, inner, rects);
+                let inner = child.borrow::<View>().map(|view| {
+                    (view.children.iter().map(|(_, c)| c.clone()).collect::<Vec<_>>(), view.layout.clip_x || view.layout.clip_y)
+                });
+                if let Some((inner, clips)) = inner {
+                    let mut clip = clip;
+                    if clips {
+                        let r = child.area().rect(cx);
+                        if r.size.x > 0.0 && r.size.y > 0.0 {
+                            let r = match clip { Some(c) => r.clip(c), None => r };
+                            clip = Some((r.pos, r.pos + r.size));
+                        }
+                    }
+                    collect(cx, inner, rects, text, clip);
                     continue;
                 }
                 // Text and icons take no input: a logo or a title drags.
-                if child.borrow::<Label>().is_some() || child.borrow::<crate::icon::Icon>().is_some() {
+                if let Some(label) = child.borrow::<Label>() {
+                    if text {
+                        push(rects, label.box_rect(cx));
+                    }
                     continue;
                 }
-                let rect = child.area().rect(cx);
-                if rect.size.x > 0.0 && rect.size.y > 0.0 {
-                    rects.push(rect);
+                if !text && child.borrow::<crate::icon::Icon>().is_some() {
+                    continue;
                 }
+                push(rects, child.area().rect(cx));
             }
         }
         let mut rects = Vec::new();
@@ -1377,9 +1421,34 @@ impl Window {
                 Some(view) => view.children.iter().filter(|(id, _)| !stock(*id)).map(|(_, c)| c.clone()).collect(),
                 None => continue,
             };
-            collect(cx, children, &mut rects);
+            collect(cx, children, &mut rects, text, None);
         }
         rects
+    }
+
+    /// The areas of the plain views in an app's caption content (not their controls): a press
+    /// they hold is the bar's, not a control's.
+    fn caption_view_areas(&self) -> Vec<Area> {
+        fn collect(children: Vec<WidgetRef>, areas: &mut Vec<Area>) {
+            for child in children {
+                let inner = child.borrow::<View>().map(|view| view.children.iter().map(|(_, c)| c.clone()).collect::<Vec<_>>());
+                if let Some(inner) = inner {
+                    areas.push(child.area());
+                    collect(inner, areas);
+                }
+            }
+        }
+        let mut areas = Vec::new();
+        let caption_bar = self.view.child(id!(caption_bar));
+        let caption_label = caption_bar.child(id!(caption_label));
+        for view in [&caption_bar, &caption_label] {
+            let children: Vec<WidgetRef> = match view.borrow::<View>() {
+                Some(view) => view.children.iter().map(|(_, c)| c.clone()).collect(),
+                None => continue,
+            };
+            collect(children, &mut areas);
+        }
+        areas
     }
 
     fn sync_caption_bar_height(&mut self, cx: &mut Cx) {
@@ -1419,7 +1488,7 @@ impl Window {
                 return; // No area info yet (first frame)
             }
             // The title goes in the widest gap between everything else in the bar.
-            let mut obstacles = self.caption_app_rects(cx);
+            let mut obstacles = self.caption_app_rects(cx, true);
             let windows_buttons = caption_bar.child(id!(windows_buttons));
             for widget in [caption_bar.child(id!(voice_wave)), windows_buttons.clone(), caption_bar.child(id!(web_fullscreen))] {
                 if widget.visible() {
@@ -1430,14 +1499,17 @@ impl Window {
             if !windows_buttons.visible() {
                 obstacles.push(cx.windows[self.window.window_id()].window_geom.window_chrome_buttons);
             }
-            let bar_right = bar.pos.x + bar.size.x;
+            // The title can only be drawn inside the caption label: what the bar keeps beside
+            // it (the window's own traffic lights' room) is no gap for it.
+            let bar_left = bar.pos.x.max(caption_label_rect.pos.x);
+            let bar_right = (bar.pos.x + bar.size.x).min(caption_label_rect.pos.x + caption_label_rect.size.x);
             let mut spans: Vec<(f64, f64)> = obstacles.iter()
                 .filter(|rect| rect.size.y > 0.0)
-                .map(|rect| (rect.pos.x.max(bar.pos.x), (rect.pos.x + rect.size.x).min(bar_right)))
+                .map(|rect| (rect.pos.x.max(bar_left), (rect.pos.x + rect.size.x).min(bar_right)))
                 .filter(|(start, end)| start < end)
                 .collect();
             spans.sort_by(|a, b| a.0.total_cmp(&b.0));
-            let (mut left, mut right, mut gap_start) = (bar.pos.x, bar.pos.x, bar.pos.x);
+            let (mut left, mut right, mut gap_start) = (bar_left, bar_left, bar_left);
             for (start, end) in spans.into_iter().chain([(bar_right, bar_right)]) {
                 if start - gap_start > right - left {
                     (left, right) = (gap_start, start);
@@ -1490,7 +1562,8 @@ impl Window {
                     }
                     // A label draws an empty text as a space anyway, so we show one directly,
                     // which keeps the label's text the same as the title we showed.
-                    shown_title = if low == 0 { " ".to_string() } else { truncated(low - 1) };
+                    // Fewer than three letters of a title read as noise: then none.
+                    shown_title = if low < 4 { " ".to_string() } else { truncated(low - 1) };
                     title_width = measure(&inner, cx, &shown_title);
                 }
                 let title_left = (center - title_width / 2.0).clamp(left, (right - title_width).max(left));
@@ -2632,6 +2705,7 @@ impl WindowRef {
                     cx.set_own_window_chrome(inner.drag_region.is_some());
                 }
                 inner.caption_has_content = None;
+                inner.caption_window_gap = None;
                 inner.caption_centering_inputs = None;
                 inner.drag_query_cache = None;
                 inner.sync_caption_bar_state(cx);
@@ -3093,7 +3167,8 @@ impl Widget for Window {
                     // empty space moves the window, as a title bar does.
                     // Under the WM the caption is the window's title bar: its empty space
                     // moves the window. Under another host it is a toolbar.
-                    let content_toolbar = !under_wm() && (cx.in_makepad_studio()
+                    // A fullscreen window under the WM keeps an app's caption as a toolbar too.
+                    let content_toolbar = (under_wm() && cx.hosted_fullscreen(dq.window_id)) || !under_wm() && (cx.in_makepad_studio()
                         || matches!(cx.os_type(), OsType::LinuxWindow(params) if !params.custom_window_chrome)
                         || (matches!(cx.os_type(), OsType::LinuxWindow(_))
                             && !self.window.handle.uses_wayland_client_side_decorations(cx))
@@ -3128,7 +3203,14 @@ impl Widget for Window {
                     // What is left: a capture records no window, so a drag in ANOTHER window
                     // of the same application still reads as held here. That one cannot be
                     // told apart from this side.
-                    let mine = [self.view.area(), caption_area];
+                    //
+                    // The plain views of an app's caption content are the bar too (a toolbar
+                    // group, a scrolled strip): a scrolling one takes the press to drag its
+                    // content, and that must not make the empty bar under it the client's.
+                    let mut mine = vec![self.view.area(), caption_area];
+                    if visible {
+                        mine.extend(self.caption_view_areas());
+                    }
                     let mouse_held = cx.fingers.is_mouse_held_outside(&mine);
                     // A press on the caption that is the client's rather than the window
                     // manager's, for the `Caption` arm below.
@@ -3136,7 +3218,7 @@ impl Widget for Window {
                     // Controls the app hangs in the caption bar (its own keys beside the
                     // title) are the client's: a press on them is a click, not a window
                     // drag. The bar's empty space stays the window manager's.
-                    let over_app_control = visible && self.caption_app_rects(cx).iter().any(|r| r.contains(dq.abs));
+                    let over_app_control = visible && self.caption_app_rects(cx, false).iter().any(|r| r.contains(dq.abs));
                     match classify_window_drag_query(
                         visible,
                         caption_rect,

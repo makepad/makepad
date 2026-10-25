@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use makepad_desk_link::server::Out;
+pub use super::capture::InFlight;
 pub use super::settings::Split;
 
 /// The viewers a picture goes to: their queue, its backlog, whether they pause.
@@ -28,8 +29,9 @@ pub enum Fence {
 }
 
 pub enum Job {
-    /// `refine`: the last picture again at a near-lossless QP (the desktop held still).
-    Picture { handle: u64, size: [u32; 2], fence: Fence, built_ns: u64, fps: u32, kbps: u32, split: Split, full_chroma: bool, refine: bool },
+    /// `refine`: the last picture again at a near-lossless QP (the desktop held still). `held`:
+    /// its texture is not drawn over until every engine's read of it is done (dropped then).
+    Picture { handle: u64, held: InFlight, size: [u32; 2], fence: Fence, built_ns: u64, fps: u32, kbps: u32, split: Split, full_chroma: bool, refine: bool },
     Keyframe,
     /// The picture texture's registration `handle` is released (after the pictures queued
     /// before it were encoded).
@@ -51,6 +53,9 @@ pub struct EncodeStats {
     pub pictures: AtomicU64,
     pub refined: AtomicU64,
     pub encode_us_max: AtomicU64,
+    /// The last picture sent out (its frame number): a viewer's `Stats` frame against it is how
+    /// far that viewer is behind.
+    pub last_frame: std::sync::atomic::AtomicU32,
 }
 
 impl Encoder {
@@ -98,6 +103,8 @@ struct Stream {
 
 struct Work {
     handle: u64,
+    /// Dropped with the last engine's work: the texture may be drawn over.
+    _held: Arc<InFlight>,
     ready: GpuReady,
     frame: u32,
     key: bool,
@@ -205,6 +212,7 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
                 stats.encode_us_max.fetch_max(encoded_ns.saturating_sub(built_ns) / 1000, Ordering::Relaxed);
                 let complete = |stats: &EncodeStats| {
                     stats.pictures.fetch_add(1, Ordering::Relaxed);
+                    stats.last_frame.store(frame, Ordering::Relaxed);
                     if refining.get().is_some() {
                         stats.refined.fetch_add(1, Ordering::Relaxed);
                     }
@@ -250,7 +258,8 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
                 streams = None;
                 key_wanted = true;
             }
-            Job::Picture { handle, size, fence, built_ns, fps, kbps, split, full_chroma, refine } => {
+            Job::Picture { handle, held, size, fence, built_ns, fps, kbps, split, full_chroma, refine } => {
+                let held = Arc::new(held);
                 // still (no picture, or pictures that change nothing) for REFINE_AFTER: near-lossless
                 // pictures from this one on, until one changes something
                 if refining.get().is_none() && (refine || last_change.get().elapsed() >= REFINE_AFTER) {
@@ -311,7 +320,7 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
                         readies.push(clone_ready(&readies[0]));
                     }
                     for (s, ready) in list.iter().zip(readies) {
-                        let _ = s.tx.send(Work { handle, ready, frame, key, refine, built_ns });
+                        let _ = s.tx.send(Work { handle, _held: held.clone(), ready, frame, key, refine, built_ns });
                         in_flight += 1;
                     }
                     // a picture's tiles are complete before the next picture starts
@@ -328,7 +337,7 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
                         in_flight -= 1;
                         take(d, &streams, &mut gathering, &mut failed, &mut fail);
                     }
-                    let _ = list[frame as usize % n].tx.send(Work { handle, ready, frame, key, refine, built_ns });
+                    let _ = list[frame as usize % n].tx.send(Work { handle, _held: held, ready, frame, key, refine, built_ns });
                     in_flight += 1;
                     // answers that came meanwhile go out at once
                     while let Ok(d) = done_rx.try_recv() {

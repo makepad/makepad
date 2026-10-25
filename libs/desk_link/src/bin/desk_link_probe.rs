@@ -1,4 +1,4 @@
-//! desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--split tiles|interleave|off]: a headless Desk Link viewer for
+//! desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--split tiles|interleave|off] [--stall MS,EVERY_MS]: a headless Desk Link viewer for
 //! checks. It connects with this machine's fleet credential, prints the Welcome, counts the
 //! pictures and bytes, pings once a second (RTT), and with `--input` moves the desktop's pointer
 //! between two points twice a second, timing each move until the desktop's own Cursor message
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let Some(target) = args.get(1).filter(|a| !a.starts_with("--")) else {
-        eprintln!("usage: desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--split tiles|interleave|off]");
+        eprintln!("usage: desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--split tiles|interleave|off] [--stall MS,EVERY_MS]");
         std::process::exit(2);
     };
     let secs: u64 = args.windows(2).find(|w| w[0] == "--secs").and_then(|w| w[1].parse().ok()).unwrap_or(10);
@@ -28,17 +28,24 @@ fn main() {
         "interleave" => proto::split::INTERLEAVE,
         _ => proto::split::OFF,
     });
+    // --stall MS,EVERY_MS: stop reading for MS every EVERY_MS (a viewer that does not read for a
+    // while: the desktop's socket fills and it must hold pictures back, not restart the stream)
+    let stall: Option<(u64, u64)> = args.windows(2).find(|w| w[0] == "--stall").and_then(|w| {
+        let (a, b) = w[1].split_once(',')?;
+        Some((a.parse().ok()?, b.parse().ok()?))
+    });
     let (host, port) = match target.rsplit_once(':') {
         Some((h, p)) if p.parse::<u16>().is_ok() => (h.to_string(), p.to_string()),
         _ => (target.clone(), proto::DEFAULT_PORT.to_string()),
     };
-    if let Err(e) = run(&host, &port, secs, input, paused, flap, split) {
+    if let Err(e) = run(&host, &port, secs, input, paused, flap, split, stall) {
         eprintln!("probe: {e}");
         std::process::exit(1);
     }
 }
 
-fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Option<u64>, split: Option<u8>) -> Result<(), String> {
+#[allow(clippy::too_many_arguments)]
+fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Option<u64>, split: Option<u8>, stall: Option<(u64, u64)>) -> Result<(), String> {
     let credential = fleet_auth::own_credential().ok_or("no fleet credential")?;
     let (mut stream, fp) = SocketStream::connect_capture(host, port).map_err(|e| format!("connect: {e}"))?;
     println!("probe: certificate {}", makepad_network::tls::to_hex(&fp));
@@ -64,7 +71,17 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
     let mut slowest = (u32::MAX, 0f64);
     let epoch = Instant::now();
     let mut flapped = (Instant::now(), paused, 0u32);
+    let (mut last_stall, mut stalls) = (Instant::now(), 0u32);
+    // the longest time between two pictures, and the encode time of the slowest one
+    let (mut last_picture, mut gap_max, mut encode_max): (Option<Instant>, f64, f64) = (None, 0.0, 0.0);
     while start.elapsed() < Duration::from_secs(secs) {
+        if let Some((ms, every)) = stall.filter(|_| welcomed) {
+            if last_stall.elapsed() >= Duration::from_millis(every) {
+                std::thread::sleep(Duration::from_millis(ms));
+                last_stall = Instant::now();
+                stalls += 1;
+            }
+        }
         if let Some(ms) = flap.filter(|_| welcomed) {
             if flapped.0.elapsed() >= Duration::from_millis(ms) {
                 flapped = (Instant::now(), !flapped.1, flapped.2 + 1);
@@ -113,6 +130,12 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
                         pictures += 1;
                         keys += key as u64;
                         encodes.push(slowest.1);
+                        encode_max = encode_max.max(slowest.1);
+                        let now = Instant::now();
+                        if let Some(at) = last_picture {
+                            gap_max = gap_max.max(now.duration_since(at).as_secs_f64() * 1000.0);
+                        }
+                        last_picture = Some(now);
                     }
                 }
                 ServerMsg::Pong { client_ns, .. } => rtts.push((epoch.elapsed().as_nanos() as u64 - client_ns) as f64 / 1e6),
@@ -146,6 +169,10 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
         e.sort_by(|a, b| a.partial_cmp(b).unwrap());
         e.get(e.len() * 9 / 10).copied().unwrap_or(f64::NAN)
     });
+    println!("probe: longest gap between pictures {gap_max:.1} ms; slowest frame submit to bitstream {encode_max:.1} ms");
+    if stall.is_some() {
+        println!("probe: {stalls} read stalls");
+    }
     if flap.is_some() {
         println!("probe: {} pause/resume flips", flapped.2);
     }

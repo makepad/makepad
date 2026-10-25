@@ -322,9 +322,9 @@ impl App {
         }
         let Some(c) = self.conns.get(self.selected) else { return };
         let picture = c.latest.lock().unwrap().take();
-        let (state, welcome, cursor, offset, fps, mbps, warning, stream_fps) = {
+        let (state, welcome, cursor, offset, fps, mbps, warning, stream_fps, read_gap_ms, decode_queue) = {
             let s = c.shared.lock().unwrap();
-            (s.state.clone().unwrap_or(State::Connecting), s.welcome.clone(), s.cursor, s.offset_ns, s.fps, s.mbps, s.warning.clone(), s.stream_fps)
+            (s.state.clone().unwrap_or(State::Connecting), s.welcome.clone(), s.cursor, s.offset_ns, s.fps, s.mbps, s.warning.clone(), s.stream_fps, s.read_gap_ms, s.decode_queue)
         };
         let remote = self.remote(cx);
         let Some(mut view) = remote.borrow_mut::<RemoteView>() else { return };
@@ -362,6 +362,7 @@ impl App {
         }
         if self.details {
             lines.push(view::latency_line(&self.latency));
+            lines.push(view::flow_line(read_gap_ms, decode_queue));
         }
         if let Some(w) = warning {
             lines.push(format!("WARNING: {w}"));
@@ -712,11 +713,11 @@ impl AppMain for App {
                 c.send(ClientMsg::Stats { frame, decode_us, present_us });
             }
             if self.stats_log {
-                let (fps, mbps, rtt, stream_fps) = self.current().map(|c| {
+                let (fps, mbps, rtt, stream_fps, gap, queue) = self.current().map(|c| {
                     let s = c.shared.lock().unwrap();
-                    (s.fps, s.mbps, s.rtt_ms.unwrap_or(0.0), s.stream_fps)
+                    (s.fps, s.mbps, s.rtt_ms.unwrap_or(0.0), s.stream_fps, s.read_gap_ms, s.decode_queue)
                 }).unwrap_or_default();
-                eprintln!("desklink stats: rtt {rtt:.2} ms · {}", format!("{} · {}", view::latency_line(&self.latency), view::rate_line(fps, mbps, stream_fps, crate::conn::DISPLAY_HZ.load(std::sync::atomic::Ordering::Acquire))));
+                eprintln!("desklink stats: rtt {rtt:.2} ms · {} · {} · {}", view::latency_line(&self.latency), view::rate_line(fps, mbps, stream_fps, crate::conn::DISPLAY_HZ.load(std::sync::atomic::Ordering::Acquire)), view::flow_line(gap, queue));
             }
         }
         if let Event::Draw(_) = event {

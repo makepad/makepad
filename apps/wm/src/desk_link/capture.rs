@@ -16,10 +16,17 @@
 //!
 //! C repaints when the desktop changes, which repaints the picture (`CaptureState::painted`):
 //! the WM then hands the picture texture, with the fence of the frame that rendered it, to its
-//! stream encoder. A cursor move repaints only the window pass: no picture. Colour is BT.709
+//! stream encoder. There are two picture textures, drawn in turn: a picture is never drawn into
+//! a texture the encoder still reads (`CaptureState::in_flight`; one texture drawn over while it
+//! was encoded sent torn pictures, the game window half of one frame and half of the next).
+//! While a viewer is behind (`CaptureState::hold`) or the encoder still reads the texture that
+//! is next, the frame draws C alone and the picture is owed, as when it is too soon.
+//! A cursor move repaints only the window pass: no picture. Colour is BT.709
 //! limited range.
 
 use crate::dock_warp::WindowFrame;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use makepad_widgets::makepad_draw::render_target::{RenderTarget, RenderTargetFormat};
 use makepad_widgets::*;
 
@@ -132,13 +139,17 @@ pub struct Want {
 pub struct CaptureState {
     pub want: Option<Want>,
     frame: Option<WindowFrame>,
-    picture: Option<RenderTarget>,
+    /// The two picture textures, drawn in turn: `next` is drawn next, the other holds the last
+    /// picture.
+    pictures: [Option<RenderTarget>; 2],
+    next: usize,
     /// Draws made with the current target.
     pub drawn: u64,
     /// Frames whose picture was held back (too soon after the last one), for the timeline.
     pub held: u64,
-    /// The picture was drawn in the frame being made: once it is submitted, it is encoded.
-    pub painted: bool,
+    /// The picture drawn in the frame being made (its texture's encoder hold): once the frame
+    /// is submitted, it goes to the encoder with it.
+    pub painted: Option<InFlight>,
     /// Raised with `painted`, so the WM looks right after the frame is submitted.
     pub signal: Option<SignalToUI>,
     /// The desktop as the window draws it: its size in device pixels and the dpi factor.
@@ -149,12 +160,43 @@ pub struct CaptureState {
     pub interval: f64,
     pub last_picture: f64,
     pub owed: bool,
+    /// A viewer is behind on pictures (its socket backlog): pictures are held back, the
+    /// capture itself stays (its texture, the encoder's registration, no new key frame).
+    pub hold: bool,
+    /// Per picture texture: pictures of it not encoded yet (each an `InFlight`, which the encoder
+    /// drops once its GPU reads are done). A texture is drawn only at 0, so the encoder never
+    /// reads a picture being drawn over, and an encoder slower than the capture never queues
+    /// pictures (each one it takes shows the desktop as it is now).
+    pub in_flight: [Arc<AtomicUsize>; 2],
+    /// Frames held back for `hold` or `in_flight` (a subset of `held`), for the timeline.
+    pub held_behind: u64,
+}
+
+/// A picture of one texture not encoded yet: the texture is not drawn over while one lives.
+pub struct InFlight(Arc<AtomicUsize>);
+
+impl InFlight {
+    pub fn new(count: &Arc<AtomicUsize>) -> InFlight {
+        count.fetch_add(1, Ordering::AcqRel);
+        InFlight(count.clone())
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl CaptureState {
-    /// The picture texture (made at the first capture draw; shared, for the encoder).
+    /// The texture of the last picture (shared, for the encoder).
     pub fn picture(&self) -> Option<Texture> {
-        Some(self.picture.as_ref()?.texture.clone())
+        Some(self.pictures[1 - self.next].as_ref()?.texture.clone())
+    }
+
+    /// A hold of the last picture's texture, for another job that reads it (a refinement).
+    pub fn hold_last(&self) -> InFlight {
+        InFlight::new(&self.in_flight[1 - self.next])
     }
 
     /// No capture: give the targets' memory back.
@@ -162,12 +204,14 @@ impl CaptureState {
         if let Some(frame) = self.frame.take() {
             frame.forget(cx);
         }
-        if let Some(t) = self.picture.as_mut() {
-            t.release(cx);
+        for slot in &mut self.pictures {
+            if let Some(t) = slot.as_mut() {
+                t.release(cx);
+            }
+            *slot = None;
         }
-        self.picture = None;
         self.drawn = 0;
-        self.painted = false;
+        self.painted = None;
     }
 }
 
@@ -201,7 +245,8 @@ impl Widget for DeskCapture {
         let rect = cx.walk_turtle(walk);
         let [w, h] = want.stream;
         let clear = vec4(0.0, 0.0, 0.0, 0.0);
-        let mut picture = st.picture.take().unwrap_or_else(|| RenderTarget::new(cx, "wm_desk_link_picture"));
+        let slot = st.next;
+        let mut picture = st.pictures[slot].take().unwrap_or_else(|| RenderTarget::new(cx, if slot == 0 { "wm_desk_link_picture_0" } else { "wm_desk_link_picture_1" }));
         let mut frame = st.frame.take().unwrap_or_else(|| WindowFrame::new_with_name(cx, "wm_desk_link"));
         // shared (another GPU user reads it by its handle) and kept between pictures
         let chroma_rows = if want.full_chroma { h * 2 } else { h / 2 };
@@ -213,7 +258,9 @@ impl Widget for DeskCapture {
         let source = vec4(want.screen_px[0] as f32, want.screen_px[1] as f32, w as f32, h as f32);
 
         let now = cx.seconds_since_app_start();
-        let hold = !resized && st.drawn > 0 && now - st.last_picture < st.interval * 0.9;
+        // the first picture is drawn whatever is behind (nothing is encoded before it)
+        let behind = !resized && st.drawn > 0 && (st.hold || st.in_flight[slot].load(Ordering::Acquire) > 0);
+        let hold = behind || !resized && st.drawn > 0 && now - st.last_picture < st.interval * 0.9;
         if hold {
             // too soon for a picture: the desktop alone, C a child of the window pass
             frame.begin(cx, Rect { pos: dvec2(0.0, 0.0), size: root });
@@ -222,9 +269,10 @@ impl Widget for DeskCapture {
             self.draw_frame.draw_vars.set_texture(0, frame.texture());
             self.draw_frame.draw_abs(cx, rect);
             st.frame = Some(frame);
-            st.picture = Some(picture);
+            st.pictures[slot] = Some(picture);
             st.owed = true;
             st.held += 1;
+            st.held_behind += behind as u64;
             *cx.global::<CaptureState>() = st;
             return DrawStep::done();
         }
@@ -248,9 +296,10 @@ impl Widget for DeskCapture {
         self.draw_frame.draw_vars.set_texture(0, frame.texture());
         self.draw_frame.draw_abs(cx, rect);
         st.frame = Some(frame);
-        st.picture = Some(picture);
+        st.pictures[slot] = Some(picture);
+        st.next = 1 - slot;
         st.drawn += 1;
-        st.painted = true;
+        st.painted = Some(InFlight::new(&st.in_flight[slot]));
         if let Some(signal) = &st.signal {
             signal.set();
         }

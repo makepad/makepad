@@ -661,6 +661,14 @@ fn recolor_links(laid: &LaidoutText, links: &[(usize, usize)], base: Vec4f, ink:
 }
 
 impl Label {
+    /// The label's whole laid-out box (its `area()` is the text's draw area, which can be one
+    /// glyph's instance): what the window keeps a caption title off.
+    pub(crate) fn box_rect(&self, cx: &Cx) -> Rect {
+        self.area.rect(cx)
+    }
+}
+
+impl Label {
     /// How far the label moved since it was drawn.
     fn shift(&self, cx: &Cx) -> DVec2 {
         if self.area.is_valid(cx) {

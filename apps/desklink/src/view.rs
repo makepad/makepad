@@ -424,3 +424,10 @@ pub fn latency_line(l: &Latency) -> String {
     let f = |v: f64| format!("{:>5.1}", v.clamp(-99.9, 999.9));
     format!("encode {} · network {} · decode {} · present {} · total {} ms", f(l.encode), f(l.network), f(l.decode), f(l.present), f(l.total))
 }
+
+/// The flow line ("Latency details"): over the last second, the longest the network thread did
+/// not read (a stall there holds the desktop's pictures back) and the most pictures waiting for
+/// the decoder.
+pub fn flow_line(read_gap_ms: f64, decode_queue: usize) -> String {
+    format!("read gap {:>5.1} ms · decode queue {:>3}", read_gap_ms.clamp(0.0, 9999.9), decode_queue.min(999))
+}

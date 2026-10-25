@@ -12,7 +12,7 @@ use makepad_network::tls::KnownHosts;
 use makepad_network::{SignalToUI, SocketStream};
 use makepad_widgets::makepad_platform::video_file::{DecodedPicture, StreamVideoCodec, VideoStreamDecoder};
 use std::io::Read;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -73,6 +73,11 @@ pub struct Shared {
     /// The pictures a second the desktop streams at (its `Rate`; a still desktop sends fewer).
     pub stream_fps: Option<u16>,
     pub warning: Option<String>,
+    /// Over the last second: the longest time the network thread did not read (ms; a stall
+    /// here fills the desktop's socket and holds its pictures back), and the most pictures
+    /// waiting for the decoder (decoding slower than they arrive).
+    pub read_gap_ms: f64,
+    pub decode_queue: usize,
 }
 
 /// A decoded part of a picture: rows `y0..` of it (all of it, or one tile), the decoder's GPU
@@ -268,10 +273,13 @@ impl Net {
 
         // the decoder: its own thread, fed every picture in order
         let (dec_tx, dec_rx) = channel::<Packet>();
+        // packets sent to the decoder and not decoded yet
+        let queued = Arc::new(AtomicUsize::new(0));
         let decoder = {
-            let (latest, signal, shared, cmd) = (self.latest.clone(), self.signal.clone(), self.shared.clone(), self.cmd.clone());
-            std::thread::Builder::new().name(format!("desklink-dec-{}", self.host)).spawn(move || decode_loop(dec_rx, latest, signal, shared, cmd)).map_err(|e| e.to_string())?
+            let (latest, signal, shared, cmd, queued) = (self.latest.clone(), self.signal.clone(), self.shared.clone(), self.cmd.clone(), queued.clone());
+            std::thread::Builder::new().name(format!("desklink-dec-{}", self.host)).spawn(move || decode_loop(dec_rx, latest, signal, shared, cmd, queued)).map_err(|e| e.to_string())?
         };
+        let (mut read_gap, mut queue_max, mut last_read) = (Duration::ZERO, 0usize, Instant::now());
 
         let mut inbox = Inbox::default();
         let mut buf = vec![0u8; 512 << 10];
@@ -315,7 +323,10 @@ impl Net {
             if let Some(e) = failed {
                 break Err(e);
             }
-            match stream.read(&mut buf) {
+            read_gap = read_gap.max(last_read.elapsed());
+            let read = stream.read(&mut buf);
+            last_read = Instant::now();
+            match read {
                 Ok(0) => break Err("the desktop closed the connection".into()),
                 Ok(n) => inbox.feed(&buf[..n]),
                 Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted) => {}
@@ -360,6 +371,7 @@ impl Net {
                             second.1 += 1;
                         }
                         second.2 += data.len();
+                        queue_max = queue_max.max(queued.fetch_add(1, Ordering::AcqRel) + 1);
                         let _ = dec_tx.send(Packet { frame, key, stream, parts, y0, built_ns, encoded_ns, sent_ns, received_ns: now_ns(), data });
                     }
                     ServerMsg::Cursor { x, y, shape, visible } => {
@@ -406,6 +418,8 @@ impl Net {
                 let mut s = self.shared.lock().unwrap();
                 s.fps = second.1 as f64 / secs;
                 s.mbps = second.2 as f64 * 8.0 / secs / 1e6;
+                s.read_gap_ms = std::mem::take(&mut read_gap).as_secs_f64() * 1000.0;
+                s.decode_queue = std::mem::take(&mut queue_max);
                 second = (Instant::now(), 0, 0);
             }
         };
@@ -499,7 +513,7 @@ fn play_loop(path: String, gpu: bool, still: Option<u32>, shared: Arc<Mutex<Shar
     }
 }
 
-fn decode_loop(rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal: SignalToUI, shared: Arc<Mutex<Shared>>, cmd: Sender<ClientMsg>) {
+fn decode_loop(rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal: SignalToUI, shared: Arc<Mutex<Shared>>, cmd: Sender<ClientMsg>, queued: Arc<AtomicUsize>) {
     // one decoder per encoder stream (a tile, or an interleaved stream), each waiting for its
     // key frame after a failure
     let mut decoders: Vec<Option<VideoStreamDecoder>> = Vec::new();
@@ -508,7 +522,10 @@ fn decode_loop(rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal
     let mut gathering: Option<(u32, Vec<Option<Part>>, Picture)> = None;
     loop {
         let packet = match rx.recv_timeout(Duration::from_millis(500)) {
-            Ok(p) => p,
+            Ok(p) => {
+                queued.fetch_sub(1, Ordering::AcqRel);
+                p
+            }
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => return,
         };
