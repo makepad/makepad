@@ -143,13 +143,20 @@ impl TilePlan {
     /// multiple of the engines (every engine gets the same share) and that a viewer's decoder
     /// takes at `fps` (`MAX_MB_RATE` per stream), fewest columns first; never fewer than the size
     /// limit needs. Interleave / Off: the size limit's tiles only.
-    pub fn new(size: [u32; 2], fps: u32, split: super::settings::Split, engines: u32, max: Option<[u32; 2]>) -> TilePlan {
+    ///
+    /// H.265 (`hevc`): one stream as large as the encoder takes (no seams, one decoder), or with
+    /// `spread` a band per engine (the engines encode a picture at once).
+    pub fn new(size: [u32; 2], fps: u32, split: super::settings::Split, engines: u32, max: Option<[u32; 2]>, hevc: bool, spread: bool) -> TilePlan {
         let [mw, mh] = max.map_or([u32::MAX, u32::MAX], |[w, h]| [(w / 16 * 16).max(16), (h / 16 * 16).max(16)]);
         let min_cols = size[0].div_ceil(mw).max(1);
         let min_rows = size[1].div_ceil(mh).max(1);
         let least = TilePlan { cols: min_cols, rows: min_rows };
         if split != super::settings::Split::Tiles || engines <= 1 {
             return least;
+        }
+        if hevc {
+            let rows = engines.max(least.rows);
+            return if spread && size[1] / rows >= 64 { TilePlan { cols: least.cols, rows } } else { least };
         }
         // tiles at least 64 pixels each way, each a stream the decoder takes at this rate
         let mb_rate = |c: u32, r: u32| (size[0] / c).div_ceil(16) as u64 * (size[1] / r + 16).div_ceil(16) as u64 * fps as u64;
@@ -190,6 +197,10 @@ pub struct Want {
     /// The encoder's tiles: each column's chroma rows are packed within the column (4:4:4: a
     /// column's chroma row is its own two texture rows), so every tile is one texel rectangle.
     pub plan: TilePlan,
+    /// H.265 (else H.264), and the encoder's best pictures per bit (else its fastest): the
+    /// encoder's, the capture is the same.
+    pub hevc: bool,
+    pub sharp: bool,
 }
 
 /// Shared between the WM's Desk Link (writes `want`) and the `DeskCapture` widget (draws it):
@@ -421,16 +432,22 @@ mod plan_tests {
     #[test]
     fn an_8k_wide_picture_spreads_over_every_engine_in_columns_within_the_encoders_width() {
         let max = Some([4096, 4096]);
-        assert_eq!(TilePlan::new([7680, 2160], 120, Split::Tiles, 4, max), TilePlan { cols: 2, rows: 2 });
-        assert_eq!(TilePlan::new([7680, 2160], 120, Split::Tiles, 3, max), TilePlan { cols: 2, rows: 3 }, "3 x 2560x2160 is past the decoder's rate at 120");
-        assert_eq!(TilePlan::new([7680, 2160], 60, Split::Tiles, 3, max), TilePlan { cols: 3, rows: 1 });
-        assert_eq!(TilePlan::new([7680, 2160], 120, Split::Tiles, 2, max), TilePlan { cols: 2, rows: 2 });
-        assert_eq!(TilePlan::new([7680, 2160], 120, Split::Off, 4, max), TilePlan { cols: 2, rows: 1 });
-        assert_eq!(TilePlan::new([7680, 2160], 120, Split::Interleave, 4, max), TilePlan { cols: 2, rows: 1 });
-        assert_eq!(TilePlan::new([3840, 2160], 120, Split::Tiles, 2, max), TilePlan { cols: 1, rows: 2 });
-        assert_eq!(TilePlan::new([3840, 2160], 120, Split::Tiles, 1, max), TilePlan::WHOLE);
-        assert_eq!(TilePlan::new([3840, 2160], 120, Split::Interleave, 2, max), TilePlan::WHOLE);
-        assert_eq!(TilePlan::new([1280, 100], 120, Split::Tiles, 4, max), TilePlan { cols: 4, rows: 1 });
+        assert_eq!(TilePlan::new([7680, 2160], 120, Split::Tiles, 4, max, false, false), TilePlan { cols: 2, rows: 2 });
+        assert_eq!(TilePlan::new([7680, 2160], 120, Split::Tiles, 3, max, false, false), TilePlan { cols: 2, rows: 3 }, "3 x 2560x2160 is past the decoder's rate at 120");
+        assert_eq!(TilePlan::new([7680, 2160], 60, Split::Tiles, 3, max, false, false), TilePlan { cols: 3, rows: 1 });
+        assert_eq!(TilePlan::new([7680, 2160], 120, Split::Tiles, 2, max, false, false), TilePlan { cols: 2, rows: 2 });
+        assert_eq!(TilePlan::new([7680, 2160], 120, Split::Off, 4, max, false, false), TilePlan { cols: 2, rows: 1 });
+        assert_eq!(TilePlan::new([7680, 2160], 120, Split::Interleave, 4, max, false, false), TilePlan { cols: 2, rows: 1 });
+        assert_eq!(TilePlan::new([3840, 2160], 120, Split::Tiles, 2, max, false, false), TilePlan { cols: 1, rows: 2 });
+        assert_eq!(TilePlan::new([3840, 2160], 120, Split::Tiles, 1, max, false, false), TilePlan::WHOLE);
+        assert_eq!(TilePlan::new([3840, 2160], 120, Split::Interleave, 2, max, false, false), TilePlan::WHOLE);
+        assert_eq!(TilePlan::new([1280, 100], 120, Split::Tiles, 4, max, false, false), TilePlan { cols: 4, rows: 1 });
+        // H.265 (8192 wide): one stream, or a band per engine
+        let hevc = Some([8192, 8192]);
+        assert_eq!(TilePlan::new([7680, 2160], 120, Split::Tiles, 3, hevc, true, false), TilePlan::WHOLE);
+        assert_eq!(TilePlan::new([7680, 2160], 120, Split::Tiles, 3, hevc, true, true), TilePlan { cols: 1, rows: 3 });
+        assert_eq!(TilePlan::new([7680, 4320], 120, Split::Off, 3, hevc, true, true), TilePlan::WHOLE);
+        assert_eq!(TilePlan::new([1280, 100], 120, Split::Tiles, 3, hevc, true, true), TilePlan::WHOLE, "bands of at least 64 rows");
     }
     #[test]
     fn tile_edges_are_whole_macroblocks_and_cover_the_picture_once() {

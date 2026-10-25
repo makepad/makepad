@@ -28,9 +28,41 @@ fn rbsp(nal: &[u8]) -> Vec<u8> {
     out
 }
 
+/// The `chroma_format_idc` of an HEVC SPS NAL (with its 2-byte header): 1 4:2:0, 3 4:4:4. Reads
+/// past a single-layer profile_tier_level (`sps_max_sub_layers_minus1` 0; more layers: None).
+pub fn sps_chroma_format_idc(sps: &[u8]) -> Option<u32> {
+    let r = rbsp(sps);
+    // vps id (4), max_sub_layers_minus1 (3), temporal_id_nesting (1); then the general
+    // profile_tier_level: 12 bytes
+    if r.len() < 14 || (r[0] >> 1) & 7 != 0 {
+        return None;
+    }
+    let mut bit = 13 * 8;
+    let mut ue = || -> Option<u32> {
+        let mut zeros = 0;
+        while (r.get(bit / 8)? >> (7 - bit % 8)) & 1 == 0 {
+            zeros += 1;
+            bit += 1;
+            if zeros > 31 {
+                return None;
+            }
+        }
+        bit += 1;
+        let mut v = 0u32;
+        for _ in 0..zeros {
+            v = v << 1 | ((r.get(bit / 8)? >> (7 - bit % 8)) & 1) as u32;
+            bit += 1;
+        }
+        Some((1u32 << zeros) - 1 + v)
+    };
+    let _sps_id = ue()?;
+    ue()
+}
+
 /// The `hvcC` record for Annex-B parameter sets (VPS, SPS, PPS, in any order), or `None`
 /// without an SPS. The general profile/tier/level fields are the SPS's own
-/// (profile_tier_level follows its first byte); 4:2:0, 8 bit, 4-byte NAL lengths.
+/// (profile_tier_level follows its first byte); the SPS's chroma format, 8 bit, 4-byte NAL
+/// lengths.
 pub fn hvcc_from_annex_b(parameter_sets: &[u8]) -> Option<Vec<u8>> {
     let nals = split_annex_b(parameter_sets);
     let sps = nals.iter().find(|n| hevc_nal_unit_type(n) == SPS)?;
@@ -44,7 +76,7 @@ pub fn hvcc_from_annex_b(parameter_sets: &[u8]) -> Option<Vec<u8>> {
     out.push(general[11]); // general_level_idc
     out.extend_from_slice(&0xF000u16.to_be_bytes()); // min_spatial_segmentation_idc = 0
     out.push(0xFC); // parallelismType = 0
-    out.push(0xFC | 1); // chroma_format_idc = 1 (4:2:0)
+    out.push(0xFC | sps_chroma_format_idc(sps).unwrap_or(1).min(3) as u8); // chroma_format_idc (the SPS's)
     out.push(0xF8); // bit_depth_luma_minus8 = 0
     out.push(0xF8); // bit_depth_chroma_minus8 = 0
     out.extend_from_slice(&0u16.to_be_bytes()); // avgFrameRate
@@ -97,6 +129,18 @@ mod tests {
             out.extend_from_slice(nal);
         }
         out
+    }
+
+    #[test]
+    fn the_sps_chroma_format_is_read_past_emulation_prevention() {
+        // header 42 01, vps 0 / 1 layer, PTL: RExt (profile 4) whose compatibility flags make
+        // "00 00 00" (an emulation-prevention byte follows), level 6.2; sps id 0, chroma 3
+        let mut ptl = vec![0x01u8, 0x04, 0x08, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0xBA];
+        // ue(0) = 1, ue(3) = 00100 -> bits 1 00100 xx
+        ptl.push(0b1001_0000);
+        let mut nal = vec![0x42, 0x01];
+        nal.extend_from_slice(&ptl);
+        assert_eq!(sps_chroma_format_idc(&nal), Some(3));
     }
 
     #[test]

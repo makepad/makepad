@@ -95,8 +95,6 @@ pub enum Control {
     Resume,
     SelectScreen(u32),
     Keyframe,
-    /// `split::*` for the stream.
-    Split(u8),
     /// The viewer's display refresh (Hz, 0 = not known).
     Refresh(u16),
     /// The viewer's picture area: device pixels and scale (hundredths).
@@ -106,8 +104,8 @@ pub enum Control {
     Active,
     Clipboard(String),
     Stats { frame: u32, decode_us: u32, present_us: u32 },
-    /// The viewer's own rate cap (Mbit/s; 0 = none).
-    RateCap(u16),
+    /// The viewer's encoding choices (`pref::*`, cap Mbit/s, pictures a second; 0 = auto each).
+    Encoding { chroma: u8, codec: u8, preset: u8, mbps: u16, fps: u16 },
 }
 
 /// What the UI queues for a session.
@@ -542,12 +540,11 @@ impl SessionCtx {
                     ClientMsg::Resume => Some(Control::Resume),
                     ClientMsg::SelectScreen { index } => Some(Control::SelectScreen(index)),
                     ClientMsg::RequestKeyframe => Some(Control::Keyframe),
-                    ClientMsg::SetSplit { split } => Some(Control::Split(split)),
                     ClientMsg::Refresh { hz } => Some(Control::Refresh(hz)),
                     ClientMsg::Window { width, height, scale } => Some(Control::Window { width, height, scale }),
                     ClientMsg::Clipboard { text } => Some(Control::Clipboard(text)),
                     ClientMsg::Stats { frame, decode_us, present_us } => Some(Control::Stats { frame, decode_us, present_us }),
-                    ClientMsg::RateCap { mbps } => Some(Control::RateCap(mbps)),
+                    ClientMsg::Encoding { chroma, codec, preset, mbps, fps } => Some(Control::Encoding { chroma, codec, preset, mbps, fps }),
                     ClientMsg::Hello { .. } => return Err("a second hello".into()),
                     input => {
                         if self.active.swap(self.session, Ordering::AcqRel) != self.session {

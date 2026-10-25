@@ -57,7 +57,7 @@ pub mod stream_encoder;
 
 pub use color::{VideoColor, VideoColorUniforms, VideoMatrix, VideoPrimaries, VideoRange, VideoTransfer};
 pub use stream_decoder::{DecodedFrame, DecodedPicture, PicturePlane, VideoStreamDecoder};
-pub use stream_encoder::{EncodedPacket, GpuReady, StreamTile, StreamVideoCodec, VideoStreamEncoder, VideoStreamEncoderOptions};
+pub use stream_encoder::{EncodedPacket, GpuReady, StreamTile, StreamTuning, StreamVideoCodec, VideoStreamEncoder, VideoStreamEncoderOptions};
 
 use std::fmt;
 

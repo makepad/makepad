@@ -11,7 +11,7 @@ use std::io::{self, Write};
 #[cfg(feature = "server")]
 pub mod server;
 
-pub const VERSION: u16 = 6;
+pub const VERSION: u16 = 7;
 pub const DEFAULT_PORT: u16 = 8790;
 /// The largest message either side accepts (a key frame of a big desktop fits many times over).
 pub const MAX_MESSAGE: usize = 16 << 20;
@@ -63,6 +63,23 @@ pub mod caps {
     /// Only watches (a probe, a test client): its `Window` never decides the size of a desktop
     /// that follows its viewer.
     pub const VIEW_ONLY: u32 = 2;
+    /// Decodes H.265 (Main, and Format range extensions 4:4:4 when it has `FULL_CHROMA`).
+    pub const HEVC: u32 = 4;
+}
+
+/// `ClientMsg::Encoding` choices (0 = auto everywhere) and the codec of `Video` / `Rate`.
+pub mod pref {
+    pub const AUTO: u8 = 0;
+    /// `chroma`.
+    pub const FULL: u8 = 1;
+    pub const HALF: u8 = 2;
+    /// `codec` (also `ServerMsg::Video::codec`, `Rate::codec`).
+    pub const H264: u8 = 1;
+    pub const HEVC: u8 = 2;
+    /// `preset`: the encoder's best pictures per bit (NVIDIA: ultra-low-latency tuning, about
+    /// 60% more encoder time) or its fastest encode (low-latency tuning).
+    pub const SHARP: u8 = 1;
+    pub const FAST: u8 = 2;
 }
 
 /// `ServerMsg::Rate::limit`: what holds the stream's rate where it is now.
@@ -75,19 +92,12 @@ pub mod limit {
     pub const LINK: u8 = 2;
     /// The encoder: it took longer than a picture's time (a big 4:4:4 desktop goes 4:2:0).
     pub const ENCODER: u8 = 3;
-    /// A cap: the desktop's `max_mbps`, a viewer's `RateCap`, or the size's own rate.
+    /// A cap: the desktop's `max_mbps`, a viewer's `Encoding` cap, or the size's own rate.
     pub const CAP: u8 = 4;
     /// The desktop's settings name a fixed rate (`kbps`).
     pub const FIXED: u8 = 5;
 }
 
-/// `ClientMsg::SetSplit` values: one stream, tiles (each picture in bands, one per engine, at
-/// once) or interleave (whole pictures, the engines in turn).
-pub mod split {
-    pub const OFF: u8 = 0;
-    pub const TILES: u8 = 1;
-    pub const INTERLEAVE: u8 = 2;
-}
 
 pub mod button {
     pub const LEFT: u8 = 0;
@@ -134,8 +144,6 @@ pub enum ClientMsg {
     SelectScreen { index: u32 },
     /// A key frame now (a decoder error).
     RequestKeyframe,
-    /// How a desktop with several encode engines shares them: `split::*` (for every viewer).
-    SetSplit { split: u8 },
     /// The viewer's display refresh in Hz (measured from its vsync; 0 = not known): the desktop
     /// streams at most this many pictures a second.
     Refresh { hz: u16 },
@@ -156,9 +164,12 @@ pub enum ClientMsg {
     /// How the last shown picture fared: decode time and decode-end -> on screen.
     Stats { frame: u32, decode_us: u32, present_us: u32 },
     Clipboard { text: String },
-    /// The most this viewer wants the stream to take (Mbit/s, all tiles; 0 = no cap of its
-    /// own): the desktop streams at most the lowest of its watching viewers' caps.
-    RateCap { mbps: u16 },
+    /// How this viewer wants the stream encoded ([`pref`]; 0 = auto each): `chroma`, `codec`,
+    /// `preset`, the most it may take (`mbps`, all tiles; 0 = no cap of its own: the desktop
+    /// streams at most the lowest of its watching viewers' caps) and pictures a second (`fps`;
+    /// 0 = its display's refresh). Sent after the Hello and on every change; the active viewer's
+    /// choices decide the stream, the decoders of every watching viewer bound them.
+    Encoding { chroma: u8, codec: u8, preset: u8, mbps: u16, fps: u16 },
 }
 
 /// Server -> viewer.
@@ -176,7 +187,8 @@ pub enum ServerMsg {
     /// columns as well as bands). The picture is complete with `parts` parts of the same `frame`: one per
     /// stream when the streams are tiles (bands of each picture, encoded at once), 1 when they
     /// interleave (stream `frame % streams` encodes whole pictures in turn).
-    Video { frame: u32, key: bool, built_ns: u64, encoded_ns: u64, sent_ns: u64, stream: u8, parts: u8, x0: u32, y0: u32, data: Vec<u8> },
+    /// `codec`: [`pref::H264`] or [`pref::HEVC`] (H.265: VPS, SPS and PPS before each IDR).
+    Video { frame: u32, key: bool, built_ns: u64, encoded_ns: u64, sent_ns: u64, stream: u8, parts: u8, x0: u32, y0: u32, codec: u8, data: Vec<u8> },
     /// The pointer over the stream picture (0..=65535), its shape ([`CURSOR_SHAPES`] index).
     Cursor { x: u16, y: u16, shape: u8, visible: bool },
     Pong { client_ns: u64, server_ns: u64 },
@@ -187,7 +199,10 @@ pub enum ServerMsg {
     /// on every change. A still desktop sends fewer. `kbps`: the stream's rate now (all its
     /// tiles, the encoder's average target), `limit` what holds it there ([`limit`]),
     /// `full_chroma` whether it is 4:4:4 now.
-    Rate { fps: u16, kbps: u32, limit: u8, full_chroma: bool },
+    /// `codec` ([`pref`]), `preset` (SHARP / FAST), `streams` (the encoder streams a picture
+    /// is cut into) and `why`: what the stream is and why, in words (e.g. "fast: the encoder is
+    /// behind at sharp").
+    Rate { fps: u16, kbps: u32, limit: u8, full_chroma: bool, codec: u8, preset: u8, streams: u8, why: String },
     Clipboard { text: String },
     Bye { reason: String },
 }
@@ -292,7 +307,6 @@ mod tag {
     pub const RESUME: u8 = 3;
     pub const SELECT_SCREEN: u8 = 4;
     pub const REQUEST_KEYFRAME: u8 = 5;
-    pub const SET_SPLIT: u8 = 6;
     pub const REFRESH: u8 = 7;
     pub const WINDOW: u8 = 8;
     pub const KEY: u8 = 10;
@@ -304,7 +318,7 @@ mod tag {
     pub const PING: u8 = 20;
     pub const STATS: u8 = 21;
     pub const CLIPBOARD_C: u8 = 22;
-    pub const RATE_CAP: u8 = 23;
+    pub const ENCODING: u8 = 24;
 
     pub const WELCOME: u8 = 100;
     pub const REFUSED: u8 = 101;
@@ -334,11 +348,6 @@ impl ClientMsg {
                 o.done()
             }
             ClientMsg::RequestKeyframe => Out::new(REQUEST_KEYFRAME).done(),
-            ClientMsg::SetSplit { split } => {
-                let mut o = Out::new(SET_SPLIT);
-                o.u8(*split);
-                o.done()
-            }
             ClientMsg::Refresh { hz } => {
                 let mut o = Out::new(REFRESH);
                 o.u16(*hz);
@@ -394,9 +403,9 @@ impl ClientMsg {
                 o.str(text);
                 o.done()
             }
-            ClientMsg::RateCap { mbps } => {
-                let mut o = Out::new(RATE_CAP);
-                o.u16(*mbps);
+            ClientMsg::Encoding { chroma, codec, preset, mbps, fps } => {
+                let mut o = Out::new(ENCODING);
+                o.u8(*chroma).u8(*codec).u8(*preset).u16(*mbps).u16(*fps);
                 o.done()
             }
         }
@@ -411,7 +420,6 @@ impl ClientMsg {
             RESUME => ClientMsg::Resume,
             SELECT_SCREEN => ClientMsg::SelectScreen { index: r.u32()? },
             REQUEST_KEYFRAME => ClientMsg::RequestKeyframe,
-            SET_SPLIT => ClientMsg::SetSplit { split: r.u8()? },
             REFRESH => ClientMsg::Refresh { hz: r.u16()? },
             WINDOW => ClientMsg::Window { width: r.u32()?, height: r.u32()?, scale: r.u16()? },
             KEY => ClientMsg::Key { down: r.bool()?, keycode: r.u32()?, mods: r.u8()? },
@@ -425,7 +433,7 @@ impl ClientMsg {
             GAMEPAD_GONE => ClientMsg::GamepadGone { slot: r.u8()? },
             PING => ClientMsg::Ping { client_ns: r.u64()? },
             STATS => ClientMsg::Stats { frame: r.u32()?, decode_us: r.u32()?, present_us: r.u32()? },
-            RATE_CAP => ClientMsg::RateCap { mbps: r.u16()? },
+            ENCODING => ClientMsg::Encoding { chroma: r.u8()?, codec: r.u8()?, preset: r.u8()?, mbps: r.u16()?, fps: r.u16()? },
             CLIPBOARD_C => ClientMsg::Clipboard { text: r.str()? },
             _ => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unknown viewer message {ty}"))),
         })
@@ -450,7 +458,7 @@ impl ServerMsg {
                 o.str(reason);
                 o.done()
             }
-            ServerMsg::Video { frame, key, built_ns, encoded_ns, sent_ns, stream, parts, x0, y0, data } => encode_video(*frame, *key, *built_ns, *encoded_ns, *sent_ns, (*stream, *parts, *x0, *y0), data),
+            ServerMsg::Video { frame, key, built_ns, encoded_ns, sent_ns, stream, parts, x0, y0, codec, data } => encode_video(*frame, *key, *built_ns, *encoded_ns, *sent_ns, (*stream, *parts, *x0, *y0), *codec, data),
             ServerMsg::Cursor { x, y, shape, visible } => {
                 let mut o = Out::new(CURSOR);
                 o.u16(*x).u16(*y).u8(*shape).u8(*visible as u8);
@@ -476,9 +484,9 @@ impl ServerMsg {
                 o.str(reason);
                 o.done()
             }
-            ServerMsg::Rate { fps, kbps, limit, full_chroma } => {
+            ServerMsg::Rate { fps, kbps, limit, full_chroma, codec, preset, streams, why } => {
                 let mut o = Out::new(RATE);
-                o.u16(*fps).u32(*kbps).u8(*limit).u8(*full_chroma as u8);
+                o.u16(*fps).u32(*kbps).u8(*limit).u8(*full_chroma as u8).u8(*codec).u8(*preset).u8(*streams).str(why);
                 o.done()
             }
         }
@@ -502,13 +510,13 @@ impl ServerMsg {
                 ServerMsg::Welcome { version, session, screens, screen: r.u32()?, stream: [r.u32()?, r.u32()?], input: r.bool()?, input_note: r.str()?, server: r.str()? }
             }
             REFUSED => ServerMsg::Refused { reason: r.str()? },
-            VIDEO => ServerMsg::Video { frame: r.u32()?, key: r.bool()?, built_ns: r.u64()?, encoded_ns: r.u64()?, sent_ns: r.u64()?, stream: r.u8()?, parts: r.u8()?, x0: r.u32()?, y0: r.u32()?, data: r.bytes()?.to_vec() },
+            VIDEO => ServerMsg::Video { frame: r.u32()?, key: r.bool()?, built_ns: r.u64()?, encoded_ns: r.u64()?, sent_ns: r.u64()?, stream: r.u8()?, parts: r.u8()?, x0: r.u32()?, y0: r.u32()?, codec: r.u8()?, data: r.bytes()?.to_vec() },
             CURSOR => ServerMsg::Cursor { x: r.u16()?, y: r.u16()?, shape: r.u8()?, visible: r.bool()? },
             PONG => ServerMsg::Pong { client_ns: r.u64()?, server_ns: r.u64()? },
             STREAM => ServerMsg::Stream { screen: r.u32()?, stream: [r.u32()?, r.u32()?] },
             CLIPBOARD_S => ServerMsg::Clipboard { text: r.str()? },
             BYE => ServerMsg::Bye { reason: r.str()? },
-            RATE => ServerMsg::Rate { fps: r.u16()?, kbps: r.u32()?, limit: r.u8()?, full_chroma: r.bool()? },
+            RATE => ServerMsg::Rate { fps: r.u16()?, kbps: r.u32()?, limit: r.u8()?, full_chroma: r.bool()?, codec: r.u8()?, preset: r.u8()?, streams: r.u8()?, why: r.str()? },
             _ => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unknown server message {ty}"))),
         })
     }
@@ -517,10 +525,10 @@ impl ServerMsg {
 /// A `Video` message without copying the picture into a `ServerMsg` first.
 /// `part`: (stream, parts of the picture, first row).
 /// `part`: (stream, parts, x0, y0), see `ServerMsg::Video`.
-pub fn encode_video(frame: u32, key: bool, built_ns: u64, encoded_ns: u64, sent_ns: u64, part: (u8, u8, u32, u32), data: &[u8]) -> Vec<u8> {
+pub fn encode_video(frame: u32, key: bool, built_ns: u64, encoded_ns: u64, sent_ns: u64, part: (u8, u8, u32, u32), codec: u8, data: &[u8]) -> Vec<u8> {
     let mut o = Out(Vec::with_capacity(data.len() + 60));
     o.0.extend_from_slice(&[tag::VIDEO, 0, 0, 0, 0]);
-    o.u32(frame).u8(key as u8).u64(built_ns).u64(encoded_ns).u64(sent_ns).u8(part.0).u8(part.1).u32(part.2).u32(part.3).bytes(data);
+    o.u32(frame).u8(key as u8).u64(built_ns).u64(encoded_ns).u64(sent_ns).u8(part.0).u8(part.1).u32(part.2).u32(part.3).u8(codec).bytes(data);
     o.done()
 }
 
@@ -649,7 +657,7 @@ mod tests {
         round_client(ClientMsg::Resume);
         round_client(ClientMsg::SelectScreen { index: 2 });
         round_client(ClientMsg::RequestKeyframe);
-        round_client(ClientMsg::SetSplit { split: split::INTERLEAVE });
+        round_client(ClientMsg::Encoding { chroma: pref::FULL, codec: pref::HEVC, preset: pref::SHARP, mbps: 300, fps: 120 });
         round_client(ClientMsg::Refresh { hz: 120 });
         round_client(ClientMsg::Window { width: 7680, height: 2160, scale: 200 });
         round_client(ClientMsg::Key { down: true, keycode: 42, mods: mods::SHIFT | mods::LOGO });
@@ -661,7 +669,6 @@ mod tests {
         round_client(ClientMsg::Ping { client_ns: u64::MAX - 3 });
         round_client(ClientMsg::Stats { frame: 9, decode_us: 1200, present_us: 8000 });
         round_client(ClientMsg::Clipboard { text: "héllo".into() });
-        round_client(ClientMsg::RateCap { mbps: 300 });
     }
 
     #[test]
@@ -677,23 +684,23 @@ mod tests {
             server: "wm 166".into(),
         });
         round_server(ServerMsg::Refused { reason: "busy".into() });
-        round_server(ServerMsg::Video { frame: 3, key: true, built_ns: 1, encoded_ns: 2, sent_ns: 3, stream: 1, parts: 4, x0: 3840, y0: 1072, data: vec![0, 0, 0, 1, 0x67] });
+        round_server(ServerMsg::Video { frame: 3, key: true, built_ns: 1, encoded_ns: 2, sent_ns: 3, stream: 1, parts: 4, x0: 3840, y0: 1072, codec: pref::HEVC, data: vec![0, 0, 0, 1, 0x67] });
         round_server(ServerMsg::Cursor { x: 1, y: 2, shape: cursor_index("Text"), visible: true });
         round_server(ServerMsg::Pong { client_ns: 5, server_ns: 6 });
         round_server(ServerMsg::Stream { screen: 0, stream: [2560, 1440] });
         round_server(ServerMsg::Clipboard { text: String::new() });
         round_server(ServerMsg::Bye { reason: "the WM quits".into() });
-        round_server(ServerMsg::Rate { fps: 120, kbps: 250_000, limit: limit::LINK, full_chroma: true });
+        round_server(ServerMsg::Rate { fps: 120, kbps: 250_000, limit: limit::LINK, full_chroma: true, codec: pref::HEVC, preset: pref::SHARP, streams: 2, why: "fast: the encoder is behind".into() });
     }
 
     #[test]
     fn video_sent_stamp_offset() {
-        let mut bytes = encode_video(1, false, 10, 20, 0, (0, 1, 0, 0), &[9; 4]);
+        let mut bytes = encode_video(1, false, 10, 20, 0, (0, 1, 0, 0), pref::H264, &[9; 4]);
         bytes[VIDEO_SENT_AT..VIDEO_SENT_AT + 8].copy_from_slice(&30u64.to_le_bytes());
         let mut inbox = Inbox::default();
         inbox.feed(&bytes);
         let (ty, payload) = inbox.next().unwrap().unwrap();
-        assert_eq!(ServerMsg::decode(ty, &payload).unwrap(), ServerMsg::Video { frame: 1, key: false, built_ns: 10, encoded_ns: 20, sent_ns: 30, stream: 0, parts: 1, x0: 0, y0: 0, data: vec![9; 4] });
+        assert_eq!(ServerMsg::decode(ty, &payload).unwrap(), ServerMsg::Video { frame: 1, key: false, built_ns: 10, encoded_ns: 20, sent_ns: 30, stream: 0, parts: 1, x0: 0, y0: 0, codec: pref::H264, data: vec![9; 4] });
     }
 
     #[test]

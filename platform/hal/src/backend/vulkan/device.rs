@@ -24,6 +24,8 @@ pub struct VideoQueue {
     /// exposes two queues), so tiles of a picture encode at once.
     pub more: Vec<(vk::Queue, Mutex<()>)>,
     pub lock: Mutex<()>,
+    /// The encoder also takes H.265 (VK_KHR_video_encode_h265 enabled).
+    pub h265: bool,
 }
 
 pub struct Device {
@@ -272,6 +274,8 @@ impl Device {
                 .filter(|f| *f != family)
         } else { None };
         if video_family.is_some() { wanted.extend(video_names); }
+        let h265 = video_family.is_some() && supported(vk::KHR_VIDEO_ENCODE_H265_NAME);
+        if h265 { wanted.push(vk::KHR_VIDEO_ENCODE_H265_NAME); }
         // 4:4:4 encode source images (G8_B8R8_2PLANE_444): an extension below Vulkan 1.3, and a
         // feature
         let mut plane444 = vk::PhysicalDeviceYcbcr2Plane444FormatsFeaturesEXT::default();
@@ -341,7 +345,7 @@ impl Device {
         let calibrated = calibration.is_some() && raw.table.get_calibrated_timestamps_khr.is_some();
         report_profiling(name, &properties, queue.timestamp_valid_bits, calibrated);
         let video_encode = video_family.map(|f| VideoQueue { family: f as u32, queue: unsafe { raw.get_device_queue(f as u32, 0) }, timestamp_bits: video_timestamp_bits,
-            more: (1..video_count).map(|i| (unsafe { raw.get_device_queue(f as u32, i) }, Mutex::new(()))).collect(), lock: Mutex::new(()) });
+            more: (1..video_count).map(|i| (unsafe { raw.get_device_queue(f as u32, i) }, Mutex::new(()))).collect(), lock: Mutex::new(()), h265 });
         if let Some(v) = &video_encode { if log_enabled() { eprintln!("[hal-vulkan] hardware video encode queue family={}", v.family); } }
         Ok(Some(Arc::new(Self {
             queue: unsafe { raw.get_device_queue(family as u32, 0) }, queue_lock: Mutex::new(()), raw, instance: instance.clone(),

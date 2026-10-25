@@ -58,6 +58,9 @@ pub struct DeskLinkSettings {
     /// `tiles = CxR`: columns x bands of each picture (tiles only); `None`: auto.
     pub tiles: Option<(u32, u32)>,
     pub full_chroma: bool,
+    /// `codec = auto` (the default: H.265 where the GPU and every watching viewer take it) or
+    /// `h264` (never H.265).
+    pub hevc: bool,
     pub fleet_dir: Option<PathBuf>,
     /// The only peers served (`allow_peers`).
     pub allow_peers: Vec<IpAddr>,
@@ -84,6 +87,7 @@ impl Default for DeskLinkSettings {
             split: Split::Tiles,
             tiles: None,
             full_chroma: true,
+            hevc: true,
             fleet_dir: None,
             allow_peers: Vec::new(),
             dump: None,
@@ -136,6 +140,11 @@ impl DeskLinkSettings {
                 "kbps" => value.parse().map(|k| s.kbps = k).is_ok(),
                 "max_mbps" => value.parse().map(|m| s.max_mbps = m).is_ok(),
                 "fps" => value.parse::<u32>().ok().filter(|f| (1..=240).contains(f)).map(|f| s.fps = f).is_some(),
+                "codec" => match value {
+                    "auto" | "hevc" | "h265" => { s.hevc = true; true }
+                    "h264" => { s.hevc = false; true }
+                    _ => false,
+                },
                 "chroma" => match value {
                     "444" => { s.full_chroma = true; true }
                     "420" => { s.full_chroma = false; true }

@@ -98,7 +98,8 @@ mod native {
     use super::settings::DeskLinkSettings;
     use makepad_desk_link::{self as proto, ScreenInfo, ServerMsg};
     use super::encode::{EncodeStats, Encoder, Fence, Job, Subscribers, TilePlan};
-    use makepad_widgets::makepad_platform::video_file::VideoStreamEncoder;
+    use makepad_widgets::makepad_platform::video_file::{StreamVideoCodec, VideoStreamEncoder};
+    use super::rate::effort;
     use makepad_widgets::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -134,8 +135,31 @@ mod native {
         input: bool,
         /// `caps::VIEW_ONLY`: its window never decides the desktop's size.
         view_only: bool,
-        /// Its `RateCap` (Mbit/s; 0 = none).
-        cap_mbps: u16,
+        /// Its decoder takes H.265.
+        hevc: bool,
+        /// Its `Encoding` choices.
+        prefs: Prefs,
+    }
+
+    /// A viewer's `Encoding` (`proto::pref::*`; 0 = auto each).
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    struct Prefs {
+        chroma: u8,
+        codec: u8,
+        preset: u8,
+        mbps: u16,
+        fps: u16,
+    }
+
+    /// How the stream is encoded for a size, and why (the viewers' stats line).
+    #[derive(Clone, Debug, PartialEq)]
+    struct Choice {
+        hevc: bool,
+        full_chroma: bool,
+        sharp: bool,
+        /// A band per engine (H.265; H.264 always spreads over the engines).
+        spread: bool,
+        why: String,
     }
 
 
@@ -329,7 +353,7 @@ mod native {
             });
             if spawned.is_ok() {
                 self.dump_gone = Some(gone);
-                self.viewers.push(Viewer { session: 0, name: "dump".into(), peer: String::new(), full_chroma: true, refresh_hz: 0, since: std::time::Instant::now(), out: tx, backlog, paused: Arc::new(AtomicBool::new(false)), shown: None, window: None, active_at: std::time::Instant::now(), input: false, view_only: false, cap_mbps: 0 });
+                self.viewers.push(Viewer { session: 0, name: "dump".into(), peer: String::new(), full_chroma: true, refresh_hz: 0, since: std::time::Instant::now(), out: tx, backlog, paused: Arc::new(AtomicBool::new(false)), shown: None, window: None, active_at: std::time::Instant::now(), input: false, view_only: false, hevc: true, prefs: Prefs::default() });
                 self.sync_subscribers();
             }
         }
@@ -380,6 +404,11 @@ mod native {
             for v in self.viewers.iter().filter(|v| v.refresh_hz > 0 && !v.paused.load(Ordering::Acquire)) {
                 fps = fps.min(v.refresh_hz as u32);
             }
+            // the active viewer's own cap (0: its display)
+            let wanted = self.prefs().fps;
+            if wanted > 0 {
+                fps = fps.min(wanted as u32);
+            }
             fps.max(1)
         }
 
@@ -402,16 +431,83 @@ mod native {
             self.viewers.iter().any(|v| !v.paused.load(Ordering::Acquire))
         }
 
-        /// 4:4:4 when the settings ask for it and every watching viewer's decoder takes it.
-        fn full_chroma(&self) -> bool {
-            self.settings.as_ref().is_some_and(|s| s.full_chroma) && self.viewers.iter().filter(|v| !v.paused.load(Ordering::Acquire)).all(|v| v.full_chroma)
+        /// The choices of the viewer whose `Encoding` decides the stream: of the watching viewers,
+        /// one someone uses (not view-only, input last) first.
+        fn prefs(&self) -> Prefs {
+            self.viewers.iter().filter(|v| !v.paused.load(Ordering::Acquire)).max_by_key(|v| (!v.view_only, v.input, v.active_at)).map_or(Prefs::default(), |v| v.prefs)
+        }
+
+        /// Whether a `size` stream may be 4:4:4 for these choices, and why not.
+        fn can_444(&self, size: [u32; 2], p: &Prefs) -> (bool, &'static str) {
+            let watching = || self.viewers.iter().filter(|v| !v.paused.load(Ordering::Acquire));
+            if p.chroma == proto::pref::HALF {
+                (false, "4:2:0: the viewer asks for it")
+            } else if !self.settings.as_ref().is_some_and(|s| s.full_chroma) {
+                (false, "4:2:0: the desktop's settings say chroma = 420")
+            } else if !watching().all(|v| v.full_chroma) {
+                (false, "4:2:0: a viewer's decoder takes no 4:4:4")
+            } else if self.lost_full_chroma.contains(&size) {
+                (false, "4:2:0: 4:4:4 lost the GPU at this size")
+            } else {
+                (true, "")
+            }
+        }
+
+        /// The most encoder effort (`rate::effort`) a `size` stream may take: a forced 4:4:4 (or
+        /// a 4:2:0 stream) never gives up chroma for the encoder.
+        fn max_effort(&self, size: [u32; 2]) -> u8 {
+            let p = self.prefs();
+            if !self.can_444(size, &p).0 || p.chroma == proto::pref::FULL { effort::FAST } else { effort::HALF }
+        }
+
+        /// How a `size` stream is encoded now: the active viewer's choices within what every
+        /// watching viewer decodes, the GPU encodes and the settings allow, and the step the
+        /// encoder's throughput asked for (`rate::effort`).
+        fn choice(&self, size: [u32; 2]) -> Choice {
+            use proto::pref;
+            let p = self.prefs();
+            let watching = || self.viewers.iter().filter(|v| !v.paused.load(Ordering::Acquire));
+            let (can_444, no_444) = self.can_444(size, &p);
+            let mut why: Vec<String> = Vec::new();
+            let hevc = if p.codec == pref::H264 {
+                false
+            } else if !self.settings.as_ref().is_some_and(|s| s.hevc) {
+                why.push("H.264: the desktop's settings say codec = h264".into());
+                false
+            } else if !watching().all(|v| v.hevc) {
+                why.push("H.264: a viewer's decoder takes no H.265".into());
+                false
+            } else if VideoStreamEncoder::max_size(StreamVideoCodec::Hevc, can_444).is_none() {
+                why.push("H.264: this GPU's encoder has no H.265".into());
+                false
+            } else {
+                true
+            };
+            if p.chroma != pref::HALF && !can_444 {
+                why.push(no_444.into());
+            }
+            let max = self.max_effort(size);
+            let step = self.rate.effort(size, max);
+            let full_chroma = can_444 && step < effort::HALF;
+            let sharp = match p.preset {
+                pref::SHARP => true,
+                pref::FAST => false,
+                _ => step < effort::FAST,
+            };
+            match step {
+                effort::SPREAD if hevc => why.push("a stream per engine: one was behind".into()),
+                effort::FAST if p.preset == pref::AUTO => why.push("fast: the encoder was behind at sharp".into()),
+                effort::HALF => why.push("4:2:0: the encoder was behind at 4:4:4".into()),
+                _ => {}
+            }
+            Choice { hevc, full_chroma, sharp, spread: step >= effort::SPREAD, why: why.join("; ") }
         }
 
         /// The most the stream may take (kbit/s): the settings' `max_mbps` and the watching
         /// viewers' own caps (none by default: the adaptive rate alone decides).
         fn rate_ceiling(&self, _size: [u32; 2], _full_chroma: bool) -> u32 {
             let base = self.settings.as_ref().map_or(u32::MAX, |s| s.ceiling_kbps());
-            self.viewers.iter().filter(|v| !v.paused.load(Ordering::Acquire) && v.cap_mbps > 0).map(|v| v.cap_mbps as u32 * 1000).fold(base, u32::min).max(1)
+            self.viewers.iter().filter(|v| !v.paused.load(Ordering::Acquire) && v.prefs.mbps > 0).map(|v| v.prefs.mbps as u32 * 1000).fold(base, u32::min).max(1)
         }
 
         /// The whole stream's rate now (kbit/s, the encoder splits it over the tiles): the
@@ -429,10 +525,21 @@ mod native {
             let want = cx.global::<CaptureState>().want;
             let (screens, _) = self.screens(cx);
             let screen = screens.get(self.screen).map(Self::stream_size_of).unwrap_or([0, 0]);
-            let (size, full_chroma) = want.map_or((screen, self.full_chroma()), |w| (w.stream, w.full_chroma));
+            let size = want.map_or(screen, |w| w.stream);
+            let choice = self.choice(size);
+            let (full_chroma, hevc, sharp, streams) = want.map_or((choice.full_chroma, choice.hevc, choice.sharp, 1), |w| (w.full_chroma, w.hevc, w.sharp, w.plan.tiles()));
             let fixed = self.settings.as_ref().is_some_and(|s| s.kbps != 0);
             let limit = if fixed { proto::limit::FIXED } else { self.rate.limit(self.rate_ceiling(size, full_chroma)) };
-            ServerMsg::Rate { fps: self.fps as u16, kbps: self.stream_kbps(size, full_chroma), limit, full_chroma }
+            ServerMsg::Rate {
+                fps: self.fps as u16,
+                kbps: self.stream_kbps(size, full_chroma),
+                limit,
+                full_chroma,
+                codec: if hevc { proto::pref::HEVC } else { proto::pref::H264 },
+                preset: if sharp { proto::pref::SHARP } else { proto::pref::FAST },
+                streams: streams.min(255) as u8,
+                why: choice.why,
+            }
         }
 
         /// The viewers hear the `Rate` when it changed since they last did (`all`: every one).
@@ -485,14 +592,16 @@ mod native {
             let congested_ms = std::mem::take(&mut self.tl_congested_s) * 1000.0;
             // the adaptive rate decides on this second (a fixed `kbps` setting: nothing to decide)
             if let (Some(want), true) = (cx.global::<CaptureState>().want, self.settings.as_ref().is_some_and(|s| s.kbps == 0)) {
-                let second = super::rate::Second { fps: self.fps, pictures: encoded, congested_ms, held_encoder, tile_ms, sent_kbps: bytes * 8 / 1000, size: want.stream, full_chroma: want.full_chroma };
+                let max_effort = self.max_effort(want.stream);
+                let second = super::rate::Second { fps: self.fps, pictures: encoded, congested_ms, held_encoder, tile_ms, sent_kbps: bytes * 8 / 1000, size: want.stream, max_effort };
                 let ceiling = self.rate_ceiling(want.stream, want.full_chroma);
                 let was = self.rate.kbps(ceiling);
                 if self.rate.second(&second, ceiling) {
+                    let step = self.rate.effort(want.stream, max_effort);
                     super::note(&format!(
-                        "desk link: {}x{} {} (slowest tile {tile_ms:.1} ms of {:.1}, {held_encoder} frames waited for the encoder)",
-                        want.stream[0], want.stream[1],
-                        if self.rate.half_chroma(want.stream) { "streams 4:2:0: the encoder is behind at 4:4:4" } else { "tries 4:4:4 again" },
+                        "desk link: {}x{} at effort {} ({}; slowest tile {tile_ms:.1} ms of {:.1}, {held_encoder} frames waited for the encoder)",
+                        want.stream[0], want.stream[1], step,
+                        ["sharp, fewest streams", "sharp, a stream per engine", "fast, a stream per engine", "fast, 4:2:0"][step.min(3) as usize],
                         1000.0 / self.fps.max(1) as f64
                     ));
                     self.update_capture(cx);
@@ -504,7 +613,15 @@ mod native {
                 self.tell_rate(cx);
             }
             let rate = match &self.told_rate {
-                Some(ServerMsg::Rate { kbps, limit, full_chroma, .. }) => format!("{} Mbit/s {} {}", kbps / 1000, if *full_chroma { "4:4:4" } else { "4:2:0" }, super::limit_name(*limit)),
+                Some(ServerMsg::Rate { kbps, limit, full_chroma, codec, preset, streams, why, .. }) => format!(
+                    "{} Mbit/s {} {} {} x{streams} {}{}",
+                    kbps / 1000,
+                    if *codec == proto::pref::HEVC { "H.265" } else { "H.264" },
+                    if *full_chroma { "4:4:4" } else { "4:2:0" },
+                    if *preset == proto::pref::SHARP { "sharp" } else { "fast" },
+                    super::limit_name(*limit),
+                    if why.is_empty() { String::new() } else { format!(" ({why})") }
+                ),
                 _ => String::new(),
             };
             super::note(&format!(
@@ -540,16 +657,17 @@ mod native {
             let want = match (self.watching(), screen.filter(|s| s.width >= 16 && s.height >= 16)) {
                 (true, Some(s)) => {
                     let stream = Self::stream_size_of(&s);
-                    // 4:2:0 where 4:4:4 lost the device, or where the encoder could not keep up
-                    let full_chroma = self.full_chroma() && !self.lost_full_chroma.contains(&stream) && !self.rate.half_chroma(stream);
+                    let c = self.choice(stream);
+                    let codec = if c.hevc { StreamVideoCodec::Hevc } else { StreamVideoCodec::H264 };
+                    let max = VideoStreamEncoder::max_size(codec, c.full_chroma);
                     let split = self.settings.as_ref().map_or(super::settings::Split::Tiles, |s| s.split);
-                    let auto = TilePlan::new(stream, fps, split, VideoStreamEncoder::engines(), VideoStreamEncoder::max_size(full_chroma));
+                    let auto = TilePlan::new(stream, fps, split, VideoStreamEncoder::engines(), max, c.hevc, c.spread);
                     // a `tiles = CxR` setting, never fewer than the encoder's size needs
                     let plan = match self.settings.as_ref().and_then(|s| s.tiles).filter(|_| split == super::settings::Split::Tiles) {
-                        Some((c, r)) => TilePlan { cols: c.max(TilePlan::new(stream, fps, super::settings::Split::Off, 1, VideoStreamEncoder::max_size(full_chroma)).cols), rows: r },
+                        Some((cols, r)) => TilePlan { cols: cols.max(TilePlan::new(stream, fps, super::settings::Split::Off, 1, max, c.hevc, false).cols), rows: r },
                         None => auto,
                     };
-                    Some(Want { screen_px: [s.x, s.y, s.width, s.height], stream, full_chroma, plan })
+                    Some(Want { screen_px: [s.x, s.y, s.width, s.height], stream, full_chroma: c.full_chroma, plan, hevc: c.hevc, sharp: c.sharp })
                 }
                 _ => None,
             };
@@ -584,6 +702,7 @@ mod native {
             if want.is_some() {
                 self.keyframe();
             }
+            self.tell_rate(cx);
             cx.redraw_all();
         }
 
@@ -668,7 +787,7 @@ mod native {
             let settings = self.settings.clone().unwrap_or_default();
             let kbps = self.stream_kbps(want.stream, want.full_chroma);
             if let Some(e) = &self.encoder {
-                e.send(Job::Picture { handle, held, size: want.stream, fence, built_ns: makepad_hal::clock_ns(), fps: self.fps, kbps, split: settings.split, full_chroma: want.full_chroma, refine: false, plan: want.plan });
+                e.send(Job::Picture { handle, held, size: want.stream, fence, built_ns: makepad_hal::clock_ns(), fps: self.fps, kbps, split: settings.split, full_chroma: want.full_chroma, refine: false, plan: want.plan, hevc: want.hevc, sharp: want.sharp });
                 self.tl_captured += 1;
             }
             // still for REFINE_AFTER s: the same picture again, near lossless
@@ -688,7 +807,7 @@ mod native {
             let kbps = self.stream_kbps(want.stream, want.full_chroma);
             if let Some(e) = &self.encoder {
                 // the picture's frame finished long ago: nothing to wait for
-                e.send(Job::Picture { handle, held, size: want.stream, fence: Fence::None, built_ns: makepad_hal::clock_ns(), fps: self.fps, kbps, split: settings.split, full_chroma: want.full_chroma, refine: true, plan: want.plan });
+                e.send(Job::Picture { handle, held, size: want.stream, fence: Fence::None, built_ns: makepad_hal::clock_ns(), fps: self.fps, kbps, split: settings.split, full_chroma: want.full_chroma, refine: true, plan: want.plan, hevc: want.hevc, sharp: want.sharp });
             }
         }
 
@@ -750,7 +869,7 @@ mod native {
                         let _ = out.send(Out::Msg(self.rate_msg(cx).encode()));
                         // the address without its port
                         let ip = peer.rsplit_once(':').map_or(peer.as_str(), |(ip, _)| ip).trim_matches(|c| c == '[' || c == ']').to_string();
-                        self.viewers.push(Viewer { session, name, peer: ip, full_chroma: caps & proto::caps::FULL_CHROMA != 0, refresh_hz: 0, since: std::time::Instant::now(), out, backlog, paused: Arc::new(AtomicBool::new(paused)), shown: None, window: None, active_at: std::time::Instant::now(), input: false, view_only: caps & proto::caps::VIEW_ONLY != 0, cap_mbps: 0 });
+                        self.viewers.push(Viewer { session, name, peer: ip, full_chroma: caps & proto::caps::FULL_CHROMA != 0, refresh_hz: 0, since: std::time::Instant::now(), out, backlog, paused: Arc::new(AtomicBool::new(paused)), shown: None, window: None, active_at: std::time::Instant::now(), input: false, view_only: caps & proto::caps::VIEW_ONLY != 0, hevc: caps & proto::caps::HEVC != 0, prefs: Prefs::default() });
                         self.generation = self.generation.wrapping_add(1);
                         self.sync_subscribers();
                         self.cursor = None;
@@ -780,17 +899,6 @@ mod native {
                                 }
                             }
                             Control::Keyframe => self.keyframe(),
-                            Control::Split(split) => {
-                                let split = match split {
-                                    proto::split::OFF => super::settings::Split::Off,
-                                    proto::split::INTERLEAVE => super::settings::Split::Interleave,
-                                    _ => super::settings::Split::Tiles,
-                                };
-                                super::note(&format!("desk link: a viewer asks for {split:?}"));
-                                if let Some(s) = self.settings.as_mut() {
-                                    s.split = split;
-                                }
-                            }
                             Control::Refresh(hz) => {
                                 super::note(&format!("desk link: {} shows {hz} Hz", self.viewers[i].name));
                                 self.viewers[i].refresh_hz = hz;
@@ -811,11 +919,17 @@ mod native {
                                 self.viewers[i].input = true;
                             }
                             Control::Clipboard(text) => cx.copy_to_clipboard(&text),
-                            Control::RateCap(mbps) => {
-                                super::note(&format!("desk link: {} caps the stream at {}", self.viewers[i].name, if mbps == 0 { "nothing (auto)".to_string() } else { format!("{mbps} Mbit/s") }));
-                                self.viewers[i].cap_mbps = mbps;
-                                self.tell_rate(cx);
-                                continue;
+                            Control::Encoding { chroma, codec, preset, mbps, fps } => {
+                                let prefs = Prefs { chroma, codec, preset, mbps, fps };
+                                super::note(&format!("desk link: {} asks for {prefs:?}", self.viewers[i].name));
+                                if self.viewers[i].prefs != prefs {
+                                    self.viewers[i].prefs = prefs;
+                                    // applied live: another chroma / codec / preset is a new
+                                    // stream (a key frame); the size's encoder history goes,
+                                    // so a forced choice starts from the top again
+                                    self.rate.forget(cx.global::<CaptureState>().want.map_or([0, 0], |w| w.stream));
+                                    self.keyframe();
+                                }
                             }
                             Control::Stats { frame, decode_us, present_us } => {
                                 let behind = self.encode_stats.last_frame.load(Ordering::Relaxed).wrapping_sub(frame);

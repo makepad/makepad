@@ -12,7 +12,7 @@
 use crate::conn::Part;
 use crate::history::Snapshot;
 use makepad_network::SignalToUI;
-use makepad_widgets::makepad_platform::video_file::{DecodedPicture, StreamVideoCodec, VideoStreamDecoder};
+use makepad_widgets::makepad_platform::video_file::{DecodedPicture, VideoStreamDecoder};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -197,7 +197,8 @@ struct Engine {
     snap: Arc<Snapshot>,
     shared: Arc<Shared>,
     signal: SignalToUI,
-    decoders: Vec<Option<VideoStreamDecoder>>,
+    /// Per stream: its decoder and the codec it decodes (`pref::*`).
+    decoders: Vec<Option<(VideoStreamDecoder, u8)>>,
     /// The last picture decoded (the decoders' state is after it).
     at: Option<usize>,
 }
@@ -339,13 +340,14 @@ impl Engine {
             if self.decoders.len() <= s {
                 self.decoders.resize_with(s + 1, || None);
             }
-            if self.decoders[s].is_none() {
+            // a key frame in another codec (the desktop switched) gets a decoder of its own
+            if self.decoders[s].as_ref().is_none_or(|d| d.1 != p.codec) {
                 if !p.key {
                     return Err(format!("stream {s} has no key frame before frame {}", p.frame));
                 }
-                self.decoders[s] = Some(VideoStreamDecoder::new_gpu(StreamVideoCodec::H264).map_err(|e| format!("decoder: {e:?}"))?);
+                self.decoders[s] = Some((VideoStreamDecoder::new_gpu(p.video_codec()).map_err(|e| format!("decoder: {e:?}"))?, p.codec));
             }
-            let frames = self.decoders[s].as_mut().unwrap().push_packet(&p.data, p.frame as i64).map_err(|e| format!("frame {} stream {s}: {e:?}", p.frame))?;
+            let frames = self.decoders[s].as_mut().unwrap().0.push_packet(&p.data, p.frame as i64).map_err(|e| format!("frame {} stream {s}: {e:?}", p.frame))?;
             for f in frames {
                 parts.push(DecPart { x0: p.x0, y0: p.y0, width: f.width, height: f.height, gpu: f.gpu, nv12: f.nv12 });
             }

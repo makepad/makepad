@@ -4,9 +4,11 @@
 //! - Link-bound (a viewer's socket backlog held pictures back: `congested`): the rate goes down
 //!   to below what was actually sent, the picture rate stays.
 //! - Encoder-bound (pictures waited for the encoder, not for a viewer, and its slowest tile took
-//!   most of a picture's time): a 4:4:4 stream at that size goes 4:2:0 (about half the encode
-//!   work), the picture rate stays. It tries 4:4:4 again once 4:2:0 has run well clear of the
-//!   budget for a while (twice as long after every try that failed).
+//!   most of a picture's time): that size takes the next step of [`effort`] (more streams, then
+//!   the encoder's fastest tuning, then 4:2:0 last, only after [`HALF_AFTER`] seconds still
+//!   bound at the fastest tuning), the picture rate stays. It steps back once
+//!   it has run well clear of the budget for a while (twice as long after every step back that
+//!   failed).
 //! - Clean: the rate creeps back up, to the ceiling (the settings'
 //!   `max_mbps` when set, the viewers' caps; none by default).
 //!
@@ -26,9 +28,28 @@ const CONGESTED_MS: f64 = 60.0;
 const LINK_SHARE: f64 = 0.85;
 /// Clean seconds before the rate creeps up.
 const CREEP_AFTER: u32 = 3;
-/// The first wait (clean seconds at 4:2:0) before a size tries 4:4:4 again; doubles per failure.
+/// The first wait (clean seconds) before a size steps back to less encoder work; doubles per
+/// failure.
 const HALF_WAIT: u32 = 30;
 const HALF_WAIT_MAX: u32 = 960;
+/// Encoder-bound seconds in a row at the fastest 4:4:4 step before chroma goes: a reopened
+/// encoder's first second (a key frame, its stream starting) is no measure of it.
+const HALF_AFTER: u32 = 3;
+
+/// How much encoder throughput a size asks for, least first: what an encoder-bound stream gives
+/// up, one step at a time, until the encoder keeps the picture rate. 4:2:0 comes last: it is the
+/// only step that loses picture detail.
+pub mod effort {
+    /// The encoder's best pictures per bit, as few streams as the size allows (one H.265 stream
+    /// up to 8192 wide: no seams, one decoder).
+    pub const SHARP: u8 = 0;
+    /// The same, a stream per encode engine (stripes encoded at once).
+    pub const SPREAD: u8 = 1;
+    /// The encoder's fastest tuning (about 60% of the time), a stream per engine.
+    pub const FAST: u8 = 2;
+    /// And 4:2:0 (about half the encoder's work again).
+    pub const HALF: u8 = 3;
+}
 
 /// What one second of streaming saw.
 #[derive(Clone, Copy, Debug, Default)]
@@ -46,19 +67,21 @@ pub struct Second {
     /// What went out (kbit/s, all viewers' largest).
     pub sent_kbps: u64,
     pub size: [u32; 2],
-    /// The stream was 4:4:4.
-    pub full_chroma: bool,
+    /// The most effort this stream may take ([`effort`]: the viewer's choices bound it, e.g. a
+    /// forced 4:4:4 stops at `FAST`).
+    pub max_effort: u8,
 }
 
-/// A size that streams 4:2:0 because the encoder could not keep up at 4:4:4.
+/// A size's step of [`effort`] (sizes never encoder-bound are at `SHARP` and not listed).
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Half {
+struct Step {
     size: [u32; 2],
-    /// Streams 4:2:0 now (false: trying 4:4:4 again).
-    active: bool,
-    /// Clean seconds at 4:2:0 before the next try, and those so far.
+    level: u8,
+    /// Clean seconds before the next step back, and those so far.
     wait: u32,
     clean: u32,
+    /// Encoder-bound seconds in a row at this level.
+    bound: u32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -67,7 +90,7 @@ pub struct RateControl {
     kbps: u32,
     limit: u8,
     clean: u32,
-    half: Vec<Half>,
+    steps: Vec<Step>,
 }
 
 impl RateControl {
@@ -89,12 +112,18 @@ impl RateControl {
         }
     }
 
-    /// `size` streams 4:2:0 for the encoder's sake.
-    pub fn half_chroma(&self, size: [u32; 2]) -> bool {
-        self.half.iter().any(|h| h.size == size && h.active)
+    /// `size` starts from the top again (the viewer changed its choices).
+    pub fn forget(&mut self, size: [u32; 2]) {
+        self.steps.retain(|h| h.size != size);
     }
 
-    /// One second; true when a size's chroma changed (the capture is made again).
+    /// The [`effort`] step `size` streams at (`max`: the most it may take).
+    pub fn effort(&self, size: [u32; 2], max: u8) -> u8 {
+        self.steps.iter().find(|h| h.size == size).map_or(effort::SHARP, |h| h.level).min(max)
+    }
+
+    /// One second; true when a size's effort changed (the encoder, maybe the capture, is made
+    /// again).
     pub fn second(&mut self, s: &Second, ceiling: u32) -> bool {
         let budget_ms = 1000.0 / s.fps.max(1) as f64;
         let mut kbps = self.kbps(ceiling);
@@ -119,17 +148,29 @@ impl RateControl {
         } else if encoder_bound {
             self.clean = 0;
             self.limit = limit::ENCODER;
-            if s.full_chroma {
-                match self.half.iter_mut().find(|h| h.size == s.size) {
-                    // a try at 4:4:4 that failed: wait twice as long next time
+            if self.effort(s.size, s.max_effort) < s.max_effort {
+                match self.steps.iter_mut().find(|h| h.size == s.size) {
                     Some(h) => {
-                        h.active = true;
-                        h.wait = (h.wait * 2).min(HALF_WAIT_MAX);
-                        h.clean = 0;
+                        h.bound += 1;
+                        let level = h.level.min(s.max_effort);
+                        // 4:2:0 only when the fastest 4:4:4 stays behind (or a step back to it
+                        // failed at once)
+                        if level + 1 < effort::HALF || h.bound >= HALF_AFTER || h.clean == u32::MAX {
+                            h.level = level + 1;
+                            // a step back that failed: wait twice as long next time
+                            if h.clean == u32::MAX {
+                                h.wait = (h.wait * 2).min(HALF_WAIT_MAX);
+                            }
+                            h.clean = 0;
+                            h.bound = 0;
+                            changed = true;
+                        }
                     }
-                    None => self.half.push(Half { size: s.size, active: true, wait: HALF_WAIT, clean: 0 }),
+                    None => {
+                        self.steps.push(Step { size: s.size, level: effort::SPREAD.min(s.max_effort), wait: HALF_WAIT, clean: 0, bound: 0 });
+                        changed = true;
+                    }
                 }
-                changed = true;
             }
         } else {
             self.clean += 1;
@@ -142,14 +183,21 @@ impl RateControl {
             if self.clean >= CREEP_AFTER && kbps < ceiling {
                 kbps = (kbps + (kbps / 16).max(2_000)).min(ceiling);
             }
-            // 4:2:0 for the encoder's sake, now well clear of the budget: 4:4:4 again in time
-            if let Some(h) = self.half.iter_mut().find(|h| h.size == s.size && h.active) {
+            // a step taken for the encoder's sake, now well clear of the budget: back in time
+            // (a failure right after doubles the next wait: `clean` marks the step back)
+            if let Some(h) = self.steps.iter_mut().find(|h| h.size == s.size && h.level > effort::SHARP) {
+                h.bound = 0;
                 if moving && s.held_encoder == 0 && s.tile_ms < budget_ms * 0.4 {
-                    h.clean += 1;
+                    h.clean = if h.clean == u32::MAX { 1 } else { h.clean + 1 };
                     if h.clean >= h.wait {
-                        h.active = false;
+                        h.level -= 1;
+                        h.clean = u32::MAX;
                         changed = true;
                     }
+                } else if h.clean == u32::MAX && !moving {
+                    // still: nothing measured
+                } else if h.clean == u32::MAX {
+                    h.clean = 0;
                 }
             }
         }
@@ -162,8 +210,8 @@ impl RateControl {
 mod tests {
     use super::*;
 
-    fn second(congested_ms: f64, held_encoder: u64, tile_ms: f64, sent_kbps: u64, full_chroma: bool) -> Second {
-        Second { fps: 120, pictures: 110, congested_ms, held_encoder, tile_ms, sent_kbps, size: [7680, 2160], full_chroma }
+    fn second(congested_ms: f64, held_encoder: u64, tile_ms: f64, sent_kbps: u64, _full_chroma: bool) -> Second {
+        Second { fps: 120, pictures: 110, congested_ms, held_encoder, tile_ms, sent_kbps, size: [7680, 2160], max_effort: effort::HALF }
     }
 
     #[test]
@@ -219,41 +267,71 @@ mod tests {
     }
 
     #[test]
-    fn the_encoder_takes_444_away_and_gives_it_back_in_time() {
+    fn the_encoder_steps_up_one_at_a_time_and_back_in_time() {
         let mut r = RateControl::default();
         let size = [7680, 2160];
-        // a 4090 at 4:4:4 7680x2160: tiles take ~14 ms of an 8.3 ms picture, the encoder holds
-        // frames back, no viewer is behind
-        assert!(r.second(&second(0.0, 40, 14.0, 300_000, true), 400_000));
-        assert!(r.half_chroma(size));
+        let max = effort::HALF;
+        // 7680x2160 H.265 4:4:4 sharp as one stream: ~17 ms of an 8.3 ms picture, the encoder
+        // holds frames back, no viewer is behind: a stream per engine
+        assert!(r.second(&second(0.0, 40, 17.0, 300_000, true), 400_000));
+        assert_eq!(r.effort(size, max), effort::SPREAD);
         assert_eq!(r.limit(400_000), limit::ENCODER);
         assert_eq!(r.kbps(400_000), 250_000, "the rate stays: it was not the link");
+        // still behind: fast; 4:2:0 only after HALF_AFTER seconds still behind there, and no
+        // further
+        assert!(r.second(&second(0.0, 40, 9.0, 300_000, true), 400_000));
+        assert_eq!(r.effort(size, max), effort::FAST);
+        for _ in 1..HALF_AFTER {
+            assert!(!r.second(&second(0.0, 40, 9.0, 300_000, true), 400_000));
+            assert_eq!(r.effort(size, max), effort::FAST, "4:4:4 holds while it may still catch up");
+        }
+        // a clean second in between starts the count again
+        assert!(!r.second(&second(0.0, 0, 5.0, 300_000, true), 400_000));
+        for _ in 1..HALF_AFTER {
+            assert!(!r.second(&second(0.0, 40, 9.0, 300_000, true), 400_000));
+        }
+        assert!(r.second(&second(0.0, 40, 9.0, 300_000, true), 400_000));
+        assert_eq!(r.effort(size, max), effort::HALF);
+        assert!(!r.second(&second(0.0, 40, 9.0, 300_000, true), 400_000));
         // a held frame or two at a fast encode is not encoder-bound
-        assert!(!r.second(&second(0.0, 1, 14.0, 300_000, false), 400_000));
-        // 4:2:0 at ~6 ms is not clear of the budget: no try
+        assert!(!r.second(&second(0.0, 1, 9.0, 300_000, false), 400_000));
+        // ~6 ms is not clear of the budget: no step back
         for _ in 0..100 {
             assert!(!r.second(&second(0.0, 0, 6.0, 300_000, false), 400_000));
         }
-        // well clear (~3 ms) for HALF_WAIT seconds: 4:4:4 again
+        // well clear (~3 ms) for HALF_WAIT seconds: one step back
         for i in 0..HALF_WAIT {
             assert_eq!(r.second(&second(0.0, 0, 3.0, 300_000, false), 400_000), i + 1 == HALF_WAIT);
         }
-        assert!(!r.half_chroma(size));
-        // it fails again: back to 4:2:0, and the next try waits twice as long
-        assert!(r.second(&second(0.0, 40, 14.0, 300_000, true), 400_000));
-        assert!(r.half_chroma(size));
+        assert_eq!(r.effort(size, max), effort::FAST);
+        // it fails at once: up again, and the next step back waits twice as long
+        assert!(r.second(&second(0.0, 40, 9.0, 300_000, true), 400_000));
+        assert_eq!(r.effort(size, max), effort::HALF);
         for _ in 0..HALF_WAIT {
             r.second(&second(0.0, 0, 3.0, 300_000, false), 400_000);
         }
-        assert!(r.half_chroma(size), "twice HALF_WAIT now");
-        assert!(!r.half_chroma([3840, 2160]), "per size");
+        assert_eq!(r.effort(size, max), effort::HALF, "twice HALF_WAIT now");
+        assert_eq!(r.effort([3840, 2160], max), effort::SHARP, "per size");
+        // a viewer that wants 4:4:4: never 4:2:0
+        assert_eq!(r.effort(size, effort::FAST), effort::FAST);
+    }
+
+    #[test]
+    fn a_forced_444_stops_at_fast() {
+        let mut r = RateControl::default();
+        let s = |held| Second { fps: 120, pictures: 110, congested_ms: 0.0, held_encoder: held, tile_ms: 9.0, sent_kbps: 1, size: [7680, 4320], max_effort: effort::FAST };
+        assert!(r.second(&s(40), 400_000));
+        assert!(r.second(&s(40), 400_000));
+        assert!(!r.second(&s(40), 400_000), "nothing more to give up");
+        assert_eq!(r.effort([7680, 4320], effort::FAST), effort::FAST);
+        assert_eq!(r.limit(400_000), limit::ENCODER);
     }
 
     #[test]
     fn a_still_desktop_decides_nothing() {
         let mut r = RateControl::default();
-        let still = Second { fps: 120, pictures: 3, congested_ms: 0.0, held_encoder: 9, tile_ms: 20.0, sent_kbps: 2_000, size: [7680, 2160], full_chroma: true };
+        let still = Second { fps: 120, pictures: 3, congested_ms: 0.0, held_encoder: 9, tile_ms: 20.0, sent_kbps: 2_000, size: [7680, 2160], max_effort: effort::HALF };
         assert!(!r.second(&still, 400_000));
-        assert!(!r.half_chroma([7680, 2160]));
+        assert_eq!(r.effort([7680, 2160], effort::HALF), effort::SHARP);
     }
 }

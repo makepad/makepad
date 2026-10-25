@@ -26,8 +26,7 @@ use crate::VideoFileError;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StreamVideoCodec {
     H264,
-    /// Compile-time supported on both backends' code paths but not
-    /// currently wired up end-to-end — H.264 is the shipped codec.
+    /// H.265: Linux's encoder (Main, or Format range extensions 4:4:4), Apple's decoder.
     Hevc,
 }
 
@@ -62,6 +61,26 @@ impl Default for VideoStreamEncoderOptions {
             low_latency: true,
             full_chroma: false,
         }
+    }
+}
+
+/// How a stream trades encode time, latency and bits (Linux's encoder; ignored elsewhere).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StreamTuning {
+    /// The encoder's quality level: 0 its fastest; more than it has: its best.
+    pub quality: u32,
+    /// Constant bit rate instead of VBR: every picture's bits within `buffer_pictures` average
+    /// pictures (a burst fits the link).
+    pub constant_rate: bool,
+    /// The rate control's buffer, in pictures.
+    pub buffer_pictures: u32,
+    /// The encoder's best pictures per bit (more encode time) instead of its fastest encode.
+    pub sharp: bool,
+}
+
+impl Default for StreamTuning {
+    fn default() -> Self {
+        StreamTuning { quality: 0, constant_rate: false, buffer_pictures: 2, sharp: true }
     }
 }
 
@@ -132,15 +151,16 @@ impl VideoStreamEncoder {
 
     /// The largest picture one stream encodes (4:4:4 when `full_chroma`), `None` when not known
     /// (no hardware encoder, or a platform that does not say).
-    pub fn max_size(full_chroma: bool) -> Option<[u32; 2]> {
+    pub fn max_size(codec: StreamVideoCodec, full_chroma: bool) -> Option<[u32; 2]> {
         #[cfg(target_os = "linux")]
         {
-            let v = makepad_hal::stream_encode::hal_stream_encoder_max_size(if full_chroma { makepad_hal::stream_encode::FULL_CHROMA } else { 0 });
+            use makepad_hal::stream_encode as hal;
+            let v = hal::hal_stream_encoder_max_size(if full_chroma { hal::FULL_CHROMA } else { 0 } | if codec == StreamVideoCodec::Hevc { hal::HEVC } else { 0 });
             return (v != 0).then(|| [(v >> 32) as u32, v as u32]);
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = full_chroma;
+            let _ = (codec, full_chroma);
             return None;
         }
     }
@@ -149,6 +169,11 @@ impl VideoStreamEncoder {
     /// (`options.height` rows of them). Bands other than the whole picture are Linux's (the
     /// other platforms have one engine).
     pub fn new_tile(options: VideoStreamEncoderOptions, tile: StreamTile) -> Result<Self, VideoFileError> {
+        Self::new_tuned(options, tile, StreamTuning::default())
+    }
+
+    /// [`Self::new_tile`] with the rate control and quality level of `tuning` (Linux).
+    pub fn new_tuned(options: VideoStreamEncoderOptions, tile: StreamTile, tuning: StreamTuning) -> Result<Self, VideoFileError> {
         if tile.x0 % 4 != 0 || tile.y0 % 2 != 0 || tile.y0 + options.height > tile.source_height {
             return Err(VideoFileError::new(format!("tile rows {}..+{} outside a {} tall picture", tile.y0, options.height, tile.source_height)));
         }
@@ -172,14 +197,17 @@ impl VideoStreamEncoder {
         #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
         {
             #[cfg(target_os = "linux")]
-            let os = OsStreamEncoder::new(&options, tile.engine)?;
+            let os = OsStreamEncoder::new(&options, tile.engine, tuning)?;
             #[cfg(not(target_os = "linux"))]
-            let os = OsStreamEncoder::new(&options)?;
+            let os = {
+                let _ = tuning;
+                OsStreamEncoder::new(&options)?
+            };
             return Ok(Self { options, tile, os });
         }
         #[cfg(not(any(target_vendor = "apple", target_os = "windows", target_os = "linux")))]
         {
-            let _ = (&options, tile);
+            let _ = (&options, tile, tuning);
             return Err(VideoFileError::new(UNSUPPORTED));
         }
     }
@@ -210,9 +238,10 @@ impl VideoStreamEncoder {
         self.push_frame_nv12(&nv12, pts_100ns)
     }
 
-    /// Encodes one tightly packed NV12 frame.
+    /// Encodes one tightly packed NV12 frame (NV24, full-size interleaved chroma, for a 4:4:4
+    /// stream on Linux).
     pub fn push_frame_nv12(&mut self, nv12: &[u8], pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
-        let expected = crate::nv12::nv12_frame_size(self.options.width, self.options.height);
+        let expected = if self.options.full_chroma { self.options.width as usize * self.options.height as usize * 3 } else { crate::nv12::nv12_frame_size(self.options.width, self.options.height) };
         if nv12.len() != expected {
             return Err(VideoFileError::new(format!(
                 "nv12 frame size {} != expected {expected}",
@@ -265,6 +294,15 @@ impl VideoStreamEncoder {
         return self.os.stages();
         #[cfg(not(target_os = "windows"))]
         return [0; 3];
+    }
+
+    /// The last picture's time on the hardware encoder (µs; Linux, from GPU timestamps; 0
+    /// elsewhere).
+    pub fn last_encode_us(&self) -> u32 {
+        #[cfg(target_os = "linux")]
+        return self.os.last_gpu_us();
+        #[cfg(not(target_os = "linux"))]
+        return 0;
     }
 
     /// What encodes (codec, size, rate, device), for logs and status lines.

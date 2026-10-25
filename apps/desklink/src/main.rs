@@ -70,7 +70,7 @@ script_mod! {
                             integer_scale := CheckBox{text: "Whole-pixel scale" active: true}
                             details := CheckBox{text: "Latency details"}
                             screen_next := Button{width: Fill text: "Next screen"}
-                            split_mode := Button{width: Fill text: "Engines: tiles"}
+                            codec_btn := Button{width: Fill text: "Codec: auto"}
                             history_btn := Button{width: Fill text: "Pause: history"}
                             rate_cap := Button{width: Fill text: "Rate: auto"}
                         }
@@ -129,9 +129,6 @@ pub struct App {
     window_px: [u32; 2],
     #[rust]
     stats_log: bool,
-    /// The engine split asked of the desktop (`proto::split::*`; desktops start with tiles).
-    #[rust(proto::split::TILES)]
-    split: u8,
     /// The overlay shows the per-stage latency (the panel's "Latency details", or `--stats`).
     #[rust]
     details: bool,
@@ -415,7 +412,7 @@ impl App {
         };
         let (state, welcome, cursor, offset, fps, mbps, warning, stream_fps, read_gap_ms, decode_queue, stream_rate) = {
             let s = c.shared.lock().unwrap();
-            (s.state.clone().unwrap_or(State::Connecting), s.welcome.clone(), s.cursor, s.offset_ns, s.fps, s.mbps, s.warning.clone(), s.stream_fps, s.read_gap_ms, s.decode_queue, s.stream_rate)
+            (s.state.clone().unwrap_or(State::Connecting), s.welcome.clone(), s.cursor, s.offset_ns, s.fps, s.mbps, s.warning.clone(), s.stream_fps, s.read_gap_ms, s.decode_queue, s.stream_rate.clone())
         };
         let remote = self.remote(cx);
         let Some(mut view) = remote.borrow_mut::<RemoteView>() else { return };
@@ -457,13 +454,13 @@ impl App {
             // pixel a whole block, nothing resampled)
             lines.push(format!("window {}x{} px{} · scale {:.4}{}", self.window_px[0], self.window_px[1], if self.fullscreen { " (fullscreen)" } else { "" }, view.scale, if view.whole { " whole-pixel" } else { " resampled" }));
         }
-        lines.insert(0, view::summary_line(self.shown_rate, mbps, stream_rate));
+        lines.insert(0, view::summary_line(self.shown_rate, mbps, stream_rate.as_ref()));
         // view only (the desktop cannot inject input): always said, never a silent dead mouse
         if let Some(w) = welcome.as_ref().filter(|w| !w.input) {
             lines.push(if w.input_note.is_empty() { "input unavailable on this host".to_string() } else { w.input_note.clone() });
         }
         if self.details {
-            lines.push(view::rate_details_line(fps, stream_fps, crate::conn::DISPLAY_HZ.load(std::sync::atomic::Ordering::Acquire), stream_rate));
+            lines.push(view::rate_details_line(fps, stream_fps, crate::conn::DISPLAY_HZ.load(std::sync::atomic::Ordering::Acquire), stream_rate.as_ref()));
             lines.push(view::latency_line(&self.latency));
             lines.push(view::flow_line(read_gap_ms, decode_queue));
             lines.push(history_line);
@@ -1166,24 +1163,23 @@ impl MatchEvent for App {
                 v.redraw(cx);
             }
         }
-        // a desktop with several encode engines: tiles (lowest latency) -> interleave (most
-        // pictures per second) -> one engine
-        if self.ui.button(cx, ids!(split_mode)).clicked(actions) {
-            self.split = match self.split {
-                proto::split::TILES => proto::split::INTERLEAVE,
-                proto::split::INTERLEAVE => proto::split::OFF,
-                _ => proto::split::TILES,
+        // the codec: auto (H.265 where the desktop's encoder and this decoder take it, else
+        // H.264) -> H.265 -> H.264; every connection tells its desktop
+        if self.ui.button(cx, ids!(codec_btn)).clicked(actions) {
+            use proto::pref;
+            use std::sync::atomic::Ordering;
+            let next = match crate::conn::CODEC_PREF.load(Ordering::Acquire) {
+                pref::AUTO => pref::HEVC,
+                pref::HEVC => pref::H264,
+                _ => pref::AUTO,
             };
-            let label = match self.split {
-                proto::split::TILES => "Engines: tiles",
-                proto::split::INTERLEAVE => "Engines: interleave",
-                _ => "Engines: one",
+            crate::conn::CODEC_PREF.store(next, Ordering::Release);
+            let label = match next {
+                pref::HEVC => "Codec: H.265",
+                pref::H264 => "Codec: H.264",
+                _ => "Codec: auto",
             };
-            self.ui.button(cx, ids!(split_mode)).set_text(cx, label);
-            if let Some(c) = self.current() {
-                c.send(ClientMsg::SetSplit { split: self.split });
-                c.send(ClientMsg::RequestKeyframe);
-            }
+            self.ui.button(cx, ids!(codec_btn)).set_text(cx, label);
         }
         if self.ui.button(cx, ids!(history_btn)).clicked(actions) {
             if self.scrub.is_some() {
@@ -1294,10 +1290,10 @@ impl AppMain for App {
             if self.stats_log {
                 let (fps, mbps, rtt, stream_fps, gap, queue, rate) = self.current().map(|c| {
                     let s = c.shared.lock().unwrap();
-                    (s.fps, s.mbps, s.rtt_ms.unwrap_or(0.0), s.stream_fps, s.read_gap_ms, s.decode_queue, s.stream_rate)
+                    (s.fps, s.mbps, s.rtt_ms.unwrap_or(0.0), s.stream_fps, s.read_gap_ms, s.decode_queue, s.stream_rate.clone())
                 }).unwrap_or_default();
                 let display = crate::conn::DISPLAY_HZ.load(std::sync::atomic::Ordering::Acquire);
-                eprintln!("desklink stats: rtt {rtt:.2} ms · {} · {} · {} · {}", view::latency_line(&self.latency), view::summary_line(self.shown_rate, mbps, rate), view::rate_details_line(fps, stream_fps, display, rate), view::flow_line(gap, queue));
+                eprintln!("desklink stats: rtt {rtt:.2} ms · {} · {} · {} · {}", view::latency_line(&self.latency), view::summary_line(self.shown_rate, mbps, rate.as_ref()), view::rate_details_line(fps, stream_fps, display, rate.as_ref()), view::flow_line(gap, queue));
             }
         }
         if let Event::Draw(_) = event {

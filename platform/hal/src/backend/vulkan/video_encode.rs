@@ -30,35 +30,95 @@ const BITSTREAM_BYTES: u64 = 16 << 20;
 /// Picture images (source and references) round their size up to this (see `video_image`).
 const IMAGE_ALIGN: [u32; 2] = [256, 64];
 const LOG2_MAX_FRAME_NUM: u32 = 16;
+/// H.265's picture order count LSBs (its POC counts pictures from the IDR).
+const LOG2_MAX_POC_LSB: u32 = 16;
+
+/// The lowest H.265 level (`StdVideoH265LevelIdc` value) of a `w` x `h` stream at `fps`: its
+/// picture size and luma sample rate (Table A.8: levels 5.1 .. 6.2).
+fn h265_level(w: u32, h: u32, fps: u32) -> i32 {
+    let size = w as u64 * h as u64;
+    let rate = size * fps.max(1) as u64;
+    match (size, rate) {
+        (s, r) if s <= 8_912_896 && r <= 534_773_760 => 8,
+        (s, r) if s <= 8_912_896 && r <= 1_069_547_520 => 9,
+        (_, r) if r <= 1_069_547_520 => 10,
+        (_, r) if r <= 2_139_095_040 => 11,
+        _ => 12,
+    }
+}
+
+/// The stream's codec.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Codec {
+    H264,
+    /// H.265: Main (4:2:0) or Format range extensions (4:4:4), CABAC always (H.264 4:4:4 is
+    /// CAVLC-only on NVIDIA), transform skip for text.
+    H265,
+}
+
+/// How the stream trades encode time, latency and bits.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Tuning {
+    /// The encoder's quality level (`VkVideoEncodeQualityLevelInfoKHR`, 0 = its fastest); larger
+    /// than it has: its best.
+    pub quality: u32,
+    /// Constant bit rate (a VBV-capped stream whose every picture fits the link) instead of VBR.
+    pub constant: bool,
+    /// The rate control's virtual buffer, in pictures (the largest burst a picture may make,
+    /// as a multiple of an average picture); 0: 2.
+    pub buffer_pictures: u32,
+    /// The encoder's best pictures per bit: ultra-low-latency tuning (on NVIDIA about 60% more
+    /// encode time than low-latency, and a third fewer bits for the same PSNR on desktop text);
+    /// else low-latency tuning, its fastest. Both encode each picture as it comes (no lookahead,
+    /// no reordering): the latency is the encode time alone.
+    pub sharp: bool,
+}
+
+impl Default for Tuning {
+    fn default() -> Self {
+        Tuning { quality: 0, constant: false, buffer_pictures: 2, sharp: true }
+    }
+}
 
 /// The video profile and its chained infos, at a fixed address for the stream's life: every
 /// object made for the profile (session, images, buffers, queries) points at the same chain.
 struct Profile {
     h264: vk::VideoEncodeH264ProfileInfoKHR,
+    h265: vk::VideoEncodeH265ProfileInfoKHR,
     usage: vk::VideoEncodeUsageInfoKHR,
     info: vk::VideoProfileInfoKHR,
     list: vk::VideoProfileListInfoKHR,
 }
 
 impl Profile {
-    /// High (4:2:0), or High 4:4:4 Predictive when `full_chroma`.
-    fn new(full_chroma: bool) -> Box<Self> {
+    /// H.264 High (4:2:0) or High 4:4:4 Predictive when `full_chroma`; H.265 Main or Format
+    /// range extensions.
+    fn new(codec: Codec, full_chroma: bool, sharp: bool) -> Box<Self> {
         let mut p = Box::new(Profile {
             h264: vk::VideoEncodeH264ProfileInfoKHR::default().std_profile_idc(if full_chroma { vk::StdVideoH264ProfileIdc::HIGH_444_PREDICTIVE } else { vk::StdVideoH264ProfileIdc::HIGH }),
+            h265: vk::VideoEncodeH265ProfileInfoKHR::default().std_profile_idc(if full_chroma { vk::StdVideoH265ProfileIdc::FORMAT_RANGE_EXTENSIONS } else { vk::StdVideoH265ProfileIdc::MAIN }),
             usage: vk::VideoEncodeUsageInfoKHR::default()
                 .video_usage_hints(vk::VideoEncodeUsageFlagsKHR::STREAMING)
                 .video_content_hints(vk::VideoEncodeContentFlagsKHR::DESKTOP)
-                .tuning_mode(vk::VideoEncodeTuningModeKHR::ULTRA_LOW_LATENCY),
+                .tuning_mode(if sharp { vk::VideoEncodeTuningModeKHR::ULTRA_LOW_LATENCY } else { vk::VideoEncodeTuningModeKHR::LOW_LATENCY }),
             info: vk::VideoProfileInfoKHR::default()
-                .video_codec_operation(vk::VideoCodecOperationFlagsKHR::ENCODE_H264)
+                .video_codec_operation(match codec { Codec::H264 => vk::VideoCodecOperationFlagsKHR::ENCODE_H264, Codec::H265 => vk::VideoCodecOperationFlagsKHR::ENCODE_H265 })
                 .chroma_subsampling(if full_chroma { vk::VideoChromaSubsamplingFlagsKHR::TYPE_444 } else { vk::VideoChromaSubsamplingFlagsKHR::TYPE_420 })
                 .luma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
                 .chroma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8),
             list: vk::VideoProfileListInfoKHR::default(),
         });
         let p_ref = &mut *p;
-        p_ref.h264.p_next = (&mut p_ref.usage as *mut vk::VideoEncodeUsageInfoKHR).cast();
-        p_ref.info.p_next = (&mut p_ref.h264 as *mut vk::VideoEncodeH264ProfileInfoKHR).cast();
+        match codec {
+            Codec::H264 => {
+                p_ref.h264.p_next = (&mut p_ref.usage as *mut vk::VideoEncodeUsageInfoKHR).cast();
+                p_ref.info.p_next = (&mut p_ref.h264 as *mut vk::VideoEncodeH264ProfileInfoKHR).cast();
+            }
+            Codec::H265 => {
+                p_ref.h265.p_next = (&mut p_ref.usage as *mut vk::VideoEncodeUsageInfoKHR).cast();
+                p_ref.info.p_next = (&mut p_ref.h265 as *mut vk::VideoEncodeH265ProfileInfoKHR).cast();
+            }
+        }
         p_ref.list.profile_count = 1;
         p_ref.list.p_profiles = &p_ref.info;
         p
@@ -107,10 +167,14 @@ struct Encoder {
     /// SPS + PPS, Annex-B.
     parameter_sets: Vec<u8>,
     quality_level: u32,
+    /// The quality levels the encoder has (0 ..= this - 1).
+    quality_levels: u32,
     fps: u32,
     max_bitrate: u64,
-    /// 4:4:4 (High 4:4:4 Predictive) instead of 4:2:0.
+    /// 4:4:4 (High 4:4:4 Predictive / Format range extensions) instead of 4:2:0.
     full_chroma: bool,
+    codec: Codec,
+    tuning: Tuning,
 }
 
 unsafe impl Send for Encoder {}
@@ -272,38 +336,49 @@ unsafe fn buffer(dev: &Device, size: u64, usage: vk::BufferUsageFlags, profile: 
 impl Encoder {
     /// Everything a stream of `size` needs (4:4:4 when `full_chroma`), or why this GPU cannot
     /// encode it.
-    fn new(dev: Arc<Device>, size: [u32; 2], fps: u32, full_chroma: bool) -> Result<Self, String> {
-        let video = dev.video_encode.as_ref().ok_or("this GPU has no hardware H.264 encode queue")?;
+    fn new(dev: Arc<Device>, size: [u32; 2], fps: u32, full_chroma: bool, codec: Codec, tuning: Tuning) -> Result<Self, String> {
+        let video = dev.video_encode.as_ref().ok_or("this GPU has no hardware video encode queue")?;
+        if codec == Codec::H265 && !video.h265 {
+            return Err("this GPU's encoder has no H.265 (VK_KHR_video_encode_h265)".into());
+        }
         if size[0] == 0 || size[1] == 0 || size[0] % 4 != 0 || size[1] % 2 != 0 {
             return Err(format!("stream size {}x{}: the width must be a multiple of 4 and the height even", size[0], size[1]));
         }
-        let profile = Profile::new(full_chroma);
+        let profile = Profile::new(codec, full_chroma, tuning.sharp);
         let picture_format = if full_chroma { vk::Format::G8_B8R8_2PLANE_444_UNORM } else { vk::Format::G8_B8R8_2PLANE_420_UNORM };
         unsafe {
             // capabilities of the profile
             let mut h264_caps = vk::VideoEncodeH264CapabilitiesKHR::default();
+            let mut h265_caps = vk::VideoEncodeH265CapabilitiesKHR::default();
             let mut encode_caps = vk::VideoEncodeCapabilitiesKHR::default();
-            let mut caps = vk::VideoCapabilitiesKHR::default()
-                .next_video_encode_capabilities_khr(&mut encode_caps)
-                .next_video_encode_h264_capabilities_khr(&mut h264_caps);
-            dev.instance.get_physical_device_video_capabilities(dev.physical, &profile.info, &mut caps).map_err(|e| format!("H.264 encode capabilities: {e:?}"))?;
+            let mut caps = vk::VideoCapabilitiesKHR::default().next_video_encode_capabilities_khr(&mut encode_caps);
+            caps = match codec {
+                Codec::H264 => caps.next_video_encode_h264_capabilities_khr(&mut h264_caps),
+                Codec::H265 => caps.next_video_encode_h265_capabilities_khr(&mut h265_caps),
+            };
+            dev.instance.get_physical_device_video_capabilities(dev.physical, &profile.info, &mut caps).map_err(|e| format!("{codec:?} encode capabilities: {e:?}"))?;
             let gran = caps.picture_access_granularity;
-            // macroblocks, then the encoder's picture access granularity
-            let align = |v: u32, g: u32| (v.div_ceil(16) * 16).div_ceil(g.max(1)) * g.max(1);
+            // macroblocks (H.264) or 8x8 coding blocks (H.265), then the encoder's picture access
+            // granularity
+            let unit = match codec { Codec::H264 => 16, Codec::H265 => 8 };
+            let align = |v: u32, g: u32| (v.div_ceil(unit) * unit).div_ceil(g.max(1)) * g.max(1);
             let coded = [align(size[0], gran.width).max(caps.min_coded_extent.width), align(size[1], gran.height).max(caps.min_coded_extent.height)];
             if coded[0] > caps.max_coded_extent.width || coded[1] > caps.max_coded_extent.height {
                 return Err(format!("stream size {}x{} exceeds the encoder's {}x{}", size[0], size[1], caps.max_coded_extent.width, caps.max_coded_extent.height));
             }
-            if caps.max_dpb_slots < 2 || caps.max_active_reference_pictures < 1 || h264_caps.max_p_picture_l0_reference_count < 1 {
-                return Err("the H.264 encoder takes no P frame references".into());
+            let p_refs = match codec { Codec::H264 => h264_caps.max_p_picture_l0_reference_count, Codec::H265 => h265_caps.max_p_picture_l0_reference_count };
+            if caps.max_dpb_slots < 2 || caps.max_active_reference_pictures < 1 || p_refs < 1 {
+                return Err(format!("the {codec:?} encoder takes no P frame references"));
             }
             let feedback = vk::VideoEncodeFeedbackFlagsKHR::BITSTREAM_BUFFER_OFFSET | vk::VideoEncodeFeedbackFlagsKHR::BITSTREAM_BYTES_WRITTEN;
             if !encode_caps.supported_encode_feedback_flags.contains(feedback) {
                 return Err("the encoder reports no bitstream size".into());
             }
-            if !encode_caps.rate_control_modes.contains(vk::VideoEncodeRateControlModeFlagsKHR::VBR) {
-                return Err("the encoder has no VBR rate control".into());
+            let rc_mode = if tuning.constant { vk::VideoEncodeRateControlModeFlagsKHR::CBR } else { vk::VideoEncodeRateControlModeFlagsKHR::VBR };
+            if !encode_caps.rate_control_modes.contains(rc_mode) {
+                return Err(format!("the encoder has no {rc_mode:?} rate control"));
             }
+            let quality_levels = encode_caps.max_quality_levels.max(1);
             // picture formats
             let mut list = profile.list;
             list.p_next = std::ptr::null_mut();
@@ -326,6 +401,10 @@ impl Encoder {
                 .raw
                 .create_video_session(
                     &vk::VideoSessionCreateInfoKHR::default()
+                        // the driver may change parameters for speed (it reports what it did; its
+                        // own parameter sets are sent then): NVIDIA's H.265 encode is 5x faster
+                        // with it (4K 4:4:4: 16.6 -> 3.1 ms at low-latency tuning, RTX 5090)
+                        .flags(vk::VideoSessionCreateFlagsKHR::ALLOW_ENCODE_PARAMETER_OPTIMIZATIONS)
                         .queue_family_index(video.family)
                         .video_profile(&profile.info)
                         .picture_format(src_format.format)
@@ -353,10 +432,13 @@ impl Encoder {
                 size,
                 coded,
                 parameter_sets: Vec::new(),
-                quality_level: 0,
+                quality_level: tuning.quality.min(quality_levels - 1),
+                quality_levels,
                 fps: fps.max(1),
                 max_bitrate: encode_caps.max_bitrate,
                 full_chroma,
+                codec,
+                tuning,
             };
             for req in dev.raw.get_video_session_memory_requirements(session).map_err(error)? {
                 let ty = dev
@@ -377,115 +459,10 @@ impl Encoder {
                     )
                     .map_err(error)?;
             }
-            // parameters
-            let level = level_for(size[0], size[1], fps);
-            let level = level.min(std_level_value(h264_caps.max_level_idc).max(31));
-            let params = StreamParams {
-                profile_idc: if full_chroma { 244 } else { 100 },
-                chroma_format_idc: if full_chroma { 3 } else { 1 },
-                level_idc: level,
-                width: size[0],
-                height: size[1],
-                log2_max_frame_num_minus4: (LOG2_MAX_FRAME_NUM - 4) as u8,
-                max_num_ref_frames: 1,
-                // CAVLC for 4:4:4: NVIDIA's encoder fails the command buffer
-                // (ERROR_INITIALIZATION_FAILED) for High 4:4:4 Predictive with CABAC
-                cabac: !full_chroma,
-                transform_8x8: true,
-                pic_init_qp_minus26: 0,
-                chroma_qp_index_offset: 0,
-                full_range: false,
-            };
-            // the coded size may exceed the macroblock-rounded size (granularity): cropped
-            let crop_unit = if full_chroma { 1 } else { 2 };
-            let (crop_right, crop_bottom) = ((coded[0] - size[0]) / crop_unit, (coded[1] - size[1]) / crop_unit);
-            let vui = vk::StdVideoH264SequenceParameterSetVui {
-                flags: vk::StdVideoH264SpsVuiFlags::default()
-                    .video_signal_type_present_flag(1)
-                    .video_full_range_flag(params.full_range as u32)
-                    .color_description_present_flag(1)
-                    .bitstream_restriction_flag(1),
-                aspect_ratio_idc: vk::StdVideoH264AspectRatioIdc::SQUARE,
-                video_format: 5,
-                colour_primaries: 1,
-                transfer_characteristics: 1,
-                matrix_coefficients: 1,
-                max_num_reorder_frames: 0,
-                max_dec_frame_buffering: params.max_num_ref_frames,
-                ..Default::default()
-            };
-            let sps = vk::StdVideoH264SequenceParameterSet {
-                flags: vk::StdVideoH264SpsFlags::default()
-                    .direct_8x8_inference_flag(1)
-                    .frame_mbs_only_flag(1)
-                    .frame_cropping_flag((crop_right != 0 || crop_bottom != 0) as u32)
-                    .vui_parameters_present_flag(1),
-                profile_idc: if full_chroma { vk::StdVideoH264ProfileIdc::HIGH_444_PREDICTIVE } else { vk::StdVideoH264ProfileIdc::HIGH },
-                level_idc: std_level(level),
-                chroma_format_idc: if full_chroma { vk::StdVideoH264ChromaFormatIdc::TYPE_444 } else { vk::StdVideoH264ChromaFormatIdc::TYPE_420 },
-                log2_max_frame_num_minus4: params.log2_max_frame_num_minus4,
-                pic_order_cnt_type: vk::StdVideoH264PocType::TYPE_2,
-                max_num_ref_frames: params.max_num_ref_frames,
-                pic_width_in_mbs_minus1: coded[0] / 16 - 1,
-                pic_height_in_map_units_minus1: coded[1] / 16 - 1,
-                frame_crop_right_offset: crop_right,
-                frame_crop_bottom_offset: crop_bottom,
-                p_sequence_parameter_set_vui: &vui as *const _,
-                ..Default::default()
-            };
-            let pps = vk::StdVideoH264PictureParameterSet {
-                flags: vk::StdVideoH264PpsFlags::default()
-                    .transform_8x8_mode_flag(params.transform_8x8 as u32)
-                    .deblocking_filter_control_present_flag(1)
-                    .entropy_coding_mode_flag(params.cabac as u32),
-                weighted_bipred_idc: vk::StdVideoH264WeightedBipredIdc::DEFAULT,
-                ..Default::default()
-            };
-            let sps_list = [sps];
-            let pps_list = [pps];
-            let add = vk::VideoEncodeH264SessionParametersAddInfoKHR::default().std_sp_ss(&sps_list).std_pp_ss(&pps_list);
-            let mut h264_params = vk::VideoEncodeH264SessionParametersCreateInfoKHR::default().max_std_sps_count(1).max_std_pps_count(1).parameters_add_info(&add);
-            let mut quality = vk::VideoEncodeQualityLevelInfoKHR::default().quality_level(enc.quality_level);
-            enc.params = dev
-                .raw
-                .create_video_session_parameters(
-                    &vk::VideoSessionParametersCreateInfoKHR::default()
-                        .video_session(session)
-                        .next_video_encode_h264_session_parameters_create_info_khr(&mut h264_params)
-                        .next_video_encode_quality_level_info_khr(&mut quality),
-                    None,
-                )
-                .map_err(|e| format!("vkCreateVideoSessionParametersKHR: {e:?}"))?;
-            // our parameter sets, checked against the driver's encoding of the same parameters
-            // our writer describes macroblock-rounded coding; a coarser granularity is the driver's
-            let ours = if coded == [size[0].div_ceil(16) * 16, size[1].div_ceil(16) * 16] { params.parameter_sets() } else { Vec::new() };
-            let mut h264_get = vk::VideoEncodeH264SessionParametersGetInfoKHR::default().write_std_sps(true).write_std_pps(true);
-            let mut h264_feedback = vk::VideoEncodeH264SessionParametersFeedbackInfoKHR::default();
-            let mut feedback_info = vk::VideoEncodeSessionParametersFeedbackInfoKHR::default().next_video_encode_h264_session_parameters_feedback_info_khr(&mut h264_feedback);
-            let driver = dev.raw.get_encoded_video_session_parameters(
-                &vk::VideoEncodeSessionParametersGetInfoKHR::default().video_session_parameters(enc.params).next_video_encode_h264_session_parameters_get_info_khr(&mut h264_get),
-                &mut feedback_info,
-            );
-            enc.parameter_sets = match driver {
-                Ok(driver) if feedback_info.has_overrides != 0 || ours.is_empty() => {
-                    eprintln!(
-                        "[hal-video] the encoder overrode parameters (sps {}, pps {}): its parameter sets are used ({} bytes; ours {} bytes)",
-                        h264_feedback.has_std_sps_overrides, h264_feedback.has_std_pps_overrides, driver.len(), ours.len()
-                    );
-                    driver
-                }
-                Ok(driver) => {
-                    if driver != ours {
-                        eprintln!("[hal-video] parameter sets: ours {} bytes, the driver's {} bytes (no overrides; ours are sent)", ours.len(), driver.len());
-                    }
-                    ours
-                }
-                Err(e) if !ours.is_empty() => {
-                    eprintln!("[hal-video] vkGetEncodedVideoSessionParametersKHR: {e:?}; ours are sent");
-                    ours
-                }
-                Err(e) => return Err(format!("vkGetEncodedVideoSessionParametersKHR: {e:?}")),
-            };
+            match codec {
+                Codec::H264 => enc.h264_parameters(&h264_caps)?,
+                Codec::H265 => enc.h265_parameters(&h265_caps)?,
+            }
             // reference pictures and the per-picture objects
             for _ in 0..2 {
                 let image = video_image(&dev, &enc._profile, dpb_format, coded, vk::ImageUsageFlags::VIDEO_ENCODE_DPB_KHR, &[video.family])?;
@@ -533,13 +510,246 @@ impl Encoder {
         }
     }
 
+    /// The H.264 SPS and PPS (ours, checked against the driver's encoding of them).
+    unsafe fn h264_parameters(&mut self, h264_caps: &vk::VideoEncodeH264CapabilitiesKHR) -> Result<(), String> {
+        let (size, coded, full_chroma) = (self.size, self.coded, self.full_chroma);
+        let level = level_for(size[0], size[1], self.fps);
+        let level = level.min(std_level_value(h264_caps.max_level_idc).max(31));
+        let params = StreamParams {
+            profile_idc: if full_chroma { 244 } else { 100 },
+            chroma_format_idc: if full_chroma { 3 } else { 1 },
+            level_idc: level,
+            width: size[0],
+            height: size[1],
+            log2_max_frame_num_minus4: (LOG2_MAX_FRAME_NUM - 4) as u8,
+            max_num_ref_frames: 1,
+            // CAVLC for 4:4:4: NVIDIA's encoder fails the command buffer
+            // (ERROR_INITIALIZATION_FAILED) for High 4:4:4 Predictive with CABAC
+            cabac: !full_chroma,
+            transform_8x8: true,
+            pic_init_qp_minus26: 0,
+            chroma_qp_index_offset: 0,
+            full_range: false,
+        };
+        // the coded size may exceed the macroblock-rounded size (granularity): cropped
+        let crop_unit = if full_chroma { 1 } else { 2 };
+        let (crop_right, crop_bottom) = ((coded[0] - size[0]) / crop_unit, (coded[1] - size[1]) / crop_unit);
+        let vui = vk::StdVideoH264SequenceParameterSetVui {
+            flags: vk::StdVideoH264SpsVuiFlags::default()
+                .video_signal_type_present_flag(1)
+                .video_full_range_flag(params.full_range as u32)
+                .color_description_present_flag(1)
+                .bitstream_restriction_flag(1),
+            aspect_ratio_idc: vk::StdVideoH264AspectRatioIdc::SQUARE,
+            video_format: 5,
+            colour_primaries: 1,
+            transfer_characteristics: 1,
+            matrix_coefficients: 1,
+            max_num_reorder_frames: 0,
+            max_dec_frame_buffering: params.max_num_ref_frames,
+            ..Default::default()
+        };
+        let sps = vk::StdVideoH264SequenceParameterSet {
+            flags: vk::StdVideoH264SpsFlags::default()
+                .direct_8x8_inference_flag(1)
+                .frame_mbs_only_flag(1)
+                .frame_cropping_flag((crop_right != 0 || crop_bottom != 0) as u32)
+                .vui_parameters_present_flag(1),
+            profile_idc: if full_chroma { vk::StdVideoH264ProfileIdc::HIGH_444_PREDICTIVE } else { vk::StdVideoH264ProfileIdc::HIGH },
+            level_idc: std_level(level),
+            chroma_format_idc: if full_chroma { vk::StdVideoH264ChromaFormatIdc::TYPE_444 } else { vk::StdVideoH264ChromaFormatIdc::TYPE_420 },
+            log2_max_frame_num_minus4: params.log2_max_frame_num_minus4,
+            pic_order_cnt_type: vk::StdVideoH264PocType::TYPE_2,
+            max_num_ref_frames: params.max_num_ref_frames,
+            pic_width_in_mbs_minus1: coded[0] / 16 - 1,
+            pic_height_in_map_units_minus1: coded[1] / 16 - 1,
+            frame_crop_right_offset: crop_right,
+            frame_crop_bottom_offset: crop_bottom,
+            p_sequence_parameter_set_vui: &vui as *const _,
+            ..Default::default()
+        };
+        let pps = vk::StdVideoH264PictureParameterSet {
+            flags: vk::StdVideoH264PpsFlags::default()
+                .transform_8x8_mode_flag(params.transform_8x8 as u32)
+                .deblocking_filter_control_present_flag(1)
+                .entropy_coding_mode_flag(params.cabac as u32),
+            weighted_bipred_idc: vk::StdVideoH264WeightedBipredIdc::DEFAULT,
+            ..Default::default()
+        };
+        let sps_list = [sps];
+        let pps_list = [pps];
+        let add = vk::VideoEncodeH264SessionParametersAddInfoKHR::default().std_sp_ss(&sps_list).std_pp_ss(&pps_list);
+        let mut h264_params = vk::VideoEncodeH264SessionParametersCreateInfoKHR::default().max_std_sps_count(1).max_std_pps_count(1).parameters_add_info(&add);
+        let mut quality = vk::VideoEncodeQualityLevelInfoKHR::default().quality_level(self.quality_level);
+        self.params = self.dev
+            .raw
+            .create_video_session_parameters(
+                &vk::VideoSessionParametersCreateInfoKHR::default()
+                    .video_session(self.session)
+                    .next_video_encode_h264_session_parameters_create_info_khr(&mut h264_params)
+                    .next_video_encode_quality_level_info_khr(&mut quality),
+                None,
+            )
+            .map_err(|e| format!("vkCreateVideoSessionParametersKHR: {e:?}"))?;
+        // our parameter sets, checked against the driver's encoding of the same parameters
+        // our writer describes macroblock-rounded coding; a coarser granularity is the driver's
+        let ours = if coded == [size[0].div_ceil(16) * 16, size[1].div_ceil(16) * 16] { params.parameter_sets() } else { Vec::new() };
+        let mut h264_get = vk::VideoEncodeH264SessionParametersGetInfoKHR::default().write_std_sps(true).write_std_pps(true);
+        let mut h264_feedback = vk::VideoEncodeH264SessionParametersFeedbackInfoKHR::default();
+        let mut feedback_info = vk::VideoEncodeSessionParametersFeedbackInfoKHR::default().next_video_encode_h264_session_parameters_feedback_info_khr(&mut h264_feedback);
+        let driver = self.dev.raw.get_encoded_video_session_parameters(
+            &vk::VideoEncodeSessionParametersGetInfoKHR::default().video_session_parameters(self.params).next_video_encode_h264_session_parameters_get_info_khr(&mut h264_get),
+            &mut feedback_info,
+        );
+        self.parameter_sets = match driver {
+            Ok(driver) if feedback_info.has_overrides != 0 || ours.is_empty() => {
+                eprintln!(
+                    "[hal-video] the encoder overrode parameters (sps {}, pps {}): its parameter sets are used ({} bytes; ours {} bytes)",
+                    h264_feedback.has_std_sps_overrides, h264_feedback.has_std_pps_overrides, driver.len(), ours.len()
+                );
+                driver
+            }
+            Ok(driver) => {
+                if driver != ours {
+                    eprintln!("[hal-video] parameter sets: ours {} bytes, the driver's {} bytes (no overrides; ours are sent)", ours.len(), driver.len());
+                }
+                ours
+            }
+            Err(e) if !ours.is_empty() => {
+                eprintln!("[hal-video] vkGetEncodedVideoSessionParametersKHR: {e:?}; ours are sent");
+                ours
+            }
+            Err(e) => return Err(format!("vkGetEncodedVideoSessionParametersKHR: {e:?}")),
+        };
+        Ok(())
+    }
+
+    /// The H.265 VPS, SPS and PPS, as the driver encodes them: one 8-bit layer, no reordering
+    /// (each P picture references the one before, its reference picture set in the slice
+    /// header), 32x32 coding tree blocks, SAO, transform skip (sharp text) and the BT.709
+    /// limited range VUI; the conformance window crops the coded size to the picture.
+    unsafe fn h265_parameters(&mut self, h265_caps: &vk::VideoEncodeH265CapabilitiesKHR) -> Result<(), String> {
+        let (size, coded, full_chroma) = (self.size, self.coded, self.full_chroma);
+        let level = h265_level(size[0], size[1], self.fps).min(h265_caps.max_level_idc.as_raw());
+        let profile_idc = if full_chroma { vk::StdVideoH265ProfileIdc::FORMAT_RANGE_EXTENSIONS } else { vk::StdVideoH265ProfileIdc::MAIN };
+        let ptl = vk::StdVideoH265ProfileTierLevel {
+            flags: vk::StdVideoH265ProfileTierLevelFlags::default().general_progressive_source_flag(1).general_frame_only_constraint_flag(1),
+            general_profile_idc: profile_idc,
+            general_level_idc: vk::StdVideoH265LevelIdc::from_raw(level),
+        };
+        // two pictures in the decoder: this one and its reference; output at once
+        let mut dpbm = vk::StdVideoH265DecPicBufMgr { ..Default::default() };
+        dpbm.max_dec_pic_buffering_minus1[0] = 1;
+        let vps = vk::StdVideoH265VideoParameterSet {
+            flags: vk::StdVideoH265VpsFlags::default().vps_temporal_id_nesting_flag(1).vps_sub_layer_ordering_info_present_flag(1),
+            p_dec_pic_buf_mgr: &dpbm,
+            p_profile_tier_level: &ptl,
+            ..Default::default()
+        };
+        let vui = vk::StdVideoH265SequenceParameterSetVui {
+            flags: vk::StdVideoH265SpsVuiFlags::default().video_signal_type_present_flag(1).colour_description_present_flag(1),
+            aspect_ratio_idc: vk::StdVideoH265AspectRatioIdc::SQUARE,
+            video_format: 5,
+            colour_primaries: 1,
+            transfer_characteristics: 1,
+            matrix_coeffs: 1,
+            ..Default::default()
+        };
+        let sub = if full_chroma { 1 } else { 2 };
+        let (crop_right, crop_bottom) = ((coded[0] - size[0]) / sub, (coded[1] - size[1]) / sub);
+        // CTB 32 (all NVIDIA has), coding blocks 8..32, transforms 4..32
+        let sps = vk::StdVideoH265SequenceParameterSet {
+            flags: vk::StdVideoH265SpsFlags::default()
+                .sps_temporal_id_nesting_flag(1)
+                .sps_sub_layer_ordering_info_present_flag(1)
+                .conformance_window_flag((crop_right != 0 || crop_bottom != 0) as u32)
+                .sample_adaptive_offset_enabled_flag(1)
+                .amp_enabled_flag(1)
+                .vui_parameters_present_flag(1),
+            chroma_format_idc: if full_chroma { vk::StdVideoH265ChromaFormatIdc::TYPE_444 } else { vk::StdVideoH265ChromaFormatIdc::TYPE_420 },
+            pic_width_in_luma_samples: coded[0],
+            pic_height_in_luma_samples: coded[1],
+            log2_max_pic_order_cnt_lsb_minus4: (LOG2_MAX_POC_LSB - 4) as u8,
+            log2_min_luma_coding_block_size_minus3: 0,
+            log2_diff_max_min_luma_coding_block_size: 2,
+            log2_min_luma_transform_block_size_minus2: 0,
+            log2_diff_max_min_luma_transform_block_size: 3,
+            max_transform_hierarchy_depth_inter: 3,
+            max_transform_hierarchy_depth_intra: 3,
+            conf_win_right_offset: crop_right,
+            conf_win_bottom_offset: crop_bottom,
+            p_profile_tier_level: &ptl,
+            p_dec_pic_buf_mgr: &dpbm,
+            p_sequence_parameter_set_vui: &vui,
+            ..Default::default()
+        };
+        // VK_VIDEO_ENCODE_H265_STD_TRANSFORM_SKIP_ENABLED_FLAG_SET_BIT_KHR (bit 10)
+        let skip = h265_caps.std_syntax_flags.as_raw() & (1 << 10) != 0;
+        let pps = vk::StdVideoH265PictureParameterSet {
+            flags: vk::StdVideoH265PpsFlags::default()
+                .cu_qp_delta_enabled_flag(1)
+                .transform_skip_enabled_flag(skip as u32)
+                .pps_loop_filter_across_slices_enabled_flag(1)
+                .deblocking_filter_control_present_flag(1),
+            diff_cu_qp_delta_depth: 0,
+            ..Default::default()
+        };
+        let (vps_list, sps_list, pps_list) = ([vps], [sps], [pps]);
+        let add = vk::VideoEncodeH265SessionParametersAddInfoKHR::default().std_vp_ss(&vps_list).std_sp_ss(&sps_list).std_pp_ss(&pps_list);
+        let mut h265_params = vk::VideoEncodeH265SessionParametersCreateInfoKHR::default().max_std_vps_count(1).max_std_sps_count(1).max_std_pps_count(1).parameters_add_info(&add);
+        let mut quality = vk::VideoEncodeQualityLevelInfoKHR::default().quality_level(self.quality_level);
+        self.params = self
+            .dev
+            .raw
+            .create_video_session_parameters(
+                &vk::VideoSessionParametersCreateInfoKHR::default()
+                    .video_session(self.session)
+                    .next_video_encode_h265_session_parameters_create_info_khr(&mut h265_params)
+                    .next_video_encode_quality_level_info_khr(&mut quality),
+                None,
+            )
+            .map_err(|e| format!("vkCreateVideoSessionParametersKHR (H.265): {e:?}"))?;
+        let mut get = vk::VideoEncodeH265SessionParametersGetInfoKHR::default().write_std_vps(true).write_std_sps(true).write_std_pps(true);
+        let mut h265_feedback = vk::VideoEncodeH265SessionParametersFeedbackInfoKHR::default();
+        let mut feedback_info = vk::VideoEncodeSessionParametersFeedbackInfoKHR::default().next_video_encode_h265_session_parameters_feedback_info_khr(&mut h265_feedback);
+        self.parameter_sets = self
+            .dev
+            .raw
+            .get_encoded_video_session_parameters(
+                &vk::VideoEncodeSessionParametersGetInfoKHR::default().video_session_parameters(self.params).next_video_encode_h265_session_parameters_get_info_khr(&mut get),
+                &mut feedback_info,
+            )
+            .map_err(|e| format!("vkGetEncodedVideoSessionParametersKHR (H.265): {e:?}"))?;
+        if feedback_info.has_overrides != 0 {
+            eprintln!(
+                "[hal-video] H.265: the encoder overrode parameters (vps {}, sps {}, pps {}); its parameter sets are sent ({} bytes)",
+                h265_feedback.has_std_vps_overrides, h265_feedback.has_std_sps_overrides, h265_feedback.has_std_pps_overrides, self.parameter_sets.len()
+            );
+        }
+        Ok(())
+    }
+
     fn rate_control_layer(&self, kbps: u32) -> vk::VideoEncodeRateControlLayerInfoKHR {
         let average = (kbps as u64 * 1000).min(self.max_bitrate.max(1));
+        // CBR: every picture's share of the rate, a burst only as large as the buffer; VBR:
+        // a moving picture may take twice the average while a still one takes nothing
+        let peak = if self.tuning.constant { average } else { (average * 2).min(self.max_bitrate.max(1)) };
         vk::VideoEncodeRateControlLayerInfoKHR::default()
             .average_bitrate(average)
-            .max_bitrate((average * 2).min(self.max_bitrate.max(1)))
+            .max_bitrate(peak)
             .frame_rate_numerator(self.fps)
             .frame_rate_denominator(1)
+    }
+
+    fn rate_control_mode(&self) -> vk::VideoEncodeRateControlModeFlagsKHR {
+        if self.tuning.constant { vk::VideoEncodeRateControlModeFlagsKHR::CBR } else { vk::VideoEncodeRateControlModeFlagsKHR::VBR }
+    }
+
+    /// The rate control's virtual buffer (ms): `buffer_pictures` pictures' time, and its
+    /// initial fullness half of it.
+    fn buffer_ms(&self) -> (u32, u32) {
+        let ms = (self.tuning.buffer_pictures.max(1) * 1000 / self.fps).max(1);
+        (ms, (ms / 2).max(1))
     }
 
     /// Records the encode of `pic` into its slot's command buffer.
@@ -582,25 +792,31 @@ impl Encoder {
         if let (Some((s, _, _)), Some(r)) = (pic.reference, ref_resource.as_ref()) {
             begin_slots.push(vk::VideoReferenceSlotInfoKHR::default().slot_index(s as i32).picture_resource(r));
         }
-        // the per-layer H.264 info goes with every layer (NVIDIA's driver fails the command
+        // the per-layer codec info goes with every layer (NVIDIA's driver fails the command
         // buffer without it, although the spec leaves it optional)
         let mut layer_h264_now = vk::VideoEncodeH264RateControlLayerInfoKHR::default();
-        let layer_now = pic.current_kbps.map(|k| [self.rate_control_layer(k).next_video_encode_h264_rate_control_layer_info_khr(&mut layer_h264_now)]);
+        let mut layer_h265_now = vk::VideoEncodeH265RateControlLayerInfoKHR::default();
+        let layer_now = pic.current_kbps.map(|k| {
+            let layer = self.rate_control_layer(k);
+            [match self.codec { Codec::H264 => layer.next_video_encode_h264_rate_control_layer_info_khr(&mut layer_h264_now), Codec::H265 => layer.next_video_encode_h265_rate_control_layer_info_khr(&mut layer_h265_now) }]
+        });
         // no GOP hints: the reference pattern hints come only with a regular GOP, and this stream's
         // GOP is open-ended (an IDR on request)
         let mut h264_rc_now = vk::VideoEncodeH264RateControlInfoKHR::default().gop_frame_count(u32::MAX).idr_period(u32::MAX).temporal_layer_count(1);
+        let mut h265_rc_now = vk::VideoEncodeH265RateControlInfoKHR::default().gop_frame_count(u32::MAX).idr_period(u32::MAX).sub_layer_count(1);
         let mut rc_now = vk::VideoEncodeRateControlInfoKHR::default();
         let mut begin = vk::VideoBeginCodingInfoKHR::default().video_session(self.session).video_session_parameters(self.params).reference_slots(&begin_slots);
+        let (buffer_ms, initial_ms) = self.buffer_ms();
         if pic.rc_off_now {
             rc_now = rc_now.rate_control_mode(vk::VideoEncodeRateControlModeFlagsKHR::DISABLED);
             begin = begin.next_video_encode_rate_control_info_khr(&mut rc_now);
         } else if let Some(layer) = layer_now.as_ref() {
-            rc_now = rc_now
-                .rate_control_mode(vk::VideoEncodeRateControlModeFlagsKHR::VBR)
-                .layers(layer)
-                .virtual_buffer_size_in_ms(2000 / self.fps)
-                .initial_virtual_buffer_size_in_ms(1000 / self.fps);
-            begin = begin.next_video_encode_rate_control_info_khr(&mut rc_now).next_video_encode_h264_rate_control_info_khr(&mut h264_rc_now);
+            rc_now = rc_now.rate_control_mode(self.rate_control_mode()).layers(layer).virtual_buffer_size_in_ms(buffer_ms).initial_virtual_buffer_size_in_ms(initial_ms);
+            begin = begin.next_video_encode_rate_control_info_khr(&mut rc_now);
+            begin = match self.codec {
+                Codec::H264 => begin.next_video_encode_h264_rate_control_info_khr(&mut h264_rc_now),
+                Codec::H265 => begin.next_video_encode_h265_rate_control_info_khr(&mut h265_rc_now),
+            };
         }
         d.cmd_begin_video_coding(slot.cb, &begin);
         if pic.refine {
@@ -611,13 +827,12 @@ impl Encoder {
         } else if pic.reset || pic.bitrate.is_some() {
             let kbps = pic.bitrate.or(pic.current_kbps).unwrap_or(0);
             let mut layer_h264 = vk::VideoEncodeH264RateControlLayerInfoKHR::default();
-            let layer = [self.rate_control_layer(kbps).next_video_encode_h264_rate_control_layer_info_khr(&mut layer_h264)];
+            let mut layer_h265 = vk::VideoEncodeH265RateControlLayerInfoKHR::default();
+            let layer = self.rate_control_layer(kbps);
+            let layer = [match self.codec { Codec::H264 => layer.next_video_encode_h264_rate_control_layer_info_khr(&mut layer_h264), Codec::H265 => layer.next_video_encode_h265_rate_control_layer_info_khr(&mut layer_h265) }];
             let mut h264_rc = vk::VideoEncodeH264RateControlInfoKHR::default().gop_frame_count(u32::MAX).idr_period(u32::MAX).temporal_layer_count(1);
-            let mut rc = vk::VideoEncodeRateControlInfoKHR::default()
-                .rate_control_mode(vk::VideoEncodeRateControlModeFlagsKHR::VBR)
-                .layers(&layer)
-                .virtual_buffer_size_in_ms(2000 / self.fps)
-                .initial_virtual_buffer_size_in_ms(1000 / self.fps);
+            let mut h265_rc = vk::VideoEncodeH265RateControlInfoKHR::default().gop_frame_count(u32::MAX).idr_period(u32::MAX).sub_layer_count(1);
+            let mut rc = vk::VideoEncodeRateControlInfoKHR::default().rate_control_mode(self.rate_control_mode()).layers(&layer).virtual_buffer_size_in_ms(buffer_ms).initial_virtual_buffer_size_in_ms(initial_ms);
             let mut quality = vk::VideoEncodeQualityLevelInfoKHR::default().quality_level(self.quality_level);
             let mut flags = vk::VideoCodingControlFlagsKHR::ENCODE_RATE_CONTROL;
             let mut control = vk::VideoCodingControlInfoKHR::default();
@@ -625,11 +840,17 @@ impl Encoder {
                 flags |= vk::VideoCodingControlFlagsKHR::RESET | vk::VideoCodingControlFlagsKHR::ENCODE_QUALITY_LEVEL;
                 control = control.next_video_encode_quality_level_info_khr(&mut quality);
             }
-            control = control.flags(flags).next_video_encode_rate_control_info_khr(&mut rc).next_video_encode_h264_rate_control_info_khr(&mut h264_rc);
+            control = control.flags(flags).next_video_encode_rate_control_info_khr(&mut rc);
+            control = match self.codec {
+                Codec::H264 => control.next_video_encode_h264_rate_control_info_khr(&mut h264_rc),
+                Codec::H265 => control.next_video_encode_h265_rate_control_info_khr(&mut h265_rc),
+            };
             d.cmd_control_video_coding(slot.cb, &control);
         }
 
         // the picture: reference lists always (empty for an IDR: the driver reads them anyway)
+        let qp = if pic.refine { REFINE_QP } else { 0 };
+        // H.264
         let mut l0 = [0xffu8; vk::STD_VIDEO_H264_MAX_NUM_LIST_REF as usize];
         if let Some((s, _, _)) = pic.reference {
             l0[0] = s as u8;
@@ -653,7 +874,7 @@ impl Encoder {
             cabac_init_idc: vk::StdVideoH264CabacInitIdc::TYPE_0,
             ..Default::default()
         };
-        let slices = [vk::VideoEncodeH264NaluSliceInfoKHR::default().std_slice_header(&slice_header).constant_qp(if pic.refine { REFINE_QP } else { 0 })];
+        let slices = [vk::VideoEncodeH264NaluSliceInfoKHR::default().std_slice_header(&slice_header).constant_qp(qp)];
         let mut h264_picture = vk::VideoEncodeH264PictureInfoKHR::default().nalu_slice_entries(&slices).std_picture_info(&std_picture);
         let setup_info = vk::StdVideoEncodeH264ReferenceInfo {
             primary_pic_type: std_picture.primary_pic_type,
@@ -662,7 +883,6 @@ impl Encoder {
             ..Default::default()
         };
         let mut setup_dpb = vk::VideoEncodeH264DpbSlotInfoKHR::default().std_reference_info(&setup_info);
-        let setup_slot = vk::VideoReferenceSlotInfoKHR::default().slot_index(pic.setup as i32).picture_resource(&setup_resource).next_video_encode_h264_dpb_slot_info_khr(&mut setup_dpb);
         let ref_info = pic.reference.map(|(_, frame_num, poc)| vk::StdVideoEncodeH264ReferenceInfo {
             primary_pic_type: if frame_num == 0 { vk::StdVideoH264PictureType::IDR } else { vk::StdVideoH264PictureType::P },
             frame_num,
@@ -670,9 +890,65 @@ impl Encoder {
             ..Default::default()
         });
         let mut ref_dpb = ref_info.as_ref().map(|r| vk::VideoEncodeH264DpbSlotInfoKHR::default().std_reference_info(r));
+        // H.265: POC counts pictures from the IDR; a P picture's reference picture set is the one
+        // picture before it (in its slice header, no sets in the SPS)
+        let mut l0_265 = [0xffu8; vk::STD_VIDEO_H265_MAX_NUM_LIST_REF as usize];
+        if let Some((s, _, _)) = pic.reference {
+            l0_265[0] = s as u8;
+        }
+        let ref_lists_265 = vk::StdVideoEncodeH265ReferenceListsInfo {
+            ref_pic_list0: l0_265,
+            ref_pic_list1: [0xff; vk::STD_VIDEO_H265_MAX_NUM_LIST_REF as usize],
+            ..Default::default()
+        };
+        let mut rps = vk::StdVideoH265ShortTermRefPicSet { ..Default::default() };
+        if pic.reference.is_some() {
+            rps.num_negative_pics = 1;
+            rps.used_by_curr_pic_s0_flag = 1;
+            rps.delta_poc_s0_minus1[0] = 0;
+        }
+        let std_picture_265 = vk::StdVideoEncodeH265PictureInfo {
+            flags: vk::StdVideoEncodeH265PictureInfoFlags::default().is_reference(1).irap_pic_flag(pic.idr as u32).pic_output_flag(1),
+            pic_type: if pic.idr { vk::StdVideoH265PictureType::IDR } else { vk::StdVideoH265PictureType::P },
+            pic_order_cnt_val: pic.poc,
+            p_ref_lists: &ref_lists_265,
+            p_short_term_ref_pic_set: &rps,
+            ..Default::default()
+        };
+        let segment_header = vk::StdVideoEncodeH265SliceSegmentHeader {
+            flags: vk::StdVideoEncodeH265SliceSegmentHeaderFlags::default()
+                .first_slice_segment_in_pic_flag(1)
+                .slice_sao_luma_flag(1)
+                .slice_sao_chroma_flag(1)
+                .slice_loop_filter_across_slices_enabled_flag(1),
+            slice_type: if pic.idr { vk::StdVideoH265SliceType::I } else { vk::StdVideoH265SliceType::P },
+            max_num_merge_cand: 5,
+            ..Default::default()
+        };
+        let segments = [vk::VideoEncodeH265NaluSliceSegmentInfoKHR::default().std_slice_segment_header(&segment_header).constant_qp(qp)];
+        let mut h265_picture = vk::VideoEncodeH265PictureInfoKHR::default().nalu_slice_segment_entries(&segments).std_picture_info(&std_picture_265);
+        let setup_info_265 = vk::StdVideoEncodeH265ReferenceInfo { pic_type: std_picture_265.pic_type, pic_order_cnt_val: pic.poc, ..Default::default() };
+        let mut setup_dpb_265 = vk::VideoEncodeH265DpbSlotInfoKHR::default().std_reference_info(&setup_info_265);
+        let ref_info_265 = pic.reference.map(|(_, _, poc)| vk::StdVideoEncodeH265ReferenceInfo {
+            pic_type: if poc == 0 { vk::StdVideoH265PictureType::IDR } else { vk::StdVideoH265PictureType::P },
+            pic_order_cnt_val: poc,
+            ..Default::default()
+        });
+        let mut ref_dpb_265 = ref_info_265.as_ref().map(|r| vk::VideoEncodeH265DpbSlotInfoKHR::default().std_reference_info(r));
+
+        let setup_slot = vk::VideoReferenceSlotInfoKHR::default().slot_index(pic.setup as i32).picture_resource(&setup_resource);
+        let setup_slot = match self.codec {
+            Codec::H264 => setup_slot.next_video_encode_h264_dpb_slot_info_khr(&mut setup_dpb),
+            Codec::H265 => setup_slot.next_video_encode_h265_dpb_slot_info_khr(&mut setup_dpb_265),
+        };
         let mut ref_slots = Vec::new();
-        if let (Some((s, _, _)), Some(r), Some(dpb)) = (pic.reference, ref_resource.as_ref(), ref_dpb.as_mut()) {
-            ref_slots.push(vk::VideoReferenceSlotInfoKHR::default().slot_index(s as i32).picture_resource(r).next_video_encode_h264_dpb_slot_info_khr(dpb));
+        if let (Some((s, _, _)), Some(r)) = (pic.reference, ref_resource.as_ref()) {
+            let slot_info = vk::VideoReferenceSlotInfoKHR::default().slot_index(s as i32).picture_resource(r);
+            match (self.codec, ref_dpb.as_mut(), ref_dpb_265.as_mut()) {
+                (Codec::H264, Some(dpb), _) => ref_slots.push(slot_info.next_video_encode_h264_dpb_slot_info_khr(dpb)),
+                (Codec::H265, _, Some(dpb)) => ref_slots.push(slot_info.next_video_encode_h265_dpb_slot_info_khr(dpb)),
+                _ => {}
+            }
         }
         let encode = vk::VideoEncodeInfoKHR::default()
             .dst_buffer(slot.bitstream)
@@ -680,8 +956,11 @@ impl Encoder {
             .dst_buffer_range(BITSTREAM_BYTES)
             .src_picture_resource(src_resource)
             .setup_reference_slot(&setup_slot)
-            .reference_slots(&ref_slots)
-            .next_video_encode_h264_picture_info_khr(&mut h264_picture);
+            .reference_slots(&ref_slots);
+        let encode = match self.codec {
+            Codec::H264 => encode.next_video_encode_h264_picture_info_khr(&mut h264_picture),
+            Codec::H265 => encode.next_video_encode_h265_picture_info_khr(&mut h265_picture),
+        };
         d.cmd_begin_query(slot.cb, self.queries, pic.slot as u32, vk::QueryControlFlags::empty());
         d.cmd_encode_video(slot.cb, &encode);
         d.cmd_end_query(slot.cb, self.queries, pic.slot as u32);
@@ -815,6 +1094,8 @@ pub(crate) struct StreamEncoder {
     upload: Option<(vk::Buffer, vk::DeviceMemory, usize, bool)>,
     count: u32,
     frame_num: u32,
+    /// H.265's picture order count (pictures since the IDR).
+    poc_count: i32,
     idr_pic_id: u16,
     /// The DPB slot holding the last picture, its frame_num and POC.
     last: Option<(usize, u32, i32)>,
@@ -874,31 +1155,42 @@ fn default_kbps_for(w: u32, h: u32, fps: u32, full_chroma: bool) -> u32 {
 }
 
 impl StreamEncoder {
+    /// Makes the process's Vulkan device offscreen when no backend made one (a tool that encodes
+    /// pictures without a window: the encoder bench). False when it cannot.
+    pub fn offscreen_device() -> bool {
+        Device::existing().is_some() || Device::shared(&[], &[], &mut super::surface::Offscreen).is_ok()
+    }
+
     /// The encode engines (queues) of the process's GPU; 0 without hardware encode.
     pub fn engines() -> u32 {
         Device::existing().and_then(|d| d.video_encode.as_ref().map(|v| 1 + v.more.len() as u32)).unwrap_or(0)
     }
 
-    /// The largest coded picture of the H.264 profile (4:4:4 when `full_chroma`) on this GPU.
-    pub fn max_size(full_chroma: bool) -> Option<[u32; 2]> {
+    /// The largest coded picture of the codec's profile (4:4:4 when `full_chroma`) on this GPU.
+    pub fn max_size(codec: Codec, full_chroma: bool) -> Option<[u32; 2]> {
         let dev = Device::existing()?;
-        dev.video_encode.as_ref()?;
-        let profile = Profile::new(full_chroma);
+        if !dev.video_encode.as_ref()?.h265 && codec == Codec::H265 {
+            return None;
+        }
+        let profile = Profile::new(codec, full_chroma, true);
         let mut h264_caps = vk::VideoEncodeH264CapabilitiesKHR::default();
+        let mut h265_caps = vk::VideoEncodeH265CapabilitiesKHR::default();
         let mut encode_caps = vk::VideoEncodeCapabilitiesKHR::default();
-        let mut caps = vk::VideoCapabilitiesKHR::default()
-            .next_video_encode_capabilities_khr(&mut encode_caps)
-            .next_video_encode_h264_capabilities_khr(&mut h264_caps);
+        let caps = vk::VideoCapabilitiesKHR::default().next_video_encode_capabilities_khr(&mut encode_caps);
+        let mut caps = match codec {
+            Codec::H264 => caps.next_video_encode_h264_capabilities_khr(&mut h264_caps),
+            Codec::H265 => caps.next_video_encode_h265_capabilities_khr(&mut h265_caps),
+        };
         unsafe { dev.instance.get_physical_device_video_capabilities(dev.physical, &profile.info, &mut caps) }.ok()?;
         Some([caps.max_coded_extent.width, caps.max_coded_extent.height])
     }
 
     /// An encoder on engine `engine` (its queue; an engine the GPU does not have is engine 0),
     /// 4:4:4 when `full_chroma`.
-    pub fn open(width: u32, height: u32, fps: u32, kbps: u32, engine: usize, full_chroma: bool) -> Result<StreamEncoder, String> {
+    pub fn open(width: u32, height: u32, fps: u32, kbps: u32, engine: usize, full_chroma: bool, codec: Codec, tuning: Tuning) -> Result<StreamEncoder, String> {
         let dev = Device::existing().ok_or("the HAL has no Vulkan device yet (no window rendered)")?;
         let fps = fps.clamp(1, 240);
-        let mut enc = Encoder::new(dev.clone(), [width, height], fps, full_chroma)?;
+        let mut enc = Encoder::new(dev.clone(), [width, height], fps, full_chroma, codec, tuning)?;
         enc.queue_index = engine;
         let kbps = if kbps == 0 { default_kbps_for(width, height, fps, full_chroma) } else { kbps };
         unsafe {
@@ -911,7 +1203,16 @@ impl StreamEncoder {
             let ready = d.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).map_err(error)?;
             let stamps = d.create_query_pool(&vk::QueryPoolCreateInfo::default().query_type(vk::QueryType::TIMESTAMP).query_count(2), None).map_err(error)?;
             let name = std::ffi::CStr::from_ptr(dev.properties.device_name.as_ptr()).to_string_lossy().into_owned();
-            let info = format!("H.264 High{} {width}x{height} (coded {}x{}) {fps} fps {kbps} kbit/s on {name}", if full_chroma { " 4:4:4" } else { "" }, enc.coded[0], enc.coded[1]);
+            let profile = match (codec, full_chroma) {
+                (Codec::H264, false) => "H.264 High",
+                (Codec::H264, true) => "H.264 High 4:4:4",
+                (Codec::H265, false) => "H.265 Main",
+                (Codec::H265, true) => "H.265 RExt 4:4:4",
+            };
+            let info = format!(
+                "{profile} {} {width}x{height} (coded {}x{}) {fps} fps {kbps} kbit/s {} buffer {} pictures, quality {}/{} on {name}",
+                if tuning.sharp { "sharp" } else { "fast" }, enc.coded[0], enc.coded[1], if tuning.constant { "CBR" } else { "VBR" }, tuning.buffer_pictures, enc.quality_level, enc.quality_levels - 1
+            );
             Ok(StreamEncoder {
                 enc,
                 copy_pool,
@@ -921,6 +1222,7 @@ impl StreamEncoder {
                 upload: None,
                 count: 0,
                 frame_num: 0,
+                poc_count: 0,
                 idr_pic_id: 0,
                 last: None,
                 kbps,
@@ -931,6 +1233,11 @@ impl StreamEncoder {
                 timing: Timing::default(),
             })
         }
+    }
+
+    /// The last picture's encode on the video queue (ns, GPU timestamps; 0 when not measured).
+    pub fn last_gpu_ns(&self) -> u64 {
+        self.enc.last_encode_ns.get().unwrap_or(0)
     }
 
     pub fn set_kbps(&mut self, kbps: u32) {
@@ -944,13 +1251,17 @@ impl StreamEncoder {
         let idr = key || self.last.is_none();
         if idr {
             self.frame_num = 0;
+            self.poc_count = 0;
             self.idr_pic_id = self.idr_pic_id.wrapping_add(if self.count == 0 { 0 } else { 1 });
         }
         let setup = match self.last {
             Some((s, _, _)) if !idr => 1 - s,
             _ => 0,
         };
-        let poc = (self.frame_num * 2) as i32;
+        // H.264: POC type 2 (twice frame_num); H.265: pictures since the IDR (never wraps: 2^31
+        // pictures)
+        let poc = match self.enc.codec { Codec::H264 => (self.frame_num * 2) as i32, Codec::H265 => self.poc_count };
+        self.poc_count += 1;
         let pic = Picture {
             slot: 0,
             idr,
@@ -1194,15 +1505,13 @@ impl StreamEncoder {
         }
     }
 
-    /// A picture from tightly packed NV12 bytes.
+    /// A picture from tightly packed NV12 bytes (NV24 for a 4:4:4 stream).
     pub fn encode_nv12(&mut self, nv12: &[u8], key: bool) -> Result<Vec<u8>, String> {
         let [w, h] = self.enc.size;
-        if self.enc.full_chroma {
-            return Err("a 4:4:4 stream takes texture pictures only".into());
-        }
-        let bytes = w as usize * h as usize * 3 / 2;
+        // NV12, or NV24 (full-size interleaved chroma) for a 4:4:4 stream
+        let bytes = if self.enc.full_chroma { w as usize * h as usize * 3 } else { w as usize * h as usize * 3 / 2 };
         if nv12.len() != bytes {
-            return Err(format!("NV12 picture of {} bytes, a {w}x{h} one has {bytes}", nv12.len()));
+            return Err(format!("{} picture of {} bytes, a {w}x{h} one has {bytes}", if self.enc.full_chroma { "NV24" } else { "NV12" }, nv12.len()));
         }
         unsafe {
             if self.upload.is_none() {

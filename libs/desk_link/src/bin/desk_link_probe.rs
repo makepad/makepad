@@ -1,4 +1,4 @@
-//! desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--split tiles|interleave|off] [--stall MS,EVERY_MS] [--window WxH[@SCALE] [--drive]] [--hz N] [--dump DIR] [--420] [--keyreq MS]: a headless Desk Link viewer for
+//! desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--codec auto|h264|hevc] [--chroma auto|444|420] [--preset auto|sharp|fast] [--mbps N] [--fps N] [--h264only] [--stall MS,EVERY_MS] [--window WxH[@SCALE] [--drive]] [--hz N] [--dump DIR] [--420] [--keyreq MS]: a headless Desk Link viewer for
 //! checks. It connects with this machine's fleet credential, prints the Welcome, counts the
 //! pictures and bytes, pings once a second (RTT), and with `--input` moves the desktop's pointer
 //! between two points twice a second, timing each move until the desktop's own Cursor message
@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let Some(target) = args.get(1).filter(|a| !a.starts_with("--")) else {
-        eprintln!("usage: desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--split tiles|interleave|off] [--stall MS,EVERY_MS] [--window WxH[@SCALE] [--drive]] [--hz N] [--dump DIR] [--420] [--keyreq MS]");
+        eprintln!("usage: desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--codec auto|h264|hevc] [--chroma auto|444|420] [--preset auto|sharp|fast] [--mbps N] [--fps N] [--h264only] [--stall MS,EVERY_MS] [--window WxH[@SCALE] [--drive]] [--hz N] [--dump DIR] [--420] [--keyreq MS]");
         std::process::exit(2);
     };
     let secs: u64 = args.windows(2).find(|w| w[0] == "--secs").and_then(|w| w[1].parse().ok()).unwrap_or(10);
@@ -33,11 +33,20 @@ fn main() {
     // --flap MS: pause and resume every MS milliseconds (the desktop releases its picture
     // texture whenever nobody watches: a lifetime test)
     let flap: Option<u64> = args.windows(2).find(|w| w[0] == "--flap").and_then(|w| w[1].parse().ok());
-    // --split: how the desktop shares its encode engines (for every viewer), asked after the Welcome
-    let split = args.windows(2).find(|w| w[0] == "--split").map(|w| match w[1].as_str() {
-        "tiles" => proto::split::TILES,
-        "interleave" => proto::split::INTERLEAVE,
-        _ => proto::split::OFF,
+    // --codec / --chroma / --preset / --mbps / --fps: this viewer's Encoding, sent after the
+    // Welcome (any of them given)
+    let pick = |name: &str, table: &[(&str, u8)]| args.windows(2).find(|w| w[0] == name).map(|w| table.iter().find(|(n, _)| *n == w[1]).map_or(0, |(_, v)| *v));
+    let number = |name: &str| args.windows(2).find(|w| w[0] == name).and_then(|w| w[1].parse::<u16>().ok());
+    let codec = pick("--codec", &[("h264", proto::pref::H264), ("hevc", proto::pref::HEVC)]);
+    let chroma = pick("--chroma", &[("444", proto::pref::FULL), ("420", proto::pref::HALF)]);
+    let preset = pick("--preset", &[("sharp", proto::pref::SHARP), ("fast", proto::pref::FAST)]);
+    let (mbps, fps) = (number("--mbps"), number("--fps"));
+    let encoding = (codec.is_some() || chroma.is_some() || preset.is_some() || mbps.is_some() || fps.is_some()).then(|| ClientMsg::Encoding {
+        chroma: chroma.unwrap_or(0),
+        codec: codec.unwrap_or(0),
+        preset: preset.unwrap_or(0),
+        mbps: mbps.unwrap_or(0),
+        fps: fps.unwrap_or(0),
     });
     // --stall MS,EVERY_MS: stop reading for MS every EVERY_MS (a viewer that does not read for a
     // while: the desktop's socket fills and it must hold pictures back, not restart the stream)
@@ -54,6 +63,8 @@ fn main() {
     let dump: Option<std::path::PathBuf> = args.windows(2).find(|w| w[0] == "--dump").map(|w| w[1].clone().into());
     // --420: a viewer whose decoder does not take 4:4:4 (the desktop streams 4:2:0)
     let caps = if args.iter().any(|a| a == "--420") { 0 } else { proto::caps::FULL_CHROMA };
+    // --h264only: a viewer without an H.265 decoder
+    let caps = if args.iter().any(|a| a == "--h264only") { caps } else { caps | proto::caps::HEVC };
     // view-only unless --drive: a probe never resizes a followed desktop someone is using
     let caps = if args.iter().any(|a| a == "--drive") { caps } else { caps | proto::caps::VIEW_ONLY };
     let keyreq: Option<u64> = args.windows(2).find(|w| w[0] == "--keyreq").and_then(|w| w[1].parse().ok());
@@ -62,7 +73,7 @@ fn main() {
         Some((h, p)) if p.parse::<u16>().is_ok() => (h.to_string(), p.to_string()),
         _ => (target.clone(), proto::DEFAULT_PORT.to_string()),
     };
-    if let Err(e) = run(&host, &port, secs, input, paused, flap, split, stall, opts) {
+    if let Err(e) = run(&host, &port, secs, input, paused, flap, encoding, stall, opts) {
         eprintln!("probe: {e}");
         std::process::exit(1);
     }
@@ -77,7 +88,7 @@ struct Opts {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Option<u64>, split: Option<u8>, stall: Option<(u64, u64)>, opts: Opts) -> Result<(), String> {
+fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Option<u64>, encoding: Option<ClientMsg>, stall: Option<(u64, u64)>, opts: Opts) -> Result<(), String> {
     use std::io::Write;
     // --dump: per stream its file (opened at its first key frame) and position
     let mut dumps: Vec<Option<std::fs::File>> = Vec::new();
@@ -174,17 +185,23 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
                     if let Some((width, height, scale)) = opts.window {
                         proto::write_all(&mut stream, &ClientMsg::Window { width, height, scale }.encode()).map_err(|e| e.to_string())?;
                     }
-                    if let Some(split) = split {
-                        proto::write_all(&mut stream, &ClientMsg::SetSplit { split }.encode()).map_err(|e| e.to_string())?;
-                        proto::write_all(&mut stream, &ClientMsg::RequestKeyframe.encode()).map_err(|e| e.to_string())?;
+                    if let Some(encoding) = &encoding {
+                        proto::write_all(&mut stream, &encoding.encode()).map_err(|e| e.to_string())?;
                     }
                     println!("probe: welcome from {server}: screen {screen} of {} ({stream_size:?}), input {}{}", screens.len(), input, if input { String::new() } else { format!(" ({input_note})") });
                 }
                 ServerMsg::Refused { reason } => return Err(format!("refused: {reason}")),
                 ServerMsg::Bye { reason } => return Err(format!("bye: {reason}")),
                 ServerMsg::Stream { screen, stream: size } => println!("probe: the stream is now screen {screen} at {size:?}"),
-                ServerMsg::Rate { fps, kbps, limit, full_chroma } => println!("probe: the desktop streams {fps} pictures a second at {} Mbit/s {} (limit {limit})", kbps / 1000, if full_chroma { "4:4:4" } else { "4:2:0" }),
-                ServerMsg::Video { key, data, stream, parts, built_ns, encoded_ns, frame, x0, y0, .. } => {
+                ServerMsg::Rate { fps, kbps, limit, full_chroma, codec, preset, streams, why } => println!(
+                    "probe: the desktop streams {fps} pictures a second at {} Mbit/s {} {} {} in {streams} stream(s) (limit {limit}){}",
+                    kbps / 1000,
+                    if codec == proto::pref::HEVC { "H.265" } else { "H.264" },
+                    if full_chroma { "4:4:4" } else { "4:2:0" },
+                    if preset == proto::pref::SHARP { "sharp" } else { "fast" },
+                    if why.is_empty() { String::new() } else { format!(": {why}") }
+                ),
+                ServerMsg::Video { key, data, stream, parts, built_ns, encoded_ns, frame, x0, y0, codec, .. } => {
                     let i = stream as usize;
                     if per_stream.len() <= i {
                         per_stream.resize(i + 1, (0, 0));
@@ -194,7 +211,7 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
                     per_stream[i].1 += 1;
                     if let Some(dir) = &opts.dump {
                         if dumps[i].is_none() && key {
-                            let path = dir.join(format!("stream-{i}.h264"));
+                            let path = dir.join(format!("stream-{i}.{}", if codec == proto::pref::HEVC { "h265" } else { "h264" }));
                             dumps[i] = Some(std::fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?);
                             positions.push((stream, x0, y0));
                         }
@@ -206,7 +223,7 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
                     // its encode time is its slowest part's
                     bytes += data.len() as u64;
                     streams = streams.max(stream as u32 + 1);
-                    check.picture(stream, key, &data);
+                    check.picture(stream, key, codec == proto::pref::HEVC, &data);
                     let ms = encoded_ns.saturating_sub(built_ns) as f64 / 1e6;
                     slowest = if slowest.0 == frame { (frame, slowest.1.max(ms)) } else { (frame, ms) };
                     if parts <= 1 || stream + 1 == parts {
@@ -293,10 +310,12 @@ struct Check {
     bare_keys: u32,
     /// Pictures whose `key` flag disagrees with an IDR slice in them.
     wrong_flags: u32,
-    /// The first SPS's profile_idc, constraint flags, level_idc.
+    /// The first SPS's profile_idc, constraint flags (H.265: its tier), level_idc.
     sps: Option<[u8; 3]>,
+    /// The streams are H.265.
+    hevc: bool,
     /// NAL types seen in key frames (bit per type).
-    key_nals: u32,
+    key_nals: u64,
 }
 
 impl Check {
@@ -304,16 +323,54 @@ impl Check {
         self.started.iter_mut().for_each(|s| *s = false);
     }
 
-    fn picture(&mut self, stream: u8, key: bool, data: &[u8]) {
+    fn picture(&mut self, stream: u8, key: bool, hevc: bool, data: &[u8]) {
         let s = stream as usize;
         if self.started.len() <= s {
             self.started.resize(s + 1, false);
         }
         let nals = nal_units(data);
-        let has = |t: u8| nals.iter().any(|n| n.first().map(|b| b & 0x1f) == Some(t));
-        let idr = has(5);
+        // H.264: the type in the low 5 bits; H.265: bits 1..6 of the first header byte
+        let ty = |b: u8| if hevc { (b >> 1) & 0x3f } else { b & 0x1f };
+        let has = |t: u8| nals.iter().any(|n| n.first().map(|b| ty(*b)) == Some(t));
+        // H.265 IDR_W_RADL / IDR_N_LP, VPS + SPS + PPS
+        let idr = if hevc { has(19) || has(20) } else { has(5) };
         if key != idr {
             self.wrong_flags += 1;
+        }
+        if hevc {
+            self.hevc = true;
+            if key {
+                self.started[s] = true;
+                if !(has(32) && has(33) && has(34) && idr) {
+                    self.bare_keys += 1;
+                }
+                for n in &nals {
+                    if let Some(b) = n.first() {
+                        self.key_nals |= 1u64 << ty(*b);
+                    }
+                }
+                if self.sps.is_none() {
+                    // after the 2-byte header and vps id / sub layers / nesting: the general
+                    // profile_tier_level (profile space, tier, profile_idc; 4 + 6 flag bytes;
+                    // level_idc), emulation prevention removed
+                    self.sps = nals.iter().find(|n| n.first().map(|b| ty(*b)) == Some(33)).and_then(|n| {
+                        let mut r = Vec::new();
+                        let mut zeros = 0;
+                        for &b in n.iter().skip(2) {
+                            if zeros >= 2 && b == 3 {
+                                zeros = 0;
+                                continue;
+                            }
+                            zeros = if b == 0 { zeros + 1 } else { 0 };
+                            r.push(b);
+                        }
+                        (r.len() >= 13).then(|| [r[1] & 0x1f, (r[1] >> 5) & 1, r[12]])
+                    });
+                }
+            } else if !self.started[s] {
+                self.before_key += 1;
+            }
+            return;
         }
         if key {
             self.started[s] = true;
@@ -322,7 +379,7 @@ impl Check {
             }
             for n in &nals {
                 if let Some(b) = n.first() {
-                    self.key_nals |= 1 << (b & 0x1f);
+                    self.key_nals |= 1u64 << (b & 0x1f);
                 }
             }
             if self.sps.is_none() {
@@ -335,10 +392,12 @@ impl Check {
 
     fn report(&self) -> String {
         let sps = match self.sps {
+            // H.265 profile_idc 1 Main, 4 Format range extensions (4:4:4)
+            Some([profile, tier, level]) if self.hevc => format!("H.265 SPS profile_idc {profile} tier {tier} level_idc {level}"),
             Some([profile, flags, level]) => format!("SPS profile_idc {profile} (constraints {flags:#04x}) level_idc {level}"),
             None => "no SPS".into(),
         };
-        let types: Vec<String> = (0..32).filter(|t| self.key_nals & (1 << t) != 0).map(|t| t.to_string()).collect();
+        let types: Vec<String> = (0..64).filter(|t| self.key_nals & (1u64 << t) != 0).map(|t| t.to_string()).collect();
         let ok = self.before_key == 0 && self.bare_keys == 0 && self.wrong_flags == 0 && self.sps.is_some();
         format!(
             "probe: bitstream {}: {sps}; key frame NAL types [{}]; {} pictures before a key frame, {} key frames without SPS/PPS/IDR, {} wrong key flags",

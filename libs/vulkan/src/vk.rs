@@ -8,6 +8,27 @@ pub const STD_VIDEO_H264_SCALING_LIST_4X4_NUM_ELEMENTS: u32 = 16;
 pub const STD_VIDEO_H264_SCALING_LIST_4X4_NUM_LISTS: u32 = 6;
 pub const STD_VIDEO_H264_SCALING_LIST_8X8_NUM_ELEMENTS: u32 = 64;
 pub const STD_VIDEO_H264_SCALING_LIST_8X8_NUM_LISTS: u32 = 6;
+pub const STD_VIDEO_H265_CHROMA_QP_OFFSET_LIST_SIZE: u32 = 6;
+pub const STD_VIDEO_H265_CHROMA_QP_OFFSET_TILE_COLS_LIST_SIZE: u32 = 19;
+pub const STD_VIDEO_H265_CHROMA_QP_OFFSET_TILE_ROWS_LIST_SIZE: u32 = 21;
+pub const STD_VIDEO_H265_CPB_CNT_LIST_SIZE: u32 = 32;
+pub const STD_VIDEO_H265_MAX_CHROMA_PLANES: u32 = 2;
+pub const STD_VIDEO_H265_MAX_DELTA_POC: u32 = 48;
+pub const STD_VIDEO_H265_MAX_DPB_SIZE: u32 = 16;
+pub const STD_VIDEO_H265_MAX_LONG_TERM_PICS: u32 = 16;
+pub const STD_VIDEO_H265_MAX_LONG_TERM_REF_PICS_SPS: u32 = 32;
+pub const STD_VIDEO_H265_MAX_NUM_LIST_REF: u32 = 15;
+pub const STD_VIDEO_H265_PREDICTOR_PALETTE_COMPONENTS_LIST_SIZE: u32 = 3;
+pub const STD_VIDEO_H265_PREDICTOR_PALETTE_COMP_ENTRIES_LIST_SIZE: u32 = 128;
+pub const STD_VIDEO_H265_SCALING_LIST_16X16_NUM_ELEMENTS: u32 = 64;
+pub const STD_VIDEO_H265_SCALING_LIST_16X16_NUM_LISTS: u32 = 6;
+pub const STD_VIDEO_H265_SCALING_LIST_32X32_NUM_ELEMENTS: u32 = 64;
+pub const STD_VIDEO_H265_SCALING_LIST_32X32_NUM_LISTS: u32 = 2;
+pub const STD_VIDEO_H265_SCALING_LIST_4X4_NUM_ELEMENTS: u32 = 16;
+pub const STD_VIDEO_H265_SCALING_LIST_4X4_NUM_LISTS: u32 = 6;
+pub const STD_VIDEO_H265_SCALING_LIST_8X8_NUM_ELEMENTS: u32 = 64;
+pub const STD_VIDEO_H265_SCALING_LIST_8X8_NUM_LISTS: u32 = 6;
+pub const STD_VIDEO_H265_SUBLAYERS_LIST_SIZE: u32 = 7;
 pub const ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_NAME: &CStr = c"VK_ANDROID_external_memory_android_hardware_buffer";
 pub const API_VERSION_1_1: u32 = (1 << 22) | (1 << 12);
 pub const API_VERSION_1_2: u32 = (1 << 22) | (2 << 12);
@@ -38,6 +59,7 @@ pub const KHR_SWAPCHAIN_NAME: &CStr = c"VK_KHR_swapchain";
 pub const KHR_SYNCHRONIZATION_2_NAME: &CStr = c"VK_KHR_synchronization2";
 pub const KHR_TIMELINE_SEMAPHORE_NAME: &CStr = c"VK_KHR_timeline_semaphore";
 pub const KHR_VIDEO_ENCODE_H264_NAME: &CStr = c"VK_KHR_video_encode_h264";
+pub const KHR_VIDEO_ENCODE_H265_NAME: &CStr = c"VK_KHR_video_encode_h265";
 pub const KHR_VIDEO_ENCODE_QUEUE_NAME: &CStr = c"VK_KHR_video_encode_queue";
 pub const KHR_VIDEO_QUEUE_NAME: &CStr = c"VK_KHR_video_queue";
 pub const KHR_WAYLAND_SURFACE_NAME: &CStr = c"VK_KHR_wayland_surface";
@@ -55,6 +77,7 @@ pub const QUEUE_FAMILY_EXTERNAL: u32 = u32::MAX - 1;
 pub const QUEUE_FAMILY_FOREIGN_EXT: u32 = u32::MAX - 2;
 pub const QUEUE_FAMILY_IGNORED: u32 = u32::MAX;
 pub const STD_VULKAN_VIDEO_CODEC_H264_ENCODE_NAME: &CStr = c"VK_STD_vulkan_video_codec_h264_encode";
+pub const STD_VULKAN_VIDEO_CODEC_H265_ENCODE_NAME: &CStr = c"VK_STD_vulkan_video_codec_h265_encode";
 pub const SUBPASS_EXTERNAL: u32 = u32::MAX;
 pub const TRUE: u32 = 1;
 pub const UUID_SIZE: u32 = 16;
@@ -445,6 +468,427 @@ impl StdVideoEncodeH264WeightTableFlags {
     pub fn luma_weight_l1_flag(mut self, value: u32) -> Self { self.luma_weight_l1_flag = value; self }
     #[inline]
     pub fn chroma_weight_l1_flag(mut self, value: u32) -> Self { self.chroma_weight_l1_flag = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoEncodeH265LongTermRefPics {
+    pub num_long_term_sps: u8,
+    pub num_long_term_pics: u8,
+    pub lt_idx_sps: [u8; STD_VIDEO_H265_MAX_LONG_TERM_REF_PICS_SPS as usize],
+    pub poc_lsb_lt: [u8; STD_VIDEO_H265_MAX_LONG_TERM_PICS as usize],
+    pub used_by_curr_pic_lt_flag: u16,
+    pub delta_poc_msb_present_flag: [u8; STD_VIDEO_H265_MAX_DELTA_POC as usize],
+    pub delta_poc_msb_cycle_lt: [u8; STD_VIDEO_H265_MAX_DELTA_POC as usize],
+}
+impl Default for StdVideoEncodeH265LongTermRefPics { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoEncodeH265LongTermRefPics {}
+unsafe impl Sync for StdVideoEncodeH265LongTermRefPics {}
+impl StdVideoEncodeH265LongTermRefPics {
+    #[inline]
+    pub fn num_long_term_sps(mut self, value: u8) -> Self { self.num_long_term_sps = value; self }
+    #[inline]
+    pub fn num_long_term_pics(mut self, value: u8) -> Self { self.num_long_term_pics = value; self }
+    #[inline]
+    pub fn lt_idx_sps(mut self, value: [u8; STD_VIDEO_H265_MAX_LONG_TERM_REF_PICS_SPS as usize]) -> Self { self.lt_idx_sps = value; self }
+    #[inline]
+    pub fn poc_lsb_lt(mut self, value: [u8; STD_VIDEO_H265_MAX_LONG_TERM_PICS as usize]) -> Self { self.poc_lsb_lt = value; self }
+    #[inline]
+    pub fn used_by_curr_pic_lt_flag(mut self, value: u16) -> Self { self.used_by_curr_pic_lt_flag = value; self }
+    #[inline]
+    pub fn delta_poc_msb_present_flag(mut self, value: [u8; STD_VIDEO_H265_MAX_DELTA_POC as usize]) -> Self { self.delta_poc_msb_present_flag = value; self }
+    #[inline]
+    pub fn delta_poc_msb_cycle_lt(mut self, value: [u8; STD_VIDEO_H265_MAX_DELTA_POC as usize]) -> Self { self.delta_poc_msb_cycle_lt = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoEncodeH265PictureInfo {
+    pub flags: StdVideoEncodeH265PictureInfoFlags,
+    pub pic_type: StdVideoH265PictureType,
+    pub sps_video_parameter_set_id: u8,
+    pub pps_seq_parameter_set_id: u8,
+    pub pps_pic_parameter_set_id: u8,
+    pub short_term_ref_pic_set_idx: u8,
+    pub pic_order_cnt_val: i32,
+    pub temporal_id: u8,
+    pub reserved1: [u8; 7 as usize],
+    pub p_ref_lists: *const StdVideoEncodeH265ReferenceListsInfo,
+    pub p_short_term_ref_pic_set: *const StdVideoH265ShortTermRefPicSet,
+    pub p_long_term_ref_pics: *const StdVideoEncodeH265LongTermRefPics,
+}
+impl Default for StdVideoEncodeH265PictureInfo { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoEncodeH265PictureInfo {}
+unsafe impl Sync for StdVideoEncodeH265PictureInfo {}
+impl StdVideoEncodeH265PictureInfo {
+    #[inline]
+    pub fn flags(mut self, value: StdVideoEncodeH265PictureInfoFlags) -> Self { self.flags = value; self }
+    #[inline]
+    pub fn pic_type(mut self, value: StdVideoH265PictureType) -> Self { self.pic_type = value; self }
+    #[inline]
+    pub fn sps_video_parameter_set_id(mut self, value: u8) -> Self { self.sps_video_parameter_set_id = value; self }
+    #[inline]
+    pub fn pps_seq_parameter_set_id(mut self, value: u8) -> Self { self.pps_seq_parameter_set_id = value; self }
+    #[inline]
+    pub fn pps_pic_parameter_set_id(mut self, value: u8) -> Self { self.pps_pic_parameter_set_id = value; self }
+    #[inline]
+    pub fn short_term_ref_pic_set_idx(mut self, value: u8) -> Self { self.short_term_ref_pic_set_idx = value; self }
+    #[inline]
+    pub fn pic_order_cnt_val(mut self, value: i32) -> Self { self.pic_order_cnt_val = value; self }
+    #[inline]
+    pub fn temporal_id(mut self, value: u8) -> Self { self.temporal_id = value; self }
+    #[inline]
+    pub fn reserved1(mut self, value: [u8; 7 as usize]) -> Self { self.reserved1 = value; self }
+    #[inline]
+    pub fn ref_lists(mut self, value: *const StdVideoEncodeH265ReferenceListsInfo) -> Self { self.p_ref_lists = value; self }
+    #[inline]
+    pub fn short_term_ref_pic_set(mut self, value: *const StdVideoH265ShortTermRefPicSet) -> Self { self.p_short_term_ref_pic_set = value; self }
+    #[inline]
+    pub fn long_term_ref_pics(mut self, value: *const StdVideoEncodeH265LongTermRefPics) -> Self { self.p_long_term_ref_pics = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoEncodeH265PictureInfoFlags {
+    pub bitfield0: u32,
+}
+impl Default for StdVideoEncodeH265PictureInfoFlags { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoEncodeH265PictureInfoFlags {}
+unsafe impl Sync for StdVideoEncodeH265PictureInfoFlags {}
+impl StdVideoEncodeH265PictureInfoFlags {
+    #[inline]
+    pub fn is_reference(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 0)) | ((value & 0x1) << 0); self }
+    #[inline]
+    pub fn get_is_reference(&self) -> u32 { (self.bitfield0 >> 0) & 0x1 }
+    #[inline]
+    pub fn irap_pic_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 1)) | ((value & 0x1) << 1); self }
+    #[inline]
+    pub fn get_irap_pic_flag(&self) -> u32 { (self.bitfield0 >> 1) & 0x1 }
+    #[inline]
+    pub fn used_for_long_term_reference(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 2)) | ((value & 0x1) << 2); self }
+    #[inline]
+    pub fn get_used_for_long_term_reference(&self) -> u32 { (self.bitfield0 >> 2) & 0x1 }
+    #[inline]
+    pub fn discardable_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 3)) | ((value & 0x1) << 3); self }
+    #[inline]
+    pub fn get_discardable_flag(&self) -> u32 { (self.bitfield0 >> 3) & 0x1 }
+    #[inline]
+    pub fn cross_layer_bla_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 4)) | ((value & 0x1) << 4); self }
+    #[inline]
+    pub fn get_cross_layer_bla_flag(&self) -> u32 { (self.bitfield0 >> 4) & 0x1 }
+    #[inline]
+    pub fn pic_output_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 5)) | ((value & 0x1) << 5); self }
+    #[inline]
+    pub fn get_pic_output_flag(&self) -> u32 { (self.bitfield0 >> 5) & 0x1 }
+    #[inline]
+    pub fn no_output_of_prior_pics_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 6)) | ((value & 0x1) << 6); self }
+    #[inline]
+    pub fn get_no_output_of_prior_pics_flag(&self) -> u32 { (self.bitfield0 >> 6) & 0x1 }
+    #[inline]
+    pub fn short_term_ref_pic_set_sps_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 7)) | ((value & 0x1) << 7); self }
+    #[inline]
+    pub fn get_short_term_ref_pic_set_sps_flag(&self) -> u32 { (self.bitfield0 >> 7) & 0x1 }
+    #[inline]
+    pub fn slice_temporal_mvp_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 8)) | ((value & 0x1) << 8); self }
+    #[inline]
+    pub fn get_slice_temporal_mvp_enabled_flag(&self) -> u32 { (self.bitfield0 >> 8) & 0x1 }
+    #[inline]
+    pub fn reserved(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x7fffff << 9)) | ((value & 0x7fffff) << 9); self }
+    #[inline]
+    pub fn get_reserved(&self) -> u32 { (self.bitfield0 >> 9) & 0x7fffff }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoEncodeH265ReferenceInfo {
+    pub flags: StdVideoEncodeH265ReferenceInfoFlags,
+    pub pic_type: StdVideoH265PictureType,
+    pub pic_order_cnt_val: i32,
+    pub temporal_id: u8,
+}
+impl Default for StdVideoEncodeH265ReferenceInfo { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoEncodeH265ReferenceInfo {}
+unsafe impl Sync for StdVideoEncodeH265ReferenceInfo {}
+impl StdVideoEncodeH265ReferenceInfo {
+    #[inline]
+    pub fn flags(mut self, value: StdVideoEncodeH265ReferenceInfoFlags) -> Self { self.flags = value; self }
+    #[inline]
+    pub fn pic_type(mut self, value: StdVideoH265PictureType) -> Self { self.pic_type = value; self }
+    #[inline]
+    pub fn pic_order_cnt_val(mut self, value: i32) -> Self { self.pic_order_cnt_val = value; self }
+    #[inline]
+    pub fn temporal_id(mut self, value: u8) -> Self { self.temporal_id = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoEncodeH265ReferenceInfoFlags {
+    pub bitfield0: u32,
+}
+impl Default for StdVideoEncodeH265ReferenceInfoFlags { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoEncodeH265ReferenceInfoFlags {}
+unsafe impl Sync for StdVideoEncodeH265ReferenceInfoFlags {}
+impl StdVideoEncodeH265ReferenceInfoFlags {
+    #[inline]
+    pub fn used_for_long_term_reference(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 0)) | ((value & 0x1) << 0); self }
+    #[inline]
+    pub fn get_used_for_long_term_reference(&self) -> u32 { (self.bitfield0 >> 0) & 0x1 }
+    #[inline]
+    pub fn unused_for_reference(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 1)) | ((value & 0x1) << 1); self }
+    #[inline]
+    pub fn get_unused_for_reference(&self) -> u32 { (self.bitfield0 >> 1) & 0x1 }
+    #[inline]
+    pub fn reserved(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x3fffffff << 2)) | ((value & 0x3fffffff) << 2); self }
+    #[inline]
+    pub fn get_reserved(&self) -> u32 { (self.bitfield0 >> 2) & 0x3fffffff }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoEncodeH265ReferenceListsInfo {
+    pub flags: StdVideoEncodeH265ReferenceListsInfoFlags,
+    pub num_ref_idx_l0_active_minus1: u8,
+    pub num_ref_idx_l1_active_minus1: u8,
+    pub ref_pic_list0: [u8; STD_VIDEO_H265_MAX_NUM_LIST_REF as usize],
+    pub ref_pic_list1: [u8; STD_VIDEO_H265_MAX_NUM_LIST_REF as usize],
+    pub list_entry_l0: [u8; STD_VIDEO_H265_MAX_NUM_LIST_REF as usize],
+    pub list_entry_l1: [u8; STD_VIDEO_H265_MAX_NUM_LIST_REF as usize],
+}
+impl Default for StdVideoEncodeH265ReferenceListsInfo { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoEncodeH265ReferenceListsInfo {}
+unsafe impl Sync for StdVideoEncodeH265ReferenceListsInfo {}
+impl StdVideoEncodeH265ReferenceListsInfo {
+    #[inline]
+    pub fn flags(mut self, value: StdVideoEncodeH265ReferenceListsInfoFlags) -> Self { self.flags = value; self }
+    #[inline]
+    pub fn num_ref_idx_l0_active_minus1(mut self, value: u8) -> Self { self.num_ref_idx_l0_active_minus1 = value; self }
+    #[inline]
+    pub fn num_ref_idx_l1_active_minus1(mut self, value: u8) -> Self { self.num_ref_idx_l1_active_minus1 = value; self }
+    #[inline]
+    pub fn ref_pic_list0(mut self, value: [u8; STD_VIDEO_H265_MAX_NUM_LIST_REF as usize]) -> Self { self.ref_pic_list0 = value; self }
+    #[inline]
+    pub fn ref_pic_list1(mut self, value: [u8; STD_VIDEO_H265_MAX_NUM_LIST_REF as usize]) -> Self { self.ref_pic_list1 = value; self }
+    #[inline]
+    pub fn list_entry_l0(mut self, value: [u8; STD_VIDEO_H265_MAX_NUM_LIST_REF as usize]) -> Self { self.list_entry_l0 = value; self }
+    #[inline]
+    pub fn list_entry_l1(mut self, value: [u8; STD_VIDEO_H265_MAX_NUM_LIST_REF as usize]) -> Self { self.list_entry_l1 = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoEncodeH265ReferenceListsInfoFlags {
+    pub bitfield0: u32,
+}
+impl Default for StdVideoEncodeH265ReferenceListsInfoFlags { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoEncodeH265ReferenceListsInfoFlags {}
+unsafe impl Sync for StdVideoEncodeH265ReferenceListsInfoFlags {}
+impl StdVideoEncodeH265ReferenceListsInfoFlags {
+    #[inline]
+    pub fn ref_pic_list_modification_flag_l0(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 0)) | ((value & 0x1) << 0); self }
+    #[inline]
+    pub fn get_ref_pic_list_modification_flag_l0(&self) -> u32 { (self.bitfield0 >> 0) & 0x1 }
+    #[inline]
+    pub fn ref_pic_list_modification_flag_l1(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 1)) | ((value & 0x1) << 1); self }
+    #[inline]
+    pub fn get_ref_pic_list_modification_flag_l1(&self) -> u32 { (self.bitfield0 >> 1) & 0x1 }
+    #[inline]
+    pub fn reserved(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x3fffffff << 2)) | ((value & 0x3fffffff) << 2); self }
+    #[inline]
+    pub fn get_reserved(&self) -> u32 { (self.bitfield0 >> 2) & 0x3fffffff }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoEncodeH265SliceSegmentHeader {
+    pub flags: StdVideoEncodeH265SliceSegmentHeaderFlags,
+    pub slice_type: StdVideoH265SliceType,
+    pub slice_segment_address: u32,
+    pub collocated_ref_idx: u8,
+    pub max_num_merge_cand: u8,
+    pub slice_cb_qp_offset: i8,
+    pub slice_cr_qp_offset: i8,
+    pub slice_beta_offset_div2: i8,
+    pub slice_tc_offset_div2: i8,
+    pub slice_act_y_qp_offset: i8,
+    pub slice_act_cb_qp_offset: i8,
+    pub slice_act_cr_qp_offset: i8,
+    pub slice_qp_delta: i8,
+    pub reserved1: u16,
+    pub p_weight_table: *const StdVideoEncodeH265WeightTable,
+}
+impl Default for StdVideoEncodeH265SliceSegmentHeader { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoEncodeH265SliceSegmentHeader {}
+unsafe impl Sync for StdVideoEncodeH265SliceSegmentHeader {}
+impl StdVideoEncodeH265SliceSegmentHeader {
+    #[inline]
+    pub fn flags(mut self, value: StdVideoEncodeH265SliceSegmentHeaderFlags) -> Self { self.flags = value; self }
+    #[inline]
+    pub fn slice_type(mut self, value: StdVideoH265SliceType) -> Self { self.slice_type = value; self }
+    #[inline]
+    pub fn slice_segment_address(mut self, value: u32) -> Self { self.slice_segment_address = value; self }
+    #[inline]
+    pub fn collocated_ref_idx(mut self, value: u8) -> Self { self.collocated_ref_idx = value; self }
+    #[inline]
+    pub fn max_num_merge_cand(mut self, value: u8) -> Self { self.max_num_merge_cand = value; self }
+    #[inline]
+    pub fn slice_cb_qp_offset(mut self, value: i8) -> Self { self.slice_cb_qp_offset = value; self }
+    #[inline]
+    pub fn slice_cr_qp_offset(mut self, value: i8) -> Self { self.slice_cr_qp_offset = value; self }
+    #[inline]
+    pub fn slice_beta_offset_div2(mut self, value: i8) -> Self { self.slice_beta_offset_div2 = value; self }
+    #[inline]
+    pub fn slice_tc_offset_div2(mut self, value: i8) -> Self { self.slice_tc_offset_div2 = value; self }
+    #[inline]
+    pub fn slice_act_y_qp_offset(mut self, value: i8) -> Self { self.slice_act_y_qp_offset = value; self }
+    #[inline]
+    pub fn slice_act_cb_qp_offset(mut self, value: i8) -> Self { self.slice_act_cb_qp_offset = value; self }
+    #[inline]
+    pub fn slice_act_cr_qp_offset(mut self, value: i8) -> Self { self.slice_act_cr_qp_offset = value; self }
+    #[inline]
+    pub fn slice_qp_delta(mut self, value: i8) -> Self { self.slice_qp_delta = value; self }
+    #[inline]
+    pub fn reserved1(mut self, value: u16) -> Self { self.reserved1 = value; self }
+    #[inline]
+    pub fn weight_table(mut self, value: *const StdVideoEncodeH265WeightTable) -> Self { self.p_weight_table = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoEncodeH265SliceSegmentHeaderFlags {
+    pub bitfield0: u32,
+}
+impl Default for StdVideoEncodeH265SliceSegmentHeaderFlags { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoEncodeH265SliceSegmentHeaderFlags {}
+unsafe impl Sync for StdVideoEncodeH265SliceSegmentHeaderFlags {}
+impl StdVideoEncodeH265SliceSegmentHeaderFlags {
+    #[inline]
+    pub fn first_slice_segment_in_pic_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 0)) | ((value & 0x1) << 0); self }
+    #[inline]
+    pub fn get_first_slice_segment_in_pic_flag(&self) -> u32 { (self.bitfield0 >> 0) & 0x1 }
+    #[inline]
+    pub fn dependent_slice_segment_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 1)) | ((value & 0x1) << 1); self }
+    #[inline]
+    pub fn get_dependent_slice_segment_flag(&self) -> u32 { (self.bitfield0 >> 1) & 0x1 }
+    #[inline]
+    pub fn slice_sao_luma_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 2)) | ((value & 0x1) << 2); self }
+    #[inline]
+    pub fn get_slice_sao_luma_flag(&self) -> u32 { (self.bitfield0 >> 2) & 0x1 }
+    #[inline]
+    pub fn slice_sao_chroma_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 3)) | ((value & 0x1) << 3); self }
+    #[inline]
+    pub fn get_slice_sao_chroma_flag(&self) -> u32 { (self.bitfield0 >> 3) & 0x1 }
+    #[inline]
+    pub fn num_ref_idx_active_override_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 4)) | ((value & 0x1) << 4); self }
+    #[inline]
+    pub fn get_num_ref_idx_active_override_flag(&self) -> u32 { (self.bitfield0 >> 4) & 0x1 }
+    #[inline]
+    pub fn mvd_l1_zero_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 5)) | ((value & 0x1) << 5); self }
+    #[inline]
+    pub fn get_mvd_l1_zero_flag(&self) -> u32 { (self.bitfield0 >> 5) & 0x1 }
+    #[inline]
+    pub fn cabac_init_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 6)) | ((value & 0x1) << 6); self }
+    #[inline]
+    pub fn get_cabac_init_flag(&self) -> u32 { (self.bitfield0 >> 6) & 0x1 }
+    #[inline]
+    pub fn cu_chroma_qp_offset_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 7)) | ((value & 0x1) << 7); self }
+    #[inline]
+    pub fn get_cu_chroma_qp_offset_enabled_flag(&self) -> u32 { (self.bitfield0 >> 7) & 0x1 }
+    #[inline]
+    pub fn deblocking_filter_override_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 8)) | ((value & 0x1) << 8); self }
+    #[inline]
+    pub fn get_deblocking_filter_override_flag(&self) -> u32 { (self.bitfield0 >> 8) & 0x1 }
+    #[inline]
+    pub fn slice_deblocking_filter_disabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 9)) | ((value & 0x1) << 9); self }
+    #[inline]
+    pub fn get_slice_deblocking_filter_disabled_flag(&self) -> u32 { (self.bitfield0 >> 9) & 0x1 }
+    #[inline]
+    pub fn collocated_from_l0_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 10)) | ((value & 0x1) << 10); self }
+    #[inline]
+    pub fn get_collocated_from_l0_flag(&self) -> u32 { (self.bitfield0 >> 10) & 0x1 }
+    #[inline]
+    pub fn slice_loop_filter_across_slices_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 11)) | ((value & 0x1) << 11); self }
+    #[inline]
+    pub fn get_slice_loop_filter_across_slices_enabled_flag(&self) -> u32 { (self.bitfield0 >> 11) & 0x1 }
+    #[inline]
+    pub fn reserved(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0xfffff << 12)) | ((value & 0xfffff) << 12); self }
+    #[inline]
+    pub fn get_reserved(&self) -> u32 { (self.bitfield0 >> 12) & 0xfffff }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoEncodeH265WeightTable {
+    pub flags: StdVideoEncodeH265WeightTableFlags,
+    pub luma_log2_weight_denom: u8,
+    pub delta_chroma_log2_weight_denom: i8,
+    pub delta_luma_weight_l0: [i8; STD_VIDEO_H265_MAX_NUM_LIST_REF as usize],
+    pub luma_offset_l0: [i8; STD_VIDEO_H265_MAX_NUM_LIST_REF as usize],
+    pub delta_chroma_weight_l0: [[i8; STD_VIDEO_H265_MAX_CHROMA_PLANES as usize]; STD_VIDEO_H265_MAX_NUM_LIST_REF as usize],
+    pub delta_chroma_offset_l0: [[i8; STD_VIDEO_H265_MAX_CHROMA_PLANES as usize]; STD_VIDEO_H265_MAX_NUM_LIST_REF as usize],
+    pub delta_luma_weight_l1: [i8; STD_VIDEO_H265_MAX_NUM_LIST_REF as usize],
+    pub luma_offset_l1: [i8; STD_VIDEO_H265_MAX_NUM_LIST_REF as usize],
+    pub delta_chroma_weight_l1: [[i8; STD_VIDEO_H265_MAX_CHROMA_PLANES as usize]; STD_VIDEO_H265_MAX_NUM_LIST_REF as usize],
+    pub delta_chroma_offset_l1: [[i8; STD_VIDEO_H265_MAX_CHROMA_PLANES as usize]; STD_VIDEO_H265_MAX_NUM_LIST_REF as usize],
+}
+impl Default for StdVideoEncodeH265WeightTable { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoEncodeH265WeightTable {}
+unsafe impl Sync for StdVideoEncodeH265WeightTable {}
+impl StdVideoEncodeH265WeightTable {
+    #[inline]
+    pub fn flags(mut self, value: StdVideoEncodeH265WeightTableFlags) -> Self { self.flags = value; self }
+    #[inline]
+    pub fn luma_log2_weight_denom(mut self, value: u8) -> Self { self.luma_log2_weight_denom = value; self }
+    #[inline]
+    pub fn delta_chroma_log2_weight_denom(mut self, value: i8) -> Self { self.delta_chroma_log2_weight_denom = value; self }
+    #[inline]
+    pub fn delta_luma_weight_l0(mut self, value: [i8; STD_VIDEO_H265_MAX_NUM_LIST_REF as usize]) -> Self { self.delta_luma_weight_l0 = value; self }
+    #[inline]
+    pub fn luma_offset_l0(mut self, value: [i8; STD_VIDEO_H265_MAX_NUM_LIST_REF as usize]) -> Self { self.luma_offset_l0 = value; self }
+    #[inline]
+    pub fn delta_chroma_weight_l0(mut self, value: [[i8; STD_VIDEO_H265_MAX_CHROMA_PLANES as usize]; STD_VIDEO_H265_MAX_NUM_LIST_REF as usize]) -> Self { self.delta_chroma_weight_l0 = value; self }
+    #[inline]
+    pub fn delta_chroma_offset_l0(mut self, value: [[i8; STD_VIDEO_H265_MAX_CHROMA_PLANES as usize]; STD_VIDEO_H265_MAX_NUM_LIST_REF as usize]) -> Self { self.delta_chroma_offset_l0 = value; self }
+    #[inline]
+    pub fn delta_luma_weight_l1(mut self, value: [i8; STD_VIDEO_H265_MAX_NUM_LIST_REF as usize]) -> Self { self.delta_luma_weight_l1 = value; self }
+    #[inline]
+    pub fn luma_offset_l1(mut self, value: [i8; STD_VIDEO_H265_MAX_NUM_LIST_REF as usize]) -> Self { self.luma_offset_l1 = value; self }
+    #[inline]
+    pub fn delta_chroma_weight_l1(mut self, value: [[i8; STD_VIDEO_H265_MAX_CHROMA_PLANES as usize]; STD_VIDEO_H265_MAX_NUM_LIST_REF as usize]) -> Self { self.delta_chroma_weight_l1 = value; self }
+    #[inline]
+    pub fn delta_chroma_offset_l1(mut self, value: [[i8; STD_VIDEO_H265_MAX_CHROMA_PLANES as usize]; STD_VIDEO_H265_MAX_NUM_LIST_REF as usize]) -> Self { self.delta_chroma_offset_l1 = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoEncodeH265WeightTableFlags {
+    pub luma_weight_l0_flag: u16,
+    pub chroma_weight_l0_flag: u16,
+    pub luma_weight_l1_flag: u16,
+    pub chroma_weight_l1_flag: u16,
+}
+impl Default for StdVideoEncodeH265WeightTableFlags { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoEncodeH265WeightTableFlags {}
+unsafe impl Sync for StdVideoEncodeH265WeightTableFlags {}
+impl StdVideoEncodeH265WeightTableFlags {
+    #[inline]
+    pub fn luma_weight_l0_flag(mut self, value: u16) -> Self { self.luma_weight_l0_flag = value; self }
+    #[inline]
+    pub fn chroma_weight_l0_flag(mut self, value: u16) -> Self { self.chroma_weight_l0_flag = value; self }
+    #[inline]
+    pub fn luma_weight_l1_flag(mut self, value: u16) -> Self { self.luma_weight_l1_flag = value; self }
+    #[inline]
+    pub fn chroma_weight_l1_flag(mut self, value: u16) -> Self { self.chroma_weight_l1_flag = value; self }
 }
 #[repr(transparent)]
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1133,6 +1577,1231 @@ match self.0 {
     _ => core::fmt::Debug::fmt(&self.0, f),
 }
 } }
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StdVideoH265AspectRatioIdc(pub i32);
+impl StdVideoH265AspectRatioIdc {
+    pub const fn from_raw(value: i32) -> Self { Self(value) }
+    pub const fn as_raw(self) -> i32 { self.0 }
+    pub const SQUARE: Self = Self(1 as i32);
+}
+impl core::fmt::Debug for StdVideoH265AspectRatioIdc { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+match self.0 {
+    0 => f.write_str("UNSPECIFIED"),
+    0x7FFFFFFF => f.write_str("INVALID"),
+    1 => f.write_str("SQUARE"),
+    10 => f.write_str("TYPE_18_11"),
+    11 => f.write_str("TYPE_15_11"),
+    12 => f.write_str("TYPE_64_33"),
+    13 => f.write_str("TYPE_160_99"),
+    14 => f.write_str("TYPE_4_3"),
+    15 => f.write_str("TYPE_3_2"),
+    16 => f.write_str("TYPE_2_1"),
+    2 => f.write_str("TYPE_12_11"),
+    255 => f.write_str("EXTENDED_SAR"),
+    3 => f.write_str("TYPE_10_11"),
+    4 => f.write_str("TYPE_16_11"),
+    5 => f.write_str("TYPE_40_33"),
+    6 => f.write_str("TYPE_24_11"),
+    7 => f.write_str("TYPE_20_11"),
+    8 => f.write_str("TYPE_32_11"),
+    9 => f.write_str("TYPE_80_33"),
+    _ => core::fmt::Debug::fmt(&self.0, f),
+}
+} }
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StdVideoH265ChromaFormatIdc(pub i32);
+impl StdVideoH265ChromaFormatIdc {
+    pub const fn from_raw(value: i32) -> Self { Self(value) }
+    pub const fn as_raw(self) -> i32 { self.0 }
+    pub const TYPE_420: Self = Self(1 as i32);
+    pub const TYPE_444: Self = Self(3 as i32);
+}
+impl core::fmt::Debug for StdVideoH265ChromaFormatIdc { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+match self.0 {
+    0 => f.write_str("MONOCHROME"),
+    0x7FFFFFFF => f.write_str("INVALID"),
+    1 => f.write_str("TYPE_420"),
+    2 => f.write_str("TYPE_422"),
+    3 => f.write_str("TYPE_444"),
+    _ => core::fmt::Debug::fmt(&self.0, f),
+}
+} }
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoH265DecPicBufMgr {
+    pub max_latency_increase_plus1: [u32; STD_VIDEO_H265_SUBLAYERS_LIST_SIZE as usize],
+    pub max_dec_pic_buffering_minus1: [u8; STD_VIDEO_H265_SUBLAYERS_LIST_SIZE as usize],
+    pub max_num_reorder_pics: [u8; STD_VIDEO_H265_SUBLAYERS_LIST_SIZE as usize],
+}
+impl Default for StdVideoH265DecPicBufMgr { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoH265DecPicBufMgr {}
+unsafe impl Sync for StdVideoH265DecPicBufMgr {}
+impl StdVideoH265DecPicBufMgr {
+    #[inline]
+    pub fn max_latency_increase_plus1(mut self, value: [u32; STD_VIDEO_H265_SUBLAYERS_LIST_SIZE as usize]) -> Self { self.max_latency_increase_plus1 = value; self }
+    #[inline]
+    pub fn max_dec_pic_buffering_minus1(mut self, value: [u8; STD_VIDEO_H265_SUBLAYERS_LIST_SIZE as usize]) -> Self { self.max_dec_pic_buffering_minus1 = value; self }
+    #[inline]
+    pub fn max_num_reorder_pics(mut self, value: [u8; STD_VIDEO_H265_SUBLAYERS_LIST_SIZE as usize]) -> Self { self.max_num_reorder_pics = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoH265HrdFlags {
+    pub bitfield0: u32,
+}
+impl Default for StdVideoH265HrdFlags { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoH265HrdFlags {}
+unsafe impl Sync for StdVideoH265HrdFlags {}
+impl StdVideoH265HrdFlags {
+    #[inline]
+    pub fn nal_hrd_parameters_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 0)) | ((value & 0x1) << 0); self }
+    #[inline]
+    pub fn get_nal_hrd_parameters_present_flag(&self) -> u32 { (self.bitfield0 >> 0) & 0x1 }
+    #[inline]
+    pub fn vcl_hrd_parameters_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 1)) | ((value & 0x1) << 1); self }
+    #[inline]
+    pub fn get_vcl_hrd_parameters_present_flag(&self) -> u32 { (self.bitfield0 >> 1) & 0x1 }
+    #[inline]
+    pub fn sub_pic_hrd_params_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 2)) | ((value & 0x1) << 2); self }
+    #[inline]
+    pub fn get_sub_pic_hrd_params_present_flag(&self) -> u32 { (self.bitfield0 >> 2) & 0x1 }
+    #[inline]
+    pub fn sub_pic_cpb_params_in_pic_timing_sei_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 3)) | ((value & 0x1) << 3); self }
+    #[inline]
+    pub fn get_sub_pic_cpb_params_in_pic_timing_sei_flag(&self) -> u32 { (self.bitfield0 >> 3) & 0x1 }
+    #[inline]
+    pub fn fixed_pic_rate_general_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0xff << 4)) | ((value & 0xff) << 4); self }
+    #[inline]
+    pub fn get_fixed_pic_rate_general_flag(&self) -> u32 { (self.bitfield0 >> 4) & 0xff }
+    #[inline]
+    pub fn fixed_pic_rate_within_cvs_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0xff << 12)) | ((value & 0xff) << 12); self }
+    #[inline]
+    pub fn get_fixed_pic_rate_within_cvs_flag(&self) -> u32 { (self.bitfield0 >> 12) & 0xff }
+    #[inline]
+    pub fn low_delay_hrd_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0xff << 20)) | ((value & 0xff) << 20); self }
+    #[inline]
+    pub fn get_low_delay_hrd_flag(&self) -> u32 { (self.bitfield0 >> 20) & 0xff }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoH265HrdParameters {
+    pub flags: StdVideoH265HrdFlags,
+    pub tick_divisor_minus2: u8,
+    pub du_cpb_removal_delay_increment_length_minus1: u8,
+    pub dpb_output_delay_du_length_minus1: u8,
+    pub bit_rate_scale: u8,
+    pub cpb_size_scale: u8,
+    pub cpb_size_du_scale: u8,
+    pub initial_cpb_removal_delay_length_minus1: u8,
+    pub au_cpb_removal_delay_length_minus1: u8,
+    pub dpb_output_delay_length_minus1: u8,
+    pub cpb_cnt_minus1: [u8; STD_VIDEO_H265_SUBLAYERS_LIST_SIZE as usize],
+    pub elemental_duration_in_tc_minus1: [u16; STD_VIDEO_H265_SUBLAYERS_LIST_SIZE as usize],
+    pub reserved: [u16; 3 as usize],
+    pub p_sub_layer_hrd_parameters_nal: *const StdVideoH265SubLayerHrdParameters,
+    pub p_sub_layer_hrd_parameters_vcl: *const StdVideoH265SubLayerHrdParameters,
+}
+impl Default for StdVideoH265HrdParameters { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoH265HrdParameters {}
+unsafe impl Sync for StdVideoH265HrdParameters {}
+impl StdVideoH265HrdParameters {
+    #[inline]
+    pub fn flags(mut self, value: StdVideoH265HrdFlags) -> Self { self.flags = value; self }
+    #[inline]
+    pub fn tick_divisor_minus2(mut self, value: u8) -> Self { self.tick_divisor_minus2 = value; self }
+    #[inline]
+    pub fn du_cpb_removal_delay_increment_length_minus1(mut self, value: u8) -> Self { self.du_cpb_removal_delay_increment_length_minus1 = value; self }
+    #[inline]
+    pub fn dpb_output_delay_du_length_minus1(mut self, value: u8) -> Self { self.dpb_output_delay_du_length_minus1 = value; self }
+    #[inline]
+    pub fn bit_rate_scale(mut self, value: u8) -> Self { self.bit_rate_scale = value; self }
+    #[inline]
+    pub fn cpb_size_scale(mut self, value: u8) -> Self { self.cpb_size_scale = value; self }
+    #[inline]
+    pub fn cpb_size_du_scale(mut self, value: u8) -> Self { self.cpb_size_du_scale = value; self }
+    #[inline]
+    pub fn initial_cpb_removal_delay_length_minus1(mut self, value: u8) -> Self { self.initial_cpb_removal_delay_length_minus1 = value; self }
+    #[inline]
+    pub fn au_cpb_removal_delay_length_minus1(mut self, value: u8) -> Self { self.au_cpb_removal_delay_length_minus1 = value; self }
+    #[inline]
+    pub fn dpb_output_delay_length_minus1(mut self, value: u8) -> Self { self.dpb_output_delay_length_minus1 = value; self }
+    #[inline]
+    pub fn cpb_cnt_minus1(mut self, value: [u8; STD_VIDEO_H265_SUBLAYERS_LIST_SIZE as usize]) -> Self { self.cpb_cnt_minus1 = value; self }
+    #[inline]
+    pub fn elemental_duration_in_tc_minus1(mut self, value: [u16; STD_VIDEO_H265_SUBLAYERS_LIST_SIZE as usize]) -> Self { self.elemental_duration_in_tc_minus1 = value; self }
+    #[inline]
+    pub fn reserved(mut self, value: [u16; 3 as usize]) -> Self { self.reserved = value; self }
+}
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StdVideoH265LevelIdc(pub i32);
+impl StdVideoH265LevelIdc {
+    pub const fn from_raw(value: i32) -> Self { Self(value) }
+    pub const fn as_raw(self) -> i32 { self.0 }
+    pub const TYPE_5_1: Self = Self(8 as i32);
+    pub const TYPE_5_2: Self = Self(9 as i32);
+    pub const TYPE_6_0: Self = Self(10 as i32);
+    pub const TYPE_6_1: Self = Self(11 as i32);
+    pub const TYPE_6_2: Self = Self(12 as i32);
+}
+impl core::fmt::Debug for StdVideoH265LevelIdc { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+match self.0 {
+    0 => f.write_str("TYPE_1_0"),
+    0x7FFFFFFF => f.write_str("INVALID"),
+    1 => f.write_str("TYPE_2_0"),
+    10 => f.write_str("TYPE_6_0"),
+    11 => f.write_str("TYPE_6_1"),
+    12 => f.write_str("TYPE_6_2"),
+    2 => f.write_str("TYPE_2_1"),
+    3 => f.write_str("TYPE_3_0"),
+    4 => f.write_str("TYPE_3_1"),
+    5 => f.write_str("TYPE_4_0"),
+    6 => f.write_str("TYPE_4_1"),
+    7 => f.write_str("TYPE_5_0"),
+    8 => f.write_str("TYPE_5_1"),
+    9 => f.write_str("TYPE_5_2"),
+    _ => core::fmt::Debug::fmt(&self.0, f),
+}
+} }
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoH265LongTermRefPicsSps {
+    pub used_by_curr_pic_lt_sps_flag: u32,
+    pub lt_ref_pic_poc_lsb_sps: [u32; STD_VIDEO_H265_MAX_LONG_TERM_REF_PICS_SPS as usize],
+}
+impl Default for StdVideoH265LongTermRefPicsSps { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoH265LongTermRefPicsSps {}
+unsafe impl Sync for StdVideoH265LongTermRefPicsSps {}
+impl StdVideoH265LongTermRefPicsSps {
+    #[inline]
+    pub fn used_by_curr_pic_lt_sps_flag(mut self, value: u32) -> Self { self.used_by_curr_pic_lt_sps_flag = value; self }
+    #[inline]
+    pub fn lt_ref_pic_poc_lsb_sps(mut self, value: [u32; STD_VIDEO_H265_MAX_LONG_TERM_REF_PICS_SPS as usize]) -> Self { self.lt_ref_pic_poc_lsb_sps = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoH265PictureParameterSet {
+    pub flags: StdVideoH265PpsFlags,
+    pub pps_pic_parameter_set_id: u8,
+    pub pps_seq_parameter_set_id: u8,
+    pub sps_video_parameter_set_id: u8,
+    pub num_extra_slice_header_bits: u8,
+    pub num_ref_idx_l0_default_active_minus1: u8,
+    pub num_ref_idx_l1_default_active_minus1: u8,
+    pub init_qp_minus26: i8,
+    pub diff_cu_qp_delta_depth: u8,
+    pub pps_cb_qp_offset: i8,
+    pub pps_cr_qp_offset: i8,
+    pub pps_beta_offset_div2: i8,
+    pub pps_tc_offset_div2: i8,
+    pub log2_parallel_merge_level_minus2: u8,
+    pub log2_max_transform_skip_block_size_minus2: u8,
+    pub diff_cu_chroma_qp_offset_depth: u8,
+    pub chroma_qp_offset_list_len_minus1: u8,
+    pub cb_qp_offset_list: [i8; STD_VIDEO_H265_CHROMA_QP_OFFSET_LIST_SIZE as usize],
+    pub cr_qp_offset_list: [i8; STD_VIDEO_H265_CHROMA_QP_OFFSET_LIST_SIZE as usize],
+    pub log2_sao_offset_scale_luma: u8,
+    pub log2_sao_offset_scale_chroma: u8,
+    pub pps_act_y_qp_offset_plus5: i8,
+    pub pps_act_cb_qp_offset_plus5: i8,
+    pub pps_act_cr_qp_offset_plus3: i8,
+    pub pps_num_palette_predictor_initializers: u8,
+    pub luma_bit_depth_entry_minus8: u8,
+    pub chroma_bit_depth_entry_minus8: u8,
+    pub num_tile_columns_minus1: u8,
+    pub num_tile_rows_minus1: u8,
+    pub reserved1: u8,
+    pub reserved2: u8,
+    pub column_width_minus1: [u16; STD_VIDEO_H265_CHROMA_QP_OFFSET_TILE_COLS_LIST_SIZE as usize],
+    pub row_height_minus1: [u16; STD_VIDEO_H265_CHROMA_QP_OFFSET_TILE_ROWS_LIST_SIZE as usize],
+    pub reserved3: u32,
+    pub p_scaling_lists: *const StdVideoH265ScalingLists,
+    pub p_predictor_palette_entries: *const StdVideoH265PredictorPaletteEntries,
+}
+impl Default for StdVideoH265PictureParameterSet { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoH265PictureParameterSet {}
+unsafe impl Sync for StdVideoH265PictureParameterSet {}
+impl StdVideoH265PictureParameterSet {
+    #[inline]
+    pub fn flags(mut self, value: StdVideoH265PpsFlags) -> Self { self.flags = value; self }
+    #[inline]
+    pub fn pps_pic_parameter_set_id(mut self, value: u8) -> Self { self.pps_pic_parameter_set_id = value; self }
+    #[inline]
+    pub fn pps_seq_parameter_set_id(mut self, value: u8) -> Self { self.pps_seq_parameter_set_id = value; self }
+    #[inline]
+    pub fn sps_video_parameter_set_id(mut self, value: u8) -> Self { self.sps_video_parameter_set_id = value; self }
+    #[inline]
+    pub fn num_extra_slice_header_bits(mut self, value: u8) -> Self { self.num_extra_slice_header_bits = value; self }
+    #[inline]
+    pub fn num_ref_idx_l0_default_active_minus1(mut self, value: u8) -> Self { self.num_ref_idx_l0_default_active_minus1 = value; self }
+    #[inline]
+    pub fn num_ref_idx_l1_default_active_minus1(mut self, value: u8) -> Self { self.num_ref_idx_l1_default_active_minus1 = value; self }
+    #[inline]
+    pub fn init_qp_minus26(mut self, value: i8) -> Self { self.init_qp_minus26 = value; self }
+    #[inline]
+    pub fn diff_cu_qp_delta_depth(mut self, value: u8) -> Self { self.diff_cu_qp_delta_depth = value; self }
+    #[inline]
+    pub fn pps_cb_qp_offset(mut self, value: i8) -> Self { self.pps_cb_qp_offset = value; self }
+    #[inline]
+    pub fn pps_cr_qp_offset(mut self, value: i8) -> Self { self.pps_cr_qp_offset = value; self }
+    #[inline]
+    pub fn pps_beta_offset_div2(mut self, value: i8) -> Self { self.pps_beta_offset_div2 = value; self }
+    #[inline]
+    pub fn pps_tc_offset_div2(mut self, value: i8) -> Self { self.pps_tc_offset_div2 = value; self }
+    #[inline]
+    pub fn log2_parallel_merge_level_minus2(mut self, value: u8) -> Self { self.log2_parallel_merge_level_minus2 = value; self }
+    #[inline]
+    pub fn log2_max_transform_skip_block_size_minus2(mut self, value: u8) -> Self { self.log2_max_transform_skip_block_size_minus2 = value; self }
+    #[inline]
+    pub fn diff_cu_chroma_qp_offset_depth(mut self, value: u8) -> Self { self.diff_cu_chroma_qp_offset_depth = value; self }
+    #[inline]
+    pub fn chroma_qp_offset_list_len_minus1(mut self, value: u8) -> Self { self.chroma_qp_offset_list_len_minus1 = value; self }
+    #[inline]
+    pub fn cb_qp_offset_list(mut self, value: [i8; STD_VIDEO_H265_CHROMA_QP_OFFSET_LIST_SIZE as usize]) -> Self { self.cb_qp_offset_list = value; self }
+    #[inline]
+    pub fn cr_qp_offset_list(mut self, value: [i8; STD_VIDEO_H265_CHROMA_QP_OFFSET_LIST_SIZE as usize]) -> Self { self.cr_qp_offset_list = value; self }
+    #[inline]
+    pub fn log2_sao_offset_scale_luma(mut self, value: u8) -> Self { self.log2_sao_offset_scale_luma = value; self }
+    #[inline]
+    pub fn log2_sao_offset_scale_chroma(mut self, value: u8) -> Self { self.log2_sao_offset_scale_chroma = value; self }
+    #[inline]
+    pub fn pps_act_y_qp_offset_plus5(mut self, value: i8) -> Self { self.pps_act_y_qp_offset_plus5 = value; self }
+    #[inline]
+    pub fn pps_act_cb_qp_offset_plus5(mut self, value: i8) -> Self { self.pps_act_cb_qp_offset_plus5 = value; self }
+    #[inline]
+    pub fn pps_act_cr_qp_offset_plus3(mut self, value: i8) -> Self { self.pps_act_cr_qp_offset_plus3 = value; self }
+    #[inline]
+    pub fn pps_num_palette_predictor_initializers(mut self, value: u8) -> Self { self.pps_num_palette_predictor_initializers = value; self }
+    #[inline]
+    pub fn luma_bit_depth_entry_minus8(mut self, value: u8) -> Self { self.luma_bit_depth_entry_minus8 = value; self }
+    #[inline]
+    pub fn chroma_bit_depth_entry_minus8(mut self, value: u8) -> Self { self.chroma_bit_depth_entry_minus8 = value; self }
+    #[inline]
+    pub fn num_tile_columns_minus1(mut self, value: u8) -> Self { self.num_tile_columns_minus1 = value; self }
+    #[inline]
+    pub fn num_tile_rows_minus1(mut self, value: u8) -> Self { self.num_tile_rows_minus1 = value; self }
+    #[inline]
+    pub fn reserved1(mut self, value: u8) -> Self { self.reserved1 = value; self }
+    #[inline]
+    pub fn reserved2(mut self, value: u8) -> Self { self.reserved2 = value; self }
+    #[inline]
+    pub fn column_width_minus1(mut self, value: [u16; STD_VIDEO_H265_CHROMA_QP_OFFSET_TILE_COLS_LIST_SIZE as usize]) -> Self { self.column_width_minus1 = value; self }
+    #[inline]
+    pub fn row_height_minus1(mut self, value: [u16; STD_VIDEO_H265_CHROMA_QP_OFFSET_TILE_ROWS_LIST_SIZE as usize]) -> Self { self.row_height_minus1 = value; self }
+    #[inline]
+    pub fn reserved3(mut self, value: u32) -> Self { self.reserved3 = value; self }
+    #[inline]
+    pub fn scaling_lists(mut self, value: *const StdVideoH265ScalingLists) -> Self { self.p_scaling_lists = value; self }
+    #[inline]
+    pub fn predictor_palette_entries(mut self, value: *const StdVideoH265PredictorPaletteEntries) -> Self { self.p_predictor_palette_entries = value; self }
+}
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StdVideoH265PictureType(pub i32);
+impl StdVideoH265PictureType {
+    pub const fn from_raw(value: i32) -> Self { Self(value) }
+    pub const fn as_raw(self) -> i32 { self.0 }
+    pub const IDR: Self = Self(3 as i32);
+    pub const P: Self = Self(0 as i32);
+}
+impl core::fmt::Debug for StdVideoH265PictureType { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+match self.0 {
+    0 => f.write_str("P"),
+    0x7FFFFFFF => f.write_str("INVALID"),
+    1 => f.write_str("B"),
+    2 => f.write_str("I"),
+    3 => f.write_str("IDR"),
+    _ => core::fmt::Debug::fmt(&self.0, f),
+}
+} }
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoH265PpsFlags {
+    pub bitfield0: u32,
+}
+impl Default for StdVideoH265PpsFlags { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoH265PpsFlags {}
+unsafe impl Sync for StdVideoH265PpsFlags {}
+impl StdVideoH265PpsFlags {
+    #[inline]
+    pub fn dependent_slice_segments_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 0)) | ((value & 0x1) << 0); self }
+    #[inline]
+    pub fn get_dependent_slice_segments_enabled_flag(&self) -> u32 { (self.bitfield0 >> 0) & 0x1 }
+    #[inline]
+    pub fn output_flag_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 1)) | ((value & 0x1) << 1); self }
+    #[inline]
+    pub fn get_output_flag_present_flag(&self) -> u32 { (self.bitfield0 >> 1) & 0x1 }
+    #[inline]
+    pub fn sign_data_hiding_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 2)) | ((value & 0x1) << 2); self }
+    #[inline]
+    pub fn get_sign_data_hiding_enabled_flag(&self) -> u32 { (self.bitfield0 >> 2) & 0x1 }
+    #[inline]
+    pub fn cabac_init_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 3)) | ((value & 0x1) << 3); self }
+    #[inline]
+    pub fn get_cabac_init_present_flag(&self) -> u32 { (self.bitfield0 >> 3) & 0x1 }
+    #[inline]
+    pub fn constrained_intra_pred_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 4)) | ((value & 0x1) << 4); self }
+    #[inline]
+    pub fn get_constrained_intra_pred_flag(&self) -> u32 { (self.bitfield0 >> 4) & 0x1 }
+    #[inline]
+    pub fn transform_skip_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 5)) | ((value & 0x1) << 5); self }
+    #[inline]
+    pub fn get_transform_skip_enabled_flag(&self) -> u32 { (self.bitfield0 >> 5) & 0x1 }
+    #[inline]
+    pub fn cu_qp_delta_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 6)) | ((value & 0x1) << 6); self }
+    #[inline]
+    pub fn get_cu_qp_delta_enabled_flag(&self) -> u32 { (self.bitfield0 >> 6) & 0x1 }
+    #[inline]
+    pub fn pps_slice_chroma_qp_offsets_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 7)) | ((value & 0x1) << 7); self }
+    #[inline]
+    pub fn get_pps_slice_chroma_qp_offsets_present_flag(&self) -> u32 { (self.bitfield0 >> 7) & 0x1 }
+    #[inline]
+    pub fn weighted_pred_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 8)) | ((value & 0x1) << 8); self }
+    #[inline]
+    pub fn get_weighted_pred_flag(&self) -> u32 { (self.bitfield0 >> 8) & 0x1 }
+    #[inline]
+    pub fn weighted_bipred_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 9)) | ((value & 0x1) << 9); self }
+    #[inline]
+    pub fn get_weighted_bipred_flag(&self) -> u32 { (self.bitfield0 >> 9) & 0x1 }
+    #[inline]
+    pub fn transquant_bypass_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 10)) | ((value & 0x1) << 10); self }
+    #[inline]
+    pub fn get_transquant_bypass_enabled_flag(&self) -> u32 { (self.bitfield0 >> 10) & 0x1 }
+    #[inline]
+    pub fn tiles_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 11)) | ((value & 0x1) << 11); self }
+    #[inline]
+    pub fn get_tiles_enabled_flag(&self) -> u32 { (self.bitfield0 >> 11) & 0x1 }
+    #[inline]
+    pub fn entropy_coding_sync_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 12)) | ((value & 0x1) << 12); self }
+    #[inline]
+    pub fn get_entropy_coding_sync_enabled_flag(&self) -> u32 { (self.bitfield0 >> 12) & 0x1 }
+    #[inline]
+    pub fn uniform_spacing_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 13)) | ((value & 0x1) << 13); self }
+    #[inline]
+    pub fn get_uniform_spacing_flag(&self) -> u32 { (self.bitfield0 >> 13) & 0x1 }
+    #[inline]
+    pub fn loop_filter_across_tiles_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 14)) | ((value & 0x1) << 14); self }
+    #[inline]
+    pub fn get_loop_filter_across_tiles_enabled_flag(&self) -> u32 { (self.bitfield0 >> 14) & 0x1 }
+    #[inline]
+    pub fn pps_loop_filter_across_slices_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 15)) | ((value & 0x1) << 15); self }
+    #[inline]
+    pub fn get_pps_loop_filter_across_slices_enabled_flag(&self) -> u32 { (self.bitfield0 >> 15) & 0x1 }
+    #[inline]
+    pub fn deblocking_filter_control_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 16)) | ((value & 0x1) << 16); self }
+    #[inline]
+    pub fn get_deblocking_filter_control_present_flag(&self) -> u32 { (self.bitfield0 >> 16) & 0x1 }
+    #[inline]
+    pub fn deblocking_filter_override_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 17)) | ((value & 0x1) << 17); self }
+    #[inline]
+    pub fn get_deblocking_filter_override_enabled_flag(&self) -> u32 { (self.bitfield0 >> 17) & 0x1 }
+    #[inline]
+    pub fn pps_deblocking_filter_disabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 18)) | ((value & 0x1) << 18); self }
+    #[inline]
+    pub fn get_pps_deblocking_filter_disabled_flag(&self) -> u32 { (self.bitfield0 >> 18) & 0x1 }
+    #[inline]
+    pub fn pps_scaling_list_data_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 19)) | ((value & 0x1) << 19); self }
+    #[inline]
+    pub fn get_pps_scaling_list_data_present_flag(&self) -> u32 { (self.bitfield0 >> 19) & 0x1 }
+    #[inline]
+    pub fn lists_modification_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 20)) | ((value & 0x1) << 20); self }
+    #[inline]
+    pub fn get_lists_modification_present_flag(&self) -> u32 { (self.bitfield0 >> 20) & 0x1 }
+    #[inline]
+    pub fn slice_segment_header_extension_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 21)) | ((value & 0x1) << 21); self }
+    #[inline]
+    pub fn get_slice_segment_header_extension_present_flag(&self) -> u32 { (self.bitfield0 >> 21) & 0x1 }
+    #[inline]
+    pub fn pps_extension_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 22)) | ((value & 0x1) << 22); self }
+    #[inline]
+    pub fn get_pps_extension_present_flag(&self) -> u32 { (self.bitfield0 >> 22) & 0x1 }
+    #[inline]
+    pub fn cross_component_prediction_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 23)) | ((value & 0x1) << 23); self }
+    #[inline]
+    pub fn get_cross_component_prediction_enabled_flag(&self) -> u32 { (self.bitfield0 >> 23) & 0x1 }
+    #[inline]
+    pub fn chroma_qp_offset_list_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 24)) | ((value & 0x1) << 24); self }
+    #[inline]
+    pub fn get_chroma_qp_offset_list_enabled_flag(&self) -> u32 { (self.bitfield0 >> 24) & 0x1 }
+    #[inline]
+    pub fn pps_curr_pic_ref_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 25)) | ((value & 0x1) << 25); self }
+    #[inline]
+    pub fn get_pps_curr_pic_ref_enabled_flag(&self) -> u32 { (self.bitfield0 >> 25) & 0x1 }
+    #[inline]
+    pub fn residual_adaptive_colour_transform_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 26)) | ((value & 0x1) << 26); self }
+    #[inline]
+    pub fn get_residual_adaptive_colour_transform_enabled_flag(&self) -> u32 { (self.bitfield0 >> 26) & 0x1 }
+    #[inline]
+    pub fn pps_slice_act_qp_offsets_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 27)) | ((value & 0x1) << 27); self }
+    #[inline]
+    pub fn get_pps_slice_act_qp_offsets_present_flag(&self) -> u32 { (self.bitfield0 >> 27) & 0x1 }
+    #[inline]
+    pub fn pps_palette_predictor_initializers_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 28)) | ((value & 0x1) << 28); self }
+    #[inline]
+    pub fn get_pps_palette_predictor_initializers_present_flag(&self) -> u32 { (self.bitfield0 >> 28) & 0x1 }
+    #[inline]
+    pub fn monochrome_palette_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 29)) | ((value & 0x1) << 29); self }
+    #[inline]
+    pub fn get_monochrome_palette_flag(&self) -> u32 { (self.bitfield0 >> 29) & 0x1 }
+    #[inline]
+    pub fn pps_range_extension_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 30)) | ((value & 0x1) << 30); self }
+    #[inline]
+    pub fn get_pps_range_extension_flag(&self) -> u32 { (self.bitfield0 >> 30) & 0x1 }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoH265PredictorPaletteEntries {
+    pub predictor_palette_entries: [[u16; STD_VIDEO_H265_PREDICTOR_PALETTE_COMP_ENTRIES_LIST_SIZE as usize]; STD_VIDEO_H265_PREDICTOR_PALETTE_COMPONENTS_LIST_SIZE as usize],
+}
+impl Default for StdVideoH265PredictorPaletteEntries { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoH265PredictorPaletteEntries {}
+unsafe impl Sync for StdVideoH265PredictorPaletteEntries {}
+impl StdVideoH265PredictorPaletteEntries {
+    #[inline]
+    pub fn predictor_palette_entries(mut self, value: [[u16; STD_VIDEO_H265_PREDICTOR_PALETTE_COMP_ENTRIES_LIST_SIZE as usize]; STD_VIDEO_H265_PREDICTOR_PALETTE_COMPONENTS_LIST_SIZE as usize]) -> Self { self.predictor_palette_entries = value; self }
+}
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StdVideoH265ProfileIdc(pub i32);
+impl StdVideoH265ProfileIdc {
+    pub const fn from_raw(value: i32) -> Self { Self(value) }
+    pub const fn as_raw(self) -> i32 { self.0 }
+    pub const FORMAT_RANGE_EXTENSIONS: Self = Self(4 as i32);
+    pub const MAIN: Self = Self(1 as i32);
+}
+impl core::fmt::Debug for StdVideoH265ProfileIdc { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+match self.0 {
+    0x7FFFFFFF => f.write_str("INVALID"),
+    1 => f.write_str("MAIN"),
+    2 => f.write_str("MAIN_10"),
+    3 => f.write_str("MAIN_STILL_PICTURE"),
+    4 => f.write_str("FORMAT_RANGE_EXTENSIONS"),
+    9 => f.write_str("SCC_EXTENSIONS"),
+    _ => core::fmt::Debug::fmt(&self.0, f),
+}
+} }
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoH265ProfileTierLevel {
+    pub flags: StdVideoH265ProfileTierLevelFlags,
+    pub general_profile_idc: StdVideoH265ProfileIdc,
+    pub general_level_idc: StdVideoH265LevelIdc,
+}
+impl Default for StdVideoH265ProfileTierLevel { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoH265ProfileTierLevel {}
+unsafe impl Sync for StdVideoH265ProfileTierLevel {}
+impl StdVideoH265ProfileTierLevel {
+    #[inline]
+    pub fn flags(mut self, value: StdVideoH265ProfileTierLevelFlags) -> Self { self.flags = value; self }
+    #[inline]
+    pub fn general_profile_idc(mut self, value: StdVideoH265ProfileIdc) -> Self { self.general_profile_idc = value; self }
+    #[inline]
+    pub fn general_level_idc(mut self, value: StdVideoH265LevelIdc) -> Self { self.general_level_idc = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoH265ProfileTierLevelFlags {
+    pub bitfield0: u32,
+}
+impl Default for StdVideoH265ProfileTierLevelFlags { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoH265ProfileTierLevelFlags {}
+unsafe impl Sync for StdVideoH265ProfileTierLevelFlags {}
+impl StdVideoH265ProfileTierLevelFlags {
+    #[inline]
+    pub fn general_tier_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 0)) | ((value & 0x1) << 0); self }
+    #[inline]
+    pub fn get_general_tier_flag(&self) -> u32 { (self.bitfield0 >> 0) & 0x1 }
+    #[inline]
+    pub fn general_progressive_source_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 1)) | ((value & 0x1) << 1); self }
+    #[inline]
+    pub fn get_general_progressive_source_flag(&self) -> u32 { (self.bitfield0 >> 1) & 0x1 }
+    #[inline]
+    pub fn general_interlaced_source_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 2)) | ((value & 0x1) << 2); self }
+    #[inline]
+    pub fn get_general_interlaced_source_flag(&self) -> u32 { (self.bitfield0 >> 2) & 0x1 }
+    #[inline]
+    pub fn general_non_packed_constraint_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 3)) | ((value & 0x1) << 3); self }
+    #[inline]
+    pub fn get_general_non_packed_constraint_flag(&self) -> u32 { (self.bitfield0 >> 3) & 0x1 }
+    #[inline]
+    pub fn general_frame_only_constraint_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 4)) | ((value & 0x1) << 4); self }
+    #[inline]
+    pub fn get_general_frame_only_constraint_flag(&self) -> u32 { (self.bitfield0 >> 4) & 0x1 }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoH265ScalingLists {
+    pub scaling_list4x4: [[u8; STD_VIDEO_H265_SCALING_LIST_4X4_NUM_ELEMENTS as usize]; STD_VIDEO_H265_SCALING_LIST_4X4_NUM_LISTS as usize],
+    pub scaling_list8x8: [[u8; STD_VIDEO_H265_SCALING_LIST_8X8_NUM_ELEMENTS as usize]; STD_VIDEO_H265_SCALING_LIST_8X8_NUM_LISTS as usize],
+    pub scaling_list16x16: [[u8; STD_VIDEO_H265_SCALING_LIST_16X16_NUM_ELEMENTS as usize]; STD_VIDEO_H265_SCALING_LIST_16X16_NUM_LISTS as usize],
+    pub scaling_list32x32: [[u8; STD_VIDEO_H265_SCALING_LIST_32X32_NUM_ELEMENTS as usize]; STD_VIDEO_H265_SCALING_LIST_32X32_NUM_LISTS as usize],
+    pub scaling_list_dc_coef16x16: [u8; STD_VIDEO_H265_SCALING_LIST_16X16_NUM_LISTS as usize],
+    pub scaling_list_dc_coef32x32: [u8; STD_VIDEO_H265_SCALING_LIST_32X32_NUM_LISTS as usize],
+}
+impl Default for StdVideoH265ScalingLists { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoH265ScalingLists {}
+unsafe impl Sync for StdVideoH265ScalingLists {}
+impl StdVideoH265ScalingLists {
+    #[inline]
+    pub fn scaling_list4x4(mut self, value: [[u8; STD_VIDEO_H265_SCALING_LIST_4X4_NUM_ELEMENTS as usize]; STD_VIDEO_H265_SCALING_LIST_4X4_NUM_LISTS as usize]) -> Self { self.scaling_list4x4 = value; self }
+    #[inline]
+    pub fn scaling_list8x8(mut self, value: [[u8; STD_VIDEO_H265_SCALING_LIST_8X8_NUM_ELEMENTS as usize]; STD_VIDEO_H265_SCALING_LIST_8X8_NUM_LISTS as usize]) -> Self { self.scaling_list8x8 = value; self }
+    #[inline]
+    pub fn scaling_list16x16(mut self, value: [[u8; STD_VIDEO_H265_SCALING_LIST_16X16_NUM_ELEMENTS as usize]; STD_VIDEO_H265_SCALING_LIST_16X16_NUM_LISTS as usize]) -> Self { self.scaling_list16x16 = value; self }
+    #[inline]
+    pub fn scaling_list32x32(mut self, value: [[u8; STD_VIDEO_H265_SCALING_LIST_32X32_NUM_ELEMENTS as usize]; STD_VIDEO_H265_SCALING_LIST_32X32_NUM_LISTS as usize]) -> Self { self.scaling_list32x32 = value; self }
+    #[inline]
+    pub fn scaling_list_dc_coef16x16(mut self, value: [u8; STD_VIDEO_H265_SCALING_LIST_16X16_NUM_LISTS as usize]) -> Self { self.scaling_list_dc_coef16x16 = value; self }
+    #[inline]
+    pub fn scaling_list_dc_coef32x32(mut self, value: [u8; STD_VIDEO_H265_SCALING_LIST_32X32_NUM_LISTS as usize]) -> Self { self.scaling_list_dc_coef32x32 = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoH265SequenceParameterSet {
+    pub flags: StdVideoH265SpsFlags,
+    pub chroma_format_idc: StdVideoH265ChromaFormatIdc,
+    pub pic_width_in_luma_samples: u32,
+    pub pic_height_in_luma_samples: u32,
+    pub sps_video_parameter_set_id: u8,
+    pub sps_max_sub_layers_minus1: u8,
+    pub sps_seq_parameter_set_id: u8,
+    pub bit_depth_luma_minus8: u8,
+    pub bit_depth_chroma_minus8: u8,
+    pub log2_max_pic_order_cnt_lsb_minus4: u8,
+    pub log2_min_luma_coding_block_size_minus3: u8,
+    pub log2_diff_max_min_luma_coding_block_size: u8,
+    pub log2_min_luma_transform_block_size_minus2: u8,
+    pub log2_diff_max_min_luma_transform_block_size: u8,
+    pub max_transform_hierarchy_depth_inter: u8,
+    pub max_transform_hierarchy_depth_intra: u8,
+    pub num_short_term_ref_pic_sets: u8,
+    pub num_long_term_ref_pics_sps: u8,
+    pub pcm_sample_bit_depth_luma_minus1: u8,
+    pub pcm_sample_bit_depth_chroma_minus1: u8,
+    pub log2_min_pcm_luma_coding_block_size_minus3: u8,
+    pub log2_diff_max_min_pcm_luma_coding_block_size: u8,
+    pub reserved1: u8,
+    pub reserved2: u8,
+    pub palette_max_size: u8,
+    pub delta_palette_max_predictor_size: u8,
+    pub motion_vector_resolution_control_idc: u8,
+    pub sps_num_palette_predictor_initializers_minus1: u8,
+    pub conf_win_left_offset: u32,
+    pub conf_win_right_offset: u32,
+    pub conf_win_top_offset: u32,
+    pub conf_win_bottom_offset: u32,
+    pub p_profile_tier_level: *const StdVideoH265ProfileTierLevel,
+    pub p_dec_pic_buf_mgr: *const StdVideoH265DecPicBufMgr,
+    pub p_scaling_lists: *const StdVideoH265ScalingLists,
+    pub p_short_term_ref_pic_set: *const StdVideoH265ShortTermRefPicSet,
+    pub p_long_term_ref_pics_sps: *const StdVideoH265LongTermRefPicsSps,
+    pub p_sequence_parameter_set_vui: *const StdVideoH265SequenceParameterSetVui,
+    pub p_predictor_palette_entries: *const StdVideoH265PredictorPaletteEntries,
+}
+impl Default for StdVideoH265SequenceParameterSet { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoH265SequenceParameterSet {}
+unsafe impl Sync for StdVideoH265SequenceParameterSet {}
+impl StdVideoH265SequenceParameterSet {
+    #[inline]
+    pub fn flags(mut self, value: StdVideoH265SpsFlags) -> Self { self.flags = value; self }
+    #[inline]
+    pub fn chroma_format_idc(mut self, value: StdVideoH265ChromaFormatIdc) -> Self { self.chroma_format_idc = value; self }
+    #[inline]
+    pub fn pic_width_in_luma_samples(mut self, value: u32) -> Self { self.pic_width_in_luma_samples = value; self }
+    #[inline]
+    pub fn pic_height_in_luma_samples(mut self, value: u32) -> Self { self.pic_height_in_luma_samples = value; self }
+    #[inline]
+    pub fn sps_video_parameter_set_id(mut self, value: u8) -> Self { self.sps_video_parameter_set_id = value; self }
+    #[inline]
+    pub fn sps_max_sub_layers_minus1(mut self, value: u8) -> Self { self.sps_max_sub_layers_minus1 = value; self }
+    #[inline]
+    pub fn sps_seq_parameter_set_id(mut self, value: u8) -> Self { self.sps_seq_parameter_set_id = value; self }
+    #[inline]
+    pub fn bit_depth_luma_minus8(mut self, value: u8) -> Self { self.bit_depth_luma_minus8 = value; self }
+    #[inline]
+    pub fn bit_depth_chroma_minus8(mut self, value: u8) -> Self { self.bit_depth_chroma_minus8 = value; self }
+    #[inline]
+    pub fn log2_max_pic_order_cnt_lsb_minus4(mut self, value: u8) -> Self { self.log2_max_pic_order_cnt_lsb_minus4 = value; self }
+    #[inline]
+    pub fn log2_min_luma_coding_block_size_minus3(mut self, value: u8) -> Self { self.log2_min_luma_coding_block_size_minus3 = value; self }
+    #[inline]
+    pub fn log2_diff_max_min_luma_coding_block_size(mut self, value: u8) -> Self { self.log2_diff_max_min_luma_coding_block_size = value; self }
+    #[inline]
+    pub fn log2_min_luma_transform_block_size_minus2(mut self, value: u8) -> Self { self.log2_min_luma_transform_block_size_minus2 = value; self }
+    #[inline]
+    pub fn log2_diff_max_min_luma_transform_block_size(mut self, value: u8) -> Self { self.log2_diff_max_min_luma_transform_block_size = value; self }
+    #[inline]
+    pub fn max_transform_hierarchy_depth_inter(mut self, value: u8) -> Self { self.max_transform_hierarchy_depth_inter = value; self }
+    #[inline]
+    pub fn max_transform_hierarchy_depth_intra(mut self, value: u8) -> Self { self.max_transform_hierarchy_depth_intra = value; self }
+    #[inline]
+    pub fn num_short_term_ref_pic_sets(mut self, value: u8) -> Self { self.num_short_term_ref_pic_sets = value; self }
+    #[inline]
+    pub fn num_long_term_ref_pics_sps(mut self, value: u8) -> Self { self.num_long_term_ref_pics_sps = value; self }
+    #[inline]
+    pub fn pcm_sample_bit_depth_luma_minus1(mut self, value: u8) -> Self { self.pcm_sample_bit_depth_luma_minus1 = value; self }
+    #[inline]
+    pub fn pcm_sample_bit_depth_chroma_minus1(mut self, value: u8) -> Self { self.pcm_sample_bit_depth_chroma_minus1 = value; self }
+    #[inline]
+    pub fn log2_min_pcm_luma_coding_block_size_minus3(mut self, value: u8) -> Self { self.log2_min_pcm_luma_coding_block_size_minus3 = value; self }
+    #[inline]
+    pub fn log2_diff_max_min_pcm_luma_coding_block_size(mut self, value: u8) -> Self { self.log2_diff_max_min_pcm_luma_coding_block_size = value; self }
+    #[inline]
+    pub fn reserved1(mut self, value: u8) -> Self { self.reserved1 = value; self }
+    #[inline]
+    pub fn reserved2(mut self, value: u8) -> Self { self.reserved2 = value; self }
+    #[inline]
+    pub fn palette_max_size(mut self, value: u8) -> Self { self.palette_max_size = value; self }
+    #[inline]
+    pub fn delta_palette_max_predictor_size(mut self, value: u8) -> Self { self.delta_palette_max_predictor_size = value; self }
+    #[inline]
+    pub fn motion_vector_resolution_control_idc(mut self, value: u8) -> Self { self.motion_vector_resolution_control_idc = value; self }
+    #[inline]
+    pub fn sps_num_palette_predictor_initializers_minus1(mut self, value: u8) -> Self { self.sps_num_palette_predictor_initializers_minus1 = value; self }
+    #[inline]
+    pub fn conf_win_left_offset(mut self, value: u32) -> Self { self.conf_win_left_offset = value; self }
+    #[inline]
+    pub fn conf_win_right_offset(mut self, value: u32) -> Self { self.conf_win_right_offset = value; self }
+    #[inline]
+    pub fn conf_win_top_offset(mut self, value: u32) -> Self { self.conf_win_top_offset = value; self }
+    #[inline]
+    pub fn conf_win_bottom_offset(mut self, value: u32) -> Self { self.conf_win_bottom_offset = value; self }
+    #[inline]
+    pub fn profile_tier_level(mut self, value: *const StdVideoH265ProfileTierLevel) -> Self { self.p_profile_tier_level = value; self }
+    #[inline]
+    pub fn dec_pic_buf_mgr(mut self, value: *const StdVideoH265DecPicBufMgr) -> Self { self.p_dec_pic_buf_mgr = value; self }
+    #[inline]
+    pub fn scaling_lists(mut self, value: *const StdVideoH265ScalingLists) -> Self { self.p_scaling_lists = value; self }
+    #[inline]
+    pub fn short_term_ref_pic_set(mut self, value: &[StdVideoH265ShortTermRefPicSet]) -> Self { self.num_short_term_ref_pic_sets = value.len() as _; self.p_short_term_ref_pic_set = value.as_ptr(); self }
+    #[inline]
+    pub fn long_term_ref_pics_sps(mut self, value: *const StdVideoH265LongTermRefPicsSps) -> Self { self.p_long_term_ref_pics_sps = value; self }
+    #[inline]
+    pub fn sequence_parameter_set_vui(mut self, value: *const StdVideoH265SequenceParameterSetVui) -> Self { self.p_sequence_parameter_set_vui = value; self }
+    #[inline]
+    pub fn predictor_palette_entries(mut self, value: *const StdVideoH265PredictorPaletteEntries) -> Self { self.p_predictor_palette_entries = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoH265SequenceParameterSetVui {
+    pub flags: StdVideoH265SpsVuiFlags,
+    pub aspect_ratio_idc: StdVideoH265AspectRatioIdc,
+    pub sar_width: u16,
+    pub sar_height: u16,
+    pub video_format: u8,
+    pub colour_primaries: u8,
+    pub transfer_characteristics: u8,
+    pub matrix_coeffs: u8,
+    pub chroma_sample_loc_type_top_field: u8,
+    pub chroma_sample_loc_type_bottom_field: u8,
+    pub reserved1: u8,
+    pub reserved2: u8,
+    pub def_disp_win_left_offset: u16,
+    pub def_disp_win_right_offset: u16,
+    pub def_disp_win_top_offset: u16,
+    pub def_disp_win_bottom_offset: u16,
+    pub vui_num_units_in_tick: u32,
+    pub vui_time_scale: u32,
+    pub vui_num_ticks_poc_diff_one_minus1: u32,
+    pub min_spatial_segmentation_idc: u16,
+    pub reserved3: u16,
+    pub max_bytes_per_pic_denom: u8,
+    pub max_bits_per_min_cu_denom: u8,
+    pub log2_max_mv_length_horizontal: u8,
+    pub log2_max_mv_length_vertical: u8,
+    pub p_hrd_parameters: *const StdVideoH265HrdParameters,
+}
+impl Default for StdVideoH265SequenceParameterSetVui { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoH265SequenceParameterSetVui {}
+unsafe impl Sync for StdVideoH265SequenceParameterSetVui {}
+impl StdVideoH265SequenceParameterSetVui {
+    #[inline]
+    pub fn flags(mut self, value: StdVideoH265SpsVuiFlags) -> Self { self.flags = value; self }
+    #[inline]
+    pub fn aspect_ratio_idc(mut self, value: StdVideoH265AspectRatioIdc) -> Self { self.aspect_ratio_idc = value; self }
+    #[inline]
+    pub fn sar_width(mut self, value: u16) -> Self { self.sar_width = value; self }
+    #[inline]
+    pub fn sar_height(mut self, value: u16) -> Self { self.sar_height = value; self }
+    #[inline]
+    pub fn video_format(mut self, value: u8) -> Self { self.video_format = value; self }
+    #[inline]
+    pub fn colour_primaries(mut self, value: u8) -> Self { self.colour_primaries = value; self }
+    #[inline]
+    pub fn transfer_characteristics(mut self, value: u8) -> Self { self.transfer_characteristics = value; self }
+    #[inline]
+    pub fn matrix_coeffs(mut self, value: u8) -> Self { self.matrix_coeffs = value; self }
+    #[inline]
+    pub fn chroma_sample_loc_type_top_field(mut self, value: u8) -> Self { self.chroma_sample_loc_type_top_field = value; self }
+    #[inline]
+    pub fn chroma_sample_loc_type_bottom_field(mut self, value: u8) -> Self { self.chroma_sample_loc_type_bottom_field = value; self }
+    #[inline]
+    pub fn reserved1(mut self, value: u8) -> Self { self.reserved1 = value; self }
+    #[inline]
+    pub fn reserved2(mut self, value: u8) -> Self { self.reserved2 = value; self }
+    #[inline]
+    pub fn def_disp_win_left_offset(mut self, value: u16) -> Self { self.def_disp_win_left_offset = value; self }
+    #[inline]
+    pub fn def_disp_win_right_offset(mut self, value: u16) -> Self { self.def_disp_win_right_offset = value; self }
+    #[inline]
+    pub fn def_disp_win_top_offset(mut self, value: u16) -> Self { self.def_disp_win_top_offset = value; self }
+    #[inline]
+    pub fn def_disp_win_bottom_offset(mut self, value: u16) -> Self { self.def_disp_win_bottom_offset = value; self }
+    #[inline]
+    pub fn vui_num_units_in_tick(mut self, value: u32) -> Self { self.vui_num_units_in_tick = value; self }
+    #[inline]
+    pub fn vui_time_scale(mut self, value: u32) -> Self { self.vui_time_scale = value; self }
+    #[inline]
+    pub fn vui_num_ticks_poc_diff_one_minus1(mut self, value: u32) -> Self { self.vui_num_ticks_poc_diff_one_minus1 = value; self }
+    #[inline]
+    pub fn min_spatial_segmentation_idc(mut self, value: u16) -> Self { self.min_spatial_segmentation_idc = value; self }
+    #[inline]
+    pub fn reserved3(mut self, value: u16) -> Self { self.reserved3 = value; self }
+    #[inline]
+    pub fn max_bytes_per_pic_denom(mut self, value: u8) -> Self { self.max_bytes_per_pic_denom = value; self }
+    #[inline]
+    pub fn max_bits_per_min_cu_denom(mut self, value: u8) -> Self { self.max_bits_per_min_cu_denom = value; self }
+    #[inline]
+    pub fn log2_max_mv_length_horizontal(mut self, value: u8) -> Self { self.log2_max_mv_length_horizontal = value; self }
+    #[inline]
+    pub fn log2_max_mv_length_vertical(mut self, value: u8) -> Self { self.log2_max_mv_length_vertical = value; self }
+    #[inline]
+    pub fn hrd_parameters(mut self, value: *const StdVideoH265HrdParameters) -> Self { self.p_hrd_parameters = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoH265ShortTermRefPicSet {
+    pub flags: StdVideoH265ShortTermRefPicSetFlags,
+    pub delta_idx_minus1: u32,
+    pub use_delta_flag: u16,
+    pub abs_delta_rps_minus1: u16,
+    pub used_by_curr_pic_flag: u16,
+    pub used_by_curr_pic_s0_flag: u16,
+    pub used_by_curr_pic_s1_flag: u16,
+    pub reserved1: u16,
+    pub reserved2: u8,
+    pub reserved3: u8,
+    pub num_negative_pics: u8,
+    pub num_positive_pics: u8,
+    pub delta_poc_s0_minus1: [u16; STD_VIDEO_H265_MAX_DPB_SIZE as usize],
+    pub delta_poc_s1_minus1: [u16; STD_VIDEO_H265_MAX_DPB_SIZE as usize],
+}
+impl Default for StdVideoH265ShortTermRefPicSet { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoH265ShortTermRefPicSet {}
+unsafe impl Sync for StdVideoH265ShortTermRefPicSet {}
+impl StdVideoH265ShortTermRefPicSet {
+    #[inline]
+    pub fn flags(mut self, value: StdVideoH265ShortTermRefPicSetFlags) -> Self { self.flags = value; self }
+    #[inline]
+    pub fn delta_idx_minus1(mut self, value: u32) -> Self { self.delta_idx_minus1 = value; self }
+    #[inline]
+    pub fn use_delta_flag(mut self, value: u16) -> Self { self.use_delta_flag = value; self }
+    #[inline]
+    pub fn abs_delta_rps_minus1(mut self, value: u16) -> Self { self.abs_delta_rps_minus1 = value; self }
+    #[inline]
+    pub fn used_by_curr_pic_flag(mut self, value: u16) -> Self { self.used_by_curr_pic_flag = value; self }
+    #[inline]
+    pub fn used_by_curr_pic_s0_flag(mut self, value: u16) -> Self { self.used_by_curr_pic_s0_flag = value; self }
+    #[inline]
+    pub fn used_by_curr_pic_s1_flag(mut self, value: u16) -> Self { self.used_by_curr_pic_s1_flag = value; self }
+    #[inline]
+    pub fn reserved1(mut self, value: u16) -> Self { self.reserved1 = value; self }
+    #[inline]
+    pub fn reserved2(mut self, value: u8) -> Self { self.reserved2 = value; self }
+    #[inline]
+    pub fn reserved3(mut self, value: u8) -> Self { self.reserved3 = value; self }
+    #[inline]
+    pub fn num_negative_pics(mut self, value: u8) -> Self { self.num_negative_pics = value; self }
+    #[inline]
+    pub fn num_positive_pics(mut self, value: u8) -> Self { self.num_positive_pics = value; self }
+    #[inline]
+    pub fn delta_poc_s0_minus1(mut self, value: [u16; STD_VIDEO_H265_MAX_DPB_SIZE as usize]) -> Self { self.delta_poc_s0_minus1 = value; self }
+    #[inline]
+    pub fn delta_poc_s1_minus1(mut self, value: [u16; STD_VIDEO_H265_MAX_DPB_SIZE as usize]) -> Self { self.delta_poc_s1_minus1 = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoH265ShortTermRefPicSetFlags {
+    pub bitfield0: u32,
+}
+impl Default for StdVideoH265ShortTermRefPicSetFlags { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoH265ShortTermRefPicSetFlags {}
+unsafe impl Sync for StdVideoH265ShortTermRefPicSetFlags {}
+impl StdVideoH265ShortTermRefPicSetFlags {
+    #[inline]
+    pub fn inter_ref_pic_set_prediction_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 0)) | ((value & 0x1) << 0); self }
+    #[inline]
+    pub fn get_inter_ref_pic_set_prediction_flag(&self) -> u32 { (self.bitfield0 >> 0) & 0x1 }
+    #[inline]
+    pub fn delta_rps_sign(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 1)) | ((value & 0x1) << 1); self }
+    #[inline]
+    pub fn get_delta_rps_sign(&self) -> u32 { (self.bitfield0 >> 1) & 0x1 }
+}
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StdVideoH265SliceType(pub i32);
+impl StdVideoH265SliceType {
+    pub const fn from_raw(value: i32) -> Self { Self(value) }
+    pub const fn as_raw(self) -> i32 { self.0 }
+    pub const I: Self = Self(2 as i32);
+    pub const P: Self = Self(1 as i32);
+}
+impl core::fmt::Debug for StdVideoH265SliceType { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+match self.0 {
+    0 => f.write_str("B"),
+    0x7FFFFFFF => f.write_str("INVALID"),
+    1 => f.write_str("P"),
+    2 => f.write_str("I"),
+    _ => core::fmt::Debug::fmt(&self.0, f),
+}
+} }
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoH265SpsFlags {
+    pub bitfield0: u32,
+}
+impl Default for StdVideoH265SpsFlags { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoH265SpsFlags {}
+unsafe impl Sync for StdVideoH265SpsFlags {}
+impl StdVideoH265SpsFlags {
+    #[inline]
+    pub fn sps_temporal_id_nesting_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 0)) | ((value & 0x1) << 0); self }
+    #[inline]
+    pub fn get_sps_temporal_id_nesting_flag(&self) -> u32 { (self.bitfield0 >> 0) & 0x1 }
+    #[inline]
+    pub fn separate_colour_plane_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 1)) | ((value & 0x1) << 1); self }
+    #[inline]
+    pub fn get_separate_colour_plane_flag(&self) -> u32 { (self.bitfield0 >> 1) & 0x1 }
+    #[inline]
+    pub fn conformance_window_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 2)) | ((value & 0x1) << 2); self }
+    #[inline]
+    pub fn get_conformance_window_flag(&self) -> u32 { (self.bitfield0 >> 2) & 0x1 }
+    #[inline]
+    pub fn sps_sub_layer_ordering_info_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 3)) | ((value & 0x1) << 3); self }
+    #[inline]
+    pub fn get_sps_sub_layer_ordering_info_present_flag(&self) -> u32 { (self.bitfield0 >> 3) & 0x1 }
+    #[inline]
+    pub fn scaling_list_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 4)) | ((value & 0x1) << 4); self }
+    #[inline]
+    pub fn get_scaling_list_enabled_flag(&self) -> u32 { (self.bitfield0 >> 4) & 0x1 }
+    #[inline]
+    pub fn sps_scaling_list_data_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 5)) | ((value & 0x1) << 5); self }
+    #[inline]
+    pub fn get_sps_scaling_list_data_present_flag(&self) -> u32 { (self.bitfield0 >> 5) & 0x1 }
+    #[inline]
+    pub fn amp_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 6)) | ((value & 0x1) << 6); self }
+    #[inline]
+    pub fn get_amp_enabled_flag(&self) -> u32 { (self.bitfield0 >> 6) & 0x1 }
+    #[inline]
+    pub fn sample_adaptive_offset_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 7)) | ((value & 0x1) << 7); self }
+    #[inline]
+    pub fn get_sample_adaptive_offset_enabled_flag(&self) -> u32 { (self.bitfield0 >> 7) & 0x1 }
+    #[inline]
+    pub fn pcm_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 8)) | ((value & 0x1) << 8); self }
+    #[inline]
+    pub fn get_pcm_enabled_flag(&self) -> u32 { (self.bitfield0 >> 8) & 0x1 }
+    #[inline]
+    pub fn pcm_loop_filter_disabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 9)) | ((value & 0x1) << 9); self }
+    #[inline]
+    pub fn get_pcm_loop_filter_disabled_flag(&self) -> u32 { (self.bitfield0 >> 9) & 0x1 }
+    #[inline]
+    pub fn long_term_ref_pics_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 10)) | ((value & 0x1) << 10); self }
+    #[inline]
+    pub fn get_long_term_ref_pics_present_flag(&self) -> u32 { (self.bitfield0 >> 10) & 0x1 }
+    #[inline]
+    pub fn sps_temporal_mvp_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 11)) | ((value & 0x1) << 11); self }
+    #[inline]
+    pub fn get_sps_temporal_mvp_enabled_flag(&self) -> u32 { (self.bitfield0 >> 11) & 0x1 }
+    #[inline]
+    pub fn strong_intra_smoothing_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 12)) | ((value & 0x1) << 12); self }
+    #[inline]
+    pub fn get_strong_intra_smoothing_enabled_flag(&self) -> u32 { (self.bitfield0 >> 12) & 0x1 }
+    #[inline]
+    pub fn vui_parameters_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 13)) | ((value & 0x1) << 13); self }
+    #[inline]
+    pub fn get_vui_parameters_present_flag(&self) -> u32 { (self.bitfield0 >> 13) & 0x1 }
+    #[inline]
+    pub fn sps_extension_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 14)) | ((value & 0x1) << 14); self }
+    #[inline]
+    pub fn get_sps_extension_present_flag(&self) -> u32 { (self.bitfield0 >> 14) & 0x1 }
+    #[inline]
+    pub fn sps_range_extension_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 15)) | ((value & 0x1) << 15); self }
+    #[inline]
+    pub fn get_sps_range_extension_flag(&self) -> u32 { (self.bitfield0 >> 15) & 0x1 }
+    #[inline]
+    pub fn transform_skip_rotation_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 16)) | ((value & 0x1) << 16); self }
+    #[inline]
+    pub fn get_transform_skip_rotation_enabled_flag(&self) -> u32 { (self.bitfield0 >> 16) & 0x1 }
+    #[inline]
+    pub fn transform_skip_context_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 17)) | ((value & 0x1) << 17); self }
+    #[inline]
+    pub fn get_transform_skip_context_enabled_flag(&self) -> u32 { (self.bitfield0 >> 17) & 0x1 }
+    #[inline]
+    pub fn implicit_rdpcm_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 18)) | ((value & 0x1) << 18); self }
+    #[inline]
+    pub fn get_implicit_rdpcm_enabled_flag(&self) -> u32 { (self.bitfield0 >> 18) & 0x1 }
+    #[inline]
+    pub fn explicit_rdpcm_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 19)) | ((value & 0x1) << 19); self }
+    #[inline]
+    pub fn get_explicit_rdpcm_enabled_flag(&self) -> u32 { (self.bitfield0 >> 19) & 0x1 }
+    #[inline]
+    pub fn extended_precision_processing_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 20)) | ((value & 0x1) << 20); self }
+    #[inline]
+    pub fn get_extended_precision_processing_flag(&self) -> u32 { (self.bitfield0 >> 20) & 0x1 }
+    #[inline]
+    pub fn intra_smoothing_disabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 21)) | ((value & 0x1) << 21); self }
+    #[inline]
+    pub fn get_intra_smoothing_disabled_flag(&self) -> u32 { (self.bitfield0 >> 21) & 0x1 }
+    #[inline]
+    pub fn high_precision_offsets_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 22)) | ((value & 0x1) << 22); self }
+    #[inline]
+    pub fn get_high_precision_offsets_enabled_flag(&self) -> u32 { (self.bitfield0 >> 22) & 0x1 }
+    #[inline]
+    pub fn persistent_rice_adaptation_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 23)) | ((value & 0x1) << 23); self }
+    #[inline]
+    pub fn get_persistent_rice_adaptation_enabled_flag(&self) -> u32 { (self.bitfield0 >> 23) & 0x1 }
+    #[inline]
+    pub fn cabac_bypass_alignment_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 24)) | ((value & 0x1) << 24); self }
+    #[inline]
+    pub fn get_cabac_bypass_alignment_enabled_flag(&self) -> u32 { (self.bitfield0 >> 24) & 0x1 }
+    #[inline]
+    pub fn sps_scc_extension_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 25)) | ((value & 0x1) << 25); self }
+    #[inline]
+    pub fn get_sps_scc_extension_flag(&self) -> u32 { (self.bitfield0 >> 25) & 0x1 }
+    #[inline]
+    pub fn sps_curr_pic_ref_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 26)) | ((value & 0x1) << 26); self }
+    #[inline]
+    pub fn get_sps_curr_pic_ref_enabled_flag(&self) -> u32 { (self.bitfield0 >> 26) & 0x1 }
+    #[inline]
+    pub fn palette_mode_enabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 27)) | ((value & 0x1) << 27); self }
+    #[inline]
+    pub fn get_palette_mode_enabled_flag(&self) -> u32 { (self.bitfield0 >> 27) & 0x1 }
+    #[inline]
+    pub fn sps_palette_predictor_initializers_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 28)) | ((value & 0x1) << 28); self }
+    #[inline]
+    pub fn get_sps_palette_predictor_initializers_present_flag(&self) -> u32 { (self.bitfield0 >> 28) & 0x1 }
+    #[inline]
+    pub fn intra_boundary_filtering_disabled_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 29)) | ((value & 0x1) << 29); self }
+    #[inline]
+    pub fn get_intra_boundary_filtering_disabled_flag(&self) -> u32 { (self.bitfield0 >> 29) & 0x1 }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoH265SpsVuiFlags {
+    pub bitfield0: u32,
+}
+impl Default for StdVideoH265SpsVuiFlags { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoH265SpsVuiFlags {}
+unsafe impl Sync for StdVideoH265SpsVuiFlags {}
+impl StdVideoH265SpsVuiFlags {
+    #[inline]
+    pub fn aspect_ratio_info_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 0)) | ((value & 0x1) << 0); self }
+    #[inline]
+    pub fn get_aspect_ratio_info_present_flag(&self) -> u32 { (self.bitfield0 >> 0) & 0x1 }
+    #[inline]
+    pub fn overscan_info_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 1)) | ((value & 0x1) << 1); self }
+    #[inline]
+    pub fn get_overscan_info_present_flag(&self) -> u32 { (self.bitfield0 >> 1) & 0x1 }
+    #[inline]
+    pub fn overscan_appropriate_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 2)) | ((value & 0x1) << 2); self }
+    #[inline]
+    pub fn get_overscan_appropriate_flag(&self) -> u32 { (self.bitfield0 >> 2) & 0x1 }
+    #[inline]
+    pub fn video_signal_type_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 3)) | ((value & 0x1) << 3); self }
+    #[inline]
+    pub fn get_video_signal_type_present_flag(&self) -> u32 { (self.bitfield0 >> 3) & 0x1 }
+    #[inline]
+    pub fn video_full_range_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 4)) | ((value & 0x1) << 4); self }
+    #[inline]
+    pub fn get_video_full_range_flag(&self) -> u32 { (self.bitfield0 >> 4) & 0x1 }
+    #[inline]
+    pub fn colour_description_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 5)) | ((value & 0x1) << 5); self }
+    #[inline]
+    pub fn get_colour_description_present_flag(&self) -> u32 { (self.bitfield0 >> 5) & 0x1 }
+    #[inline]
+    pub fn chroma_loc_info_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 6)) | ((value & 0x1) << 6); self }
+    #[inline]
+    pub fn get_chroma_loc_info_present_flag(&self) -> u32 { (self.bitfield0 >> 6) & 0x1 }
+    #[inline]
+    pub fn neutral_chroma_indication_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 7)) | ((value & 0x1) << 7); self }
+    #[inline]
+    pub fn get_neutral_chroma_indication_flag(&self) -> u32 { (self.bitfield0 >> 7) & 0x1 }
+    #[inline]
+    pub fn field_seq_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 8)) | ((value & 0x1) << 8); self }
+    #[inline]
+    pub fn get_field_seq_flag(&self) -> u32 { (self.bitfield0 >> 8) & 0x1 }
+    #[inline]
+    pub fn frame_field_info_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 9)) | ((value & 0x1) << 9); self }
+    #[inline]
+    pub fn get_frame_field_info_present_flag(&self) -> u32 { (self.bitfield0 >> 9) & 0x1 }
+    #[inline]
+    pub fn default_display_window_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 10)) | ((value & 0x1) << 10); self }
+    #[inline]
+    pub fn get_default_display_window_flag(&self) -> u32 { (self.bitfield0 >> 10) & 0x1 }
+    #[inline]
+    pub fn vui_timing_info_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 11)) | ((value & 0x1) << 11); self }
+    #[inline]
+    pub fn get_vui_timing_info_present_flag(&self) -> u32 { (self.bitfield0 >> 11) & 0x1 }
+    #[inline]
+    pub fn vui_poc_proportional_to_timing_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 12)) | ((value & 0x1) << 12); self }
+    #[inline]
+    pub fn get_vui_poc_proportional_to_timing_flag(&self) -> u32 { (self.bitfield0 >> 12) & 0x1 }
+    #[inline]
+    pub fn vui_hrd_parameters_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 13)) | ((value & 0x1) << 13); self }
+    #[inline]
+    pub fn get_vui_hrd_parameters_present_flag(&self) -> u32 { (self.bitfield0 >> 13) & 0x1 }
+    #[inline]
+    pub fn bitstream_restriction_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 14)) | ((value & 0x1) << 14); self }
+    #[inline]
+    pub fn get_bitstream_restriction_flag(&self) -> u32 { (self.bitfield0 >> 14) & 0x1 }
+    #[inline]
+    pub fn tiles_fixed_structure_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 15)) | ((value & 0x1) << 15); self }
+    #[inline]
+    pub fn get_tiles_fixed_structure_flag(&self) -> u32 { (self.bitfield0 >> 15) & 0x1 }
+    #[inline]
+    pub fn motion_vectors_over_pic_boundaries_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 16)) | ((value & 0x1) << 16); self }
+    #[inline]
+    pub fn get_motion_vectors_over_pic_boundaries_flag(&self) -> u32 { (self.bitfield0 >> 16) & 0x1 }
+    #[inline]
+    pub fn restricted_ref_pic_lists_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 17)) | ((value & 0x1) << 17); self }
+    #[inline]
+    pub fn get_restricted_ref_pic_lists_flag(&self) -> u32 { (self.bitfield0 >> 17) & 0x1 }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoH265SubLayerHrdParameters {
+    pub bit_rate_value_minus1: [u32; STD_VIDEO_H265_CPB_CNT_LIST_SIZE as usize],
+    pub cpb_size_value_minus1: [u32; STD_VIDEO_H265_CPB_CNT_LIST_SIZE as usize],
+    pub cpb_size_du_value_minus1: [u32; STD_VIDEO_H265_CPB_CNT_LIST_SIZE as usize],
+    pub bit_rate_du_value_minus1: [u32; STD_VIDEO_H265_CPB_CNT_LIST_SIZE as usize],
+    pub cbr_flag: u32,
+}
+impl Default for StdVideoH265SubLayerHrdParameters { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoH265SubLayerHrdParameters {}
+unsafe impl Sync for StdVideoH265SubLayerHrdParameters {}
+impl StdVideoH265SubLayerHrdParameters {
+    #[inline]
+    pub fn bit_rate_value_minus1(mut self, value: [u32; STD_VIDEO_H265_CPB_CNT_LIST_SIZE as usize]) -> Self { self.bit_rate_value_minus1 = value; self }
+    #[inline]
+    pub fn cpb_size_value_minus1(mut self, value: [u32; STD_VIDEO_H265_CPB_CNT_LIST_SIZE as usize]) -> Self { self.cpb_size_value_minus1 = value; self }
+    #[inline]
+    pub fn cpb_size_du_value_minus1(mut self, value: [u32; STD_VIDEO_H265_CPB_CNT_LIST_SIZE as usize]) -> Self { self.cpb_size_du_value_minus1 = value; self }
+    #[inline]
+    pub fn bit_rate_du_value_minus1(mut self, value: [u32; STD_VIDEO_H265_CPB_CNT_LIST_SIZE as usize]) -> Self { self.bit_rate_du_value_minus1 = value; self }
+    #[inline]
+    pub fn cbr_flag(mut self, value: u32) -> Self { self.cbr_flag = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoH265VideoParameterSet {
+    pub flags: StdVideoH265VpsFlags,
+    pub vps_video_parameter_set_id: u8,
+    pub vps_max_sub_layers_minus1: u8,
+    pub reserved1: u8,
+    pub reserved2: u8,
+    pub vps_num_units_in_tick: u32,
+    pub vps_time_scale: u32,
+    pub vps_num_ticks_poc_diff_one_minus1: u32,
+    pub reserved3: u32,
+    pub p_dec_pic_buf_mgr: *const StdVideoH265DecPicBufMgr,
+    pub p_hrd_parameters: *const StdVideoH265HrdParameters,
+    pub p_profile_tier_level: *const StdVideoH265ProfileTierLevel,
+}
+impl Default for StdVideoH265VideoParameterSet { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoH265VideoParameterSet {}
+unsafe impl Sync for StdVideoH265VideoParameterSet {}
+impl StdVideoH265VideoParameterSet {
+    #[inline]
+    pub fn flags(mut self, value: StdVideoH265VpsFlags) -> Self { self.flags = value; self }
+    #[inline]
+    pub fn vps_video_parameter_set_id(mut self, value: u8) -> Self { self.vps_video_parameter_set_id = value; self }
+    #[inline]
+    pub fn vps_max_sub_layers_minus1(mut self, value: u8) -> Self { self.vps_max_sub_layers_minus1 = value; self }
+    #[inline]
+    pub fn reserved1(mut self, value: u8) -> Self { self.reserved1 = value; self }
+    #[inline]
+    pub fn reserved2(mut self, value: u8) -> Self { self.reserved2 = value; self }
+    #[inline]
+    pub fn vps_num_units_in_tick(mut self, value: u32) -> Self { self.vps_num_units_in_tick = value; self }
+    #[inline]
+    pub fn vps_time_scale(mut self, value: u32) -> Self { self.vps_time_scale = value; self }
+    #[inline]
+    pub fn vps_num_ticks_poc_diff_one_minus1(mut self, value: u32) -> Self { self.vps_num_ticks_poc_diff_one_minus1 = value; self }
+    #[inline]
+    pub fn reserved3(mut self, value: u32) -> Self { self.reserved3 = value; self }
+    #[inline]
+    pub fn dec_pic_buf_mgr(mut self, value: *const StdVideoH265DecPicBufMgr) -> Self { self.p_dec_pic_buf_mgr = value; self }
+    #[inline]
+    pub fn hrd_parameters(mut self, value: *const StdVideoH265HrdParameters) -> Self { self.p_hrd_parameters = value; self }
+    #[inline]
+    pub fn profile_tier_level(mut self, value: *const StdVideoH265ProfileTierLevel) -> Self { self.p_profile_tier_level = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StdVideoH265VpsFlags {
+    pub bitfield0: u32,
+}
+impl Default for StdVideoH265VpsFlags { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for StdVideoH265VpsFlags {}
+unsafe impl Sync for StdVideoH265VpsFlags {}
+impl StdVideoH265VpsFlags {
+    #[inline]
+    pub fn vps_temporal_id_nesting_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 0)) | ((value & 0x1) << 0); self }
+    #[inline]
+    pub fn get_vps_temporal_id_nesting_flag(&self) -> u32 { (self.bitfield0 >> 0) & 0x1 }
+    #[inline]
+    pub fn vps_sub_layer_ordering_info_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 1)) | ((value & 0x1) << 1); self }
+    #[inline]
+    pub fn get_vps_sub_layer_ordering_info_present_flag(&self) -> u32 { (self.bitfield0 >> 1) & 0x1 }
+    #[inline]
+    pub fn vps_timing_info_present_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 2)) | ((value & 0x1) << 2); self }
+    #[inline]
+    pub fn get_vps_timing_info_present_flag(&self) -> u32 { (self.bitfield0 >> 2) & 0x1 }
+    #[inline]
+    pub fn vps_poc_proportional_to_timing_flag(mut self, value: u32) -> Self { self.bitfield0 = (self.bitfield0 & !(0x1 << 3)) | ((value & 0x1) << 3); self }
+    #[inline]
+    pub fn get_vps_poc_proportional_to_timing_flag(&self) -> u32 { (self.bitfield0 >> 3) & 0x1 }
+}
 #[repr(transparent)]
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AccessFlags(pub u32);
@@ -9567,6 +11236,8 @@ impl QueryPoolCreateInfo {
     #[inline]
     pub fn next_video_encode_h264_profile_info_khr(mut self, next: &mut VideoEncodeH264ProfileInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH264ProfileInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH264ProfileInfoKHR as *const core::ffi::c_void; self }
     #[inline]
+    pub fn next_video_encode_h265_profile_info_khr(mut self, next: &mut VideoEncodeH265ProfileInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH265ProfileInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH265ProfileInfoKHR as *const core::ffi::c_void; self }
+    #[inline]
     pub fn next_video_encode_usage_info_khr(mut self, next: &mut VideoEncodeUsageInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeUsageInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeUsageInfoKHR as *const core::ffi::c_void; self }
     #[inline]
     pub fn next_video_profile_info_khr(mut self, next: &mut VideoProfileInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoProfileInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoProfileInfoKHR as *const core::ffi::c_void; self }
@@ -11046,6 +12717,19 @@ impl StructureType {
     pub const VIDEO_ENCODE_H264_SESSION_PARAMETERS_CREATE_INFO_KHR: Self = Self(1000038001 as i32);
     pub const VIDEO_ENCODE_H264_SESSION_PARAMETERS_FEEDBACK_INFO_KHR: Self = Self(1000038013 as i32);
     pub const VIDEO_ENCODE_H264_SESSION_PARAMETERS_GET_INFO_KHR: Self = Self(1000038012 as i32);
+    pub const VIDEO_ENCODE_H265_CAPABILITIES_KHR: Self = Self(1000039000 as i32);
+    pub const VIDEO_ENCODE_H265_DPB_SLOT_INFO_KHR: Self = Self(1000039004 as i32);
+    pub const VIDEO_ENCODE_H265_NALU_SLICE_SEGMENT_INFO_KHR: Self = Self(1000039005 as i32);
+    pub const VIDEO_ENCODE_H265_PICTURE_INFO_KHR: Self = Self(1000039003 as i32);
+    pub const VIDEO_ENCODE_H265_PROFILE_INFO_KHR: Self = Self(1000039007 as i32);
+    pub const VIDEO_ENCODE_H265_QUALITY_LEVEL_PROPERTIES_KHR: Self = Self(1000039012 as i32);
+    pub const VIDEO_ENCODE_H265_RATE_CONTROL_INFO_KHR: Self = Self(1000039009 as i32);
+    pub const VIDEO_ENCODE_H265_RATE_CONTROL_LAYER_INFO_KHR: Self = Self(1000039010 as i32);
+    pub const VIDEO_ENCODE_H265_SESSION_CREATE_INFO_KHR: Self = Self(1000039011 as i32);
+    pub const VIDEO_ENCODE_H265_SESSION_PARAMETERS_ADD_INFO_KHR: Self = Self(1000039002 as i32);
+    pub const VIDEO_ENCODE_H265_SESSION_PARAMETERS_CREATE_INFO_KHR: Self = Self(1000039001 as i32);
+    pub const VIDEO_ENCODE_H265_SESSION_PARAMETERS_FEEDBACK_INFO_KHR: Self = Self(1000039014 as i32);
+    pub const VIDEO_ENCODE_H265_SESSION_PARAMETERS_GET_INFO_KHR: Self = Self(1000039013 as i32);
     pub const VIDEO_ENCODE_INFO_KHR: Self = Self(1000299000 as i32);
     pub const VIDEO_ENCODE_QUALITY_LEVEL_INFO_KHR: Self = Self(1000299008 as i32);
     pub const VIDEO_ENCODE_QUALITY_LEVEL_PROPERTIES_KHR: Self = Self(1000299007 as i32);
@@ -11104,6 +12788,19 @@ match self.0 {
     1000038011 => f.write_str("VIDEO_ENCODE_H264_QUALITY_LEVEL_PROPERTIES_KHR"),
     1000038012 => f.write_str("VIDEO_ENCODE_H264_SESSION_PARAMETERS_GET_INFO_KHR"),
     1000038013 => f.write_str("VIDEO_ENCODE_H264_SESSION_PARAMETERS_FEEDBACK_INFO_KHR"),
+    1000039000 => f.write_str("VIDEO_ENCODE_H265_CAPABILITIES_KHR"),
+    1000039001 => f.write_str("VIDEO_ENCODE_H265_SESSION_PARAMETERS_CREATE_INFO_KHR"),
+    1000039002 => f.write_str("VIDEO_ENCODE_H265_SESSION_PARAMETERS_ADD_INFO_KHR"),
+    1000039003 => f.write_str("VIDEO_ENCODE_H265_PICTURE_INFO_KHR"),
+    1000039004 => f.write_str("VIDEO_ENCODE_H265_DPB_SLOT_INFO_KHR"),
+    1000039005 => f.write_str("VIDEO_ENCODE_H265_NALU_SLICE_SEGMENT_INFO_KHR"),
+    1000039007 => f.write_str("VIDEO_ENCODE_H265_PROFILE_INFO_KHR"),
+    1000039009 => f.write_str("VIDEO_ENCODE_H265_RATE_CONTROL_INFO_KHR"),
+    1000039010 => f.write_str("VIDEO_ENCODE_H265_RATE_CONTROL_LAYER_INFO_KHR"),
+    1000039011 => f.write_str("VIDEO_ENCODE_H265_SESSION_CREATE_INFO_KHR"),
+    1000039012 => f.write_str("VIDEO_ENCODE_H265_QUALITY_LEVEL_PROPERTIES_KHR"),
+    1000039013 => f.write_str("VIDEO_ENCODE_H265_SESSION_PARAMETERS_GET_INFO_KHR"),
+    1000039014 => f.write_str("VIDEO_ENCODE_H265_SESSION_PARAMETERS_FEEDBACK_INFO_KHR"),
     1000053000 => f.write_str("RENDER_PASS_MULTIVIEW_CREATE_INFO"),
     1000053001 => f.write_str("PHYSICAL_DEVICE_MULTIVIEW_FEATURES"),
     1000053002 => f.write_str("PHYSICAL_DEVICE_MULTIVIEW_PROPERTIES"),
@@ -11880,6 +13577,8 @@ impl VideoBeginCodingInfoKHR {
     #[inline]
     pub fn next_video_encode_h264_rate_control_info_khr(mut self, next: &mut VideoEncodeH264RateControlInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH264RateControlInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH264RateControlInfoKHR as *const core::ffi::c_void; self }
     #[inline]
+    pub fn next_video_encode_h265_rate_control_info_khr(mut self, next: &mut VideoEncodeH265RateControlInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH265RateControlInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH265RateControlInfoKHR as *const core::ffi::c_void; self }
+    #[inline]
     pub fn next_video_encode_rate_control_info_khr(mut self, next: &mut VideoEncodeRateControlInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeRateControlInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeRateControlInfoKHR as *const core::ffi::c_void; self }
 }
 #[repr(C)]
@@ -11927,6 +13626,8 @@ impl VideoCapabilitiesKHR {
     pub fn next_video_encode_capabilities_khr(mut self, next: &mut VideoEncodeCapabilitiesKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeCapabilitiesKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeCapabilitiesKHR as *mut core::ffi::c_void; self }
     #[inline]
     pub fn next_video_encode_h264_capabilities_khr(mut self, next: &mut VideoEncodeH264CapabilitiesKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH264CapabilitiesKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH264CapabilitiesKHR as *mut core::ffi::c_void; self }
+    #[inline]
+    pub fn next_video_encode_h265_capabilities_khr(mut self, next: &mut VideoEncodeH265CapabilitiesKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH265CapabilitiesKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH265CapabilitiesKHR as *mut core::ffi::c_void; self }
 }
 #[repr(transparent)]
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -12012,6 +13713,7 @@ impl VideoCodecOperationFlagsKHR {
     pub const fn from_raw(value: u32) -> Self { Self(value) }
     pub const fn as_raw(self) -> u32 { self.0 }
     pub const ENCODE_H264: Self = Self(65536 as u32);
+    pub const ENCODE_H265: Self = Self(131072 as u32);
     #[inline]
     pub const fn from_bits_retain(value: u32) -> Self { Self(value) }
     #[inline]
@@ -12106,6 +13808,8 @@ impl VideoCodingControlInfoKHR {
     pub fn flags(mut self, value: VideoCodingControlFlagsKHR) -> Self { self.flags = value; self }
     #[inline]
     pub fn next_video_encode_h264_rate_control_info_khr(mut self, next: &mut VideoEncodeH264RateControlInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH264RateControlInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH264RateControlInfoKHR as *const core::ffi::c_void; self }
+    #[inline]
+    pub fn next_video_encode_h265_rate_control_info_khr(mut self, next: &mut VideoEncodeH265RateControlInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH265RateControlInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH265RateControlInfoKHR as *const core::ffi::c_void; self }
     #[inline]
     pub fn next_video_encode_quality_level_info_khr(mut self, next: &mut VideoEncodeQualityLevelInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeQualityLevelInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeQualityLevelInfoKHR as *const core::ffi::c_void; self }
     #[inline]
@@ -12869,6 +14573,650 @@ debug_flags(f, self.0 as u64, &[
 } }
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
+pub struct VideoEncodeH265CapabilitiesKHR {
+    pub s_type: StructureType,
+    pub p_next: *mut core::ffi::c_void,
+    pub flags: VideoEncodeH265CapabilityFlagsKHR,
+    pub max_level_idc: StdVideoH265LevelIdc,
+    pub max_slice_segment_count: u32,
+    pub max_tiles: Extent2D,
+    pub ctb_sizes: VideoEncodeH265CtbSizeFlagsKHR,
+    pub transform_block_sizes: VideoEncodeH265TransformBlockSizeFlagsKHR,
+    pub max_p_picture_l0_reference_count: u32,
+    pub max_b_picture_l0_reference_count: u32,
+    pub max_l1_reference_count: u32,
+    pub max_sub_layer_count: u32,
+    pub expect_dyadic_temporal_sub_layer_pattern: Bool32,
+    pub min_qp: i32,
+    pub max_qp: i32,
+    pub prefers_gop_remaining_frames: Bool32,
+    pub requires_gop_remaining_frames: Bool32,
+    pub std_syntax_flags: VideoEncodeH265StdFlagsKHR,
+}
+impl Default for VideoEncodeH265CapabilitiesKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000039000);
+    value
+} }
+unsafe impl Send for VideoEncodeH265CapabilitiesKHR {}
+unsafe impl Sync for VideoEncodeH265CapabilitiesKHR {}
+impl VideoEncodeH265CapabilitiesKHR {
+    #[inline]
+    pub fn flags(mut self, value: VideoEncodeH265CapabilityFlagsKHR) -> Self { self.flags = value; self }
+    #[inline]
+    pub fn max_level_idc(mut self, value: StdVideoH265LevelIdc) -> Self { self.max_level_idc = value; self }
+    #[inline]
+    pub fn max_slice_segment_count(mut self, value: u32) -> Self { self.max_slice_segment_count = value; self }
+    #[inline]
+    pub fn max_tiles(mut self, value: Extent2D) -> Self { self.max_tiles = value; self }
+    #[inline]
+    pub fn ctb_sizes(mut self, value: VideoEncodeH265CtbSizeFlagsKHR) -> Self { self.ctb_sizes = value; self }
+    #[inline]
+    pub fn transform_block_sizes(mut self, value: VideoEncodeH265TransformBlockSizeFlagsKHR) -> Self { self.transform_block_sizes = value; self }
+    #[inline]
+    pub fn max_p_picture_l0_reference_count(mut self, value: u32) -> Self { self.max_p_picture_l0_reference_count = value; self }
+    #[inline]
+    pub fn max_b_picture_l0_reference_count(mut self, value: u32) -> Self { self.max_b_picture_l0_reference_count = value; self }
+    #[inline]
+    pub fn max_l1_reference_count(mut self, value: u32) -> Self { self.max_l1_reference_count = value; self }
+    #[inline]
+    pub fn max_sub_layer_count(mut self, value: u32) -> Self { self.max_sub_layer_count = value; self }
+    #[inline]
+    pub fn expect_dyadic_temporal_sub_layer_pattern(mut self, value: bool) -> Self { self.expect_dyadic_temporal_sub_layer_pattern = value as u32; self }
+    #[inline]
+    pub fn min_qp(mut self, value: i32) -> Self { self.min_qp = value; self }
+    #[inline]
+    pub fn max_qp(mut self, value: i32) -> Self { self.max_qp = value; self }
+    #[inline]
+    pub fn prefers_gop_remaining_frames(mut self, value: bool) -> Self { self.prefers_gop_remaining_frames = value as u32; self }
+    #[inline]
+    pub fn requires_gop_remaining_frames(mut self, value: bool) -> Self { self.requires_gop_remaining_frames = value as u32; self }
+    #[inline]
+    pub fn std_syntax_flags(mut self, value: VideoEncodeH265StdFlagsKHR) -> Self { self.std_syntax_flags = value; self }
+}
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VideoEncodeH265CapabilityFlagsKHR(pub u32);
+impl VideoEncodeH265CapabilityFlagsKHR {
+    pub const fn from_raw(value: u32) -> Self { Self(value) }
+    pub const fn as_raw(self) -> u32 { self.0 }
+    #[inline]
+    pub const fn from_bits_retain(value: u32) -> Self { Self(value) }
+    #[inline]
+    pub const fn bits(self) -> u32 { self.0 }
+    #[inline]
+    pub const fn empty() -> Self { Self(0) }
+    #[inline]
+    pub const fn all() -> Self { Self(!0) }
+    #[inline]
+    pub const fn is_empty(self) -> bool { self.0 == 0 }
+    #[inline]
+    pub const fn is_all(self) -> bool { self.0 == !0 }
+    #[inline]
+    pub const fn contains(self, other: Self) -> bool { self.0 & other.0 == other.0 }
+    #[inline]
+    pub const fn intersects(self, other: Self) -> bool { self.0 & other.0 != 0 }
+}
+impl core::ops::BitOr for VideoEncodeH265CapabilityFlagsKHR { type Output = Self; #[inline] fn bitor(self, other: Self) -> Self { Self(self.0 | other.0) } }
+impl core::ops::BitOrAssign for VideoEncodeH265CapabilityFlagsKHR { #[inline] fn bitor_assign(&mut self, other: Self) { self.0 |= other.0 } }
+impl core::ops::BitAnd for VideoEncodeH265CapabilityFlagsKHR { type Output = Self; #[inline] fn bitand(self, other: Self) -> Self { Self(self.0 & other.0) } }
+impl core::ops::BitAndAssign for VideoEncodeH265CapabilityFlagsKHR { #[inline] fn bitand_assign(&mut self, other: Self) { self.0 &= other.0 } }
+impl core::ops::BitXor for VideoEncodeH265CapabilityFlagsKHR { type Output = Self; #[inline] fn bitxor(self, other: Self) -> Self { Self(self.0 ^ other.0) } }
+impl core::ops::BitXorAssign for VideoEncodeH265CapabilityFlagsKHR { #[inline] fn bitxor_assign(&mut self, other: Self) { self.0 ^= other.0 } }
+impl core::ops::Not for VideoEncodeH265CapabilityFlagsKHR { type Output = Self; #[inline] fn not(self) -> Self { Self(!self.0) } }
+impl core::fmt::Debug for VideoEncodeH265CapabilityFlagsKHR { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+debug_flags(f, self.0 as u64, &[
+(1, "HRD_COMPLIANCE"),
+(2, "PREDICTION_WEIGHT_TABLE_GENERATED"),
+(4, "ROW_UNALIGNED_SLICE_SEGMENT"),
+(8, "DIFFERENT_SLICE_SEGMENT_TYPE"),
+(16, "B_FRAME_IN_L0_LIST"),
+(32, "B_FRAME_IN_L1_LIST"),
+(64, "PER_PICTURE_TYPE_MIN_MAX_QP"),
+(128, "PER_SLICE_SEGMENT_CONSTANT_QP"),
+(256, "MULTIPLE_TILES_PER_SLICE_SEGMENT"),
+(512, "MULTIPLE_SLICE_SEGMENTS_PER_TILE"),
+(1024, "CU_QP_DIFF_WRAPAROUND"),
+(2048, "B_PICTURE_INTRA_REFRESH"),
+])
+} }
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VideoEncodeH265CtbSizeFlagsKHR(pub u32);
+impl VideoEncodeH265CtbSizeFlagsKHR {
+    pub const fn from_raw(value: u32) -> Self { Self(value) }
+    pub const fn as_raw(self) -> u32 { self.0 }
+    pub const TYPE_16: Self = Self(1 as u32);
+    pub const TYPE_32: Self = Self(2 as u32);
+    pub const TYPE_64: Self = Self(4 as u32);
+    #[inline]
+    pub const fn from_bits_retain(value: u32) -> Self { Self(value) }
+    #[inline]
+    pub const fn bits(self) -> u32 { self.0 }
+    #[inline]
+    pub const fn empty() -> Self { Self(0) }
+    #[inline]
+    pub const fn all() -> Self { Self(!0) }
+    #[inline]
+    pub const fn is_empty(self) -> bool { self.0 == 0 }
+    #[inline]
+    pub const fn is_all(self) -> bool { self.0 == !0 }
+    #[inline]
+    pub const fn contains(self, other: Self) -> bool { self.0 & other.0 == other.0 }
+    #[inline]
+    pub const fn intersects(self, other: Self) -> bool { self.0 & other.0 != 0 }
+}
+impl core::ops::BitOr for VideoEncodeH265CtbSizeFlagsKHR { type Output = Self; #[inline] fn bitor(self, other: Self) -> Self { Self(self.0 | other.0) } }
+impl core::ops::BitOrAssign for VideoEncodeH265CtbSizeFlagsKHR { #[inline] fn bitor_assign(&mut self, other: Self) { self.0 |= other.0 } }
+impl core::ops::BitAnd for VideoEncodeH265CtbSizeFlagsKHR { type Output = Self; #[inline] fn bitand(self, other: Self) -> Self { Self(self.0 & other.0) } }
+impl core::ops::BitAndAssign for VideoEncodeH265CtbSizeFlagsKHR { #[inline] fn bitand_assign(&mut self, other: Self) { self.0 &= other.0 } }
+impl core::ops::BitXor for VideoEncodeH265CtbSizeFlagsKHR { type Output = Self; #[inline] fn bitxor(self, other: Self) -> Self { Self(self.0 ^ other.0) } }
+impl core::ops::BitXorAssign for VideoEncodeH265CtbSizeFlagsKHR { #[inline] fn bitxor_assign(&mut self, other: Self) { self.0 ^= other.0 } }
+impl core::ops::Not for VideoEncodeH265CtbSizeFlagsKHR { type Output = Self; #[inline] fn not(self) -> Self { Self(!self.0) } }
+impl core::fmt::Debug for VideoEncodeH265CtbSizeFlagsKHR { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+debug_flags(f, self.0 as u64, &[
+(1, "TYPE_16"),
+(2, "TYPE_32"),
+(4, "TYPE_64"),
+])
+} }
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VideoEncodeH265DpbSlotInfoKHR {
+    pub s_type: StructureType,
+    pub p_next: *const core::ffi::c_void,
+    pub p_std_reference_info: *const StdVideoEncodeH265ReferenceInfo,
+}
+impl Default for VideoEncodeH265DpbSlotInfoKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000039004);
+    value
+} }
+unsafe impl Send for VideoEncodeH265DpbSlotInfoKHR {}
+unsafe impl Sync for VideoEncodeH265DpbSlotInfoKHR {}
+impl VideoEncodeH265DpbSlotInfoKHR {
+    #[inline]
+    pub fn std_reference_info(mut self, value: *const StdVideoEncodeH265ReferenceInfo) -> Self { self.p_std_reference_info = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VideoEncodeH265FrameSizeKHR {
+    pub frame_i_size: u32,
+    pub frame_p_size: u32,
+    pub frame_b_size: u32,
+}
+impl Default for VideoEncodeH265FrameSizeKHR { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for VideoEncodeH265FrameSizeKHR {}
+unsafe impl Sync for VideoEncodeH265FrameSizeKHR {}
+impl VideoEncodeH265FrameSizeKHR {
+    #[inline]
+    pub fn frame_i_size(mut self, value: u32) -> Self { self.frame_i_size = value; self }
+    #[inline]
+    pub fn frame_p_size(mut self, value: u32) -> Self { self.frame_p_size = value; self }
+    #[inline]
+    pub fn frame_b_size(mut self, value: u32) -> Self { self.frame_b_size = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VideoEncodeH265NaluSliceSegmentInfoKHR {
+    pub s_type: StructureType,
+    pub p_next: *const core::ffi::c_void,
+    pub constant_qp: i32,
+    pub p_std_slice_segment_header: *const StdVideoEncodeH265SliceSegmentHeader,
+}
+impl Default for VideoEncodeH265NaluSliceSegmentInfoKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000039005);
+    value
+} }
+unsafe impl Send for VideoEncodeH265NaluSliceSegmentInfoKHR {}
+unsafe impl Sync for VideoEncodeH265NaluSliceSegmentInfoKHR {}
+impl VideoEncodeH265NaluSliceSegmentInfoKHR {
+    #[inline]
+    pub fn constant_qp(mut self, value: i32) -> Self { self.constant_qp = value; self }
+    #[inline]
+    pub fn std_slice_segment_header(mut self, value: *const StdVideoEncodeH265SliceSegmentHeader) -> Self { self.p_std_slice_segment_header = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VideoEncodeH265PictureInfoKHR {
+    pub s_type: StructureType,
+    pub p_next: *const core::ffi::c_void,
+    pub nalu_slice_segment_entry_count: u32,
+    pub p_nalu_slice_segment_entries: *const VideoEncodeH265NaluSliceSegmentInfoKHR,
+    pub p_std_picture_info: *const StdVideoEncodeH265PictureInfo,
+}
+impl Default for VideoEncodeH265PictureInfoKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000039003);
+    value
+} }
+unsafe impl Send for VideoEncodeH265PictureInfoKHR {}
+unsafe impl Sync for VideoEncodeH265PictureInfoKHR {}
+impl VideoEncodeH265PictureInfoKHR {
+    #[inline]
+    pub fn nalu_slice_segment_entry_count(mut self, value: u32) -> Self { self.nalu_slice_segment_entry_count = value; self }
+    #[inline]
+    pub fn nalu_slice_segment_entries(mut self, value: &[VideoEncodeH265NaluSliceSegmentInfoKHR]) -> Self { self.nalu_slice_segment_entry_count = value.len() as _; self.p_nalu_slice_segment_entries = value.as_ptr(); self }
+    #[inline]
+    pub fn std_picture_info(mut self, value: *const StdVideoEncodeH265PictureInfo) -> Self { self.p_std_picture_info = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VideoEncodeH265ProfileInfoKHR {
+    pub s_type: StructureType,
+    pub p_next: *const core::ffi::c_void,
+    pub std_profile_idc: StdVideoH265ProfileIdc,
+}
+impl Default for VideoEncodeH265ProfileInfoKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000039007);
+    value
+} }
+unsafe impl Send for VideoEncodeH265ProfileInfoKHR {}
+unsafe impl Sync for VideoEncodeH265ProfileInfoKHR {}
+impl VideoEncodeH265ProfileInfoKHR {
+    #[inline]
+    pub fn std_profile_idc(mut self, value: StdVideoH265ProfileIdc) -> Self { self.std_profile_idc = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VideoEncodeH265QpKHR {
+    pub qp_i: i32,
+    pub qp_p: i32,
+    pub qp_b: i32,
+}
+impl Default for VideoEncodeH265QpKHR { fn default() -> Self {
+    unsafe { core::mem::zeroed() }
+} }
+unsafe impl Send for VideoEncodeH265QpKHR {}
+unsafe impl Sync for VideoEncodeH265QpKHR {}
+impl VideoEncodeH265QpKHR {
+    #[inline]
+    pub fn qp_i(mut self, value: i32) -> Self { self.qp_i = value; self }
+    #[inline]
+    pub fn qp_p(mut self, value: i32) -> Self { self.qp_p = value; self }
+    #[inline]
+    pub fn qp_b(mut self, value: i32) -> Self { self.qp_b = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VideoEncodeH265QualityLevelPropertiesKHR {
+    pub s_type: StructureType,
+    pub p_next: *mut core::ffi::c_void,
+    pub preferred_rate_control_flags: VideoEncodeH265RateControlFlagsKHR,
+    pub preferred_gop_frame_count: u32,
+    pub preferred_idr_period: u32,
+    pub preferred_consecutive_b_frame_count: u32,
+    pub preferred_sub_layer_count: u32,
+    pub preferred_constant_qp: VideoEncodeH265QpKHR,
+    pub preferred_max_l0_reference_count: u32,
+    pub preferred_max_l1_reference_count: u32,
+}
+impl Default for VideoEncodeH265QualityLevelPropertiesKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000039012);
+    value
+} }
+unsafe impl Send for VideoEncodeH265QualityLevelPropertiesKHR {}
+unsafe impl Sync for VideoEncodeH265QualityLevelPropertiesKHR {}
+impl VideoEncodeH265QualityLevelPropertiesKHR {
+    #[inline]
+    pub fn preferred_rate_control_flags(mut self, value: VideoEncodeH265RateControlFlagsKHR) -> Self { self.preferred_rate_control_flags = value; self }
+    #[inline]
+    pub fn preferred_gop_frame_count(mut self, value: u32) -> Self { self.preferred_gop_frame_count = value; self }
+    #[inline]
+    pub fn preferred_idr_period(mut self, value: u32) -> Self { self.preferred_idr_period = value; self }
+    #[inline]
+    pub fn preferred_consecutive_b_frame_count(mut self, value: u32) -> Self { self.preferred_consecutive_b_frame_count = value; self }
+    #[inline]
+    pub fn preferred_sub_layer_count(mut self, value: u32) -> Self { self.preferred_sub_layer_count = value; self }
+    #[inline]
+    pub fn preferred_constant_qp(mut self, value: VideoEncodeH265QpKHR) -> Self { self.preferred_constant_qp = value; self }
+    #[inline]
+    pub fn preferred_max_l0_reference_count(mut self, value: u32) -> Self { self.preferred_max_l0_reference_count = value; self }
+    #[inline]
+    pub fn preferred_max_l1_reference_count(mut self, value: u32) -> Self { self.preferred_max_l1_reference_count = value; self }
+}
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VideoEncodeH265RateControlFlagsKHR(pub u32);
+impl VideoEncodeH265RateControlFlagsKHR {
+    pub const fn from_raw(value: u32) -> Self { Self(value) }
+    pub const fn as_raw(self) -> u32 { self.0 }
+    #[inline]
+    pub const fn from_bits_retain(value: u32) -> Self { Self(value) }
+    #[inline]
+    pub const fn bits(self) -> u32 { self.0 }
+    #[inline]
+    pub const fn empty() -> Self { Self(0) }
+    #[inline]
+    pub const fn all() -> Self { Self(!0) }
+    #[inline]
+    pub const fn is_empty(self) -> bool { self.0 == 0 }
+    #[inline]
+    pub const fn is_all(self) -> bool { self.0 == !0 }
+    #[inline]
+    pub const fn contains(self, other: Self) -> bool { self.0 & other.0 == other.0 }
+    #[inline]
+    pub const fn intersects(self, other: Self) -> bool { self.0 & other.0 != 0 }
+}
+impl core::ops::BitOr for VideoEncodeH265RateControlFlagsKHR { type Output = Self; #[inline] fn bitor(self, other: Self) -> Self { Self(self.0 | other.0) } }
+impl core::ops::BitOrAssign for VideoEncodeH265RateControlFlagsKHR { #[inline] fn bitor_assign(&mut self, other: Self) { self.0 |= other.0 } }
+impl core::ops::BitAnd for VideoEncodeH265RateControlFlagsKHR { type Output = Self; #[inline] fn bitand(self, other: Self) -> Self { Self(self.0 & other.0) } }
+impl core::ops::BitAndAssign for VideoEncodeH265RateControlFlagsKHR { #[inline] fn bitand_assign(&mut self, other: Self) { self.0 &= other.0 } }
+impl core::ops::BitXor for VideoEncodeH265RateControlFlagsKHR { type Output = Self; #[inline] fn bitxor(self, other: Self) -> Self { Self(self.0 ^ other.0) } }
+impl core::ops::BitXorAssign for VideoEncodeH265RateControlFlagsKHR { #[inline] fn bitxor_assign(&mut self, other: Self) { self.0 ^= other.0 } }
+impl core::ops::Not for VideoEncodeH265RateControlFlagsKHR { type Output = Self; #[inline] fn not(self) -> Self { Self(!self.0) } }
+impl core::fmt::Debug for VideoEncodeH265RateControlFlagsKHR { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+debug_flags(f, self.0 as u64, &[
+(1, "ATTEMPT_HRD_COMPLIANCE"),
+(2, "REGULAR_GOP"),
+(4, "REFERENCE_PATTERN_FLAT"),
+(8, "REFERENCE_PATTERN_DYADIC"),
+(16, "TEMPORAL_SUB_LAYER_PATTERN_DYADIC"),
+])
+} }
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VideoEncodeH265RateControlInfoKHR {
+    pub s_type: StructureType,
+    pub p_next: *const core::ffi::c_void,
+    pub flags: VideoEncodeH265RateControlFlagsKHR,
+    pub gop_frame_count: u32,
+    pub idr_period: u32,
+    pub consecutive_b_frame_count: u32,
+    pub sub_layer_count: u32,
+}
+impl Default for VideoEncodeH265RateControlInfoKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000039009);
+    value
+} }
+unsafe impl Send for VideoEncodeH265RateControlInfoKHR {}
+unsafe impl Sync for VideoEncodeH265RateControlInfoKHR {}
+impl VideoEncodeH265RateControlInfoKHR {
+    #[inline]
+    pub fn flags(mut self, value: VideoEncodeH265RateControlFlagsKHR) -> Self { self.flags = value; self }
+    #[inline]
+    pub fn gop_frame_count(mut self, value: u32) -> Self { self.gop_frame_count = value; self }
+    #[inline]
+    pub fn idr_period(mut self, value: u32) -> Self { self.idr_period = value; self }
+    #[inline]
+    pub fn consecutive_b_frame_count(mut self, value: u32) -> Self { self.consecutive_b_frame_count = value; self }
+    #[inline]
+    pub fn sub_layer_count(mut self, value: u32) -> Self { self.sub_layer_count = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VideoEncodeH265RateControlLayerInfoKHR {
+    pub s_type: StructureType,
+    pub p_next: *const core::ffi::c_void,
+    pub use_min_qp: Bool32,
+    pub min_qp: VideoEncodeH265QpKHR,
+    pub use_max_qp: Bool32,
+    pub max_qp: VideoEncodeH265QpKHR,
+    pub use_max_frame_size: Bool32,
+    pub max_frame_size: VideoEncodeH265FrameSizeKHR,
+}
+impl Default for VideoEncodeH265RateControlLayerInfoKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000039010);
+    value
+} }
+unsafe impl Send for VideoEncodeH265RateControlLayerInfoKHR {}
+unsafe impl Sync for VideoEncodeH265RateControlLayerInfoKHR {}
+impl VideoEncodeH265RateControlLayerInfoKHR {
+    #[inline]
+    pub fn use_min_qp(mut self, value: bool) -> Self { self.use_min_qp = value as u32; self }
+    #[inline]
+    pub fn min_qp(mut self, value: VideoEncodeH265QpKHR) -> Self { self.min_qp = value; self }
+    #[inline]
+    pub fn use_max_qp(mut self, value: bool) -> Self { self.use_max_qp = value as u32; self }
+    #[inline]
+    pub fn max_qp(mut self, value: VideoEncodeH265QpKHR) -> Self { self.max_qp = value; self }
+    #[inline]
+    pub fn use_max_frame_size(mut self, value: bool) -> Self { self.use_max_frame_size = value as u32; self }
+    #[inline]
+    pub fn max_frame_size(mut self, value: VideoEncodeH265FrameSizeKHR) -> Self { self.max_frame_size = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VideoEncodeH265SessionCreateInfoKHR {
+    pub s_type: StructureType,
+    pub p_next: *const core::ffi::c_void,
+    pub use_max_level_idc: Bool32,
+    pub max_level_idc: StdVideoH265LevelIdc,
+}
+impl Default for VideoEncodeH265SessionCreateInfoKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000039011);
+    value
+} }
+unsafe impl Send for VideoEncodeH265SessionCreateInfoKHR {}
+unsafe impl Sync for VideoEncodeH265SessionCreateInfoKHR {}
+impl VideoEncodeH265SessionCreateInfoKHR {
+    #[inline]
+    pub fn use_max_level_idc(mut self, value: bool) -> Self { self.use_max_level_idc = value as u32; self }
+    #[inline]
+    pub fn max_level_idc(mut self, value: StdVideoH265LevelIdc) -> Self { self.max_level_idc = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VideoEncodeH265SessionParametersAddInfoKHR {
+    pub s_type: StructureType,
+    pub p_next: *const core::ffi::c_void,
+    pub std_vps_count: u32,
+    pub p_std_vp_ss: *const StdVideoH265VideoParameterSet,
+    pub std_sps_count: u32,
+    pub p_std_sp_ss: *const StdVideoH265SequenceParameterSet,
+    pub std_pps_count: u32,
+    pub p_std_pp_ss: *const StdVideoH265PictureParameterSet,
+}
+impl Default for VideoEncodeH265SessionParametersAddInfoKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000039002);
+    value
+} }
+unsafe impl Send for VideoEncodeH265SessionParametersAddInfoKHR {}
+unsafe impl Sync for VideoEncodeH265SessionParametersAddInfoKHR {}
+impl VideoEncodeH265SessionParametersAddInfoKHR {
+    #[inline]
+    pub fn std_vps_count(mut self, value: u32) -> Self { self.std_vps_count = value; self }
+    #[inline]
+    pub fn std_vp_ss(mut self, value: &[StdVideoH265VideoParameterSet]) -> Self { self.std_vps_count = value.len() as _; self.p_std_vp_ss = value.as_ptr(); self }
+    #[inline]
+    pub fn std_sps_count(mut self, value: u32) -> Self { self.std_sps_count = value; self }
+    #[inline]
+    pub fn std_sp_ss(mut self, value: &[StdVideoH265SequenceParameterSet]) -> Self { self.std_sps_count = value.len() as _; self.p_std_sp_ss = value.as_ptr(); self }
+    #[inline]
+    pub fn std_pps_count(mut self, value: u32) -> Self { self.std_pps_count = value; self }
+    #[inline]
+    pub fn std_pp_ss(mut self, value: &[StdVideoH265PictureParameterSet]) -> Self { self.std_pps_count = value.len() as _; self.p_std_pp_ss = value.as_ptr(); self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VideoEncodeH265SessionParametersCreateInfoKHR {
+    pub s_type: StructureType,
+    pub p_next: *const core::ffi::c_void,
+    pub max_std_vps_count: u32,
+    pub max_std_sps_count: u32,
+    pub max_std_pps_count: u32,
+    pub p_parameters_add_info: *const VideoEncodeH265SessionParametersAddInfoKHR,
+}
+impl Default for VideoEncodeH265SessionParametersCreateInfoKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000039001);
+    value
+} }
+unsafe impl Send for VideoEncodeH265SessionParametersCreateInfoKHR {}
+unsafe impl Sync for VideoEncodeH265SessionParametersCreateInfoKHR {}
+impl VideoEncodeH265SessionParametersCreateInfoKHR {
+    #[inline]
+    pub fn max_std_vps_count(mut self, value: u32) -> Self { self.max_std_vps_count = value; self }
+    #[inline]
+    pub fn max_std_sps_count(mut self, value: u32) -> Self { self.max_std_sps_count = value; self }
+    #[inline]
+    pub fn max_std_pps_count(mut self, value: u32) -> Self { self.max_std_pps_count = value; self }
+    #[inline]
+    pub fn parameters_add_info(mut self, value: &VideoEncodeH265SessionParametersAddInfoKHR) -> Self { self.p_parameters_add_info = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VideoEncodeH265SessionParametersFeedbackInfoKHR {
+    pub s_type: StructureType,
+    pub p_next: *mut core::ffi::c_void,
+    pub has_std_vps_overrides: Bool32,
+    pub has_std_sps_overrides: Bool32,
+    pub has_std_pps_overrides: Bool32,
+}
+impl Default for VideoEncodeH265SessionParametersFeedbackInfoKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000039014);
+    value
+} }
+unsafe impl Send for VideoEncodeH265SessionParametersFeedbackInfoKHR {}
+unsafe impl Sync for VideoEncodeH265SessionParametersFeedbackInfoKHR {}
+impl VideoEncodeH265SessionParametersFeedbackInfoKHR {
+    #[inline]
+    pub fn has_std_vps_overrides(mut self, value: bool) -> Self { self.has_std_vps_overrides = value as u32; self }
+    #[inline]
+    pub fn has_std_sps_overrides(mut self, value: bool) -> Self { self.has_std_sps_overrides = value as u32; self }
+    #[inline]
+    pub fn has_std_pps_overrides(mut self, value: bool) -> Self { self.has_std_pps_overrides = value as u32; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VideoEncodeH265SessionParametersGetInfoKHR {
+    pub s_type: StructureType,
+    pub p_next: *const core::ffi::c_void,
+    pub write_std_vps: Bool32,
+    pub write_std_sps: Bool32,
+    pub write_std_pps: Bool32,
+    pub std_vps_id: u32,
+    pub std_sps_id: u32,
+    pub std_pps_id: u32,
+}
+impl Default for VideoEncodeH265SessionParametersGetInfoKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000039013);
+    value
+} }
+unsafe impl Send for VideoEncodeH265SessionParametersGetInfoKHR {}
+unsafe impl Sync for VideoEncodeH265SessionParametersGetInfoKHR {}
+impl VideoEncodeH265SessionParametersGetInfoKHR {
+    #[inline]
+    pub fn write_std_vps(mut self, value: bool) -> Self { self.write_std_vps = value as u32; self }
+    #[inline]
+    pub fn write_std_sps(mut self, value: bool) -> Self { self.write_std_sps = value as u32; self }
+    #[inline]
+    pub fn write_std_pps(mut self, value: bool) -> Self { self.write_std_pps = value as u32; self }
+    #[inline]
+    pub fn std_vps_id(mut self, value: u32) -> Self { self.std_vps_id = value; self }
+    #[inline]
+    pub fn std_sps_id(mut self, value: u32) -> Self { self.std_sps_id = value; self }
+    #[inline]
+    pub fn std_pps_id(mut self, value: u32) -> Self { self.std_pps_id = value; self }
+}
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VideoEncodeH265StdFlagsKHR(pub u32);
+impl VideoEncodeH265StdFlagsKHR {
+    pub const fn from_raw(value: u32) -> Self { Self(value) }
+    pub const fn as_raw(self) -> u32 { self.0 }
+    #[inline]
+    pub const fn from_bits_retain(value: u32) -> Self { Self(value) }
+    #[inline]
+    pub const fn bits(self) -> u32 { self.0 }
+    #[inline]
+    pub const fn empty() -> Self { Self(0) }
+    #[inline]
+    pub const fn all() -> Self { Self(!0) }
+    #[inline]
+    pub const fn is_empty(self) -> bool { self.0 == 0 }
+    #[inline]
+    pub const fn is_all(self) -> bool { self.0 == !0 }
+    #[inline]
+    pub const fn contains(self, other: Self) -> bool { self.0 & other.0 == other.0 }
+    #[inline]
+    pub const fn intersects(self, other: Self) -> bool { self.0 & other.0 != 0 }
+}
+impl core::ops::BitOr for VideoEncodeH265StdFlagsKHR { type Output = Self; #[inline] fn bitor(self, other: Self) -> Self { Self(self.0 | other.0) } }
+impl core::ops::BitOrAssign for VideoEncodeH265StdFlagsKHR { #[inline] fn bitor_assign(&mut self, other: Self) { self.0 |= other.0 } }
+impl core::ops::BitAnd for VideoEncodeH265StdFlagsKHR { type Output = Self; #[inline] fn bitand(self, other: Self) -> Self { Self(self.0 & other.0) } }
+impl core::ops::BitAndAssign for VideoEncodeH265StdFlagsKHR { #[inline] fn bitand_assign(&mut self, other: Self) { self.0 &= other.0 } }
+impl core::ops::BitXor for VideoEncodeH265StdFlagsKHR { type Output = Self; #[inline] fn bitxor(self, other: Self) -> Self { Self(self.0 ^ other.0) } }
+impl core::ops::BitXorAssign for VideoEncodeH265StdFlagsKHR { #[inline] fn bitxor_assign(&mut self, other: Self) { self.0 ^= other.0 } }
+impl core::ops::Not for VideoEncodeH265StdFlagsKHR { type Output = Self; #[inline] fn not(self) -> Self { Self(!self.0) } }
+impl core::fmt::Debug for VideoEncodeH265StdFlagsKHR { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+debug_flags(f, self.0 as u64, &[
+(1, "SEPARATE_COLOR_PLANE_FLAG_SET"),
+(2, "SAMPLE_ADAPTIVE_OFFSET_ENABLED_FLAG_SET"),
+(4, "SCALING_LIST_DATA_PRESENT_FLAG_SET"),
+(8, "PCM_ENABLED_FLAG_SET"),
+(16, "SPS_TEMPORAL_MVP_ENABLED_FLAG_SET"),
+(32, "INIT_QP_MINUS26"),
+(64, "WEIGHTED_PRED_FLAG_SET"),
+(128, "WEIGHTED_BIPRED_FLAG_SET"),
+(256, "LOG2_PARALLEL_MERGE_LEVEL_MINUS2"),
+(512, "SIGN_DATA_HIDING_ENABLED_FLAG_SET"),
+(1024, "TRANSFORM_SKIP_ENABLED_FLAG_SET"),
+(2048, "TRANSFORM_SKIP_ENABLED_FLAG_UNSET"),
+(4096, "PPS_SLICE_CHROMA_QP_OFFSETS_PRESENT_FLAG_SET"),
+(8192, "TRANSQUANT_BYPASS_ENABLED_FLAG_SET"),
+(16384, "CONSTRAINED_INTRA_PRED_FLAG_SET"),
+(32768, "ENTROPY_CODING_SYNC_ENABLED_FLAG_SET"),
+(65536, "DEBLOCKING_FILTER_OVERRIDE_ENABLED_FLAG_SET"),
+(131072, "DEPENDENT_SLICE_SEGMENTS_ENABLED_FLAG_SET"),
+(262144, "DEPENDENT_SLICE_SEGMENT_FLAG_SET"),
+(524288, "SLICE_QP_DELTA"),
+(1048576, "DIFFERENT_SLICE_QP_DELTA"),
+])
+} }
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VideoEncodeH265TransformBlockSizeFlagsKHR(pub u32);
+impl VideoEncodeH265TransformBlockSizeFlagsKHR {
+    pub const fn from_raw(value: u32) -> Self { Self(value) }
+    pub const fn as_raw(self) -> u32 { self.0 }
+    pub const TYPE_32: Self = Self(8 as u32);
+    pub const TYPE_4: Self = Self(1 as u32);
+    #[inline]
+    pub const fn from_bits_retain(value: u32) -> Self { Self(value) }
+    #[inline]
+    pub const fn bits(self) -> u32 { self.0 }
+    #[inline]
+    pub const fn empty() -> Self { Self(0) }
+    #[inline]
+    pub const fn all() -> Self { Self(!0) }
+    #[inline]
+    pub const fn is_empty(self) -> bool { self.0 == 0 }
+    #[inline]
+    pub const fn is_all(self) -> bool { self.0 == !0 }
+    #[inline]
+    pub const fn contains(self, other: Self) -> bool { self.0 & other.0 == other.0 }
+    #[inline]
+    pub const fn intersects(self, other: Self) -> bool { self.0 & other.0 != 0 }
+}
+impl core::ops::BitOr for VideoEncodeH265TransformBlockSizeFlagsKHR { type Output = Self; #[inline] fn bitor(self, other: Self) -> Self { Self(self.0 | other.0) } }
+impl core::ops::BitOrAssign for VideoEncodeH265TransformBlockSizeFlagsKHR { #[inline] fn bitor_assign(&mut self, other: Self) { self.0 |= other.0 } }
+impl core::ops::BitAnd for VideoEncodeH265TransformBlockSizeFlagsKHR { type Output = Self; #[inline] fn bitand(self, other: Self) -> Self { Self(self.0 & other.0) } }
+impl core::ops::BitAndAssign for VideoEncodeH265TransformBlockSizeFlagsKHR { #[inline] fn bitand_assign(&mut self, other: Self) { self.0 &= other.0 } }
+impl core::ops::BitXor for VideoEncodeH265TransformBlockSizeFlagsKHR { type Output = Self; #[inline] fn bitxor(self, other: Self) -> Self { Self(self.0 ^ other.0) } }
+impl core::ops::BitXorAssign for VideoEncodeH265TransformBlockSizeFlagsKHR { #[inline] fn bitxor_assign(&mut self, other: Self) { self.0 ^= other.0 } }
+impl core::ops::Not for VideoEncodeH265TransformBlockSizeFlagsKHR { type Output = Self; #[inline] fn not(self) -> Self { Self(!self.0) } }
+impl core::fmt::Debug for VideoEncodeH265TransformBlockSizeFlagsKHR { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+debug_flags(f, self.0 as u64, &[
+(1, "TYPE_4"),
+(2, "TYPE_8"),
+(4, "TYPE_16"),
+(8, "TYPE_32"),
+])
+} }
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub struct VideoEncodeInfoKHR {
     pub s_type: StructureType,
     pub p_next: *const core::ffi::c_void,
@@ -12910,6 +15258,8 @@ impl VideoEncodeInfoKHR {
     pub fn preceding_externally_encoded_bytes(mut self, value: u32) -> Self { self.preceding_externally_encoded_bytes = value; self }
     #[inline]
     pub fn next_video_encode_h264_picture_info_khr(mut self, next: &mut VideoEncodeH264PictureInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH264PictureInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH264PictureInfoKHR as *const core::ffi::c_void; self }
+    #[inline]
+    pub fn next_video_encode_h265_picture_info_khr(mut self, next: &mut VideoEncodeH265PictureInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH265PictureInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH265PictureInfoKHR as *const core::ffi::c_void; self }
 }
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -12951,6 +15301,8 @@ impl VideoEncodeQualityLevelPropertiesKHR {
     pub fn preferred_rate_control_layer_count(mut self, value: u32) -> Self { self.preferred_rate_control_layer_count = value; self }
     #[inline]
     pub fn next_video_encode_h264_quality_level_properties_khr(mut self, next: &mut VideoEncodeH264QualityLevelPropertiesKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH264QualityLevelPropertiesKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH264QualityLevelPropertiesKHR as *mut core::ffi::c_void; self }
+    #[inline]
+    pub fn next_video_encode_h265_quality_level_properties_khr(mut self, next: &mut VideoEncodeH265QualityLevelPropertiesKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH265QualityLevelPropertiesKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH265QualityLevelPropertiesKHR as *mut core::ffi::c_void; self }
 }
 #[repr(transparent)]
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -13047,6 +15399,8 @@ impl VideoEncodeRateControlLayerInfoKHR {
     pub fn frame_rate_denominator(mut self, value: u32) -> Self { self.frame_rate_denominator = value; self }
     #[inline]
     pub fn next_video_encode_h264_rate_control_layer_info_khr(mut self, next: &mut VideoEncodeH264RateControlLayerInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH264RateControlLayerInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH264RateControlLayerInfoKHR as *const core::ffi::c_void; self }
+    #[inline]
+    pub fn next_video_encode_h265_rate_control_layer_info_khr(mut self, next: &mut VideoEncodeH265RateControlLayerInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH265RateControlLayerInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH265RateControlLayerInfoKHR as *const core::ffi::c_void; self }
 }
 #[repr(transparent)]
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -13108,6 +15462,8 @@ impl VideoEncodeSessionParametersFeedbackInfoKHR {
     pub fn has_overrides(mut self, value: bool) -> Self { self.has_overrides = value as u32; self }
     #[inline]
     pub fn next_video_encode_h264_session_parameters_feedback_info_khr(mut self, next: &mut VideoEncodeH264SessionParametersFeedbackInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH264SessionParametersFeedbackInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH264SessionParametersFeedbackInfoKHR as *mut core::ffi::c_void; self }
+    #[inline]
+    pub fn next_video_encode_h265_session_parameters_feedback_info_khr(mut self, next: &mut VideoEncodeH265SessionParametersFeedbackInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH265SessionParametersFeedbackInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH265SessionParametersFeedbackInfoKHR as *mut core::ffi::c_void; self }
 }
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -13128,6 +15484,8 @@ impl VideoEncodeSessionParametersGetInfoKHR {
     pub fn video_session_parameters(mut self, value: VideoSessionParametersKHR) -> Self { self.video_session_parameters = value; self }
     #[inline]
     pub fn next_video_encode_h264_session_parameters_get_info_khr(mut self, next: &mut VideoEncodeH264SessionParametersGetInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH264SessionParametersGetInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH264SessionParametersGetInfoKHR as *const core::ffi::c_void; self }
+    #[inline]
+    pub fn next_video_encode_h265_session_parameters_get_info_khr(mut self, next: &mut VideoEncodeH265SessionParametersGetInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH265SessionParametersGetInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH265SessionParametersGetInfoKHR as *const core::ffi::c_void; self }
 }
 #[repr(transparent)]
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -13352,6 +15710,8 @@ impl VideoProfileInfoKHR {
     #[inline]
     pub fn next_video_encode_h264_profile_info_khr(mut self, next: &mut VideoEncodeH264ProfileInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH264ProfileInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH264ProfileInfoKHR as *const core::ffi::c_void; self }
     #[inline]
+    pub fn next_video_encode_h265_profile_info_khr(mut self, next: &mut VideoEncodeH265ProfileInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH265ProfileInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH265ProfileInfoKHR as *const core::ffi::c_void; self }
+    #[inline]
     pub fn next_video_encode_usage_info_khr(mut self, next: &mut VideoEncodeUsageInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeUsageInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeUsageInfoKHR as *const core::ffi::c_void; self }
 }
 #[repr(C)]
@@ -13397,6 +15757,8 @@ impl VideoReferenceSlotInfoKHR {
     pub fn picture_resource(mut self, value: &VideoPictureResourceInfoKHR) -> Self { self.p_picture_resource = value; self }
     #[inline]
     pub fn next_video_encode_h264_dpb_slot_info_khr(mut self, next: &mut VideoEncodeH264DpbSlotInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH264DpbSlotInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH264DpbSlotInfoKHR as *const core::ffi::c_void; self }
+    #[inline]
+    pub fn next_video_encode_h265_dpb_slot_info_khr(mut self, next: &mut VideoEncodeH265DpbSlotInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH265DpbSlotInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH265DpbSlotInfoKHR as *const core::ffi::c_void; self }
 }
 #[repr(transparent)]
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -13480,6 +15842,8 @@ impl VideoSessionCreateInfoKHR {
     pub fn max_active_reference_pictures(mut self, value: u32) -> Self { self.max_active_reference_pictures = value; self }
     #[inline]
     pub fn std_header_version(mut self, value: &ExtensionProperties) -> Self { self.p_std_header_version = value; self }
+    #[inline]
+    pub fn next_video_encode_h265_session_create_info_khr(mut self, next: &mut VideoEncodeH265SessionCreateInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH265SessionCreateInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH265SessionCreateInfoKHR as *const core::ffi::c_void; self }
 }
 #[repr(transparent)]
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -13571,6 +15935,8 @@ impl VideoSessionParametersCreateInfoKHR {
     pub fn video_session(mut self, value: VideoSessionKHR) -> Self { self.video_session = value; self }
     #[inline]
     pub fn next_video_encode_h264_session_parameters_create_info_khr(mut self, next: &mut VideoEncodeH264SessionParametersCreateInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH264SessionParametersCreateInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH264SessionParametersCreateInfoKHR as *const core::ffi::c_void; self }
+    #[inline]
+    pub fn next_video_encode_h265_session_parameters_create_info_khr(mut self, next: &mut VideoEncodeH265SessionParametersCreateInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH265SessionParametersCreateInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH265SessionParametersCreateInfoKHR as *const core::ffi::c_void; self }
     #[inline]
     pub fn next_video_encode_quality_level_info_khr(mut self, next: &mut VideoEncodeQualityLevelInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeQualityLevelInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeQualityLevelInfoKHR as *const core::ffi::c_void; self }
 }

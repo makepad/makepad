@@ -39,6 +39,8 @@ pub struct HistPacket {
     /// (0 until the live decoder had it).
     pub x0: u32,
     pub y0: u32,
+    /// `pref::H264` / `pref::HEVC` (the `Video`'s codec).
+    pub codec: u8,
     pub size: [u32; 2],
     pub key: bool,
     /// Host clock.
@@ -50,6 +52,18 @@ pub struct HistPacket {
     pub decode_us: u32,
     pub failed: bool,
     pub data: Arc<Vec<u8>>,
+}
+
+impl HistPacket {
+    pub fn hevc(&self) -> bool {
+        self.codec == makepad_desk_link::pref::HEVC
+    }
+
+    /// The decoder's codec for this packet.
+    pub fn video_codec(&self) -> makepad_widgets::makepad_platform::video_file::StreamVideoCodec {
+        use makepad_widgets::makepad_platform::video_file::StreamVideoCodec;
+        if self.hevc() { StreamVideoCodec::Hevc } else { StreamVideoCodec::H264 }
+    }
 }
 
 pub struct History {
@@ -340,6 +354,7 @@ mod tests {
             parts,
             x0: 0,
             y0: stream as u32 * 100,
+            codec: makepad_desk_link::pref::H264,
             size: [0, 0],
             key,
             built_ns: t_ms * 1_000_000,

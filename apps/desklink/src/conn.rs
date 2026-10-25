@@ -1,5 +1,5 @@
 //! One Desk Link connection: a network thread (TLS, the fleet proof, the protocol, reconnects)
-//! and a decode thread (the platform's hardware H.264 decoder). The UI reads its state and the
+//! and a decode thread (the platform's hardware H.264 / H.265 decoder). The UI reads its state and the
 //! newest decoded picture; it never waits on either thread.
 //!
 //! A connection the viewer is not showing stays open, paused: the desktop makes no pictures
@@ -60,8 +60,53 @@ pub struct Latency {
 /// This display's refresh (Hz; 0 = not measured yet): every connection tells its desktop.
 pub static DISPLAY_HZ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 /// The rate cap the user set (Mbit/s, all tiles; 0 = auto: the desktop's own): every connection
-/// tells its desktop (`RateCap`).
+/// tells its desktop (`Encoding::mbps`).
 pub static RATE_CAP_MBPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// The codec the user chose (`proto::pref::{AUTO, H264, HEVC}`): every connection tells its
+/// desktop (`Encoding::codec`).
+pub static CODEC_PREF: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(proto::pref::AUTO);
+/// This machine's H.265 decode is unusable: in software (its hardware decoder does not take
+/// that profile) or failing on a key frame. `auto` asks for H.264 from then on.
+pub static HEVC_UNUSABLE: AtomicBool = AtomicBool::new(false);
+
+/// The codec this viewer asks for: the user's choice; `auto` is H.264 once H.265 proved
+/// unusable here ([`HEVC_UNUSABLE`]).
+fn codec_wanted() -> u8 {
+    match CODEC_PREF.load(Ordering::Acquire) {
+        proto::pref::AUTO if HEVC_UNUSABLE.load(Ordering::Acquire) => proto::pref::H264,
+        c => c,
+    }
+}
+
+/// What this viewer's decoders take (`Hello::caps`): Apple's VideoToolbox decodes H.264 High
+/// 4:4:4 Predictive and H.265 (Main, and Format range extensions 4:4:4) on its hardware decoder.
+fn decoder_caps() -> u32 {
+    if cfg!(target_vendor = "apple") { proto::caps::FULL_CHROMA | proto::caps::HEVC } else { 0 }
+}
+
+/// The desktop's `Rate`: how it streams now.
+#[derive(Clone, Debug, Default)]
+pub struct StreamRate {
+    /// The stream's rate (kbit/s, all its tiles).
+    pub kbps: u32,
+    /// What holds it there (`limit::*`).
+    pub limit: u8,
+    pub full_chroma: bool,
+    /// `pref::H264` / `pref::HEVC`.
+    pub codec: u8,
+    /// `pref::SHARP` / `pref::FAST`.
+    pub preset: u8,
+    /// The encoder streams a picture is cut into.
+    pub streams: u8,
+    /// What the stream is and why, in words.
+    pub why: String,
+}
+
+impl StreamRate {
+    pub fn codec_name(&self) -> &'static str {
+        if self.codec == proto::pref::HEVC { "H.265" } else { "H.264" }
+    }
+}
 
 /// The picture area in device pixels (width << 32 | height) and the scale (hundredths), as the
 /// view last drew it: told to the desktop once it has held still (`WINDOW_SETTLE`).
@@ -93,8 +138,8 @@ pub struct Shared {
     pub mbps: f64,
     /// The pictures a second the desktop streams at (its `Rate`; a still desktop sends fewer).
     pub stream_fps: Option<u16>,
-    /// The stream's rate (kbit/s), what holds it (`limit::*`) and whether it is 4:4:4 (its `Rate`).
-    pub stream_rate: Option<(u32, u8, bool)>,
+    /// How the desktop streams now (its `Rate`).
+    pub stream_rate: Option<StreamRate>,
     pub warning: Option<String>,
     /// Over the last second: the longest time the network thread did not read (ms; a stall
     /// here fills the desktop's socket and holds its pictures back), and the most pictures
@@ -138,6 +183,8 @@ struct Packet {
     parts: u8,
     x0: u32,
     y0: u32,
+    /// `pref::H264` / `pref::HEVC`.
+    codec: u8,
     built_ns: u64,
     encoded_ns: u64,
     sent_ns: u64,
@@ -334,8 +381,7 @@ impl Net {
             authorization: credential.authorization(&fingerprint),
             screen: -1,
             paused: self.paused.load(Ordering::Acquire),
-            // Apple Silicon's VideoToolbox decodes 4:4:4 H.264 on its hardware decoder
-            caps: if cfg!(target_vendor = "apple") { proto::caps::FULL_CHROMA } else { 0 },
+            caps: decoder_caps(),
         };
         proto::write_all(&mut stream, &hello.encode()).map_err(|e| format!("hello: {e}"))?;
         stream.set_read_timeout(Some(Duration::from_millis(1))).map_err(|e| e.to_string())?;
@@ -359,7 +405,8 @@ impl Net {
         let mut last_heard = Instant::now();
         // the display refresh last told to the desktop
         let mut told_hz = 0u32;
-        let mut told_cap = 0u32;
+        // the Encoding last told (rate cap, codec): sent once at the start, then on changes
+        let mut told_encoding: Option<(u32, u8)> = None;
         // the window last told, the one seen since when, and since when the window differs from
         // the one told (a size that keeps changing is told after WINDOW_LATEST anyway)
         let (mut told_window, mut seen_window) = ((0u64, 0u32), ((0u64, 0u32), Instant::now()));
@@ -378,10 +425,12 @@ impl Net {
                     break Err(format!("write: {e}"));
                 }
             }
-            let cap = RATE_CAP_MBPS.load(Ordering::Acquire);
-            if cap != told_cap {
-                told_cap = cap;
-                if let Err(e) = proto::write_all(&mut stream, &ClientMsg::RateCap { mbps: cap.min(u16::MAX as u32) as u16 }.encode()) {
+            let encoding = (RATE_CAP_MBPS.load(Ordering::Acquire), codec_wanted());
+            if told_encoding != Some(encoding) {
+                told_encoding = Some(encoding);
+                let (cap, codec) = encoding;
+                let msg = ClientMsg::Encoding { chroma: proto::pref::AUTO, codec, preset: proto::pref::AUTO, mbps: cap.min(u16::MAX as u32) as u16, fps: 0 };
+                if let Err(e) = proto::write_all(&mut stream, &msg.encode()) {
                     break Err(format!("write: {e}"));
                 }
             }
@@ -476,14 +525,14 @@ impl Net {
                         ended = Some(Ok(format!("the desktop said goodbye: {reason}")));
                         break;
                     }
-                    ServerMsg::Video { frame, key, built_ns, encoded_ns, sent_ns, stream, parts, x0, y0, data } => {
+                    ServerMsg::Video { frame, key, built_ns, encoded_ns, sent_ns, stream, parts, x0, y0, codec, data } => {
                         // pictures per second: each picture's last part (tiles) or each picture
                         if parts <= 1 || stream + 1 == parts {
                             second.1 += 1;
                         }
                         second.2 += data.len();
                         queue_max = queue_max.max(queued.fetch_add(1, Ordering::AcqRel) + 1);
-                        let _ = dec_tx.send(Packet { frame, key, stream, parts, x0, y0, built_ns, encoded_ns, sent_ns, received_ns: now_ns(), data: Arc::new(data), seq: 0 });
+                        let _ = dec_tx.send(Packet { frame, key, stream, parts, x0, y0, codec, built_ns, encoded_ns, sent_ns, received_ns: now_ns(), data: Arc::new(data), seq: 0 });
                     }
                     ServerMsg::Cursor { x, y, shape, visible } => {
                         self.shared.lock().unwrap().cursor = Some((x, y, shape, visible));
@@ -515,10 +564,10 @@ impl Net {
                         }
                         self.signal.set();
                     }
-                    ServerMsg::Rate { fps, kbps, limit, full_chroma } => {
+                    ServerMsg::Rate { fps, kbps, limit, full_chroma, codec, preset, streams, why } => {
                         let mut s = self.shared.lock().unwrap();
                         s.stream_fps = Some(fps);
-                        s.stream_rate = Some((kbps, limit, full_chroma));
+                        s.stream_rate = Some(StreamRate { kbps, limit, full_chroma, codec, preset, streams, why });
                         drop(s);
                         self.signal.set();
                     }
@@ -570,7 +619,10 @@ fn play_loop(path: String, gpu: bool, still: Option<u32>, shared: Arc<Mutex<Shar
         for line in tiles.lines() {
             let v: Vec<u32> = line.split_whitespace().filter_map(|w| w.parse().ok()).collect();
             if let [i, x0, y0] = v[..] {
-                files.push((dir.join(format!("stream-{i}.h264")).display().to_string(), x0, y0));
+                // the probe names an H.265 stream's file .h265
+                let h265 = dir.join(format!("stream-{i}.h265"));
+                let file = if h265.exists() { h265 } else { dir.join(format!("stream-{i}.h264")) };
+                files.push((file.display().to_string(), x0, y0));
             }
         }
     } else {
@@ -580,7 +632,12 @@ fn play_loop(path: String, gpu: bool, still: Option<u32>, shared: Arc<Mutex<Shar
             files.push((file.to_string(), x0, y0));
         }
     }
-    // per tile: one access unit per coded picture, parameter sets with the picture after them
+    // per tile: one access unit per coded picture, parameter sets with the picture after them;
+    // .h265 / .hevc files are H.265
+    let hevc = files.first().is_some_and(|(f, _, _)| f.ends_with(".h265") || f.ends_with(".hevc"));
+    let codec = if hevc { proto::pref::HEVC } else { proto::pref::H264 };
+    let vcl = |nal: &[u8]| if hevc { annex_b::hevc_nal_unit_type(nal) < 32 } else { matches!(annex_b::nal_unit_type(nal), 1 | 5) };
+    let idr = |nal: &[u8]| if hevc { matches!(annex_b::hevc_nal_unit_type(nal), 16..=21) } else { annex_b::nal_unit_type(nal) == 5 };
     let mut tiles: Vec<(Vec<Vec<u8>>, u32, u32)> = Vec::new();
     for (file, x0, y0) in files {
         let data = match std::fs::read(&file) {
@@ -592,7 +649,7 @@ fn play_loop(path: String, gpu: bool, still: Option<u32>, shared: Arc<Mutex<Shar
         for nal in annex_b::split_annex_b(&data) {
             unit.extend_from_slice(&[0, 0, 0, 1]);
             unit.extend_from_slice(nal);
-            if matches!(annex_b::nal_unit_type(nal), 1 | 5) {
+            if vcl(nal) {
                 units.push(std::mem::take(&mut unit));
             }
         }
@@ -618,9 +675,9 @@ fn play_loop(path: String, gpu: bool, still: Option<u32>, shared: Arc<Mutex<Shar
             let now = now_ns();
             for (stream, (units, x0, y0)) in tiles.iter().enumerate() {
                 let data = units[at].clone();
-                let key = annex_b::split_annex_b(&data).iter().any(|nal| annex_b::nal_unit_type(nal) == 5);
+                let key = annex_b::split_annex_b(&data).iter().any(|nal| idr(nal));
                 queued.fetch_add(1, Ordering::AcqRel);
-                let _ = dec_tx.send(Packet { frame, key, stream: stream as u8, parts, x0: *x0, y0: *y0, built_ns: now, encoded_ns: now, sent_ns: now, received_ns: now, data: Arc::new(data), seq: 0 });
+                let _ = dec_tx.send(Packet { frame, key, stream: stream as u8, parts, x0: *x0, y0: *y0, codec, built_ns: now, encoded_ns: now, sent_ns: now, received_ns: now, data: Arc::new(data), seq: 0 });
             }
             if still == Some(frame) {
                 // the decoders (and their pictures) stay alive while the view shows this one
@@ -644,6 +701,7 @@ fn record(history: &mut History, packet: &Packet) -> u64 {
         parts: packet.parts,
         x0: packet.x0,
         y0: packet.y0,
+        codec: packet.codec,
         size: [0, 0],
         key: packet.key,
         built_ns: packet.built_ns,
@@ -795,12 +853,24 @@ impl Assembly {
     }
 }
 
+/// H.265 is no use on this machine (`why`): said once; `auto` asks for H.264 from now on (the
+/// network thread sends the new `Encoding`).
+fn hevc_unusable(shared: &Mutex<Shared>, signal: &SignalToUI, why: &str) {
+    if !HEVC_UNUSABLE.swap(true, Ordering::AcqRel) {
+        eprintln!("desklink: {why}; asking for H.264");
+        shared.lock().unwrap().warning = Some(format!("{why}: auto uses H.264"));
+        signal.set();
+    }
+}
+
 /// One encoder stream's decoder: waits for its key frame after a failure; a whole picture
 /// goes out at once, a tile once its picture's other tiles are here (never a torn picture; a
 /// newer picture complete first drops the older incomplete ones, see `Assembly`).
 #[allow(clippy::too_many_arguments)]
 fn decode_stream(s: usize, rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal: SignalToUI, shared: Arc<Mutex<Shared>>, cmd: Sender<ClientMsg>, gathering: Arc<Mutex<Assembly>>, streams: Arc<AtomicUsize>, history: Arc<Mutex<History>>, gpu: bool) {
-    let mut decoder: Option<VideoStreamDecoder> = None;
+    // the decoder and the codec it decodes (`pref::*`): a desktop that changes codec sends a key
+    // frame in the new one, which gets a new decoder
+    let mut decoder: Option<(VideoStreamDecoder, u8)> = None;
     let mut waiting_key = false;
     // the last picture of a single-stream desktop: a picture missing in between means the next
     // ones would decode against a reference this decoder never had
@@ -822,10 +892,27 @@ fn decode_stream(s: usize, rx: Receiver<Packet>, latest: Arc<Mutex<Option<Pictur
                 }
             }
         }
+        if decoder.as_ref().is_some_and(|d| d.1 != packet.codec) && !packet.key {
+            // the codec changed and this is no key frame of the new one: wait for it
+            waiting_key = true;
+            let _ = cmd.send(ClientMsg::RequestKeyframe);
+            history.lock().unwrap().note(packet.seq, 0, true, [0, 0]);
+            continue;
+        }
         last_frame = Some(packet.frame);
-        if decoder.is_none() || packet.key && waiting_key {
-            match if gpu { VideoStreamDecoder::new_gpu(StreamVideoCodec::H264) } else { VideoStreamDecoder::new(StreamVideoCodec::H264) } {
-                Ok(d) => decoder = Some(d),
+        if decoder.as_ref().is_none_or(|d| d.1 != packet.codec) || packet.key && waiting_key {
+            let codec = if packet.codec == proto::pref::HEVC { StreamVideoCodec::Hevc } else { StreamVideoCodec::H264 };
+            match if gpu { VideoStreamDecoder::new_gpu(codec) } else { VideoStreamDecoder::new(codec) } {
+                Ok(d) => decoder = Some((d, packet.codec)),
+                Err(e) if packet.codec == proto::pref::HEVC => {
+                    // no H.265 decoder: `auto` asks for H.264, whose key frame comes next
+                    hevc_unusable(&shared, &signal, &format!("no H.265 decoder ({e:?})"));
+                    decoder = None;
+                    waiting_key = true;
+                    let _ = cmd.send(ClientMsg::RequestKeyframe);
+                    history.lock().unwrap().note(packet.seq, 0, true, [0, 0]);
+                    continue;
+                }
                 Err(e) => {
                     shared.lock().unwrap().warning = Some(format!("hardware decoder: {e:?}"));
                     signal.set();
@@ -835,11 +922,21 @@ fn decode_stream(s: usize, rx: Receiver<Packet>, latest: Arc<Mutex<Option<Pictur
         }
         waiting_key = false;
         let start = now_ns();
-        let out = decoder.as_mut().unwrap().push_packet(&packet.data, packet.frame as i64);
+        let (dec, codec) = decoder.as_mut().unwrap();
+        let fresh = dec.hardware().is_none();
+        let out = dec.push_packet(&packet.data, packet.frame as i64);
         let decoded_ns = now_ns();
+        // a new H.265 session in software (the hardware decoder does not take its profile):
+        // `auto` asks for H.264 from now on
+        if fresh && *codec == proto::pref::HEVC && dec.hardware() == Some(false) {
+            hevc_unusable(&shared, &signal, "H.265 decodes in software here");
+        }
         let frames = match out {
             Ok(frames) => frames,
             Err(e) => {
+                if *codec == proto::pref::HEVC && packet.key {
+                    hevc_unusable(&shared, &signal, &format!("an H.265 key frame failed to decode ({e:?})"));
+                }
                 eprintln!("desklink: decode of picture {} (stream {s}): {e:?}; asking for a key frame", packet.frame);
                 waiting_key = true;
                 let _ = cmd.send(ClientMsg::RequestKeyframe);

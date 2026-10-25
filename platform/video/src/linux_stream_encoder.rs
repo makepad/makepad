@@ -3,7 +3,7 @@
 //! from a shared texture (a registered DMA-BUF holding NV12 packed into BGRA8 texels, see
 //! [`crate::GpuPictureMaker::nv12_picture`]) without a pixel crossing the CPU, or from CPU NV12.
 
-use crate::stream_encoder::{EncodedPacket, GpuReady, StreamVideoCodec, VideoStreamEncoderOptions};
+use crate::stream_encoder::{EncodedPacket, GpuReady, StreamTuning, StreamVideoCodec, VideoStreamEncoderOptions};
 use crate::VideoFileError;
 use makepad_hal::stream_encode as hal;
 use std::os::fd::IntoRawFd;
@@ -26,14 +26,12 @@ pub(crate) struct LinuxStreamEncoder {
 
 impl LinuxStreamEncoder {
     /// On encode engine `engine` (`crate::VideoStreamEncoder::engines`).
-    pub fn new(options: &VideoStreamEncoderOptions, engine: u32) -> Result<Self, VideoFileError> {
-        if options.codec != StreamVideoCodec::H264 {
-            return Err(VideoFileError::new("the Linux stream encoder makes H.264 only"));
-        }
+    pub fn new(options: &VideoStreamEncoderOptions, engine: u32, tuning: StreamTuning) -> Result<Self, VideoFileError> {
         if options.width % 4 != 0 {
             return Err(VideoFileError::new(format!("stream width {} must be a multiple of 4", options.width)));
         }
-        let id = hal::hal_stream_encoder_open(options.width, options.height, options.fps, options.bitrate_kbps, engine, if options.full_chroma { hal::FULL_CHROMA } else { 0 });
+        let flags = if options.full_chroma { hal::FULL_CHROMA } else { 0 } | if options.codec == StreamVideoCodec::Hevc { hal::HEVC } else { 0 } | if tuning.constant_rate { hal::CBR } else { 0 } | if tuning.sharp { hal::SHARP } else { 0 };
+        let id = hal::hal_stream_encoder_open(options.width, options.height, options.fps, options.bitrate_kbps, engine, flags, tuning.quality, tuning.buffer_pictures);
         if id == 0 {
             return Err(last_error());
         }
@@ -92,6 +90,10 @@ impl LinuxStreamEncoder {
 
     pub fn request_refinement(&mut self) {
         self.refine_wanted = true;
+    }
+
+    pub fn last_gpu_us(&self) -> u32 {
+        (hal::hal_stream_encoder_last_gpu_ns(self.id) / 1000) as u32
     }
 
     pub fn set_bitrate_kbps(&mut self, kbps: u32) {

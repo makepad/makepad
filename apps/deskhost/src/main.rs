@@ -362,7 +362,7 @@ fn run(desktop: &mut dyn Desktop) {
                         // a physical screen streams its real size: the viewer's window size (v5,
                         // for desktops that follow their viewer) and who drives last change nothing
                         Control::Window { .. } | Control::Active => {}
-                        Control::Clipboard(_) | Control::Stats { .. } | Control::Split(_) | Control::RateCap(_) => {}
+                        Control::Clipboard(_) | Control::Stats { .. } | Control::Encoding { .. } => {}
                     }
                 }
                 ToUi::Closed { session, reason } => {
@@ -404,7 +404,7 @@ fn run(desktop: &mut dyn Desktop) {
             v.told_rate = true;
             // a plain desktop's rate does not adapt: its setting, or by picture size (kbps 0)
             let limit = if settings.kbps > 0 { proto::limit::FIXED } else { proto::limit::CAP };
-            let _ = v.out.send(Out::Msg(ServerMsg::Rate { fps: fps as u16, kbps: settings.kbps, limit, full_chroma: false }.encode()));
+            let _ = v.out.send(Out::Msg(ServerMsg::Rate { fps: fps as u16, kbps: settings.kbps, limit, full_chroma: false, codec: proto::pref::H264, preset: proto::pref::FAST, streams: 1, why: String::new() }.encode()));
         }
         // the capture follows the viewers: on while one watches, on the screen they watch, at the stream's rate
         watching = viewers.iter().any(|v| !v.paused.load(Ordering::Acquire));
@@ -526,7 +526,7 @@ fn run(desktop: &mut dyn Desktop) {
                     if p.is_key {
                         last_key = Instant::now();
                     }
-                    let bytes = proto::encode_video(frame_no, p.is_key, frame.captured_ns, encoded_ns, 0, (0, 1, 0, 0), &p.data);
+                    let bytes = proto::encode_video(frame_no, p.is_key, frame.captured_ns, encoded_ns, 0, (0, 1, 0, 0), proto::pref::H264, &p.data);
                     for v in viewers.iter_mut() {
                         if v.paused.load(Ordering::Acquire) {
                             continue;

@@ -223,9 +223,13 @@ impl AppleStreamDecoder {
         let mut session: VTDecompressionSessionRef = std::ptr::null_mut();
         // GPU output: 420v pixel buffers on global IOSurfaces (the HAL imports them by id) that
         // Metal can sample, plane by plane
-        // a 4:4:4 stream (High 4:4:4 Predictive, profile_idc 244) stays 4:4:4 on the GPU; the CPU
+        // a 4:4:4 stream (H.264 High 4:4:4 Predictive, profile_idc 244; H.265 chroma_format_idc 3)
+        // stays 4:4:4 on the GPU; the CPU
         // form is always tight NV12
-        let full_chroma = matches!(self.codec, StreamVideoCodec::H264) && sps.get(1) == Some(&244);
+        let full_chroma = match self.codec {
+            StreamVideoCodec::H264 => sps.get(1) == Some(&244),
+            StreamVideoCodec::Hevc => crate::hevc_config::sps_chroma_format_idc(sps) == Some(3),
+        };
         let number = |v: u32| -> ObjcId { msg_send![class!(NSNumber), numberWithUnsignedInt: v] };
         let destination: ObjcId = if self.gpu {
             let yes: ObjcId = msg_send![class!(NSNumber), numberWithBool: YES];

@@ -462,14 +462,14 @@ impl Widget for ConnList {
 }
 
 /// The overlay's one line (always shown): pictures shown a second, the rate that arrives, the
-/// stream's chroma, and what limits it only when something does (dropped pictures only when
-/// there are any). Fixed field widths in a monospaced face, so it never jitters.
-pub fn summary_line(shown: (u32, u32), mbps: f64, stream_rate: Option<(u32, u8, bool)>) -> String {
+/// stream's codec and chroma, and what limits it only when something does (dropped pictures only
+/// when there are any). Fixed field widths in a monospaced face, so it never jitters.
+pub fn summary_line(shown: (u32, u32), mbps: f64, stream_rate: Option<&crate::conn::StreamRate>) -> String {
     use makepad_desk_link::limit;
     let mut line = format!("{:>3} fps · {:>4.0} Mbit/s", shown.0.min(999), mbps.clamp(0.0, 9999.0));
-    if let Some((_, l, full_chroma)) = stream_rate {
-        line.push_str(if full_chroma { " · H.264 4:4:4" } else { " · H.264 4:2:0" });
-        let why = match l {
+    if let Some(r) = stream_rate {
+        line.push_str(&format!(" · {} {}", r.codec_name(), if r.full_chroma { "4:4:4" } else { "4:2:0" }));
+        let why = match r.limit {
             limit::LINK => " · link-bound",
             limit::ENCODER => " · encoder-bound",
             limit::CAP => " · capped",
@@ -485,16 +485,29 @@ pub fn summary_line(shown: (u32, u32), mbps: f64, stream_rate: Option<(u32, u8, 
 }
 
 /// The rate details ("Latency details"): pictures that arrived a second, what the desktop
-/// streams at (`stream`: its `Rate`), this display's refresh (`display`, 0 = not measured yet)
-/// and the stream's rate target.
-pub fn rate_details_line(fps: f64, stream: Option<u16>, display: u32, stream_rate: Option<(u32, u8, bool)>) -> String {
+/// streams at (`stream`: its `Rate`), this display's refresh (`display`, 0 = not measured yet),
+/// the stream's rate target, the encoder's preset and streams, and the desktop's why.
+pub fn rate_details_line(fps: f64, stream: Option<u16>, display: u32, stream_rate: Option<&crate::conn::StreamRate>) -> String {
+    use makepad_desk_link::pref;
     let stream = stream.map_or("…".to_string(), |s| s.to_string());
     let display = if display == 0 { "…".to_string() } else { display.to_string() };
     let target = match stream_rate {
-        Some((0, _, _)) | None => "…".to_string(),
-        Some((kbps, _, _)) => format!("{}", kbps / 1000),
+        Some(r) if r.kbps > 0 => format!("{}", r.kbps / 1000),
+        _ => "…".to_string(),
     };
-    format!("arrived {:>3.0}/s · stream {stream}/s · display {display} Hz · target {target} Mbit/s", fps.clamp(0.0, 999.0))
+    let mut line = format!("arrived {:>3.0}/s · stream {stream}/s · display {display} Hz · target {target} Mbit/s", fps.clamp(0.0, 999.0));
+    if let Some(r) = stream_rate {
+        let preset = match r.preset {
+            pref::SHARP => "sharp",
+            pref::FAST => "fast",
+            _ => "auto",
+        };
+        line.push_str(&format!(" · {preset} · {} stream{}", r.streams, if r.streams == 1 { "" } else { "s" }));
+        if !r.why.is_empty() {
+            line.push_str(&format!(" · {}", r.why));
+        }
+    }
+    line
 }
 
 /// The per-stage latency line ("Latency details"), fixed widths too.

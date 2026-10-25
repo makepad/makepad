@@ -1,4 +1,4 @@
-# Desk Link protocol, version 6
+# Desk Link protocol, version 7
 
 Desk Link is how a viewer (this app) sees and drives a desktop (the window manager's
 `desk_link` server, `apps/wm/src/desk_link/`). It runs between machines on one LAN only: no
@@ -50,12 +50,11 @@ Fixed-size fields are little-endian. `str` and `bytes` are `u32 LE length` + byt
 
 | type | name | payload |
 |---|---|---|
-| 1 | Hello | `version u16, name str, authorization str, screen i32 (-1 = the desktop's default), paused bool, caps u32` (1 = the viewer's decoder takes H.264 High 4:4:4 Predictive; 2 = view-only: its `Window` never decides the size of a desktop that follows its viewer, e.g. a probe) |
+| 1 | Hello | `version u16, name str, authorization str, screen i32 (-1 = the desktop's default), paused bool, caps u32` (1 = the viewer's decoder takes 4:4:4: H.264 High 4:4:4 Predictive, and with 4 H.265 Format range extensions 4:4:4; 2 = view-only: its `Window` never decides the size of a desktop that follows its viewer, e.g. a probe; 4 = it decodes H.265) |
 | 2 | Pause | — no pictures for this session; pings continue |
 | 3 | Resume | — pictures again, starting with a key frame |
 | 4 | SelectScreen | `index u32` (into `Welcome.screens`) |
 | 5 | RequestKeyframe | — (sent by the viewer after a decode error) |
-| 6 | SetSplit | `split u8` (0 one engine, 1 tiles, 2 interleave: how a desktop with several encode engines shares them, for every viewer) |
 | 7 | Refresh | `hz u16`: the viewer's display refresh, measured from its vsync (0 = not known). Sent after Hello and on every change. |
 | 8 | Window | `width u32, height u32, scale u16`: the viewer's picture area in device pixels and its scale (hundredths, 200 = 2.00x). Sent once it has held still for 250 ms, after the Welcome and after every resize. A desktop whose size follows its viewer (a virtual display set to follow) takes this size and scale from the active viewer (the watching viewer that sent input last), so the picture is shown 1:1. |
 | 10 | Key | `down bool, keycode u32 (makepad KeyCode index), mods u8 (1 shift, 2 control, 4 alt, 8 logo)` |
@@ -67,7 +66,7 @@ Fixed-size fields are little-endian. `str` and `bytes` are `u32 LE length` + byt
 | 20 | Ping | `client_ns u64` (the viewer's clock) |
 | 21 | Stats | `frame u32, decode_us u32, present_us u32` |
 | 22 | Clipboard | `text str` (the desktop's clipboard takes it) |
-| 23 | RateCap | `mbps u16`: the most this viewer wants the stream to take (all tiles; 0 = no cap of its own). The desktop streams at most the lowest cap of its watching viewers. |
+| 24 | Encoding | `chroma u8, codec u8, preset u8, mbps u16, fps u16`: how this viewer wants the stream encoded, 0 = auto each. `chroma` 1 4:4:4, 2 4:2:0; `codec` 1 H.264, 2 H.265; `preset` 1 sharp (the encoder's best pictures per bit), 2 fast (its fastest encode); `mbps` the most the stream may take (all tiles; 0 = no cap of its own: the desktop streams at most the lowest cap of its watching viewers); `fps` pictures a second (0 = its display's refresh). Sent after the Hello and on every change. The active viewer's choices decide the stream (the watching viewer that sent input last, view-only viewers last); the decoders of every watching viewer (`Hello.caps`) and the desktop's settings bound them. |
 
 Gamepad buttons: bit 0 A, 1 B, 2 X, 3 Y, 4 left shoulder, 5 right shoulder, 6 select, 7 start, 8 home,
 9 left thumb, 10 right thumb, 11-14 d-pad up/down/left/right. Sticks run −32767..32767, up positive
@@ -79,24 +78,29 @@ Gamepad buttons: bit 0 A, 1 B, 2 X, 3 Y, 4 left shoulder, 5 right shoulder, 6 se
 |---|---|---|
 | 100 | Welcome | `version u16, session u32, screens (n u32, then per screen: name str, x u32, y u32, width u32, height u32), screen u32, stream_w u32, stream_h u32, input bool, input_note str, server str` |
 | 101 | Refused | `reason str` (then the desktop closes) |
-| 102 | Video | `frame u32, key bool, built_ns u64, encoded_ns u64, sent_ns u64, stream u8, parts u8, x0 u32, y0 u32, data bytes` (see Streams) |
+| 102 | Video | `frame u32, key bool, built_ns u64, encoded_ns u64, sent_ns u64, stream u8, parts u8, x0 u32, y0 u32, codec u8 (1 H.264, 2 H.265), data bytes` (see Streams) |
 | 103 | Cursor | `x u16, y u16 (over the stream picture), shape u8, visible bool` |
 | 104 | Pong | `client_ns u64 (echoed), server_ns u64` |
 | 105 | Stream | `screen u32, stream_w u32, stream_h u32` (the stream shows another screen now) |
 | 106 | Clipboard | `text str` |
 | 107 | Bye | `reason str` (then the desktop closes) |
-| 108 | Rate | `fps u16, kbps u32, limit u8, full_chroma bool`: the pictures a second the desktop streams at now (the lowest of its settings' cap (`fps`, default 120), its streamed screen's refresh and every watching viewer's `Refresh`; a still desktop sends fewer), the stream's rate (kbit/s, all tiles; 0 = by picture size), what holds the rate (0 starting, 1 nothing: rising, 2 the link, 3 the encoder, 4 a cap, 5 a fixed setting) and whether it is 4:4:4. Sent after Welcome and on every change. |
+| 108 | Rate | `fps u16, kbps u32, limit u8, full_chroma bool, codec u8, preset u8, streams u8, why str`: the pictures a second the desktop streams at now (the lowest of its settings' cap (`fps`, default 120), its streamed screen's refresh and every watching viewer's `Refresh`; a still desktop sends fewer), the stream's rate (kbit/s, all tiles; 0 = by picture size), what holds the rate (0 starting, 1 nothing: rising, 2 the link, 3 the encoder, 4 a cap, 5 a fixed setting), whether it is 4:4:4, its codec (1 H.264, 2 H.265), the encoder's preset (1 sharp, 2 fast), the encoder streams a picture is cut into, and `why`: what the stream is and why, in words (e.g. "fast: the encoder was behind at sharp"). Sent after Welcome and on every change. |
 
 Screens are in desktop device pixels. `input = false` means viewer input is not injected (for
 example, no `/dev/uinput` access); `input_note` says why.
 
 ## Video
 
-- **Codec.** H.264 High, 4:2:0 8-bit, or High 4:4:4 Predictive (4:4:4 8-bit, CAVLC) when the
-  desktop's settings ask for it (`chroma = 444`, the default) and every watching viewer's Hello
-  says it decodes it; BT.709 limited range (written in the SPS VUI), Annex-B access units (one
-  picture each).
-  - Every key frame (IDR) starts with its SPS and PPS.
+- **Codec.** H.265 when the desktop's settings allow it (`codec = auto`, the default), its GPU
+  encodes it and every watching viewer's Hello says it decodes it (caps 4), and the active
+  viewer's `Encoding` does not ask for H.264: Main (4:2:0 8-bit) or Format range extensions
+  4:4:4 8-bit. Else H.264 High, 4:2:0 8-bit, or High 4:4:4 Predictive (4:4:4 8-bit, CAVLC).
+  4:4:4 when the desktop's settings ask for it (`chroma = 444`, the default) and every watching
+  viewer's Hello says it decodes it (caps 1). BT.709 limited range (written in the SPS VUI),
+  Annex-B access units (one picture each). Each `Video` names its codec; a change of codec
+  starts with a key frame in the new one.
+  - Every key frame (IDR) starts with its parameter sets (H.264: SPS and PPS; H.265: VPS, SPS
+    and PPS).
   - There are no B frames. Every P frame references the picture before it, and output order is
   decode order (POC type 2).
   - The VUI says `max_num_reorder_frames = 0` and `max_dec_frame_buffering = 1`, so decoders output
@@ -114,14 +118,21 @@ example, no `/dev/uinput` access); `input_note` says why.
 - **Rate control.** VBR at one rate for the whole stream, split over the tiles by area. A fixed
   `kbps` setting, or adaptive: it starts at 250 Mbit/s, goes down below what got out when a viewer falls behind
   (link-bound), and creeps back up when clean, with no ceiling but the desktop's `max_mbps` setting (none by default) and
-  the viewers' `RateCap`. When the encoder cannot keep a picture's time at 4:4:4 (its slowest
-  tile takes most of it and frames wait for it), that size streams 4:2:0 at the same picture
-  rate, and tries 4:4:4 again after a while. `Rate` tells the viewers each change.
+  the viewers' `Encoding` caps. When the encoder cannot keep a picture's time (its slowest
+  tile takes most of it and frames wait for it), that size gives up encoder work one step a
+  second, at the same picture rate: sharp in as few streams as the size allows, then a stream per
+  encode engine (bands encoded at once), then the fast preset, and 4:2:0 last, only after three
+  seconds still behind at fast and only when the active viewer's chroma is auto. It steps back
+  after a while well clear of the picture's time. `Rate` tells the viewers each change.
 - **Backpressure.** The desktop never drops an encoded picture: the next one references it. While
   a watching viewer has more than 2 pictures unsent, it makes none. The newest picture goes out
   once the viewer has caught up.
 
 ## Streams (tiles and interleaving)
+
+**H.265** is one stream as large as the encoder takes (NVIDIA: 8192 wide; no seams, one decoder),
+or, when one engine cannot keep up (the effort steps above), one band per encode engine, encoded
+at once. Bands carry `parts`, `x0`, `y0` as tiles do.
 
 A desktop whose GPU has several hardware encode engines encodes one H.264 stream per engine;
 each stream is a stream of its own (its own SPS and PPS, its own decoder on the viewer):
@@ -140,6 +151,7 @@ each stream is a stream of its own (its own SPS and PPS, its own decoder on the 
 - **Interleave** (the most pictures per second, at one picture's latency). The engines take whole
   pictures in turn: picture `frame` comes from stream `frame % streams` with `parts = 1, x0 = y0 = 0`
   (a picture wider than the encoder takes is cut into columns instead: tiles).
+- The desktop's settings pick the split (`split = tiles | interleave | off`).
 - A key frame request makes every stream start again from a key frame.
 - One engine (or `split = off`): one stream, `stream 0, parts 1, x0 0, y0 0` (or columns, as above).
 

@@ -1,7 +1,7 @@
 //! "Save clip": a range of a [`Snapshot`] into the checkout's screencap folder
 //! (`local/screencap`), on a thread of its own:
 //! - per stream (one per tile band, or per interleaved engine) the received bitstream as it
-//!   came, no re-encode: an MP4 (`-s<N>.mp4`) and the raw Annex-B (`-s<N>.h264`; all of them,
+//!   came, no re-encode: an MP4 (`-s<N>.mp4`) and the raw Annex-B (`-s<N>.h264`, or `.h265`; all of them,
 //!   comma separated, play in the viewer with `--dump-play`). Both start at the key run before
 //!   the range, so they decode on their own.
 //! - PNGs of the pictures in the range (at most [`MAX_PNGS`], centred on the shown picture),
@@ -12,7 +12,7 @@
 
 use crate::history::Snapshot;
 use makepad_network::SignalToUI;
-use makepad_widgets::makepad_platform::video_file::{annex_b, StreamVideoCodec, VideoStreamDecoder};
+use makepad_widgets::makepad_platform::video_file::{annex_b, hevc_config, VideoStreamDecoder};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -90,16 +90,22 @@ fn write_clip(req: &ClipRequest, dir: &Path, set: &dyn Fn(String)) -> Result<Pat
     if !req.frame_only {
         let streams = snap.packets[snap.pictures[sync].first..snap.pictures[to].first + snap.pictures[to].count].iter().map(|p| p.stream as usize + 1).max().unwrap_or(1);
         for s in 0..streams {
-            let packets: Vec<_> = (sync..=to).flat_map(|i| snap.packets_of(i).iter()).filter(|p| p.stream as usize == s).collect();
+            let mut packets: Vec<_> = (sync..=to).flat_map(|i| snap.packets_of(i).iter()).filter(|p| p.stream as usize == s).collect();
+            // one codec per file: the key run's (a desktop that switched codec in the range: up
+            // to the switch)
+            let hevc = packets.first().is_some_and(|p| p.hevc());
+            if let Some(end) = packets.iter().position(|p| p.hevc() != hevc) {
+                packets.truncate(end);
+            }
             let mut raw = Vec::new();
             for p in &packets {
                 raw.extend_from_slice(&p.data);
             }
-            let h264 = PathBuf::from(format!("{}-s{s}.h264", base.display()));
-            std::fs::write(&h264, &raw).map_err(|e| format!("{}: {e}", h264.display()))?;
-            files.push(h264);
+            let annex = PathBuf::from(format!("{}-s{s}.{}", base.display(), if hevc { "h265" } else { "h264" }));
+            std::fs::write(&annex, &raw).map_err(|e| format!("{}: {e}", annex.display()))?;
+            files.push(annex);
             let band = band_size(snap, &packets);
-            match mp4(&packets.iter().map(|p| (p.data.as_slice(), p.built_ns)).collect::<Vec<_>>(), band) {
+            match mp4(&packets.iter().map(|p| (p.data.as_slice(), p.built_ns)).collect::<Vec<_>>(), band, hevc) {
                 Ok(bytes) => {
                     let path = PathBuf::from(format!("{}-s{s}.mp4", base.display()));
                     std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -146,7 +152,8 @@ fn write_pngs(snap: &Snapshot, sync: usize, p0: usize, p1: usize, dir: &Path, se
                 }
             });
         }
-        let mut decoders: Vec<Option<VideoStreamDecoder>> = Vec::new();
+        // per stream: its decoder and the codec it decodes (a key frame in another codec gets a new one)
+        let mut decoders: Vec<Option<(VideoStreamDecoder, u8)>> = Vec::new();
         for i in sync..=p1 {
             let mut parts = Vec::new();
             for p in snap.packets_of(i) {
@@ -154,10 +161,10 @@ fn write_pngs(snap: &Snapshot, sync: usize, p0: usize, p1: usize, dir: &Path, se
                 if decoders.len() <= s {
                     decoders.resize_with(s + 1, || None);
                 }
-                if decoders[s].is_none() {
-                    decoders[s] = Some(VideoStreamDecoder::new(StreamVideoCodec::H264).map_err(|e| format!("decoder: {e:?}"))?);
+                if decoders[s].as_ref().is_none_or(|d| d.1 != p.codec) {
+                    decoders[s] = Some((VideoStreamDecoder::new(p.video_codec()).map_err(|e| format!("decoder: {e:?}"))?, p.codec));
                 }
-                for f in decoders[s].as_mut().unwrap().push_packet(&p.data, p.frame as i64).map_err(|e| format!("decode of frame {}: {e:?}", p.frame))? {
+                for f in decoders[s].as_mut().unwrap().0.push_packet(&p.data, p.frame as i64).map_err(|e| format!("decode of frame {}: {e:?}", p.frame))? {
                     parts.push(((p.x0, p.y0), f));
                 }
             }
@@ -274,7 +281,7 @@ fn notes(req: &ClipRequest, from: usize, to: usize, sync: usize, pngs: (usize, u
     if !files.is_empty() {
         let _ = writeln!(
             o,
-            "  (bitstream from the key run at frame {}: {} pictures before frame {f0}; one file per stream: tiles (columns and bands) or interleaved engines, in stream order; `makepad-app-desklink --dump-play <s0.h264>,<s1.h264>` plays band tiles)",
+            "  (bitstream from the key run at frame {}: {} pictures before frame {f0}; one file per stream: tiles (columns and bands) or interleaved engines, in stream order; `makepad-app-desklink --dump-play <s0.h264>,<s1.h264>` plays band tiles; .h265 for H.265)",
             snap.pictures[sync].frame,
             from - sync
         );
@@ -302,7 +309,7 @@ fn utc_stamp() -> String {
     format!("{y:04}{m:02}{d:02}-{:02}{:02}{:02}Z", rem / 3600, rem / 60 % 60, rem % 60)
 }
 
-// ---- MP4 (ISO BMFF) of an H.264 stream, written as received ----
+// ---- MP4 (ISO BMFF) of an H.264 or H.265 stream, written as received ----
 
 fn atom(name: &[u8; 4], body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(body.len() + 8);
@@ -394,27 +401,32 @@ fn avcc(sps: &[u8], pps: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 /// An MP4 of Annex-B access units (`(unit, host time ns)`, the first a key frame with its
-/// SPS/PPS), samples length-prefixed, the parameter sets in the sample entry. Stops before a
-/// changed SPS (a new stream size: another file's worth).
-pub fn mp4(units: &[(&[u8], u64)], size: [u32; 2]) -> Result<Vec<u8>, String> {
+/// parameter sets), samples length-prefixed, the parameter sets in the sample entry (`avcC`, or
+/// `hvcC` for `hevc`). Stops before a changed SPS (a new stream size: another file's worth).
+pub fn mp4(units: &[(&[u8], u64)], size: [u32; 2], hevc: bool) -> Result<Vec<u8>, String> {
     const TIMESCALE: u32 = 90_000;
+    // the NAL type: H.264 SPS 7, PPS 8, IDR 5; H.265 VPS 32, SPS 33, PPS 34, IRAP 16..=21
+    let (ty, sps_ty, pps_ty): (fn(&[u8]) -> u8, u8, u8) = if hevc { (annex_b::hevc_nal_unit_type, 33, 34) } else { (annex_b::nal_unit_type, 7, 8) };
+    let is_key = |t: u8| if hevc { (16..=21).contains(&t) } else { t == 5 };
     let mut sps: Option<Vec<u8>> = None;
     let mut pps: Option<Vec<u8>> = None;
+    let mut vps: Option<Vec<u8>> = None;
     let mut samples: Vec<(Vec<u8>, u64, bool)> = Vec::new();
     'units: for (unit, t) in units {
         let mut nals = Vec::new();
         let mut key = false;
         for nal in annex_b::split_annex_b(unit) {
-            match annex_b::nal_unit_type(nal) {
-                7 => {
+            match ty(nal) {
+                t if t == sps_ty => {
                     if sps.as_deref().is_some_and(|s| s != nal) {
                         break 'units;
                     }
                     sps = Some(nal.to_vec());
                 }
-                8 => pps = pps.or_else(|| Some(nal.to_vec())),
+                t if t == pps_ty => pps = pps.or_else(|| Some(nal.to_vec())),
+                32 if hevc => vps = vps.or_else(|| Some(nal.to_vec())),
                 t => {
-                    key |= t == 5;
+                    key |= is_key(t);
                     nals.push(nal);
                 }
             }
@@ -428,7 +440,18 @@ pub fn mp4(units: &[(&[u8], u64)], size: [u32; 2]) -> Result<Vec<u8>, String> {
     if samples.is_empty() {
         return Err("no pictures".into());
     }
-    let config = avcc(&sps, &pps)?;
+    let config = if hevc {
+        let vps = vps.ok_or("no VPS")?;
+        let mut sets = Vec::new();
+        for nal in [&vps, &sps, &pps] {
+            sets.extend_from_slice(&[0, 0, 0, 1]);
+            sets.extend_from_slice(nal);
+        }
+        hevc_config::hvcc_from_annex_b(&sets).ok_or("unreadable SPS")?
+    } else {
+        avcc(&sps, &pps)?
+    };
+    let (entry, config_box, brand) = if hevc { (b"hvc1", b"hvcC", b"hvc1") } else { (b"avc1", b"avcC", b"avc1") };
     // durations from the host's times; the last one the one before it
     let mut deltas: Vec<u32> = samples.windows(2).map(|w| ((w[1].1.saturating_sub(w[0].1)) as u128 * TIMESCALE as u128 / 1_000_000_000).max(1) as u32).collect();
     deltas.push(deltas.last().copied().unwrap_or(TIMESCALE / 60));
@@ -437,7 +460,7 @@ pub fn mp4(units: &[(&[u8], u64)], size: [u32; 2]) -> Result<Vec<u8>, String> {
     let ftyp = {
         let mut b = b"isom".to_vec();
         b.extend_from_slice(&512u32.to_be_bytes());
-        for brand in [b"isom", b"iso2", b"avc1", b"mp41"] {
+        for brand in [b"isom", b"iso2", brand, b"mp41"] {
             b.extend_from_slice(brand);
         }
         atom(b"ftyp", &b)
@@ -461,9 +484,9 @@ pub fn mp4(units: &[(&[u8], u64)], size: [u32; 2]) -> Result<Vec<u8>, String> {
         e.extend_from_slice(&[0u8; 32]);
         e.extend_from_slice(&0x0018u16.to_be_bytes());
         e.extend_from_slice(&0xFFFFu16.to_be_bytes());
-        e.extend_from_slice(&atom(b"avcC", &config));
+        e.extend_from_slice(&atom(config_box, &config));
         let mut b = 1u32.to_be_bytes().to_vec();
-        b.extend_from_slice(&atom(b"avc1", &e));
+        b.extend_from_slice(&atom(entry, &e));
         full_atom(b"stsd", 0, 0, &b)
     };
     let stts = {
@@ -604,7 +627,7 @@ mod tests {
         let key = [&[0u8, 0, 0, 1, 0x67, 77, 0, 40, 0x80][..], &[0, 0, 0, 1, 0x68, 0xEE], &[0, 0, 0, 1, 0x65, 1, 2, 3]].concat();
         let p = [0u8, 0, 0, 1, 0x41, 9, 9].to_vec();
         let units: Vec<(&[u8], u64)> = vec![(&key, 0), (&p, 8_333_333), (&p, 16_666_666), (&key, 25_000_000)];
-        let file = mp4(&units, [640, 360]).unwrap();
+        let file = mp4(&units, [640, 360], false).unwrap();
         let top = boxes(&file);
         assert_eq!(top.iter().map(|b| b.0).collect::<Vec<_>>(), vec![*b"ftyp", *b"mdat", *b"moov"]);
         // samples: length-prefixed, no parameter sets: 4+4, 4+3, 4+3, 4+4
@@ -639,7 +662,7 @@ mod tests {
             }
         }
         let timed: Vec<(&[u8], u64)> = units.iter().enumerate().map(|(i, u)| (u.as_slice(), i as u64 * 8_333_333)).collect();
-        std::fs::write(out, mp4(&timed, [w.parse().unwrap(), h.parse().unwrap()]).unwrap()).unwrap();
+        std::fs::write(out, mp4(&timed, [w.parse().unwrap(), h.parse().unwrap()], false).unwrap()).unwrap();
     }
 
     #[test]
