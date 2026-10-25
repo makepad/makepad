@@ -236,11 +236,10 @@ pub struct WindowObj {
     /// Session 0's window: the title the app drawing it gave its window (`WindowTitle` on the
     /// lent window), which `makepad run`'s load screen titles its caption with.
     pub app_title: Option<String>,
-    /// Session 0's window: its badge that takes the pointer (`window_style::BADGE_INPUT`) and
-    /// the badge's rect (window points), and whether the pointer is over it (1) or a press
-    /// begun on it is held (2).
-    pub badge_input: Option<(Id, [f32; 4])>,
-    pub badge_pointer: u8,
+    /// Session 0's window: its badge that sees the pointer hover (`window_style::BADGE_HOVER`)
+    /// and the badge's rect (window points), and whether the pointer is over it.
+    pub badge_hover: Option<(Id, [f32; 4])>,
+    pub badge_hovered: bool,
     /// Session 0's window: its badge layer (`target::BADGES`), drawn over every frame it presents.
     pub badges: Option<std::sync::Arc<KeptFrame>>,
 }
@@ -1325,13 +1324,7 @@ impl World {
             }
         }
         if let Some(hid) = alias {
-            if self.badge_event(hid, &mut event, payload) {
-                self.to_session(HOST, |q| {
-                    event.data = q.put_bytes(payload);
-                    q.push(event);
-                });
-                return;
-            }
+            self.badge_hover(hid, &event, payload);
         }
         use crate::events::event_tag as tag;
         let input = matches!(event.tag, tag::MouseDown | tag::MouseMove | tag::MouseUp | tag::MouseLeave
@@ -1348,43 +1341,35 @@ impl World {
         });
     }
 
-    /// Whether a pointer event of lent window `hid` is session 0's: over its badge that takes
-    /// input, or of a press begun there (until its release). Such an event is retargeted to the
-    /// badge (a caption question stays the window's: session 0 answers it for the window). The
-    /// pointer leaving the badge gives session 0 a `MouseLeave` of it; the event itself then goes
-    /// on to the app.
-    fn badge_event(&mut self, hid: Id, event: &mut RawEvent, payload: &[u8]) -> bool {
+    /// The pointer over lent window `hid`'s hover badge (`window_style::BADGE_HOVER`): session 0
+    /// gets a copy of each move over it (as an event of the badge) and a `MouseLeave` of it when
+    /// the pointer leaves it or the window. The badge never takes input: every event still goes
+    /// on to the window's owner (a press, a scroll and the caption question there are the app's).
+    fn badge_hover(&mut self, hid: Id, event: &RawEvent, payload: &[u8]) {
         use crate::events::event_tag as tag;
-        if !matches!(event.tag, tag::MouseDown | tag::MouseMove | tag::MouseUp | tag::MouseLeave | tag::Scroll | tag::DragQuery) {
-            return false;
+        if !matches!(event.tag, tag::MouseMove | tag::MouseLeave) {
+            return;
         }
-        let Some(w) = self.sessions.get_mut(&HOST).and_then(|s| s.windows.get_mut(HOST, hid).ok()) else { return false };
-        let Some((badge, [bx, by, bw, bh])) = w.val.badge_input else { return false };
-        let at = match event.decode(payload) {
-            Some(crate::HalEvent::MouseDown { x, y, .. } | crate::HalEvent::MouseMove { x, y, .. }
-                | crate::HalEvent::MouseUp { x, y, .. } | crate::HalEvent::Scroll { x, y, .. }
-                | crate::HalEvent::DragQuery { x, y, .. } | crate::HalEvent::MouseLeave { x, y, .. }) => [x as f32, y as f32],
-            _ => return false,
+        let Some(w) = self.sessions.get_mut(&HOST).and_then(|s| s.windows.get_mut(HOST, hid).ok()) else { return };
+        let Some((badge, [bx, by, bw, bh])) = w.val.badge_hover else { return };
+        let (x, y) = match event.decode(payload) {
+            Some(crate::HalEvent::MouseMove { x, y, .. } | crate::HalEvent::MouseLeave { x, y, .. }) => (x, y),
+            _ => return,
         };
-        let inside = event.tag != tag::MouseLeave
-            && at[0] >= bx && at[1] >= by && at[0] < bx + bw && at[1] < by + bh;
-        let held = w.val.badge_pointer == 2;
-        let (mine, next) = match event.tag {
-            tag::MouseDown if inside => (true, 2),
-            tag::MouseUp if held => (true, inside as u8),
-            tag::MouseMove | tag::MouseUp | tag::Scroll if held || inside => (true, if held { 2 } else { 1 }),
-            tag::DragQuery => (inside, w.val.badge_pointer),
-            _ => (false, 0),
-        };
-        let left = w.val.badge_pointer != 0 && next == 0;
-        w.val.badge_pointer = next;
-        if left {
-            self.to_session(HOST, |q| q.mouse_leave(badge, at[0] as f64, at[1] as f64));
+        let (fx, fy) = (x as f32, y as f32);
+        let inside = event.tag == tag::MouseMove && fx >= bx && fy >= by && fx < bx + bw && fy < by + bh;
+        let left = w.val.badge_hovered && !inside;
+        w.val.badge_hovered = inside;
+        if inside {
+            let mut copy = *event;
+            copy.window = badge;
+            self.to_session(HOST, |q| {
+                copy.data = q.put_bytes(payload);
+                q.push(copy);
+            });
+        } else if left {
+            self.to_session(HOST, |q| q.mouse_leave(badge, x, y));
         }
-        if mine {
-            event.window = if event.tag == tag::DragQuery { hid } else { badge };
-        }
-        mine
     }
 
     /// Objects alive of one kind, summed over all sessions.

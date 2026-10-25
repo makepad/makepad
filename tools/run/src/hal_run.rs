@@ -265,14 +265,10 @@ impl Watch {
     }
 }
 
-/// A failed makepad rebuild shows the amber dot until it is clicked (or the next rebuild starts).
-fn rebuild_failed_shown(ack: &mut Option<String>) -> bool {
-    use relax_compiler::reload::host::{failure, status, Phase};
-    if status().0 != Phase::Failed {
-        *ack = None;
-        return false;
-    }
-    ack.as_deref() != Some(failure().as_str())
+/// A rebuild of makepad failed (its dot shows in the ring until the next rebuild).
+fn rebuild_failed() -> bool {
+    use relax_compiler::reload::host::{status, Phase};
+    status().0 == Phase::Failed
 }
 
 /// Where the window layer over the app is in its sequence.
@@ -976,12 +972,12 @@ fn pump(
     let mut dirty = true;
     let mut stage = Stage::Running;
     let ring = ring_on();
-    // the parked stop the ring's dot was clicked for, and the run's inspect view (the halted view
-    // over the app, opened from the ring)
-    let mut ring_ack: Option<String> = None;
-    // the failed rebuild whose dot was clicked away
-    let mut rebuild_ack: Option<String> = None;
+    // the run's inspect view (the halted view over the app without a stop): opened by
+    // `makepad inspect <app> session view open` (the JIT ring is display only)
     let mut inspect_open = false;
+    // what the view over the app showed last (its `session view` answer and the log line)
+    let mut view_shown: Option<String> = None;
+    relax_compiler::inspect::run_view::set_wake(|| Hal::global().wake_session(HOST));
     let mut warm_up_at: Option<Instant> = None;
     // MAKEPAD_RUN_POSTFRAME_LOG (the responsiveness trace): the JIT ring's UI blocks too
     let mut watch = Watch::new(std::env::var_os("MAKEPAD_RUN_POSTFRAME_LOG").is_some());
@@ -1271,6 +1267,21 @@ fn pump(
                 dirty = true;
             }
         }
+        match relax_compiler::inspect::run_view::take() {
+            Some(true) => {
+                inspect_open = true;
+                overlay_dismissed = false;
+                dirty = true;
+            }
+            Some(false) => {
+                overlay_dismissed = true;
+                if std::mem::take(&mut inspect_open) && data.domain.starts_with("JIT · ") {
+                    data.domain = "Running".into();
+                }
+                dirty = true;
+            }
+            None => {}
+        }
         // Errors reveal immediately. Otherwise a warm relaunch preserves the last app
         // image for 300 ms, then uses exactly the same document/context as cold boot.
         let overlay = has_window
@@ -1282,6 +1293,44 @@ fn pump(
                 || inspect_open
                 || !document_errors.is_empty()
                 || data.parked.is_some());
+        // what the view over the app shows and why: `session view`, and a line when it changes
+        let why = overlay.then(|| {
+            if data.parked.as_ref().is_some_and(|p| p.stale) {
+                "paused on invalidated code"
+            } else if data.parked.is_some() {
+                "paused on a panic"
+            } else if failed {
+                "the app stopped"
+            } else if patch_failed {
+                "a live patch failed"
+            } else if action_failed {
+                "a run action failed"
+            } else if !document_errors.is_empty() {
+                "the boot document has errors"
+            } else {
+                "the inspect view (session view open)"
+            }
+        });
+        let shown = format!(
+            "\"over_app\":{},\"why\":{},\"dismissed\":{},\"pid\":{}",
+            overlay,
+            why.map_or("null".to_string(), |w| format!("\"{w}\"")),
+            overlay_dismissed,
+            std::process::id()
+        );
+        if view_shown.as_deref() != Some(shown.as_str()) {
+            let was_over = view_shown.as_deref().is_some_and(|v| v.starts_with("\"over_app\":true"));
+            match why {
+                Some(why) => eprintln!(
+                    "makepad-run: the run's view is over the app: {why}; Esc or `makepad inspect {} session view dismiss` dismisses it",
+                    std::process::id()
+                ),
+                None if was_over => eprintln!("makepad-run: the run's view is off the app"),
+                None => {}
+            }
+            relax_compiler::inspect::run_view::publish(shown.clone());
+            view_shown = Some(shown);
+        }
         let mode = if overlay { Mode::Overlay } else { Mode::Boot };
         if data.mode != mode {
             data.mode = mode;
@@ -1338,14 +1387,13 @@ fn pump(
         };
         host.layer(want, app_frames);
         // the JIT ring while the app runs: the JIT's work in flight, a UI block, what the program
-        // is stopped on (until the dot is clicked)
+        // is stopped on (while it is)
         let running = ring && stage == Stage::Running && lent_to_app && !active && !failed;
         let alert = data
             .parked
             .as_ref()
-            .filter(|p| ring_ack.as_ref() != Some(&p.id))
             .map(|p| if p.stale { RingAlert::Stale } else { RingAlert::Panic })
-            .or_else(|| rebuild_failed_shown(&mut rebuild_ack).then_some(RingAlert::RebuildFailed));
+            .or_else(|| rebuild_failed().then_some(RingAlert::RebuildFailed));
         if running && host.badges() {
             let want = watch.look(host.dump_ms()).filter(|_| data.parked.is_none());
             if inspect_open {
@@ -1456,24 +1504,6 @@ fn pump(
         let mut close = false;
         for event in host.events() {
             let action = match event {
-                BootEvent::RingClick => {
-                    // the dot: its stop is seen, the halted view shows it; else Scope, when one
-                    // is attached, is asked to come to this process; else the run's inspect view
-                    if let Some(parked) = &data.parked {
-                        ring_ack = Some(parked.id.clone());
-                        overlay_dismissed = false;
-                    } else if rebuild_failed_shown(&mut rebuild_ack) {
-                        // the failed rebuild's dot: seen (the terminal has the errors)
-                        rebuild_ack = Some(relax_compiler::reload::host::failure());
-                    } else if relax_compiler::inspect::pstream::viewing() {
-                        relax_compiler::inspect::flightrec::event("attention", "the JIT ring was clicked", std::process::id() as u64, 0);
-                    } else {
-                        inspect_open = true;
-                        overlay_dismissed = false;
-                    }
-                    dirty = true;
-                    None
-                }
                 BootEvent::DocumentErrors(errors) => {
                     if !errors.is_empty() {
                         overlay_dismissed = false;

@@ -218,9 +218,9 @@ fn badge_moved(world: &mut World, id: Id, geom: Option<[f32; 4]>) {
         if let Ok(w) = s.windows.get_mut(HOST, id) { w.val.geom = geom; }
     }
     if let Ok(p) = s.windows.get_mut(HOST, parent) {
-        if p.val.badge_input.is_some_and(|(b, _)| b == id) {
-            p.val.badge_input = geom.map(|g| (id, g));
-            if geom.is_none() { p.val.badge_pointer = 0; }
+        if p.val.badge_hover.is_some_and(|(b, _)| b == id) {
+            p.val.badge_hover = geom.map(|g| (id, g));
+            if geom.is_none() { p.val.badge_hovered = false; }
         }
     }
 }
@@ -486,10 +486,10 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                     s.stale();
                     return;
                 }
-                if kind & window_style::BADGE_INPUT != 0 {
+                if kind & window_style::BADGE_HOVER != 0 {
                     if let Ok(p) = s.windows.get_mut(HOST, parent) {
-                        p.val.badge_input = Some((id, geom));
-                        p.val.badge_pointer = 0;
+                        p.val.badge_hover = Some((id, geom));
+                        p.val.badge_hovered = false;
                     }
                 }
                 // the HAL's own object: no window system surface

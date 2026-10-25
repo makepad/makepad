@@ -679,9 +679,8 @@ pub mod window_kind {
     /// (`parent`) at `geom`, in the parent's points (top left). It has no surface and no frames
     /// (session 0 draws badges in the window's badge layer, `target::BADGES`); it is never
     /// adopted and is the HAL's own object, not the window system's. Made with
-    /// `window_style::BADGE_INPUT`, the pointer over it (and a press begun there, until its
-    /// release) goes to session 0 as events of the badge, and the window system's caption
-    /// question there is session 0's too; everywhere else input stays the window's.
+    /// `window_style::BADGE_HOVER`, session 0 sees the pointer move over it (copies of the moves as
+    /// events of the badge, and a `MouseLeave` of it); input itself always stays the window's.
     pub const BADGE: u32 = 4;
 }
 
@@ -717,8 +716,8 @@ pub mod window_style {
     pub const FULLSCREEN_AUXILIARY: u32 = 1 << 18;
     /// the size is exact: not fitted to the attached displays (a capture size may exceed any)
     pub const EXACT_SIZE: u32 = 1 << 19;
-    /// a badge (`window_kind::BADGE`) that takes the pointer over its rect
-    pub const BADGE_INPUT: u32 = 1 << 20;
+    /// a badge (`window_kind::BADGE`) that sees the pointer hover over its rect (never input)
+    pub const BADGE_HOVER: u32 = 1 << 20;
 }
 
 /// Window states (`WindowState`).

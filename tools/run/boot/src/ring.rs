@@ -7,13 +7,14 @@
 //! covers the builds finished of those queued since the JIT got busy (when a queue says). Once
 //! nothing has been built for half a second the ring fades out and is gone: nothing static means
 //! idle either. A program stopped on invalidated code (amber) or a panic (red) shows a solid dot
-//! that stays until it is clicked. Hovering it shows a tooltip with the live numbers; a click is
-//! the run's (`Event::RingClick`). Placement follows the caption the app draws (`WindowCaption`):
+//! that stays while the program is stopped on it. Hovering it shows a tooltip with the live numbers;
+//! it is display only: a click, a scroll or a drag over it is the app's. Placement follows the
+//! caption the app draws (`WindowCaption`):
 //! just left of window buttons at the caption's right (Windows, Linux), else ~12 pt from the
 //! window's right edge (macOS), vertically centred. It is a badge of the window
-//! (`window_kind::BADGE` with `window_style::BADGE_INPUT`): the HAL composes it over the app's
-//! frames, which neither wait for it nor pay for it; the pointer over it is session 0's,
-//! everywhere else the app's. The tooltip draws in the same badge layer while hovered. Every value
+//! (`window_kind::BADGE` with `window_style::BADGE_HOVER`): the HAL composes it over the app's
+//! frames, which neither wait for it nor pay for it; session 0 sees the pointer hover over it,
+//! the input itself stays the app's. The tooltip draws in the same badge layer while hovered. Every value
 //! eases on this session's clock; the ring is the boot document's `jit_ring_px` (GPU), one quad.
 use makepad_hal::{AppCaption, Id};
 use std::time::{Duration, Instant};
@@ -48,7 +49,7 @@ const RATE_TOP: f32 = 1000.0;
 /// the ring draws at most this often
 pub const FRAME: Duration = Duration::from_nanos(33_333_333);
 
-/// What the program is stopped on (a solid dot that stays until it is clicked).
+/// What the program is stopped on (a solid dot that stays while it is).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Alert {
     /// a stale access: code the JIT invalidated was run (amber)
@@ -134,9 +135,8 @@ pub struct Ring {
     opacity: f32,
     spin: f32,
     hover: f32,
-    /// the pointer is on the ring since, a press on it is held
+    /// the pointer is on the ring since
     pub hovered: Option<Instant>,
-    pub pressed: bool,
     /// the last alert, and whether the dot is what shows (it fades out as the dot)
     last_alert: Alert,
     dot: bool,
@@ -166,7 +166,6 @@ impl Ring {
             spin: 0.0,
             hover: 0.0,
             hovered: None,
-            pressed: false,
             last_alert: Alert::Panic,
             dot: false,
             last: Instant::now(),
@@ -254,7 +253,7 @@ impl Ring {
         self.last = now;
         let shown = self.wanted() as u8 as f32;
         self.opacity = ease(self.opacity, shown, dt, SHOW, HIDE);
-        let hover = (self.hovered.is_some() || self.pressed) as u8 as f32;
+        let hover = self.hovered.is_some() as u8 as f32;
         self.hover = ease(self.hover, hover, dt, 0.06, 0.12);
         if let Some(w) = self.want {
             let back = (!w.foreground()) as u8 as f32;
@@ -266,7 +265,7 @@ impl Ring {
         // the head always turns while the ring shows (fading out too); the dot stands still
         let pace = self.pace * if reduce_motion { 0.33 } else { 1.0 };
         self.spin = (self.spin + dt * pace) % 1000.0;
-        // a dot that goes (clicked, nothing else to show) fades out as the dot
+        // a dot that goes (the stop ended, nothing else to show) fades out as the dot
         let alert = self.alert.or(self.want.is_none().then_some(self.last_alert).filter(|_| self.dot));
         let mode = match alert {
             Some(Alert::Stale | Alert::RebuildFailed) => 2.0,
@@ -290,8 +289,8 @@ fn pace(w: &Want) -> f32 {
 pub fn summary(want: Option<Want>, alert: Option<Alert>) -> String {
     if let Some(alert) = alert {
         return match alert {
-            Alert::Stale => "paused on invalidated code · click to inspect".into(),
-            Alert::Panic => "paused on a panic · click to inspect".into(),
+            Alert::Stale => format!("paused on invalidated code · makepad inspect {} panics", std::process::id()),
+            Alert::Panic => format!("paused on a panic · makepad inspect {} panics", std::process::id()),
             Alert::RebuildFailed => "rebuilding makepad failed · the app runs the previous code (see the terminal)".into(),
         };
     }

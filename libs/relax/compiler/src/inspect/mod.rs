@@ -35,6 +35,7 @@ pub mod pstream;
 pub mod reliability;
 pub mod remarks;
 pub mod replay;
+pub mod run_view;
 pub mod tierlog;
 pub mod timeline;
 pub mod vars;
@@ -117,6 +118,7 @@ pub fn start(app: &str) {
 
 /// The commands: (name, arguments, what it answers).
 pub const COMMANDS: &[(&str, &str, &str)] = &[
+    ("session", "view [open|dismiss]", "the run's view over the app (compile errors, a parked panic, the JIT's state): what it shows, or open / dismiss it (the caption's JIT ring is display only)"),
     ("session", "relaunch", "apply the edits waiting for a restart: a hosted app relaunches its domain in this process (host window and GPU device kept); a program that restarts itself (std::relax::restart_supported) restarts with its state"),
     ("why-hung", "[probe_ms=200]", "is it stuck and why: verdict (deadlock / blocked / busy / idle), the wait chain or cycle, stacks of the threads in it"),
     ("why-slow", "[s=3]", "where the time goes: ranked findings -- the main thread's CPU split (program / compiles / makepad run runtime / system), its hot fns, the owner's service, other busy threads"),
@@ -198,7 +200,25 @@ fn dispatch_command(req: &Req, out: &mut Out) {
                     out.line(&format!("{{\"waits\":{}}}", json_str(&w)));
                 }
             }
-            _ => out.err("session [pending] | session relaunch"),
+            Some("view") => match req.pos.get(1).map(String::as_str) {
+                None => {
+                    let state = run_view::state();
+                    if state.is_empty() {
+                        out.err("no run's view in this process (a direct program or bare relax)")
+                    } else {
+                        out.line(&format!("{{{state}}}"))
+                    }
+                }
+                Some(how @ ("open" | "dismiss")) => {
+                    if run_view::request(how == "open") {
+                        out.line(&format!("{{\"view\":\"{how} asked\",\"note\":\"the run takes it on its next turn: session view shows the result\"}}"))
+                    } else {
+                        out.err("no run's view in this process (a direct program or bare relax)")
+                    }
+                }
+                Some(_) => out.err("session view [open|dismiss]"),
+            },
+            _ => out.err("session [pending] | session relaunch | session view [open|dismiss]"),
         },
         "help" => help(req, out),
         "pf" => out.err("pf is answered by the client: makepad inspect <app> pf <query> (it attaches to the app's prof stream)"),

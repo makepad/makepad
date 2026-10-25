@@ -126,8 +126,6 @@ pub enum Event {
     Text(String),
     Input(RawEvent, Vec<u8>),
     DocumentErrors(Vec<Diagnostic>),
-    /// The JIT ring in the app's caption was clicked (`Boot::ring`).
-    RingClick,
 }
 
 pub fn diagnostic_text(diagnostic: &Diagnostic) -> String {
@@ -455,10 +453,6 @@ impl Boot {
     /// and off the scroll area while its content overflows (a press there scrolls). The window
     /// has no system caption bar, so this is the only way it moves.
     pub fn drag_answer(&self, point: [f32; 2]) -> u32 {
-        // the JIT ring in the app's caption is a click, not the window's move
-        if self.ring.window.is_some() && contains(self.ring.placed, point) {
-            return input::drag_query::CLIENT;
-        }
         let Some(renderer) = &self.renderer else {
             return input::drag_query::CAPTION;
         };
@@ -800,10 +794,7 @@ impl Boot {
                     }
                     self.events.push(Event::Input(raw, payload.to_vec()));
                 }
-                HalEvent::MouseDown { window, .. }
-                | HalEvent::MouseMove { window, .. }
-                | HalEvent::MouseUp { window, .. }
-                | HalEvent::MouseLeave { window, .. }
+                HalEvent::MouseMove { window, .. } | HalEvent::MouseLeave { window, .. }
                     if Some(window) == self.ring.window =>
                 {
                     self.ring_pointer(&event)
@@ -1357,7 +1348,6 @@ impl Boot {
                 }
                 self.ring.window = None;
                 self.ring.hovered = None;
-                self.ring.pressed = false;
                 return None;
             }
             Some(badge) => {
@@ -1367,9 +1357,9 @@ impl Boot {
                 }
             }
             None if self.ring.wanted() => {
-                // the ring's place for the pointer; its pixels are the window's badge layer
+                // the ring's place for the pointer's hover; its pixels are the window's badge layer
                 let badge = next_badge(&mut self.ring.slot);
-                writer.window_create(badge, window_kind::BADGE | window_style::BADGE_INPUT, window, place, false);
+                writer.window_create(badge, window_kind::BADGE | window_style::BADGE_HOVER, window, place, false);
                 self.ring.window = Some(badge);
                 self.ring.placed = place;
             }
@@ -1404,39 +1394,19 @@ impl Boot {
         Some(self.ring.tip_due().map_or(wait, |due| wait.min(due)))
     }
 
-    /// The pointer on the ring's badge (session 0's while it is over it): hover, press, click.
+    /// The pointer hovering the ring's badge (session 0 sees its moves over it and its leave;
+    /// a press, a scroll or a drag there is the app's): the tooltip's hover.
     fn ring_pointer(&mut self, event: &HalEvent) {
         let rect = [0.0, 0.0, ring::SIDE, ring::SIDE];
-        let local = |x: f64, y: f64, placed: [f32; 4]| [x as f32 - placed[0], y as f32 - placed[1]];
         let placed = self.ring.placed;
-        match *event {
-            HalEvent::MouseMove { x, y, .. } => {
-                let over = contains(rect, local(x, y, placed));
-                if over && self.ring.hovered.is_none() {
-                    self.ring.hovered = Some(Instant::now());
-                } else if !over && !self.ring.pressed {
-                    self.ring.hovered = None;
-                }
-            }
-            HalEvent::MouseDown { button: 1, .. } => {
-                self.ring.pressed = true;
-                self.ring.hovered.get_or_insert_with(Instant::now);
-            }
-            HalEvent::MouseUp { x, y, button: 1, .. } => {
-                let over = contains(rect, local(x, y, placed));
-                if self.ring.pressed && over {
-                    self.events.push(Event::RingClick);
-                }
-                self.ring.pressed = false;
-                if !over {
-                    self.ring.hovered = None;
-                }
-            }
-            HalEvent::MouseLeave { .. } => {
-                self.ring.hovered = None;
-                self.ring.pressed = false;
-            }
-            _ => {}
+        let over = match *event {
+            HalEvent::MouseMove { x, y, .. } => contains(rect, [x as f32 - placed[0], y as f32 - placed[1]]),
+            _ => false,
+        };
+        if !over {
+            self.ring.hovered = None;
+        } else if self.ring.hovered.is_none() {
+            self.ring.hovered = Some(Instant::now());
         }
         self.ring.next_frame = Instant::now();
     }

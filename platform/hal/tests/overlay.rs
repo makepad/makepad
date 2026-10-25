@@ -237,38 +237,32 @@ fn a_window_layer_leaves_input_with_the_app_and_needs_its_texture() {
 }
 
 #[test]
-fn a_badge_that_takes_input_gets_the_pointer_over_it_and_its_press() {
+fn a_hover_badge_sees_the_pointer_over_it_but_never_takes_input() {
     let (hal, sid) = setup();
     const BADGE: Id = Id::new(9, 1);
     // (the headless backend composites no badges: the routing is the world's, set as a badge
-    // with `window_style::BADGE_INPUT` sets it)
+    // with `window_style::BADGE_HOVER` sets it)
     hal.with_world(|w| {
         let host = w.session_mut(HOST).unwrap().windows.get_mut(HOST, HOST_WINDOW).unwrap();
-        host.val.badge_input = Some((BADGE, [960.0, 2.0, 24.0, 24.0]));
+        host.val.badge_hover = Some((BADGE, [960.0, 2.0, 24.0, 24.0]));
     });
-    hal.with_world(|w| {
-        // over the app, onto the badge, a click there, a drag query there, off it again
-        w.window_event(sid, RawEvent::mouse_move(APP_WINDOW, 500.0, 10.0, 0.0, 0.0, 0), &[]);
-        w.window_event(sid, RawEvent::mouse_move(APP_WINDOW, 970.0, 12.0, 0.0, 0.0, 0), &[]);
-        w.window_event(sid, RawEvent::drag_query(APP_WINDOW, 970.0, 12.0), &[]);
-        w.window_event(sid, RawEvent::mouse_down(APP_WINDOW, 970.0, 12.0, 1, 0), &[]);
-        // the press is held: a move off it is still the badge's, and so is the release
-        w.window_event(sid, RawEvent::mouse_move(APP_WINDOW, 900.0, 12.0, 0.0, 0.0, 0), &[]);
-        w.window_event(sid, RawEvent::mouse_up(APP_WINDOW, 900.0, 12.0, 1, 0), &[]);
-        w.window_event(sid, RawEvent::mouse_move(APP_WINDOW, 800.0, 12.0, 0.0, 0.0, 0), &[]);
-    });
-    let host = take(&hal, HOST);
-    let tags: Vec<_> = host.iter().map(|(e, _)| (e.tag, e.window)).collect();
-    assert_eq!(tags, [
-        (tag::MouseMove, BADGE),
-        (tag::DragQuery, HOST_WINDOW),
-        (tag::MouseDown, BADGE),
-        (tag::MouseMove, BADGE),
-        (tag::MouseLeave, BADGE),
-        (tag::MouseUp, BADGE),
-    ]);
-    let app: Vec<_> = take(&hal, sid).iter().map(|(e, _)| e.tag).collect();
-    assert_eq!(app, [tag::MouseMove, tag::MouseMove]);
+    let events = [
+        // over the app, onto the badge, a click there, a drag query and a scroll there, off it
+        RawEvent::mouse_move(APP_WINDOW, 500.0, 10.0, 0.0, 0.0, 0),
+        RawEvent::mouse_move(APP_WINDOW, 970.0, 12.0, 0.0, 0.0, 0),
+        RawEvent::drag_query(APP_WINDOW, 970.0, 12.0),
+        RawEvent::mouse_down(APP_WINDOW, 970.0, 12.0, 1, 0),
+        RawEvent::mouse_up(APP_WINDOW, 970.0, 12.0, 1, 0),
+        RawEvent::scroll(APP_WINDOW, 970.0, 12.0, 0.0, 3.0, 0, true, 0),
+        RawEvent::mouse_move(APP_WINDOW, 800.0, 12.0, 0.0, 0.0, 0),
+    ];
+    hal.with_world(|w| for e in events { w.window_event(sid, e, &[]) });
+    // session 0 sees the hover only: the move over the badge and the leave
+    let host: Vec<_> = take(&hal, HOST).iter().map(|(e, _)| (e.tag, e.window)).collect();
+    assert_eq!(host, [(tag::MouseMove, BADGE), (tag::MouseLeave, BADGE)]);
+    // the app gets every event, the press, the caption question and the scroll over the badge too
+    let app: Vec<_> = take(&hal, sid).iter().map(|(e, _)| (e.tag, e.window)).collect();
+    assert_eq!(app, events.iter().map(|e| (e.tag, APP_WINDOW)).collect::<Vec<_>>());
 }
 
 #[test]
@@ -336,9 +330,9 @@ fn only_session_0_has_badge_layers_and_a_badge_has_no_frames() {
     assert_eq!(bad(&hal, sid), before + 2);
     const BADGE: Id = Id::new(9, 1);
     let mut host = CmdWriter::new(HOST);
-    host.window_create(BADGE, window_kind::BADGE | window_style::BADGE_INPUT, HOST_WINDOW, [960.0, 2.0, 24.0, 24.0], false);
+    host.window_create(BADGE, window_kind::BADGE | window_style::BADGE_HOVER, HOST_WINDOW, [960.0, 2.0, 24.0, 24.0], false);
     hal.submit(&host.buf());
-    assert!(hal.with_world(|w| w.session(HOST).unwrap().windows.get(HOST, HOST_WINDOW).unwrap().val.badge_input.is_some()));
+    assert!(hal.with_world(|w| w.session(HOST).unwrap().windows.get(HOST, HOST_WINDOW).unwrap().val.badge_hover.is_some()));
     let before = bad(&hal, HOST);
     frame(&hal, HOST, BADGE, 30, target::WINDOW);
     assert_eq!(bad(&hal, HOST), before + 1);
