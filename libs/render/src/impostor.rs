@@ -208,16 +208,10 @@ pub fn bake(glb: &[u8], cell: usize) -> Option<ImpostorBake> {
                 }
                 let area = (sp[1][0] - sp[0][0]) * (sp[2][1] - sp[0][1]) - (sp[1][1] - sp[0][1]) * (sp[2][0] - sp[0][0]);
                 if area.abs() < 1e-6 { continue; }
-                // The side the viewer sees; leaves bend half toward "out of
-                // the crown" so a crown shades as a soft volume.
-                let mut n = if dot(t.n, f) < 0.0 { [-t.n[0], -t.n[1], -t.n[2]] } else { t.n };
-                if t.layer.cutoff.is_some() {
-                    let m = [(t.p[0][0] + t.p[1][0] + t.p[2][0]) / 3.0 - crown[0], (t.p[0][1] + t.p[1][1] + t.p[2][1]) / 3.0 - crown[1], (t.p[0][2] + t.p[1][2] + t.p[2][2]) / 3.0 - crown[2]];
-                    if dot(m, m) > 1e-8 {
-                        let m = norm(m);
-                        n = norm([n[0] + m[0] * 1.5, n[1] + m[1] * 1.5, n[2] + m[2] * 1.5]);
-                    }
-                }
+                // The side the viewer sees; leaves bend toward "out of the
+                // crown" per texel (below) so a crown shades as a soft volume.
+                let n_side = if dot(t.n, f) < 0.0 { [-t.n[0], -t.n[1], -t.n[2]] } else { t.n };
+                let leaf = t.layer.cutoff.is_some();
                 let minx = sp.iter().map(|p| p[0]).fold(f32::MAX, f32::min).floor().max(0.0) as usize;
                 let maxx = (sp.iter().map(|p| p[0]).fold(f32::MIN, f32::max).ceil().max(0.0) as usize).min(cell);
                 let miny = sp.iter().map(|p| p[1]).fold(f32::MAX, f32::min).floor().max(0.0) as usize;
@@ -256,6 +250,18 @@ pub fn bake(glb: &[u8], cell: usize) -> Option<ImpostorBake> {
                         // trunk (255): the stand-in's shadow lets light through
                         // some leaf texels (shaders/lm_depth.rs).
                         albedo[o + 3] = if t.layer.cutoff.is_some() { LEAF_ALPHA } else { 255 };
+                        // A leaf texel's normal leans out from the crown's
+                        // middle at its own position: bent once per card
+                        // (at its centroid) each card lit flat, and a
+                        // magnified stand-in showed the crown in squares.
+                        let mut n = n_side;
+                        if leaf {
+                            let m = [0, 1, 2].map(|d| w0 * t.p[0][d] + w1 * t.p[1][d] + w2 * t.p[2][d] - crown[d]);
+                            if dot(m, m) > 1e-8 {
+                                let m = norm(m);
+                                n = norm([n[0] + m[0] * 1.5, n[1] + m[1] * 1.5, n[2] + m[2] * 1.5]);
+                            }
+                        }
                         let e = view_encode(n, right, up, f);
                         normal[o] = ((e[0] * 0.5 + 0.5) * 255.0).round() as u8;
                         normal[o + 1] = ((e[1] * 0.5 + 0.5) * 255.0).round() as u8;

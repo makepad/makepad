@@ -307,6 +307,9 @@ struct Win {
     requested: bool,
     /// A FrameReady went out; its frame has not come back yet.
     awaiting: bool,
+    /// Frames already on the GPU when that FrameReady went out: their completions come back
+    /// first and are not its frame (they must not end the Tick before its frame is drawn).
+    ahead: u32,
     geom: Option<([f64; 4], f64)>,
 }
 
@@ -473,6 +476,7 @@ impl App {
                     if w.requested && !w.awaiting && in_flight.get(key).copied().unwrap_or(0) < MAX_IN_FLIGHT {
                         w.requested = false;
                         w.awaiting = true;
+                        w.ahead = in_flight.get(key).copied().unwrap_or(0);
                         any = true;
                         self.state.shared.push(w.recipient, |q, id| q.frame_ready(id, crate::clock_ns()));
                     }
@@ -594,7 +598,11 @@ impl App {
     }
 
     fn finish_tick(&mut self) {
-        if std::mem::take(&mut self.ticking) && !self.windows.values().any(|w| w.awaiting) {
+        // The Tick stays open while a granted frame is awaited: its TickDone goes out with that
+        // frame (taking `ticking` first lost the TickDone, and the WM paced the app at its 50 ms
+        // fallback).
+        if self.ticking && !self.windows.values().any(|w| w.awaiting) {
+            self.ticking = false;
             self.hub.send(vec![AppToStudio::TickDone]);
         }
     }
@@ -655,7 +663,7 @@ impl Shell for App {
                     let window_id = self.next_window;
                     self.next_window += 1;
                     let geom = self.early.remove(&window_id);
-                    self.windows.insert((sid, id), Win { window_id, recipient: (sid, id), requested: false, awaiting: false, geom });
+                    self.windows.insert((sid, id), Win { window_id, recipient: (sid, id), requested: false, awaiting: false, ahead: 0, geom });
                     self.hub.send(vec![AppToStudio::CreateWindow { window_id, kind_id: 0 }]);
                     let focused = self.wm_focus.get(&window_id).copied().unwrap_or(true);
                     self.state.shared.push((sid, id), |q, id| q.focus(id, focused));
@@ -771,7 +779,8 @@ impl Shell for App {
         for (key, draw) in finished {
             if let Some(n) = lock(&self.state.in_flight).get_mut(&key) { *n = n.saturating_sub(1); }
             if let Some(w) = self.windows.get_mut(&key) {
-                w.awaiting = false;
+                // an earlier frame's completion leaves the granted frame awaited
+                if w.ahead > 0 { w.ahead -= 1; } else { w.awaiting = false; }
                 // A frame that found no free shared image is drawn again on the next Tick.
                 if draw.is_none() { w.requested = true; }
             }
@@ -892,7 +901,7 @@ mod tests {
             next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
             quit_sent: false, stopping: false };
         let key = (9_001, Id::new(1, 1));
-        app.windows.insert(key, Win { window_id: 0, recipient: key, requested: false, awaiting: false, geom: None });
+        app.windows.insert(key, Win { window_id: 0, recipient: key, requested: false, awaiting: false, ahead: 0, geom: None });
         // covered: the app's frame request is held, a Tick grants nothing and is answered at once
         app.message(StudioToApp::Custom(HostedVisible { visible: false }.to_json()));
         app.command(Op::Cmd(key.0, OsCmd::FrameRequest { id: key.1 }));
@@ -905,6 +914,53 @@ mod tests {
         let sent = server.join().unwrap();
         assert!(matches!(sent[0].as_slice(), [AppToStudio::TickDone]), "{:?}", sent[0]);
         assert!(matches!(sent[1].as_slice(), [AppToStudio::RequestAnimationFrame]), "{:?}", sent[1]);
+    }
+
+    #[test]
+    /// A Tick granted while an earlier frame is still on the GPU stays open until its own frame
+    /// comes back: the earlier frame's completion does not answer it, and a finish_tick while the
+    /// frame is awaited does not drop the answer (the WM then paced the app at its 50 ms fallback).
+    fn tick_done_waits_for_the_granted_frame() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8];
+            while !request.ends_with(b"\r\n\r\n") { stream.read_exact(&mut byte).unwrap(); request.push(byte[0]); }
+            stream.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n").unwrap();
+            loop { if read_client_frame(&mut stream).0 == 0x8 { break; } }
+        });
+        let state = Arc::new(State { shared: Shared::global(), inbox: Default::default(), hung_up: AtomicBool::new(false),
+            rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
+        let hub = Hub::connect(port, 80, "makepad-app-game", state.clone()).unwrap();
+        let mut app = App { state: state.clone(), hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
+            early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, hidden: false, clip_reads: HashMap::new(),
+            next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
+            quit_sent: false, stopping: false };
+        let key = (9_003, Id::new(1, 1));
+        app.windows.insert(key, Win { window_id: 0, recipient: key, requested: false, awaiting: false, ahead: 0, geom: None });
+        let presenter = Presenter(state.clone());
+        // frame 1 is on the GPU; the app asks again and the next Tick grants frame 2
+        app.command(Op::Cmd(key.0, OsCmd::FrameRequest { id: key.1 }));
+        app.message(StudioToApp::Tick);
+        presenter.scheduled(key.0, key.1);
+        app.command(Op::Cmd(key.0, OsCmd::FrameRequest { id: key.1 }));
+        app.message(StudioToApp::Tick);
+        assert!(app.ticking && app.windows[&key].awaiting, "frame 2 granted");
+        app.finish_tick();
+        assert!(app.ticking, "a finish_tick while the frame is awaited keeps the Tick open");
+        // frame 1 completes: not frame 2
+        presenter.dropped(key.0, key.1);
+        app.dispatch().unwrap();
+        assert!(app.ticking && app.windows[&key].awaiting, "an earlier frame's completion does not answer the Tick");
+        // frame 2 is drawn and completes: the Tick is answered
+        presenter.scheduled(key.0, key.1);
+        presenter.dropped(key.0, key.1);
+        app.dispatch().unwrap();
+        assert!(!app.ticking && !app.windows[&key].awaiting, "the granted frame answers the Tick");
+        app.shutdown();
+        server.join().unwrap();
     }
 
     /// A game asks for its next frame right after submitting one. The WM's Ticks (240 Hz) grant
@@ -930,7 +986,7 @@ mod tests {
             next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
             quit_sent: false, stopping: false };
         let key = (9_002, Id::new(1, 1));
-        app.windows.insert(key, Win { window_id: 0, recipient: key, requested: false, awaiting: false, geom: None });
+        app.windows.insert(key, Win { window_id: 0, recipient: key, requested: false, awaiting: false, ahead: 0, geom: None });
         let presenter = Presenter(state.clone());
         // each granted beat submits a frame and asks for the next one at once
         for _ in 0..MAX_IN_FLIGHT {
@@ -976,7 +1032,7 @@ mod tests {
             quit_sent: false, stopping: false };
         let host = (session::HOST, Id::new(1, 1));
         let lent = (9_002, Id::new(4, 1));
-        app.windows.insert(host, Win { window_id: 0, recipient: lent, requested: false, awaiting: false, geom: None });
+        app.windows.insert(host, Win { window_id: 0, recipient: lent, requested: false, awaiting: false, ahead: 0, geom: None });
         // two presses (a double click) before the app answers: the answers keep the WM's ids
         app.message(StudioToApp::Custom(HostedDragQuery { id: 11, x: 40.0, y: 8.0 }.to_json()));
         app.message(StudioToApp::Custom(HostedDragQuery { id: 12, x: 41.0, y: 8.0 }.to_json()));
@@ -1034,7 +1090,7 @@ mod tests {
             next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
             quit_sent: false, stopping: false };
         let host = (session::HOST, Id::new(77, 1));
-        app.windows.insert(host, Win { window_id: 0, recipient: host, requested: false, awaiting: false, geom: None });
+        app.windows.insert(host, Win { window_id: 0, recipient: host, requested: false, awaiting: false, ahead: 0, geom: None });
         let old_style = r#"{"makepad_style":{"name":"windows"}}"#;
         let style = r#"{"makepad_style":{"name":"macos"}}"#;
         let back = r#"{"makepad_back":{}}"#;
