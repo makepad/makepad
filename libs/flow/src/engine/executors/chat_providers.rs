@@ -2,7 +2,7 @@
 use makepad_ai_hub::chat_wire::{ChatMessage, ChatRole, ProviderAvailability};
 use makepad_ai_hub::providers::provider::{ChatProvider, ProviderEvent, TurnInput};
 
-pub const PROVIDER_SLUGS: [&str; 6] = ["fleet-qwen", "openai", "grok", "claude-cli", "codex-cli", "grok-cli"];
+pub const PROVIDER_SLUGS: [&str; 7] = ["fleet-qwen", "fleet-claude", "openai", "grok", "claude-cli", "codex-cli", "grok-cli"];
 
 pub(crate) trait ProviderSession {
     fn begin(&mut self, system: &str, prompt: &str) -> Result<(), String>;
@@ -28,6 +28,13 @@ impl ProviderAdapter {
                 Self::Fleet(makepad_ai_hub::providers::qwen::FleetQwenChatProvider::new(
                     makepad_ai_hub::providers::qwen::HttpFleetTransport, bases,
                 ).with_max_tokens(max_tokens).with_thinking(Some(false)))
+            }
+            // The Claude a fleet hub serves (claude-cli): found like the fleet's Qwen.
+            "fleet-claude" => {
+                let bases = makepad_ai_hub::discovery::start_listener().nodes().into_iter().map(|n| n.base_url).collect();
+                Self::Fleet(makepad_ai_hub::providers::qwen::FleetQwenChatProvider::new(
+                    makepad_ai_hub::providers::qwen::HttpFleetTransport, bases,
+                ).with_preferred_model(Some(makepad_ai_hub::claude_cli::MODEL_ID.to_string())).with_max_tokens(max_tokens))
             }
             "openai" => {
                 let mut config = makepad_ai_hub::providers::responses::ResponsesConfig::openai_from_env();
@@ -71,8 +78,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reserved_provider_slugs_are_exactly_the_six_sandbox_choices() {
-        assert_eq!(PROVIDER_SLUGS, ["fleet-qwen", "openai", "grok", "claude-cli", "codex-cli", "grok-cli"]);
+    fn reserved_provider_slugs_are_exactly_the_seven_sandbox_choices() {
+        assert_eq!(PROVIDER_SLUGS, ["fleet-qwen", "fleet-claude", "openai", "grok", "claude-cli", "codex-cli", "grok-cli"]);
     }
 
     #[test]

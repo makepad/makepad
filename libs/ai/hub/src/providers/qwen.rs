@@ -338,6 +338,10 @@ pub struct FleetQwenChatProvider<T: FleetTransport> {
     /// Exact fleet model requested by the caller. `None` keeps the normal
     /// provider preference order.
     preferred_model: Option<String>,
+    /// The bases whose last probe listed `preferred_model` (available or
+    /// not): an unavailable pinned model reports those nodes' reasons, and
+    /// one no node offers says so in one line.
+    wanted_listed: Vec<String>,
     /// `None` leaves the field off the wire so the serving node chooses its
     /// own default. A positive value is forwarded without alteration.
     max_tokens: Option<u32>,
@@ -414,6 +418,7 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
             transport,
             bases,
             preferred_model: None,
+            wanted_listed: Vec::new(),
             // NOT a policy number: the client requests the maximum and the
             // serving lane clamps to its physics (context minus prompt).
             // Every policy cap tried here got observed cutting a real
@@ -546,6 +551,7 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
             ));
         }
         let mut reasons = Vec::new();
+        self.wanted_listed.clear();
         let mut order = self.bases.clone();
         if let Some(last) = self.picks.last_base() {
             // The last good node goes first, but never ahead of a better tier
@@ -617,6 +623,20 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         }) {
             self.picks.remember(base.clone(), model.clone(), text_fallback);
             return Ok((base, model, text_fallback));
+        }
+        if let Some(wanted) = &self.preferred_model {
+            if self.wanted_listed.is_empty() {
+                let unreachable = reasons.iter().filter(|r| r.contains("probe failed") || r.contains("recently unreachable")).count();
+                let heard = self.bases.len();
+                let hubs = if heard == 1 { "hub" } else { "hubs" };
+                return Err(if unreachable > 0 {
+                    format!("no fleet hub offers {wanted} ({heard} {hubs} heard, {unreachable} unreachable)")
+                } else {
+                    format!("no fleet hub offers {wanted} ({heard} {hubs} heard)")
+                });
+            }
+            let listed = &self.wanted_listed;
+            reasons.retain(|r| listed.iter().any(|base| r.starts_with(&format!("{base}:"))));
         }
         Err(if reasons.is_empty() {
             "no fleet node advertises a chat or Qwen text model".to_string()
@@ -707,6 +727,9 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
                 continue;
             };
             if !matches!(domain, "chat" | "text") { continue; }
+            if wanted == Some(id) && !self.wanted_listed.iter().any(|b| b == base) {
+                self.wanted_listed.push(base.to_string());
+            }
             // claude-cli (a hub's own Claude Code) is never a fallback pick:
             // only a client that names it gets it.
             if row.get("backend").and_then(Value::as_str) == Some(crate::claude_cli::BACKEND) && wanted != Some(id) {
@@ -750,7 +773,7 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
             }
         }
         if let Some(wanted) = wanted {
-            if preferred_chat.is_none() && preferred_text.is_none() {
+            if preferred_chat.is_none() && preferred_text.is_none() && self.wanted_listed.iter().any(|b| b == base) {
                 reasons.push(format!("{base}: {wanted} is not eligible"));
             }
         }
@@ -999,8 +1022,10 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
         self.preferred_model.as_deref() == Some(crate::claude_cli::MODEL_ID)
     }
 
+    /// Pinned to a hub's Claude, this is the fleet's Claude: a cloud model
+    /// (it runs at Anthropic), whatever route reaches it.
     fn kind(&self) -> ProviderKind {
-        ProviderKind::FleetQwen
+        if self.reasons_natively() { ProviderKind::FleetClaude } else { ProviderKind::FleetQwen }
     }
 
     fn availability(&mut self) -> ProviderAvailability {
@@ -1712,6 +1737,71 @@ mod wire_transcript_tests {
         // Claude reasons natively (no <think> instructions); the fleet Qwen does not.
         assert!(provider.reasons_natively());
         assert!(!FleetQwenChatProvider::new(Scripted::default(), vec![]).reasons_natively());
+    }
+
+    #[test]
+    fn the_hubs_claude_is_the_cloud_fleet_claude_kind() {
+        let qwen = FleetQwenChatProvider::new(Scripted::default(), vec![]);
+        assert_eq!(qwen.kind(), ProviderKind::FleetQwen);
+        let claude = FleetQwenChatProvider::new(Scripted::default(), vec![])
+            .with_preferred_model(Some(crate::claude_cli::MODEL_ID.into()));
+        assert_eq!(claude.kind(), ProviderKind::FleetClaude);
+        assert_eq!(claude.kind().locality(), crate::chat_wire::Locality::Cloud);
+        assert_eq!(ProviderKind::from_slug("fleet-claude"), Some(ProviderKind::FleetClaude));
+    }
+
+    /// A hub without Claude says nothing per node: the picker gets one line.
+    #[derive(Clone, Default)]
+    struct QwenOnly;
+    impl FleetTransport for QwenOnly {
+        fn post_json(&mut self, url: &str, _body: &Value) -> Result<Value, String> { Err(format!("no post {url}")) }
+        fn get_json(&mut self, url: &str) -> Result<Value, String> {
+            if url.ends_with("/health") {
+                return Ok(json::obj(vec![("capabilities", Value::Arr(vec![json::s("chat")]))]));
+            }
+            if url.contains("down") { return Err("connect refused".into()); }
+            let available = !url.contains("tired");
+            let mut models = vec![json::obj(vec![
+                ("id", json::s("qwen3.8-27b")), ("domain", json::s("chat")),
+                ("available", Value::Bool(true)), ("state", json::s("loaded")),
+            ])];
+            if url.contains("claude") || url.contains("tired") {
+                let mut row = vec![
+                    ("id", json::s("claude-cli")), ("domain", json::s("chat")),
+                    ("backend", json::s("claude-cli")), ("available", Value::Bool(available)), ("state", json::s("ready")),
+                ];
+                if !available { row.push(("unavailable_reason", json::s("Claude Code login expired"))); }
+                models.push(json::obj(row));
+            }
+            Ok(json::obj(vec![("models", Value::Arr(models))]))
+        }
+    }
+
+    #[test]
+    fn fleet_claude_reasons_name_only_the_hubs_that_offer_it() {
+        let claude = || Some(crate::claude_cli::MODEL_ID.to_string());
+        let mut none = FleetQwenChatProvider::new(QwenOnly, vec!["http://n1:1".into(), "http://n2:1".into()])
+            .with_preferred_model(claude());
+        assert_eq!(none.availability(), ProviderAvailability::Unavailable {
+            reason: "no fleet hub offers claude-cli (2 hubs heard)".into(),
+        });
+        let mut tired = FleetQwenChatProvider::new(QwenOnly, vec!["http://n1:1".into(), "http://tired:1".into()])
+            .with_preferred_model(claude());
+        match tired.availability() {
+            ProviderAvailability::Unavailable { reason } => {
+                assert!(reason.starts_with("http://tired:1: claude-cli"), "{reason}");
+                assert!(reason.contains("login expired"), "{reason}");
+                assert!(!reason.contains("n1"), "{reason}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let mut found = FleetQwenChatProvider::new(QwenOnly, vec!["http://n1:1".into(), "http://claude:1".into()])
+            .with_preferred_model(claude());
+        assert!(matches!(found.availability(),
+            ProviderAvailability::Available { model, detail } if model == "claude-cli" && detail == "http://claude:1"));
+        // The fleet's Qwen never lands on the hub's Claude.
+        let mut qwen = FleetQwenChatProvider::new(QwenOnly, vec!["http://claude:1".into()]);
+        assert!(matches!(qwen.availability(), ProviderAvailability::Available { model, .. } if model == "qwen3.8-27b"));
     }
 
     #[test]

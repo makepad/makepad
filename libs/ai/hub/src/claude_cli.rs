@@ -34,9 +34,10 @@
 //! 4. **Who may ask.** The hub must bind a private LAN address (never
 //!    0.0.0.0, loopback or a public address, never the internet edge), so it
 //!    serves only through its TLS front to fleet credentials; `/generate` is a
-//!    `lan`/`device` route ([`crate::fleet_routes::route_allowed`]). It sends no LAN
-//!    beacon: a client reaches it only when pinned to it (`MAKEPAD_AI_HUB`),
-//!    and even then picks `claude-cli` only when it names that model.
+//!    `lan`/`device` route ([`crate::fleet_routes::route_allowed`]). It beacons
+//!    like every node (the beacon names only its TLS port), and a client
+//!    picks `claude-cli` only when it names that model: the apps' "Claude ·
+//!    ai-hub fleet" provider (`ProviderKind::FleetClaude`, a cloud kind).
 //!
 //! Player text goes over stdin, never argv; lines that start with `/` or `!`
 //! are indented one space so no slash command, skill or shell escape can

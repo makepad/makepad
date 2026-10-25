@@ -1168,7 +1168,6 @@ fn studio_msg_name(msg: &StudioToApp) -> &'static str {
         StudioToApp::None => "None",
         StudioToApp::Kill => "Kill",
         StudioToApp::Relay(_) => "Relay",
-        StudioToApp::WindowFocus { .. } => "WindowFocus",
     }
 }
 

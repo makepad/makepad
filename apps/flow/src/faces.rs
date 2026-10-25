@@ -260,8 +260,9 @@ pub struct ModelChoice {
 struct ChatProviderKind(&'static str);
 
 impl ChatProviderKind {
-    const ALL: [(&'static str, &'static str); 6] = [
+    const ALL: [(&'static str, &'static str); 7] = [
         ("fleet-qwen", "Qwen · ai-hub fleet"),
+        ("fleet-claude", "Claude · ai-hub fleet"),
         ("openai", "OpenAI · API"),
         ("grok", "Grok · API"),
         ("claude-cli", "Claude Code · CLI on server"),

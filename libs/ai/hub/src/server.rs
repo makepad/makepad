@@ -599,13 +599,11 @@ impl FleetMode {
         eprintln!("fleet: TLS front on {} (certificate {fp})", self.listen);
         makepad_network::fleet::auth::set_node_credential(self.node_credential);
         makepad_network::fleet::auth::install_fleet_client(&shared.cache_dir.join("fleet"));
-        // A claude-cli hub is reached by pin only (MAKEPAD_AI_HUB): no beacon,
-        // so no client finds it unless pointed at it.
-        if crate::claude_cli::enabled() {
-            eprintln!("fleet: claude-cli hub, no LAN beacon (clients pin it with MAKEPAD_AI_HUB)");
-        } else {
-            crate::discovery::start_fleet_beacon(node_id, self.listen.port(), self.fleet.clone(), shared.node_key.clone());
-        }
+        // Every node beacons, a claude-cli hub too: the beacon only says where
+        // the TLS front is (the front still wants a fleet credential), and the
+        // fleet's apps find the hub's Claude the way they find its Qwen. No
+        // automatic route ever picks claude-cli (fleet::is_explicit_only).
+        crate::discovery::start_fleet_beacon(node_id, self.listen.port(), self.fleet.clone(), shared.node_key.clone());
         Ok(self.listen)
     }
 }
