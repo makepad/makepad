@@ -134,6 +134,11 @@ pub struct FnEntry {
     /// before its first install here it is not never-run code (O3's walk builds its RIR, and keeps
     /// no call to it waiting for a first run that only a lazy install makes)
     pub ran_before: AtomicBool,
+    /// SPEC-V: its unverified-mode twin got code (a body whose callers ran unverified code)
+    pub twin_ran: AtomicBool,
+    /// SPEC-V: a body with no code of its own whose slot word holds its twin's code until its own
+    /// build (background) is installed (`Unit::borrow_twin`). Owner thread.
+    pub borrowed: bool,
 }
 
 /// SPEC-V: a body's standing with the borrow checker.
@@ -3857,6 +3862,72 @@ impl Unit {
     /// Slot `id`'s code is in invalidated memory (invalid.rs): it goes back to its lazy stub and
     /// builds again from the source it runs now (a rollback restoring a version a layout patch
     /// invalidated, a lazily built twin of a rolled-back generation).
+    /// SPEC-V: slot `id`, a body with no code of its own whose unverified-mode twin has code,
+    /// runs the twin's code (its slot word holds it) until its own build is installed; that build
+    /// is queued in the background (borrow_build_enqueue). The twin is the same body built for
+    /// unverified callers (no noalias, aliasing-prone calls to twins): sound for every caller. So
+    /// a verified rebuild of a caller that ran calling the twin (sweep_verdicts) never sends the
+    /// hot path to lazy first compiles of the base slots under it on the program's threads (the
+    /// Sandbox's 70-560 ms frames: ~550 lazy installs in one frame). Returns the code the slot
+    /// runs now. Owner thread.
+    pub(crate) fn borrow_twin(&mut self, id: u32) -> Option<u64> {
+        let f = &self.fns[id as usize];
+        if f.compiled || f.build_err.is_some() || !f.twin_ran.load(Ordering::Relaxed) || !matches!(f.key, FnKey::Inst(..) | FnKey::Closure(..)) || !borrow_on() {
+            return None;
+        }
+        if f.borrowed {
+            return Some(SlotWord::of(&self.slots, id).load(Ordering::SeqCst));
+        }
+        let t = self.plain_twin_of(id)?;
+        let tw = &self.fns[t as usize];
+        if !tw.compiled || tw.build_err.is_some() || crate::stale::lookup(tw.code).is_some() {
+            return None;
+        }
+        let at = tw.code;
+        self.fns[id as usize].borrowed = true;
+        SlotWord::of(&self.slots, id).store(at, Ordering::SeqCst);
+        let n = SPECV_BORROWS.fetch_add(1, Ordering::Relaxed);
+        if n < 4096 && crate::inspect::flightrec::on() {
+            crate::inspect::flightrec::event("specv.borrow", &format!("#{} {} runs its twin's code until its own build", id, short_name(&self.fns[id as usize].name)), id as u64, at);
+        }
+        if specv_trace() {
+            eprintln!("specv @{:.3} #{} {} borrows its twin's code (#{})", wall_ns() as f64 / 1e9, id, short_name(&self.fns[id as usize].name), t);
+        }
+        unsafe { borrow_build_enqueue(self as *mut Unit, id) };
+        Some(at)
+    }
+
+    /// SPEC-V: the uncompiled callees `callees` of code just installed borrow their twins' code
+    /// (borrow_twin): the code's first calls run code, not lazy compiles. Owner thread.
+    pub(crate) fn borrow_callees(&mut self, callees: impl Iterator<Item = u32>) {
+        for c in callees {
+            if (c as usize) < self.fns.len() && !self.fns[c as usize].compiled && self.fns[c as usize].twin_ran.load(Ordering::Relaxed) {
+                self.borrow_twin(c);
+            }
+        }
+    }
+
+    /// SPEC-V: twin `t`'s code changed (installed, invalidated, rolled back): a base slot borrowing
+    /// it runs the twin's current code, or its own lazy stub when the twin has none. Owner thread.
+    fn follow_twin(&mut self, t: u32) {
+        let FnKey::Plain(b) = self.fns[t as usize].key else { return };
+        if (b as usize) >= self.fns.len() {
+            return;
+        }
+        let tw = &self.fns[t as usize];
+        let live = tw.compiled && tw.build_err.is_none() && code_as_now().is_none_or(|k| k.tier != tier::STUB) && crate::stale::lookup(tw.code).is_none();
+        if live && !self.fns[b as usize].twin_ran.swap(true, Ordering::Relaxed) {
+            TWINS_RAN.fetch_add(1, Ordering::Relaxed);
+        }
+        let bf = &self.fns[b as usize];
+        if !bf.borrowed || bf.compiled {
+            return;
+        }
+        let at = if live { tw.code } else { self.slots.stub(b) };
+        self.fns[b as usize].borrowed = live;
+        SlotWord::of(&self.slots, b).store(at, Ordering::SeqCst);
+    }
+
     pub(crate) fn stub_if_invalidated(&mut self, id: u32) {
         let f = &self.fns[id as usize];
         if !f.compiled || f.code_len == 0 || crate::stale::lookup(f.code).is_none() {
@@ -3873,6 +3944,9 @@ impl Unit {
         f.o3.store(false, Ordering::Relaxed);
         f.version += 1;
         SlotWord::of(&self.slots, id).store(stub, Ordering::SeqCst);
+        if matches!(self.fns[id as usize].key, FnKey::Plain(_)) {
+            self.follow_twin(id);
+        }
     }
 
     /// A block of `len` bytes of code memory, 16-byte aligned, not written (the startup image:
@@ -4922,7 +4996,7 @@ impl Unit {
         // most slots (the startup image's thousands) are never asked.
         let entry_ref = matches!(key, FnKey::Shim(_) | FnKey::Glue(..) | FnKey::Sandbox(_) | FnKey::Plain(_)) && !matches!(key, FnKey::Glue(GLUE_UNNAMED, _));
         let name = crate::zone_alloc::kept_with(|| name.into_boxed_str());
-        FnEntry { key, name, code: stub_addr, code_len: stub_len, pc_map: PcMap::default(), file, history: None, compiled: false, patch_gen: 0, rir: None, refs: u32::from(entry_ref), rir_refs: Box::default(), entry_ref: AtomicBool::new(entry_ref), entry_ref_counted: entry_ref, building: false, build_err: None, build_ns: 0, cg_ns: 0, version: 0, inflight: false, spec: None, spec_state: 0, spec_depth: u8::MAX, baseline_hint: AtomicBool::new(false), hot_hint: AtomicBool::new(false), o3: AtomicBool::new(false), base_code: AtomicBool::new(false), unverified: AtomicBool::new(false), d3_lowered: AtomicBool::new(false), ran_before: AtomicBool::new(false), calls: Box::default() }
+        FnEntry { key, name, code: stub_addr, code_len: stub_len, pc_map: PcMap::default(), file, history: None, compiled: false, patch_gen: 0, rir: None, refs: u32::from(entry_ref), rir_refs: Box::default(), entry_ref: AtomicBool::new(entry_ref), entry_ref_counted: entry_ref, building: false, build_err: None, build_ns: 0, cg_ns: 0, version: 0, inflight: false, spec: None, spec_state: 0, spec_depth: u8::MAX, baseline_hint: AtomicBool::new(false), hot_hint: AtomicBool::new(false), o3: AtomicBool::new(false), base_code: AtomicBool::new(false), unverified: AtomicBool::new(false), d3_lowered: AtomicBool::new(false), ran_before: AtomicBool::new(false), twin_ran: AtomicBool::new(false), borrowed: false, calls: Box::default() }
     }
 
     /// Slot `id` has its key: the front's slot keys and its ahead check (before the slot is
@@ -6159,7 +6233,19 @@ impl Unit {
         if (first && gen == 0 || gen > 0) && crate::borrowck::lazy::gandalf_enabled(options) {
             self.note_first_borrowck(id, (gen > 0).then_some(0));
         }
+        // (SPEC-V: a slot that ran its twin's code runs its own now)
+        if std::mem::take(&mut self.fns[id as usize].borrowed) {
+            SPECV_BORROWS_OWN.fetch_add(1, Ordering::Relaxed);
+        }
         SlotWord::of(&self.slots, id).store(at, Ordering::SeqCst);
+        // SPEC-V: a base borrowing this twin follows it; this code's uncompiled callees whose twins
+        // ran borrow their twins' code (its first calls never compile on the calling thread)
+        if matches!(self.fns[id as usize].key, FnKey::Plain(_)) {
+            self.follow_twin(id);
+        }
+        if TWINS_RAN.load(Ordering::Relaxed) > 0 && code_as_now().is_none_or(|k| k.tier != tier::STUB) {
+            self.borrow_callees(relocs.iter().filter_map(|r| match r.target { relax_backend::rir::Reloc::Call(c) => Some(c), _ => None }));
+        }
         // its first run: O3 code that kept a call to it as never-run is built again
         if first && !self.cold_users.is_empty() {
             if let Some(users) = self.cold_users.remove(&id) {
@@ -6251,6 +6337,8 @@ impl Unit {
         match &self.fns[id as usize].key {
             FnKey::Inst(d, args) => {
                 if !crate::borrowck::event::admit(&self.prog, self.prog.def(*d).krate) || crate::borrowck::body::CheckedBody::item(&self.prog, *d).is_none() { return Verdict::Clean; }
+                // (the repro hook: every verdict pending until its release)
+                if specv_held() { return Verdict::Pending; }
                 let epoch = self.tcx.collect_epoch.load(Ordering::SeqCst);
                 let pending = match crate::borrowck::lazy::verdict(self.front.checker_id, *d, args, epoch) {
                     FnVerdict::Clean => return Verdict::Clean,
@@ -6382,7 +6470,13 @@ impl Unit {
         f.compiled = true;
         f.version += 1;
         crate::inspect::patches::code_installed(self, id);
+        if std::mem::take(&mut self.fns[id as usize].borrowed) {
+            SPECV_BORROWS_OWN.fetch_add(1, Ordering::Relaxed);
+        }
         SlotWord::of(&self.slots, id).store(at, Ordering::SeqCst);
+        if matches!(self.fns[id as usize].key, FnKey::Plain(_)) {
+            self.follow_twin(id);
+        }
         if !self.cold_users.is_empty() {
             if let Some(users) = self.cold_users.remove(&id) {
                 for t in users {
@@ -6433,6 +6527,9 @@ impl Unit {
             } else {
                 self.stub_if_invalidated(id);
             }
+            if matches!(self.fns[id as usize].key, FnKey::Plain(_)) {
+                self.follow_twin(id);
+            }
         }
     }
 
@@ -6466,6 +6563,9 @@ impl Unit {
                 SlotWord::of(&self.slots, id as u32).store(prev.0, Ordering::SeqCst);
             } else {
                 self.stub_if_invalidated(id as u32);
+            }
+            if matches!(self.fns[id].key, FnKey::Plain(_)) {
+                self.follow_twin(id as u32);
             }
             self.frequency_profiles.remove(&(id as u32));
             out.push(id as u32);
@@ -6921,8 +7021,15 @@ unsafe fn compile_slot_on_stack_inner(up: *mut Unit, id: u32) -> u64 {
     // (a cold start's cache has no code store and no speculative result exists before the first
     // present: the probe could only miss, and it costs the main thread an owner round trip per
     // slot; the front's own lookup follows anyway)
-    if !(CODE_CACHE_EMPTY.load(Ordering::Relaxed) && startup_phase()) {
+    // SPEC-V: a body whose twin has code runs that (borrow_twin): no compile here
+    let twin_ran = (&*up).fns[id as usize].twin_ran.load(Ordering::Relaxed);
+    if twin_ran || !(CODE_CACHE_EMPTY.load(Ordering::Relaxed) && startup_phase()) {
         let r = owner::call(class, || {
+            if twin_ran {
+                if let Some(a) = (&mut *up).borrow_twin(id) {
+                    return Some(a);
+                }
+            }
             if (*up).cache.is_none() {
                 return None;
             }
@@ -6937,6 +7044,11 @@ unsafe fn compile_slot_on_stack_inner(up: *mut Unit, id: u32) -> u64 {
         if let Some(a) = r {
             return a;
         }
+    }
+    LAZY_FRONTS.fetch_add(1, Ordering::Relaxed);
+    if twin_ran && crate::inspect::flightrec::on() {
+        // (the twin could not lend its code: why the base compiles on this thread)
+        crate::inspect::flightrec::event("specv.lazy-base", &format!("#{} {}: first call of a base slot whose twin ran, compiled on the calling thread", id, short_name(&(&*up).fns[id as usize].name)), id as u64, 0);
     }
     let t = wall_ns();
     typeck_ahead_slot(up, id);
@@ -7136,6 +7248,9 @@ unsafe fn ready_code_locked(up: *mut Unit, id: u32) -> Option<u64> {
             if t1.is_none() && callees.iter().any(|&c| (c as usize) < u.fns.len() && matches!(u.fns[c as usize].key, FnKey::Plain(_))) {
                 o1v_enqueue(up, id, false);
             }
+        }
+        if TWINS_RAN.load(Ordering::Relaxed) > 0 {
+            (&mut *up).borrow_callees(callees.iter().copied());
         }
         spec_enqueue_cached(up, &callees, 0);
         return Some(a);
@@ -8393,6 +8508,7 @@ pub(crate) fn o2_counts() -> (u64, bool, u64) {
     use crate::cache::warm_count as wc;
     let queued = O2_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).len()
         + O2_BASE.lock().unwrap_or_else(|e| e.into_inner()).len()
+        + BORROW_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).len()
         + O1V_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).len();
     let done = O2_STATS[0].load(Ordering::Relaxed) + O2_STATS[2].load(Ordering::Relaxed) + wc::get(wc::O1V_BUILT) + wc::get(wc::O1V_DROPPED);
     (queued as u64, O2_RUNNING.load(Ordering::Relaxed), done)
@@ -8620,6 +8736,20 @@ unsafe fn o1v_enqueue(up: *mut Unit, id: u32, inlined: bool) {
     o2_start(up);
 }
 
+/// SPEC-V: the own build of a base slot running its twin's code (borrow_build_enqueue; a unit
+/// call, like o2_begin): the cache's entry linked when it has one (or code built ahead), else an
+/// O2 build. None: linked, or nothing to do (it got code meanwhile).
+unsafe fn borrow_begin(up: *mut Unit, id: u32) -> Option<O2Work> {
+    let f = &(&*up).fns[id as usize];
+    if f.compiled || !f.borrowed {
+        return None;
+    }
+    if ready_code_locked(up, id).is_some() {
+        return None;
+    }
+    o2_begin(up, id)
+}
+
 /// A verified O1 rebuild's front (o1v_enqueue; a unit call, like o2_begin): None when it does not
 /// apply (any more) -- the slot is not verified, has O3 code, an error, a build open, or its entry
 /// is at O1 or above already.
@@ -8630,6 +8760,12 @@ unsafe fn o1v_begin(up: *mut Unit, id: u32) -> Option<O2Work> {
     let t0 = cpu_ns();
     let epoch = PATCH_EPOCH.load(Ordering::SeqCst);
     let dropped = || { wc::add(wc::O1V_DROPPED, 1); None };
+    // (the repro hook holds the verdicts: the rebuild waits for their release, as a run whose
+    // verdicts came in time builds it)
+    if specv_held() {
+        crate::zone_alloc::kept_with(|| O1V_HELD.lock().unwrap_or_else(|e| e.into_inner()).push((up as usize, id)));
+        return None;
+    }
     if !(&*up).refresh_verified(id) {
         return dropped();
     }
@@ -8695,19 +8831,23 @@ fn o2_thread(runtime: &crate::options::RuntimeOptions) {
     ensure_altstack();
     lower_worker_priority(runtime);
     loop {
-        let ((unit, id), o1) = {
+        let ((unit, id), o1, borrowed) = {
             let mut q = O2_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
             loop {
                 if !q.is_empty() {
-                    break (q.remove(0), false);
+                    break (q.remove(0), false, false);
+                }
+                // (SPEC-V: base slots running their twins' code get their own)
+                if let Some(x) = BORROW_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).pop_front() {
+                    break (x, false, true);
                 }
                 if let Some(x) = O2_BASE.lock().unwrap_or_else(|e| e.into_inner()).pop_front() {
-                    break (x, false);
+                    break (x, false, false);
                 }
                 // verified O1 rebuilds last, and never before the first frame
                 if FIRST_PRESENT.load(Ordering::Acquire) {
                     if let Some(x) = O1V_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).pop_front() {
-                        break (x, true);
+                        break (x, true, false);
                     }
                 }
                 crate::zone_alloc::compiler_hand_back_idle();
@@ -8731,7 +8871,7 @@ fn o2_thread(runtime: &crate::options::RuntimeOptions) {
                             job_sleep(TIER1_POLL);
                         }
                     }
-                    take_prefronted(&front, || live().and_then(|up| if o1 { o1v_begin(up, id) } else { o2_begin(up, id) }.map(|w| (up, w)))).flatten()
+                    take_prefronted(&front, || live().and_then(|up| if o1 { o1v_begin(up, id) } else if borrowed { borrow_begin(up, id) } else { o2_begin(up, id) }.map(|w| (up, w)))).flatten()
                 }
             };
             if let Some((up, w)) = begin {
@@ -13780,6 +13920,63 @@ fn await_verdict(id: u32, w: Await) {
     }
 }
 
+/// SPEC-V repro hook: every fn body's verdict reads as pending while held (no stored verdict
+/// either), so the code built meanwhile is unverified code calling twins; the release is one verdict
+/// change for all of them at once (the next sweep looks at every flagged slot). 0 off, 1 held
+/// (tests), 2 `MAKEPAD_RUN_SPECV_HOLD=<ms>`: held until <ms> after the first present.
+pub(crate) static SPECV_HOLD: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(u8::MAX);
+/// releases of SPECV_HOLD so far (part of the sweep's state: a release makes a full sweep)
+pub(crate) static SPECV_RELEASES: AtomicU64 = AtomicU64::new(0);
+
+fn specv_hold_ms() -> Option<u64> {
+    static MS: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *MS.get_or_init(|| std::env::var("MAKEPAD_RUN_SPECV_HOLD").ok().and_then(|v| v.parse().ok()))
+}
+
+/// SPEC-V repro hook (SPECV_HOLD): whether verdicts are held now.
+pub(crate) fn specv_held() -> bool {
+    let mut s = SPECV_HOLD.load(Ordering::Relaxed);
+    if s == u8::MAX {
+        s = if specv_hold_ms().is_some() { 2 } else { 0 };
+        let _ = SPECV_HOLD.compare_exchange(u8::MAX, s, Ordering::Relaxed, Ordering::Relaxed);
+        s = SPECV_HOLD.load(Ordering::Relaxed);
+    }
+    match s {
+        0 => false,
+        1 => true,
+        _ => {
+            let at = FIRST_PRESENT_NS.load(Ordering::Acquire);
+            if at == 0 || wall_ns() < at + specv_hold_ms().unwrap_or(0) * 1_000_000 {
+                return true;
+            }
+            specv_release();
+            false
+        }
+    }
+}
+
+/// verified O1 rebuilds that met held verdicts (o1v_begin): queued again at the release
+static O1V_HELD: relax_session::sync::Mutex<Vec<(usize, u32)>> = relax_session::sync::Mutex::new(Vec::new());
+
+/// SPEC-V repro hook: the held verdicts are released (once per hold).
+pub(crate) fn specv_release() {
+    let s = SPECV_HOLD.load(Ordering::Relaxed);
+    if (s == 1 || s == 2) && SPECV_HOLD.compare_exchange(s, 0, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+        let held = std::mem::take(&mut *O1V_HELD.lock().unwrap_or_else(|e| e.into_inner()));
+        if !held.is_empty() {
+            let _q = O2_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+            crate::zone_alloc::kept_with(|| O1V_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).extend(held));
+            O2_WAKE.notify_one();
+        }
+        SPECV_RELEASES.fetch_add(1, Ordering::Relaxed);
+        SWEPT.store(u64::MAX, Ordering::Relaxed);
+        crate::inspect::flightrec::event("specv.release", "SPEC-V repro hook: the held verdicts are released", 0, 0);
+        if specv_trace() {
+            eprintln!("specv @{:.3} held verdicts released", wall_ns() as f64 / 1e9);
+        }
+    }
+}
+
 /// SPEC-V: the verdicts moved (or a patch landed): flagged slots whose verdict is clean become
 /// verified, and the promotions that waited for them run. A no-op until `lazy::RECORDED` or the patch
 /// epoch changes. Any thread; the unit is read under a unit call.
@@ -13792,8 +13989,11 @@ pub fn sweep_verdicts() {
         return;
     }
     // (the pending patches too: unverified O3 builds wait for none to be pending)
+    // (a held repro verdict set is released by this check: specv_held)
+    let _ = specv_held();
     let now = crate::borrowck::lazy::RECORDED.load(Ordering::Acquire).wrapping_mul(1 << 20).wrapping_add(PATCH_EPOCH.load(Ordering::SeqCst))
-        .wrapping_add((crate::reload::UNVERIFIED_PATCHES.load(Ordering::Acquire) as u64) << 48);
+        .wrapping_add((crate::reload::UNVERIFIED_PATCHES.load(Ordering::Acquire) as u64) << 48)
+        .wrapping_add(SPECV_RELEASES.load(Ordering::Relaxed) << 40);
     if SWEPT.swap(now, Ordering::Relaxed) == now {
         return;
     }
@@ -13805,7 +14005,8 @@ pub fn sweep_verdicts() {
     if up.is_null() {
         return;
     }
-    let patches = PATCH_EPOCH.load(Ordering::SeqCst).wrapping_add((crate::reload::UNVERIFIED_PATCHES.load(Ordering::Acquire) as u64) << 48);
+    let patches = PATCH_EPOCH.load(Ordering::SeqCst).wrapping_add((crate::reload::UNVERIFIED_PATCHES.load(Ordering::Acquire) as u64) << 48)
+        .wrapping_add(SPECV_RELEASES.load(Ordering::Relaxed) << 40);
     let live = || (TIER_UNIT.load(Ordering::Acquire) == up).then_some(up);
     // what to look at: every slot (None) or the slots flagged since the last sweep plus the
     // flagged slots whose verdict owner recorded (rule I-PUB: the scans are chunked publishes)
@@ -13957,6 +14158,11 @@ pub fn sweep_verdicts() {
             }
             (&mut *up).retier(r);
         }
+        if (!verified.is_empty() || !relower.is_empty() || !failed.is_empty()) && crate::inspect::flightrec::on() {
+            // (why code is rebuilt right after: the recorder's answer to a verdict-driven change)
+            let first = relower.iter().chain(tc.below.iter()).take(4).map(|&c| short_name(&u.fns[c as usize].name).to_string()).collect::<Vec<_>>().join(", ");
+            crate::inspect::flightrec::event("specv.sweep", &format!("{} verified late, {} O3 rebuilt, {} twin callers to O2, {} rejected; {} bases run twin code so far: {}", verified.len(), relower.len(), tc.below.len(), failed.len(), SPECV_BORROWS.load(Ordering::Relaxed), first), verified.len() as u64, relower.len() as u64);
+        }
         let released: Vec<(u32, Await)> = {
             let mut a = AWAIT_VERDICT.lock().unwrap_or_else(|e| e.into_inner());
             // the list outlives the compiler zone (a swap destroys it): the kept part is allocated
@@ -13985,6 +14191,38 @@ pub fn sweep_verdicts() {
 
 /// slots one publish of sweep_verdicts looks at
 const SWEEP_CHUNK: usize = 4096;
+
+/// SPEC-V: base slots that borrowed their twins' code (borrow_twin), twins that got code, and
+/// lazy compiles that reached their front end on a program thread (inspect, tests)
+pub(crate) static SPECV_BORROWS: AtomicU64 = AtomicU64::new(0);
+/// ... of which got their own code since
+pub(crate) static SPECV_BORROWS_OWN: AtomicU64 = AtomicU64::new(0);
+pub(crate) static TWINS_RAN: AtomicU64 = AtomicU64::new(0);
+pub(crate) static LAZY_FRONTS: AtomicU64 = AtomicU64::new(0);
+
+/// MAKEPAD_RUN_SPECV_BORROW=0: a base slot with no code compiles on its first call even when its
+/// twin has code (the old behaviour; A/B and the repro's before). Needs the O2 worker (its own
+/// build runs there).
+fn borrow_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_SPECV_BORROW").map_or(true, |v| v != "0")) && o2_on()
+}
+
+/// base slots running borrowed twin code, waiting for their own build (the O2 worker serves them
+/// after O2_QUEUE): (unit, slot)
+static BORROW_QUEUE: relax_session::sync::Mutex<std::collections::VecDeque<(usize, u32)>> = relax_session::sync::Mutex::new(std::collections::VecDeque::new());
+
+/// SPEC-V: slot `id` runs borrowed twin code: its own build in the background (O2 worker: the
+/// cache's entry when it has one, else an O2 build). Owner thread.
+unsafe fn borrow_build_enqueue(up: *mut Unit, id: u32) {
+    O2_SEEN.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert((up as usize, id));
+    {
+        let _q = O2_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+        crate::zone_alloc::kept_with(|| BORROW_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).push_back((up as usize, id)));
+        O2_WAKE.notify_one();
+    }
+    o2_start(up);
+}
 
 /// MAKEPAD_RUN_SPECV_TRACE=1: SPEC-V verdict sweeps (slots turning verified) and twins tiering up,
 /// with the callers whose lowering still calls them.

@@ -446,6 +446,106 @@ fn specv_aliased_call_from_unverified_body() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// SPEC-V (lane SPECHITCH): a caller that ran as unverified code (its aliasing-prone calls went to
+/// the callees' twins) and is rebuilt as verified code once its verdict is clean calls the base
+/// slots, which never had code. Before: its next call compiled them lazily on the calling thread
+/// (the Sandbox's frame path: ~550 lazy installs in one 70-560 ms frame). Now they run their twins'
+/// code until their own builds (background) are installed: no lazy compile on the program thread.
+/// The verdicts are held (SPECV_HOLD) so the first run is unverified whatever the checker's speed;
+/// case `off` (MAKEPAD_RUN_SPECV_BORROW=0) is the old behaviour: the repro makes the lazy compiles.
+#[test]
+fn specv_verified_rebuild_runs_twin_code_not_lazy_compiles() {
+    const CHILD: &str = "MAKEPAD_RUN_SPECV_BORROW_TEST";
+    let Ok(case) = std::env::var(CHILD) else {
+        for case in ["borrow", "off"] {
+            let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+            cmd.args(["--exact", "lazy_reload_tests::specv_verified_rebuild_runs_twin_code_not_lazy_compiles", "--nocapture", "--test-threads=1", "--format=terse"])
+                .env(CHILD, case).env("MAKEPAD_RUN_GANDALF_ALL", "0");
+            if case == "off" {
+                cmd.env("MAKEPAD_RUN_SPECV_BORROW", "0");
+            }
+            let output = cmd.output().unwrap();
+            assert!(output.status.success(), "{case}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        }
+        return;
+    };
+    use std::sync::atomic::Ordering;
+    crate::jit::CHECK_FIRST.store(false, Ordering::Relaxed);
+    crate::jit::set_ahead_level(crate::options::AheadLevel::AotMax);
+    crate::jit::SPECV_HOLD.store(1, Ordering::Relaxed);
+    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    let dir = std::env::temp_dir().join(format!("relax-specv-borrow-{}-{}", case, std::process::id()));
+    std::fs::create_dir_all(dir.join("app/src")).unwrap();
+    std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
+    std::fs::write(dir.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    let src = "#[inline(never)] pub fn leaf(a: &mut u32, b: &u32) -> u32 { *a += *b; *a }\n\
+        #[inline(never)] pub fn mid(a: &mut u32, b: &u32) -> u32 { leaf(a, b) + leaf(a, b) }\n\
+        pub fn root(out: &mut u32) { let mut x = 1u32; let y = 2u32; *out = mid(&mut x, &y); }\n";
+    std::fs::write(dir.join("app/src/lib.rs"), src).unwrap();
+    let app = dir.join("app/src/lib.rs").to_string_lossy().into_owned();
+    let session = Arc::new(crate::Session::default());
+    let (prog, core, app_crate) = crate::load_with_std(&session, &app, "specv_borrow", false).unwrap();
+    let graph = format!(r#"{{"units":[{{"pkg_id":"path+file://{}/app#app@0.1.0","target":{{"name":"app","src_path":{}}}}}]}}"#, dir.display(), crate::diag::quote(&app));
+    let roots = crate::reload::gandalf_app_roots(&crate::unitgraph::Units::from_json(graph.as_bytes()).unwrap(), dir.join("app").to_str().unwrap());
+    let find = |name: &str| prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = crate::program::DefId(i as u32);
+        (d.krate == app_crate && prog.name(id) == name).then_some(id)
+    }).unwrap();
+    let (leaf_def, mid_def, root_def) = (find("leaf"), find("mid"), find("root"));
+    let mut tcx = crate::tcx::Tcx::new();
+    tcx.collect(&prog);
+    crate::borrowck::event::set_app_scope(roots);
+    let mut u = crate::jit::Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut crate::jit::Unit;
+    crate::syms::set_unit(up);
+    let (leaf, mid, root, root_entry) = crate::owner::call(crate::owner::Class::Program, || {
+        let l = u.fn_id(crate::jit::FnKey::Inst(leaf_def, vec![]));
+        let m = u.fn_id(crate::jit::FnKey::Inst(mid_def, vec![]));
+        let r = u.fn_id(crate::jit::FnKey::Inst(root_def, vec![]));
+        (l, m, r, u.entry(r))
+    });
+    let run = |label: &str| {
+        let mut result = 0u32;
+        unsafe { crate::jit::call_jit(up, root_entry, &mut result as *mut u32 as u64) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
+        assert_eq!(result, 8, "{label}");
+    };
+    // held verdicts: `root` runs as unverified code, its call goes to mid's twin (and that one's to leaf's)
+    run("unverified");
+    assert!(u.fns[root as usize].rir.as_ref().is_some_and(|r| r.plain_calls), "the unverified lowering calls the twin");
+    let twin = u.plain_twin_of(mid).expect("mid's twin");
+    assert!(u.fns[twin as usize].compiled && !u.fns[mid as usize].compiled, "the twin ran, the base never did");
+    // the release: one verdict change for every body
+    crate::jit::specv_release();
+    let t0 = std::time::Instant::now();
+    loop {
+        crate::borrowck::settle().recv().unwrap();
+        if [leaf, mid, root].iter().all(|&i| u.verdict_clean(i)) { break; }
+        assert!(t0.elapsed().as_secs() < 20, "no clean verdicts");
+    }
+    assert!(u.refresh_verified(root));
+    // the verified rebuild (what sweep_verdicts queues: retier at O3), installed: it calls the base slots
+    assert!(unsafe { crate::jit::compile_tier1(up, root) }, "root gets verified O3 code");
+    {
+        let r = u.fns[root as usize].rir.as_ref().expect("RIR");
+        assert!(!r.plain_calls, "verified: lowered again without twin calls");
+        assert!(r.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, relax_backend::rir::Inst::Call(relax_backend::rir::Callee::Fn(t), _, _) if *t == mid))), "it calls mid itself");
+    }
+    let lazy0 = crate::jit::LAZY_FRONTS.load(Ordering::Relaxed);
+    run("verified");
+    let lazy = crate::jit::LAZY_FRONTS.load(Ordering::Relaxed) - lazy0;
+    if case == "off" {
+        assert!(lazy >= 1, "the old behaviour: the base slots compile on the calling thread");
+    } else {
+        assert_eq!(lazy, 0, "no lazy compile on the calling thread: mid runs its twin's code");
+        assert!(u.fns[mid as usize].borrowed || u.fns[mid as usize].compiled, "mid borrows its twin's code (or got its own build)");
+        // a patch-free rerun stays on code
+        run("again");
+        assert_eq!(crate::jit::LAZY_FRONTS.load(Ordering::Relaxed) - lazy0, 0);
+    }
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// Relaxed Rust D3: a pair of index borrows the checker accepts only with a run-time check
 /// (`&mut v[i]`, `&mut v[j]`). Before the verdict the body runs as written (SPEC-V: unverified);
 /// once it is clean, the verified code is lowered with the check: an overlap panics as

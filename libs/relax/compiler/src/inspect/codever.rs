@@ -153,6 +153,11 @@ pub(crate) fn body_json(u: &Unit, id: u32, start: u64, len: u32, state: &str, ge
 /// The installed code of slot `id` as JSON (`body_json` of its code now; "none" when it has none).
 pub(crate) fn installed_json(u: &Unit, id: u32) -> String {
     let f = &u.fns[id as usize];
+    if f.borrowed && !f.compiled {
+        // SPEC-V: it runs its twin's code until its own build (background) is installed
+        let twin = u.plain_twin_of(id).map_or(String::new(), |t| format!(" (#{} {})", t, short(&u.fns[t as usize].name, 120)));
+        return format!("{{\"slot\":{},\"fn\":{},\"state\":{}}}", id, json_str(&short(&f.name, 140)), json_str(&format!("no code of its own yet: runs its unverified-mode twin's code{} until its own build (queued in the background) is installed", twin)));
+    }
     if !f.compiled || f.code_len == 0 {
         return format!("{{\"slot\":{},\"fn\":{},\"state\":\"no code (lazy: compiled on its next call)\"}}", id, json_str(&short(&f.name, 140)));
     }
