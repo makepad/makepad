@@ -347,6 +347,7 @@ impl<'a, T> From<&'a Option<T>> for Option<&'a T> {
 
 // ---------------------------------------------------------------- iterators
 
+#[derive(Debug)]
 pub struct Iter<'a, T> {
     inner: Option<&'a T>,
 }
@@ -383,6 +384,7 @@ impl<'a, T> Clone for Iter<'a, T> {
 impl<'a, T> ExactSizeIterator for Iter<'a, T> {}
 impl<'a, T> crate::iter::FusedIterator for Iter<'a, T> {}
 
+#[derive(Debug)]
 pub struct IterMut<'a, T> {
     pub(crate) inner: Option<&'a mut T>,
 }
@@ -407,6 +409,7 @@ impl<'a, T> DoubleEndedIterator for IterMut<'a, T> {
 impl<'a, T> ExactSizeIterator for IterMut<'a, T> {}
 impl<'a, T> crate::iter::FusedIterator for IterMut<'a, T> {}
 
+#[derive(Clone, Debug)]
 pub struct IntoIter<T> {
     inner: Option<T>,
 }

@@ -981,7 +981,14 @@ fn crate_modules(c: &PreCrate, scans: &[part::Scan]) -> crate::macros::CrateMods
         for u in &scan.uses {
             if let Some(bind) = &u.bind {
                 if u.path.last() != Some(bind) { modules.renames.insert(bind.clone()); }
-                if u.path == ["crate"] && u.module == c.name { modules.externs.insert(bind.clone(), c.name.clone()); }
+                if u.module == c.name {
+                    if u.path == ["crate"] {
+                        modules.externs.insert(bind.clone(), c.name.clone());
+                    } else if u.path.len() == 2 && u.path[0].is_empty() {
+                        let target = modules.externs.get(&u.path[1]).cloned().unwrap_or_else(|| u.path[1].clone());
+                        modules.externs.insert(bind.clone(), target);
+                    }
+                }
             }
             modules.uses.entry(u.module.clone()).or_default().push(u.clone());
         }

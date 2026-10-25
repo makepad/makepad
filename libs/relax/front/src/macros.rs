@@ -673,6 +673,7 @@ impl MacroTable {
         let mut uses = old.uses.clone();
         let mut renames = old.renames.clone();
         let mut mods = old.mods.clone();
+        let mut externs = old.externs.clone();
         let mut added = false;
         let mut binds: Vec<(&(String, String), &Vec<String>)> = eu.iter().collect();
         binds.sort();
@@ -696,6 +697,14 @@ impl MacroTable {
                 }
                 continue;
             }
+            if m == &old.root {
+                if path.len() == 1 && path[0] == "crate" {
+                    externs.insert(b.clone(), k.to_string());
+                } else if path.len() == 2 && path[0].is_empty() {
+                    let target = externs.get(&path[1]).cloned().unwrap_or_else(|| path[1].clone());
+                    externs.insert(b.clone(), target);
+                }
+            }
             if v.iter().any(|u| u.bind.as_deref() == Some(b.as_str()) && &u.path == path) {
                 continue;
             }
@@ -708,7 +717,7 @@ impl MacroTable {
         if !added {
             return;
         }
-        let cm = CrateMods { root: old.root.clone(), src: old.src.clone(), mods, items: old.items.clone(), uses, externs: old.externs.clone(), renames, recursion_limit: old.recursion_limit, scope: Default::default() };
+        let cm = CrateMods { root: old.root.clone(), src: old.src.clone(), mods, items: old.items.clone(), uses, externs, renames, recursion_limit: old.recursion_limit, scope: Default::default() };
         self.add_crate(k.to_string(), std::sync::Arc::new(cm));
         // a crate not loaded yet whose scope a parse ahead of its load computed (preloaded files'
         // lookups) copied this crate's names as they were: computed afresh on next use

@@ -6065,6 +6065,10 @@ impl<'a> Fcx<'a> {
         let residual = adt.variants.iter().find(|v| Some(v.def) == break_def).unwrap().fields[0].ty;
         let flow_full = self.tcx.complete_args(self.prog, def, self.tcx.tys.list(flow_args), regions);
         let output = self.tcx.instantiate_ty(self.prog, def, &flow_full, output);
+        let so = self.shallow(output);
+        if matches!(self.tcx.tys.kind(so), TyKind::Infer(_)) {
+            self.diverging.push(so);
+        }
         let residual = self.tcx.instantiate_ty(self.prog, def, &flow_full, residual);
         let ret = *self.ret_stack.last().unwrap_or(&self.tcx.tys.error);
         let full = self.infer_item_args(from_residual, &[ret, residual]);

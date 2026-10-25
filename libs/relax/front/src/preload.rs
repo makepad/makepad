@@ -492,9 +492,14 @@ impl Pool {
                     if u.path.last() != Some(b) {
                         cmods.renames.insert(b.clone());
                     }
-                    // `extern crate self as b;` at the root: b names this crate everywhere
-                    if u.path.len() == 1 && u.path[0] == "crate" && u.module == c.name {
-                        cmods.externs.insert(b.clone(), c.name.clone());
+                    // `extern crate self as b;` or `extern crate x as b;` at the root: b is in the extern prelude
+                    if u.module == c.name {
+                        if u.path.len() == 1 && u.path[0] == "crate" {
+                            cmods.externs.insert(b.clone(), c.name.clone());
+                        } else if u.path.len() == 2 && u.path[0].is_empty() {
+                            let target = cmods.externs.get(&u.path[1]).cloned().unwrap_or_else(|| u.path[1].clone());
+                            cmods.externs.insert(b.clone(), target);
+                        }
                     }
                 }
                 cmods.uses.entry(u.module.clone()).or_default().push(u);
@@ -1395,7 +1400,14 @@ pub fn check_macros(prog: &mut crate::program::Program, krate: u32, files: &[(u3
             for u in scan.uses {
                 if let Some(b) = &u.bind {
                     if u.path.last() != Some(b) { mods.renames.insert(b.clone()); }
-                    if u.path.len() == 1 && u.path[0] == "crate" && u.module == name { mods.externs.insert(b.clone(), name.clone()); }
+                    if u.module == name {
+                        if u.path.len() == 1 && u.path[0] == "crate" {
+                            mods.externs.insert(b.clone(), name.clone());
+                        } else if u.path.len() == 2 && u.path[0].is_empty() {
+                            let target = mods.externs.get(&u.path[1]).cloned().unwrap_or_else(|| u.path[1].clone());
+                            mods.externs.insert(b.clone(), target);
+                        }
+                    }
                 }
                 mods.uses.entry(u.module.clone()).or_default().push(u);
             }

@@ -209,6 +209,22 @@ pub unsafe fn _mm256_castsi256_si128(a: __m256i) -> __m128i {
     __m128i([a.0[0], a.0[1]])
 }
 
+pub unsafe fn _mm256_castsi128_si256(a: __m128i) -> __m256i {
+    __m256i([a.0[0], a.0[1], 0, 0])
+}
+
+pub unsafe fn _mm256_set_epi64x(e3: i64, e2: i64, e1: i64, e0: i64) -> __m256i {
+    __m256i([e0, e1, e2, e3])
+}
+
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+pub unsafe fn _mm256_clmulepi64_epi128<const IMM8: i32>(a: __m256i, b: __m256i) -> __m256i {
+    i_join(
+        _mm_clmulepi64_si128::<IMM8>(i_lo(&a), i_lo(&b)),
+        _mm_clmulepi64_si128::<IMM8>(i_hi(&a), i_hi(&b)),
+    )
+}
+
 #[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
 pub unsafe fn _mm256_extractf128_si256<const IMM1: i32>(a: __m256i) -> __m128i {
     __m128i([a.0[IMM1 as usize * 2], a.0[IMM1 as usize * 2 + 1]])
@@ -873,6 +889,52 @@ pub unsafe fn _mm512_set_epi8(
 
 pub unsafe fn _mm512_setzero_si512() -> __m512i {
     __m512i([0; 8])
+}
+
+pub unsafe fn _mm512_castsi128_si512(a: __m128i) -> __m512i {
+    __m512i([a.0[0], a.0[1], 0, 0, 0, 0, 0, 0])
+}
+
+pub unsafe fn _mm512_castsi512_si128(a: __m512i) -> __m128i {
+    __m128i([a.0[0], a.0[1]])
+}
+
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+pub unsafe fn _mm512_extracti32x4_epi32<const IMM8: i32>(a: __m512i) -> __m128i {
+    let idx = ((IMM8 & 3) as usize) * 2;
+    __m128i([a.0[idx], a.0[idx + 1]])
+}
+
+pub unsafe fn _mm512_set_epi64(
+    e7: i64,
+    e6: i64,
+    e5: i64,
+    e4: i64,
+    e3: i64,
+    e2: i64,
+    e1: i64,
+    e0: i64,
+) -> __m512i {
+    __m512i([e0, e1, e2, e3, e4, e5, e6, e7])
+}
+
+pub unsafe fn _mm512_xor_si512(a: __m512i, b: __m512i) -> __m512i {
+    let mut r = [0i64; 8];
+    let mut i = 0;
+    while i < 8 {
+        r[i] = a.0[i] ^ b.0[i];
+        i += 1;
+    }
+    __m512i(r)
+}
+
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+pub unsafe fn _mm512_clmulepi64_epi128<const IMM8: i32>(a: __m512i, b: __m512i) -> __m512i {
+    let l0 = _mm_clmulepi64_si128::<IMM8>(__m128i([a.0[0], a.0[1]]), __m128i([b.0[0], b.0[1]]));
+    let l1 = _mm_clmulepi64_si128::<IMM8>(__m128i([a.0[2], a.0[3]]), __m128i([b.0[2], b.0[3]]));
+    let l2 = _mm_clmulepi64_si128::<IMM8>(__m128i([a.0[4], a.0[5]]), __m128i([b.0[4], b.0[5]]));
+    let l3 = _mm_clmulepi64_si128::<IMM8>(__m128i([a.0[6], a.0[7]]), __m128i([b.0[6], b.0[7]]));
+    __m512i([l0.0[0], l0.0[1], l1.0[0], l1.0[1], l2.0[0], l2.0[1], l3.0[0], l3.0[1]])
 }
 
 #[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]

@@ -248,6 +248,7 @@ fn unwrap_failed(msg: &str, error: &dyn fmt::Debug) -> ! {
 pub type Iter<'a, T> = crate::option::Iter<'a, T>;
 pub type IterMut<'a, T> = crate::option::IterMut<'a, T>;
 
+#[derive(Clone, Debug)]
 pub struct IntoIter<T> {
     inner: Option<T>,
 }
