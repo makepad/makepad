@@ -8889,6 +8889,45 @@ mod rotate_tests {
         assert!(matches!(f.blocks[e as usize].insts[..], [Inst::ICmp(Cond::Eq, false, _, a, b)] if a == p && b == end));
     }
 
+    /// `for x in xs { if x == k { continue } s += x }` with the continue on the test's TRUE edge: it
+    /// gets its own copy of the header test, so it stays inside the rotated loop
+    #[test]
+    fn rotation_gives_a_true_edge_continue_its_own_header_test() {
+        let mut f = Func::new("rotc".into(), 0);
+        let (p0, end, k) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
+        f.params.extend([p0, end, k]);
+        f.rets.push(Cls::I);
+        let (p, c1, x, c2, s) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
+        for _ in 0..5 {
+            f.block();
+        }
+        f.blocks[0].insts = vec![Inst::Mov(p, p0), Inst::Iconst(s, 0)];
+        f.blocks[0].term = Term::Jump(1);
+        f.blocks[1].insts = vec![Inst::ICmp(Cond::Eq, false, c1, p, end)];
+        f.blocks[1].term = Term::Branch(c1, 4, 2);
+        f.blocks[2].insts = vec![Inst::IBinI(IOp::Add, U64T, p, p, 8), Inst::Load(Mem::Int(8, false), x, p, -8), Inst::ICmp(Cond::Eq, false, c2, x, k)];
+        f.blocks[2].term = Term::Branch(c2, 1, 3);
+        f.blocks[3].insts = vec![Inst::IBin(IOp::Add, U64T, s, s, x)];
+        f.blocks[3].term = Term::Jump(1);
+        f.blocks[4].term = Term::Ret(vec![s]);
+        for b in &mut f.blocks {
+            b.pos = vec![0; b.insts.len()];
+        }
+        rotate_loops(&mut f);
+        f.verify().unwrap();
+        // no edge goes back to the original header any more: the continue reaches a block of its
+        // own that runs the `p == end` test and branches to the exit or straight into the body
+        let header = f.blocks.iter().position(|b| matches!(b.insts[..], [Inst::ICmp(Cond::Eq, false, d, _, _)] if d == c1)).unwrap();
+        let body = f.blocks.iter().position(|b| matches!(b.insts.last(), Some(Inst::ICmp(Cond::Eq, false, d, _, _)) if *d == c2)).unwrap();
+        let Term::Branch(_, t, e) = f.blocks[body].term else { panic!() };
+        assert_ne!(t as usize, header, "the continue still jumps to the original header");
+        assert!(matches!(f.blocks[t as usize].insts[..], [Inst::ICmp(Cond::Eq, false, _, a, b)] if a == p && b == end));
+        let Term::Branch(_, et, ee) = f.blocks[t as usize].term else { panic!() };
+        assert_eq!(ee as usize, body);
+        assert!(matches!(f.blocks[et as usize].term, Term::Ret(_)));
+        assert_ne!(e as usize, header);
+    }
+
     /// `if (lo <= hi) & (hi <= len) { a } else { b }`: a branch on x, then one on y; `|` likewise
     #[test]
     fn branch_on_and_or_of_compares_splits() {

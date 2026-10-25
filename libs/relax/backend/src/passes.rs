@@ -7514,7 +7514,8 @@ pub fn addr_modes(f: &mut Func) {
 /// runs one conditional branch at the bottom instead of a jump plus the header test.
 /// A latch whose branch goes back to the header on its false edge (`if skip { continue }`)
 /// gets the copy as a new block laid out after it: the latch falls into the test instead of
-/// jumping to the header. Header values used only in the header get fresh vregs in the copy;
+/// jumping to the header. One that goes back on its true edge gets such a block too (a branch
+/// target of its own), so the edge stays inside the rotated loop. Header values used only in the header get fresh vregs in the copy;
 /// a header value the loop reads elsewhere (`let i = it.start` of a range's `next`, a loaded length) keeps its
 /// vreg -- the copy is the very code the jump would have run, so it defines the same values.
 pub fn rotate_loops(f: &mut Func) {
@@ -7558,9 +7559,16 @@ pub fn rotate_loops(f: &mut Func) {
     // the blocks added below (index n + k): the (latch, header) edge each one sits on
     let mut made: Vec<(u32, u32)> = Vec::new();
     for l in 0..n {
-        let (h, branch_latch) = match f.blocks[l].term {
-            Term::Jump(h) if idom[l] != u32::MAX && dominates(h, l as u32) => (h as usize, false),
-            Term::Branch(_, t, e) if t != e && e as usize != l && idom[l] != u32::MAX && dominates(e, l as u32) => (e as usize, true),
+        // (header, the latch is a branch, its true edge is the back edge)
+        let (h, branch_latch, true_edge) = match f.blocks[l].term {
+            Term::Jump(h) if idom[l] != u32::MAX && dominates(h, l as u32) => (h as usize, false, false),
+            Term::Branch(_, t, e) if t != e && e as usize != l && idom[l] != u32::MAX && dominates(e, l as u32) => (e as usize, true, false),
+            // `if skip { continue }` written as a branch back on its true edge (a `continue 'outer`
+            // from a test in the body, a filter's early `continue`): without its own copy the
+            // edge leaves the rotated loop for the original header, and the code placed between
+            // that header and the rotated body (the preheader's copies and invariant set-up)
+            // runs again on every such continue
+            Term::Branch(_, t, e) if t != e && t as usize != l && idom[l] != u32::MAX && dominates(t, l as u32) => (t as usize, true, true),
             _ => continue,
         };
         let hb = f.blocks[h].clone();
@@ -7649,8 +7657,12 @@ pub fn rotate_loops(f: &mut Func) {
             let nb = f.blocks.len() as u32;
             f.blocks.push(Block { insts, pos: hb.pos.clone(), term, term_pos: hb.term_pos, count: hb.count });
             made.push((l as u32, h as u32));
-            if let Term::Branch(_, _, ref mut e) = f.blocks[l].term {
-                *e = nb;
+            if let Term::Branch(_, ref mut t, ref mut e) = f.blocks[l].term {
+                if true_edge {
+                    *t = nb;
+                } else {
+                    *e = nb;
+                }
             }
             added = true;
         } else {
