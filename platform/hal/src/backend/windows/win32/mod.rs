@@ -26,6 +26,7 @@ mod process;
 pub use process::{activate_process, open_url};
 mod menu;
 mod rawinput;
+mod tray;
 mod window;
 
 use super::super::exec::OsCmd;

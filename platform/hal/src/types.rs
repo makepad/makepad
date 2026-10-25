@@ -293,6 +293,9 @@ pub mod menu_kind {
     pub const DISABLED: u32 = 1 << 9;
     /// the application's Quit item: `terminate:`, not a command
     pub const QUIT: u32 = 1 << 10;
+    /// the item shows a check mark state (`CHECKED` says which)
+    pub const CHECKABLE: u32 = 1 << 11;
+    pub const CHECKED: u32 = 1 << 12;
 }
 
 /// `FileDialog::kind`: the dialog in the low byte, bit 8: choose several.

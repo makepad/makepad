@@ -329,6 +329,10 @@ pub enum Event {
     /// The GPU is short of memory (see [`GpuPressureEvent`]); the session that owns the
     /// desktop frees what other GPU users hold for the UI. HAL client only.
     GpuPressure(GpuPressureEvent),
+    /// An item of one of the app's tray menus was chosen (see [`crate::tray`]).
+    TrayMenu(crate::tray::TrayMenuEvent),
+    /// A primary click on one of the app's tray icons (Windows; macOS opens the menu).
+    TrayClick(crate::tray::TrayClickEvent),
 
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
@@ -456,6 +460,8 @@ impl Event {
             88 => "ChildWindowAction",
             89 => "ChildMessage",
             90 => "GpuPressure",
+            91 => "TrayMenu",
+            92 => "TrayClick",
             _ => panic!(),
         }
     }
@@ -557,6 +563,8 @@ impl Event {
             Self::ChildWindowAction(_) => 88,
             Self::ChildMessage { .. } => 89,
             Self::GpuPressure(_) => 90,
+            Self::TrayMenu(_) => 91,
+            Self::TrayClick(_) => 92,
 
             #[cfg(target_arch = "wasm32")]
             Self::ToWasmMsg(_) => 55,

@@ -228,7 +228,7 @@ pub(crate) fn note_user_event(cx: &mut Cx, event: &Event) {
         }
         Event::TextCopy(_) | Event::TextCut(_) => ("clipboard", None),
         Event::LongPress(_) | Event::SelectionHandleDrag(_) => ("touch", None),
-        Event::MacosMenuCommand(_) => ("menu", None),
+        Event::MacosMenuCommand(_) | Event::TrayMenu(_) | Event::TrayClick(_) => ("menu", None),
         Event::WindowCloseRequested(event) => ("close", Some(event.window_id.id())),
         Event::WindowLostFocus(_) | Event::WindowClosed(_) => {
             // A release can occur outside this app; don't leave a phantom

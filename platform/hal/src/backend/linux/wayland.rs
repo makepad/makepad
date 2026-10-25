@@ -877,6 +877,8 @@ impl State {
             | OsCmd::DirectNaturalScroll { .. }
             | OsCmd::DirectTapToClick { .. }
             | OsCmd::MenuSet { .. }
+            | OsCmd::TraySet { .. }
+            | OsCmd::TrayRemove { .. }
             | OsCmd::ClipboardActions { .. }
             | OsCmd::ShareText { .. }
             | OsCmd::MobileUi { .. }

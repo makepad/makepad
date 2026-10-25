@@ -19,9 +19,9 @@
 
 use makepad_widgets::*;
 #[cfg(target_os = "linux")]
-use super::system_slider::DrawSystemSlider;
+use crate::system_slider::DrawSystemSlider;
 
-use super::{
+use crate::{
     alpha, BarTokens, ControlTokens, CtrlState, FontTokens, MenuTokens, NotificationTokens,
     ShellTokens, SpacingTokens, SurfaceTokens,
 };

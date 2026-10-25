@@ -1556,6 +1556,8 @@ impl Shell for App {
                 | OsCmd::WindowButtonsCenter { .. }
                 | OsCmd::WindowDpiOverride { .. }
                 | OsCmd::MenuSet { .. }
+                | OsCmd::TraySet { .. }
+                | OsCmd::TrayRemove { .. }
                 | OsCmd::ClipboardActions { .. }
                 | OsCmd::ShareText { .. }
                 | OsCmd::MobileUi { .. }

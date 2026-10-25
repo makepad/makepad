@@ -21965,6 +21965,94 @@ impl ::core::ops::BitOr for KNOWN_FOLDER_FLAG { type Output = Self; fn bitor(sel
 impl ::core::ops::BitAnd for KNOWN_FOLDER_FLAG { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
 impl ::core::ops::BitXor for KNOWN_FOLDER_FLAG { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
 impl ::core::ops::Not for KNOWN_FOLDER_FLAG { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const NIF_ICON: crate::Win32::UI::Shell::NOTIFY_ICON_DATA_FLAGS = crate::Win32::UI::Shell::NOTIFY_ICON_DATA_FLAGS(2u64 as _);
+pub const NIF_MESSAGE: crate::Win32::UI::Shell::NOTIFY_ICON_DATA_FLAGS = crate::Win32::UI::Shell::NOTIFY_ICON_DATA_FLAGS(1u64 as _);
+pub const NIF_SHOWTIP: crate::Win32::UI::Shell::NOTIFY_ICON_DATA_FLAGS = crate::Win32::UI::Shell::NOTIFY_ICON_DATA_FLAGS(128u64 as _);
+pub const NIF_TIP: crate::Win32::UI::Shell::NOTIFY_ICON_DATA_FLAGS = crate::Win32::UI::Shell::NOTIFY_ICON_DATA_FLAGS(4u64 as _);
+pub const NIM_ADD: crate::Win32::UI::Shell::NOTIFY_ICON_MESSAGE = crate::Win32::UI::Shell::NOTIFY_ICON_MESSAGE(0u64 as _);
+pub const NIM_DELETE: crate::Win32::UI::Shell::NOTIFY_ICON_MESSAGE = crate::Win32::UI::Shell::NOTIFY_ICON_MESSAGE(2u64 as _);
+pub const NIM_MODIFY: crate::Win32::UI::Shell::NOTIFY_ICON_MESSAGE = crate::Win32::UI::Shell::NOTIFY_ICON_MESSAGE(1u64 as _);
+pub const NIM_SETVERSION: crate::Win32::UI::Shell::NOTIFY_ICON_MESSAGE = crate::Win32::UI::Shell::NOTIFY_ICON_MESSAGE(4u64 as _);
+pub const NINF_KEY: u32 = 1;
+pub const NIN_SELECT: u32 = 1024;
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NOTIFYICONDATAW {
+pub cbSize: u32,
+pub hWnd: crate::Win32::Foundation::HWND,
+pub uID: u32,
+pub uFlags: crate::Win32::UI::Shell::NOTIFY_ICON_DATA_FLAGS,
+pub uCallbackMessage: u32,
+pub hIcon: crate::Win32::UI::WindowsAndMessaging::HICON,
+pub szTip: [u16; 128],
+pub dwState: crate::Win32::UI::Shell::NOTIFY_ICON_STATE,
+pub dwStateMask: crate::Win32::UI::Shell::NOTIFY_ICON_STATE,
+pub szInfo: [u16; 256],
+pub Anonymous: crate::Win32::UI::Shell::NOTIFYICONDATAW_0,
+pub szInfoTitle: [u16; 64],
+pub dwInfoFlags: crate::Win32::UI::Shell::NOTIFY_ICON_INFOTIP_FLAGS,
+pub guidItem: crate::core::GUID,
+pub hBalloonIcon: crate::Win32::UI::WindowsAndMessaging::HICON,
+}
+impl NOTIFYICONDATAW { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for NOTIFYICONDATAW { fn default() -> Self {Self::default()} }
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub union NOTIFYICONDATAW_0 {
+pub uTimeout: u32,
+pub uVersion: u32,
+}
+impl NOTIFYICONDATAW_0 { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for NOTIFYICONDATAW_0 { fn default() -> Self {Self::default()} }
+pub const NOTIFYICON_VERSION_4: u32 = 4;
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct NOTIFY_ICON_DATA_FLAGS(pub u32);
+impl NOTIFY_ICON_DATA_FLAGS { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for NOTIFY_ICON_DATA_FLAGS { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for NOTIFY_ICON_DATA_FLAGS { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for NOTIFY_ICON_DATA_FLAGS {}
+impl ::core::fmt::Debug for NOTIFY_ICON_DATA_FLAGS { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for NOTIFY_ICON_DATA_FLAGS { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for NOTIFY_ICON_DATA_FLAGS { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for NOTIFY_ICON_DATA_FLAGS { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for NOTIFY_ICON_DATA_FLAGS { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct NOTIFY_ICON_INFOTIP_FLAGS(pub u32);
+impl NOTIFY_ICON_INFOTIP_FLAGS { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for NOTIFY_ICON_INFOTIP_FLAGS { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for NOTIFY_ICON_INFOTIP_FLAGS { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for NOTIFY_ICON_INFOTIP_FLAGS {}
+impl ::core::fmt::Debug for NOTIFY_ICON_INFOTIP_FLAGS { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for NOTIFY_ICON_INFOTIP_FLAGS { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for NOTIFY_ICON_INFOTIP_FLAGS { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for NOTIFY_ICON_INFOTIP_FLAGS { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for NOTIFY_ICON_INFOTIP_FLAGS { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct NOTIFY_ICON_MESSAGE(pub u32);
+impl NOTIFY_ICON_MESSAGE { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for NOTIFY_ICON_MESSAGE { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for NOTIFY_ICON_MESSAGE { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for NOTIFY_ICON_MESSAGE {}
+impl ::core::fmt::Debug for NOTIFY_ICON_MESSAGE { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for NOTIFY_ICON_MESSAGE { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for NOTIFY_ICON_MESSAGE { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for NOTIFY_ICON_MESSAGE { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for NOTIFY_ICON_MESSAGE { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct NOTIFY_ICON_STATE(pub u32);
+impl NOTIFY_ICON_STATE { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for NOTIFY_ICON_STATE { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for NOTIFY_ICON_STATE { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for NOTIFY_ICON_STATE {}
+impl ::core::fmt::Debug for NOTIFY_ICON_STATE { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for NOTIFY_ICON_STATE { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for NOTIFY_ICON_STATE { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for NOTIFY_ICON_STATE { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for NOTIFY_ICON_STATE { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
 #[repr(transparent)]
 #[derive(Clone, Copy)]
 pub struct QUERY_USER_NOTIFICATION_STATE(pub i32);
@@ -22043,6 +22131,11 @@ pub use import_ShellExecuteW::call as ShellExecuteW_raw;
 #[inline]
 pub unsafe fn ShellExecuteW(hwnd: Option<crate::Win32::Foundation::HWND>,lpOperation: Option<crate::core::PCWSTR>,lpFile: crate::core::PCWSTR,lpParameters: Option<crate::core::PCWSTR>,lpDirectory: Option<crate::core::PCWSTR>,nShowCmd: crate::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD) -> crate::Win32::Foundation::HINSTANCE {
 import_ShellExecuteW::call(hwnd.unwrap_or(unsafe { ::core::mem::zeroed() }),lpOperation.unwrap_or(unsafe { ::core::mem::zeroed() }),lpFile,lpParameters.unwrap_or(unsafe { ::core::mem::zeroed() }),lpDirectory.unwrap_or(unsafe { ::core::mem::zeroed() }),nShowCmd)}
+mod import_Shell_NotifyIconW { #[link(name = "SHELL32", kind = "raw-dylib")] extern "system" { #[link_name = "Shell_NotifyIconW"] pub fn call(dwMessage: crate::Win32::UI::Shell::NOTIFY_ICON_MESSAGE,lpData: *const crate::Win32::UI::Shell::NOTIFYICONDATAW) -> crate::core::BOOL; } }
+pub use import_Shell_NotifyIconW::call as Shell_NotifyIconW_raw;
+#[inline]
+pub unsafe fn Shell_NotifyIconW(dwMessage: crate::Win32::UI::Shell::NOTIFY_ICON_MESSAGE,lpData: *const crate::Win32::UI::Shell::NOTIFYICONDATAW) -> crate::core::BOOL {
+import_Shell_NotifyIconW::call(dwMessage,lpData)}
 pub mod Common {
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -22758,6 +22851,11 @@ pub use import_RegisterClassExW::call as RegisterClassExW_raw;
 #[inline]
 pub unsafe fn RegisterClassExW(param0: *const crate::Win32::UI::WindowsAndMessaging::WNDCLASSEXW) -> u16 {
 import_RegisterClassExW::call(param0)}
+mod import_RegisterWindowMessageW { #[link(name = "USER32", kind = "raw-dylib")] extern "system" { #[link_name = "RegisterWindowMessageW"] pub fn call(lpString: crate::core::PCWSTR) -> u32; } }
+pub use import_RegisterWindowMessageW::call as RegisterWindowMessageW_raw;
+#[inline]
+pub unsafe fn RegisterWindowMessageW(lpString: crate::core::PCWSTR) -> u32 {
+import_RegisterWindowMessageW::call(lpString)}
 pub const SC_CLOSE: u32 = 61536;
 pub const SC_MAXIMIZE: u32 = 61488;
 pub const SC_MINIMIZE: u32 = 61472;
@@ -22904,7 +23002,9 @@ pub rcExclude: crate::Win32::Foundation::RECT,
 }
 impl TPMPARAMS { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
 impl ::core::default::Default for TPMPARAMS { fn default() -> Self {Self::default()} }
+pub const TPM_BOTTOMALIGN: crate::Win32::UI::WindowsAndMessaging::TRACK_POPUP_MENU_FLAGS = crate::Win32::UI::WindowsAndMessaging::TRACK_POPUP_MENU_FLAGS(32u64 as _);
 pub const TPM_LEFTALIGN: crate::Win32::UI::WindowsAndMessaging::TRACK_POPUP_MENU_FLAGS = crate::Win32::UI::WindowsAndMessaging::TRACK_POPUP_MENU_FLAGS(0u64 as _);
+pub const TPM_NONOTIFY: crate::Win32::UI::WindowsAndMessaging::TRACK_POPUP_MENU_FLAGS = crate::Win32::UI::WindowsAndMessaging::TRACK_POPUP_MENU_FLAGS(128u64 as _);
 pub const TPM_RETURNCMD: crate::Win32::UI::WindowsAndMessaging::TRACK_POPUP_MENU_FLAGS = crate::Win32::UI::WindowsAndMessaging::TRACK_POPUP_MENU_FLAGS(256u64 as _);
 pub const TPM_RIGHTBUTTON: crate::Win32::UI::WindowsAndMessaging::TRACK_POPUP_MENU_FLAGS = crate::Win32::UI::WindowsAndMessaging::TRACK_POPUP_MENU_FLAGS(2u64 as _);
 pub const TPM_TOPALIGN: crate::Win32::UI::WindowsAndMessaging::TRACK_POPUP_MENU_FLAGS = crate::Win32::UI::WindowsAndMessaging::TRACK_POPUP_MENU_FLAGS(0u64 as _);
@@ -23014,6 +23114,7 @@ pub const WM_CHAR: u32 = 258;
 pub const WM_CLIPBOARDUPDATE: u32 = 797;
 pub const WM_CLOSE: u32 = 16;
 pub const WM_COMMAND: u32 = 273;
+pub const WM_CONTEXTMENU: u32 = 123;
 pub const WM_DESTROY: u32 = 2;
 pub const WM_DISPLAYCHANGE: u32 = 126;
 pub const WM_DPICHANGED: u32 = 736;
@@ -23047,6 +23148,7 @@ pub const WM_NCLBUTTONDOWN: u32 = 161;
 pub const WM_NCMOUSELEAVE: u32 = 674;
 pub const WM_NCRBUTTONDOWN: u32 = 164;
 pub const WM_NCRBUTTONUP: u32 = 165;
+pub const WM_NULL: u32 = 0;
 pub const WM_QUIT: u32 = 18;
 pub const WM_RBUTTONDOWN: u32 = 516;
 pub const WM_RBUTTONUP: u32 = 517;

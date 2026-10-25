@@ -2800,6 +2800,14 @@ impl WindowRef {
         }
     }
 
+    /// Hide the window, or show it again in front with the app activated (a tray app's panel:
+    /// hide it on `WindowCloseRequested` with `accept_close.set(false)`, show it from the tray).
+    pub fn set_visible(&self, cx: &mut Cx, visible: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.window.handle.set_visible(cx, visible);
+        }
+    }
+
     /// Close the window through the platform, the way its own caption
     /// button does — the app sees the ordinary window-close path.
     pub fn close(&self, cx: &mut Cx) {

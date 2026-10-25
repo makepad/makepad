@@ -22,6 +22,9 @@ localai = ["llm"]
 # Depth-Anything-3, and the rig/motion oracles). Not in default: a native
 # service must not advertise or instantiate a Python runtime.
 python-backends = []
+# TEST BUILDS ONLY: claude_cli::enable_stub serves a fake claude executable unsandboxed
+# (fleet round-trip tests on any OS without anyone's login). Never in a shipped build.
+claude-stub = []
 # Real Flux image generation via makepad-ai-flux.
 flux = ["dep:makepad-ai-flux", "dep:makepad-ai-common"]
 # The generative-PBR paint domain: mesh GLB + reference image -> PBR-textured

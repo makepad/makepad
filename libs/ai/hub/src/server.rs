@@ -72,6 +72,54 @@ pub struct ServiceHandle {
     /// in-process (the machine node's idle clock reads job and residency
     /// facts from here).
     pub shared: Arc<ServiceShared>,
+    /// The TLS fronts and the beacon of a network-reachable node (empty on a
+    /// loopback node): what [`ServiceHandle::stop`] closes first.
+    fleet_run: FleetRun,
+}
+
+/// What a fleet node runs on the network: its TLS front(s) and its beacon.
+#[derive(Default)]
+struct FleetRun {
+    #[cfg(not(target_arch = "wasm32"))]
+    fronts: Vec<makepad_network::fleet::front::FrontHandle>,
+    beacon: Option<crate::discovery::Beacon>,
+}
+
+impl ServiceHandle {
+    /// Stops this service in-process (the desktop AI Hub app's Enabled switch, a backend
+    /// toggle, an inactivity turn-off): admission closes and running jobs are handed back
+    /// (as [`drain_for_stop`]), the beacon stops, the TLS front closes its port, the
+    /// loopback server and every worker thread end, the loaded models are released and the
+    /// service locks are dropped. A new [`start_service`] may follow in the same process.
+    pub fn stop(self) {
+        let ServiceHandle { activity_monitor, http_thread, route_thread, worker_thread, chat_threads, singleton, shared, mut fleet_run, .. } = self;
+        drain_for_stop(&shared, Duration::from_secs(3));
+        if let Some(beacon) = fleet_run.beacon.as_mut() {
+            beacon.stop();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        for front in &mut fleet_run.fronts {
+            front.stop();
+        }
+        http_thread.stop();
+        shared.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = route_thread.join();
+        let _ = worker_thread.join();
+        for thread in chat_threads {
+            let _ = thread.join();
+        }
+        drop(activity_monitor);
+        with_backends(&shared, |backends| {
+            for (id, backend) in backends.iter_mut() {
+                if let Err(error) = backend.unload() {
+                    eprintln!("{}: stop: unload {id}: {error}", crate::SERVICE_NAME);
+                }
+            }
+            backends.clear();
+        });
+        shared.residency_claims.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        drop(singleton);
+    }
 }
 
 /// A Windows global named mutex makes the singleton independent of cache
@@ -258,6 +306,8 @@ pub struct ServiceShared {
     /// admission and load — never for generation, which runs through
     /// [`crate::backend::ConcurrentBackend`] with the lock released.
     pub backends: Mutex<HashMap<String, Box<dyn ContentBackend>>>,
+    /// Set by [`ServiceHandle::stop`]: the worker loops and the lease reaper end.
+    pub stopped: std::sync::atomic::AtomicBool,
 }
 
 pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiError> {
@@ -390,6 +440,7 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
         realtime_sessions: Mutex::new(HashMap::new()),
         ws_sessions: Mutex::new(HashMap::new()),
         backends: Mutex::new(HashMap::new()),
+        stopped: std::sync::atomic::AtomicBool::new(false),
     });
     // LAN autodiscovery: announce this node so clients pick it up without a
     // fleet-file edit. Frontends keep only beacons whose fleet matches.
@@ -413,8 +464,8 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
         allowed_methods: None,
     })
     .ok_or_else(|| AssetAiError::Http(format!("cannot bind http server at {inner_addr}")))?;
-    let addr = match fleet_mode {
-        None => addr,
+    let (addr, fleet_run) = match fleet_mode {
+        None => (addr, FleetRun::default()),
         Some(mode) => mode.start(node_id, inner_addr, &shared)?,
     };
 
@@ -427,9 +478,11 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
     let reaper_shared = shared.clone();
     std::thread::Builder::new()
         .name("ai-hub-lease-reaper".into())
-        .spawn(move || loop {
-            std::thread::sleep(crate::lease::KEEPALIVE_INTERVAL);
-            let _ = reap_lapsed_leases(&reaper_shared);
+        .spawn(move || {
+            while !reaper_shared.stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(crate::lease::KEEPALIVE_INTERVAL);
+                let _ = reap_lapsed_leases(&reaper_shared);
+            }
         })
         .expect("spawn lease reaper");
 
@@ -471,6 +524,7 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
         chat_threads,
         singleton,
         shared,
+        fleet_run,
     })
 }
 
@@ -514,8 +568,8 @@ impl FleetMode {
         Err(AssetAiError::Io(format!("cannot serve on {addr} from a browser")))
     }
 
-    fn start(self, _node_id: u64, inner: SocketAddr, _shared: &Arc<ServiceShared>) -> Result<SocketAddr, AssetAiError> {
-        Ok(inner)
+    fn start(self, _node_id: u64, inner: SocketAddr, _shared: &Arc<ServiceShared>) -> Result<(SocketAddr, FleetRun), AssetAiError> {
+        Ok((inner, FleetRun::default()))
     }
 }
 
@@ -556,7 +610,8 @@ impl FleetMode {
 
     /// Starts the TLS front (and the edge, when configured) and the
     /// beacon; returns the public address.
-    fn start(self, node_id: u64, inner: SocketAddr, shared: &Arc<ServiceShared>) -> Result<SocketAddr, AssetAiError> {
+    fn start(self, node_id: u64, inner: SocketAddr, shared: &Arc<ServiceShared>) -> Result<(SocketAddr, FleetRun), AssetAiError> {
+        let mut run = FleetRun::default();
         let server = |identity: makepad_network::tls::TlsIdentity| {
             makepad_network::tls::TlsServer::new(identity).map_err(|e| AssetAiError::Http(format!("TLS server: {e}")))
         };
@@ -568,7 +623,7 @@ impl FleetMode {
                 fingerprint: self.identity.fingerprint,
                 dir: self.identity.dir.clone(),
             };
-            makepad_network::fleet::front::start_front(makepad_network::fleet::front::FrontConfig {
+            let front = makepad_network::fleet::front::start_front(makepad_network::fleet::front::FrontConfig {
                 listen: edge,
                 inner: std::sync::Arc::new(move |_: &str| inner),
                 inner_headers: Vec::new(),
@@ -581,9 +636,10 @@ impl FleetMode {
                 label: "edge",
             })
             .map_err(|e| AssetAiError::Http(format!("edge bind {edge}: {e}")))?;
+            run.fronts.push(front);
             eprintln!("fleet: edge (device routes only) on {edge}");
         }
-        makepad_network::fleet::front::start_front(makepad_network::fleet::front::FrontConfig {
+        let front = makepad_network::fleet::front::start_front(makepad_network::fleet::front::FrontConfig {
             listen: self.listen,
             inner: std::sync::Arc::new(move |_: &str| inner),
             inner_headers: Vec::new(),
@@ -596,6 +652,7 @@ impl FleetMode {
             label: "front",
         })
         .map_err(|e| AssetAiError::Http(format!("TLS front bind {}: {e}", self.listen)))?;
+        run.fronts.push(front);
         eprintln!("fleet: TLS front on {} (certificate {fp})", self.listen);
         makepad_network::fleet::auth::set_node_credential(self.node_credential);
         makepad_network::fleet::auth::install_fleet_client(&shared.cache_dir.join("fleet"));
@@ -603,8 +660,8 @@ impl FleetMode {
         // the TLS front is (the front still wants a fleet credential), and the
         // fleet's apps find the hub's Claude the way they find its Qwen. No
         // automatic route ever picks claude-cli (fleet::is_explicit_only).
-        crate::discovery::start_fleet_beacon(node_id, self.listen.port(), self.fleet.clone(), shared.node_key.clone());
-        Ok(self.listen)
+        run.beacon = crate::discovery::start_fleet_beacon(node_id, self.listen.port(), self.fleet.clone(), shared.node_key.clone());
+        Ok((self.listen, run))
     }
 }
 
@@ -853,6 +910,9 @@ fn caller_of(shared: &ServiceShared, headers: &HttpServerHeaders) -> Option<make
         Some(secret) => makepad_network::fleet::front::caller_from_headers(&headers.lines, secret)?,
     };
     caller.app = crate::control::app_from_headers(&headers.lines);
+    if shared.front_secret.is_some() {
+        crate::control::note_caller(&caller.client_id, makepad_network::fleet::front::peer_from_headers(headers), caller.app.as_deref());
+    }
     Some(caller)
 }
 
@@ -890,6 +950,22 @@ fn route_post_request(
         return control_local_use(shared, body);
     }
     route_post_by(shared, &caller, &headers.path, body)
+}
+
+/// A control request from the host that runs this service in-process (the desktop AI Hub
+/// app's panel: Load / Unload, context and KV, the compute mode): the same handlers as the
+/// HTTP routes, as this machine. Ok(body) for a 2xx answer, Err(body) otherwise.
+pub fn control_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> Result<String, String> {
+    let response = if path == "/control/local-use" {
+        control_local_use(shared, body)
+    } else if matches!(path, "/control/model" | "/control/yield" | "/llm/context") {
+        route_post_by(shared, &makepad_network::fleet::front::Caller::local(), path, body)
+    } else {
+        return Err(format!("{path} is not a control route"));
+    };
+    let text = String::from_utf8_lossy(&response.body).to_string();
+    let ok = response.header.split_whitespace().nth(1).is_some_and(|code| code.starts_with('2'));
+    if ok { Ok(text) } else { Err(text) }
 }
 
 /// A request that comes from this machine: a loopback-only hub takes no other,
@@ -1494,6 +1570,15 @@ fn route_control_watch(
 }
 
 /// `GET /control`: the panel's whole picture (CONTROL_API.md).
+/// `GET /control` for a host that runs the service in-process (the desktop AI Hub app's
+/// panel reads it without a request).
+pub fn control_snapshot(shared: &Arc<ServiceShared>) -> String {
+    control_json(shared)
+}
+
+/// Fleet clients heard within this long show as connected (`GET /control` `clients`).
+pub const CLIENT_SEEN_MS: u64 = 10 * 60 * 1000;
+
 fn control_json(shared: &Arc<ServiceShared>) -> String {
     use crate::control::{job_meta, model_kind, model_mb};
     let seq = crate::control::seq();
@@ -1681,10 +1766,23 @@ fn control_json(shared: &Arc<ServiceShared>) -> String {
         })),
     ]);
 
+    let clients: Vec<Value> = crate::control::clients_seen(CLIENT_SEEN_MS)
+        .into_iter()
+        .map(|c| {
+            json::obj(vec![
+                ("client", json::s(c.client)),
+                ("addr", json::s(c.addr)),
+                ("app", text(c.app)),
+                ("requests", Value::Int(c.requests as i64)),
+                ("ago_ms", Value::Int(now_ms.saturating_sub(c.last_ms) as i64)),
+            ])
+        })
+        .collect();
     json::obj(vec![
         ("v", Value::Int(1)),
         ("seq", Value::Int(seq as i64)),
         ("now_ms", Value::Int(now_ms as i64)),
+        ("clients", Value::Arr(clients)),
         ("device", json::obj(vec![("name", json::s(device_name.clone())), ("kind", json::s(device_kind))])),
         (
             "gpu",
@@ -2316,7 +2414,7 @@ fn model_revision(spec: &ModelSpec) -> Option<String> {
 /// worker's business, and a chat worker doing it between turns could evict the
 /// model its own next turn needs.
 fn chat_worker_loop(shared: Arc<ServiceShared>) {
-    loop {
+    while !shared.stopped.load(std::sync::atomic::Ordering::SeqCst) {
         let Some(job_id) = shared
             .jobs
             .wait_take_next_of(crate::jobs::JobClass::Chat, Duration::from_millis(500))
@@ -2355,7 +2453,7 @@ fn worker_loop(shared: Arc<ServiceShared>) {
     // matters here — never appears, which is what lets a chat box that keeps a
     // 27B resident forever still reclaim what an image job left behind.
     let mut ran_here: std::collections::HashSet<String> = std::collections::HashSet::new();
-    loop {
+    while !shared.stopped.load(std::sync::atomic::Ordering::SeqCst) {
         release_for_local_use(&shared);
         let Some(job_id) = shared.jobs.wait_take_next(Duration::from_millis(500)) else {
             // LLM teardown completes on its owning thread. Refresh again
@@ -4218,6 +4316,7 @@ mod lifecycle_tests {
             realtime_sessions: Mutex::new(HashMap::new()),
             ws_sessions: Mutex::new(HashMap::new()),
             backends: Mutex::new(HashMap::new()),
+            stopped: std::sync::atomic::AtomicBool::new(false),
         })
     }
 

@@ -794,6 +794,15 @@ impl WindowHandle {
     pub fn close(&mut self, cx: &mut Cx) {
         cx.push_unique_platform_op(CxOsOp::CloseWindow(self.window_id()));
     }
+
+    /// Hides the window (it keeps its state and comes back with `set_visible(cx, true)`), or
+    /// shows it again in front of the others with the app activated. A tray app hides its
+    /// window on `WindowCloseRequested` (`accept_close.set(false)`) and shows it from its menu.
+    pub fn set_visible(&mut self, cx: &mut Cx, visible: bool) {
+        let id = self.window_id();
+        cx.platform_ops.retain(|op| !matches!(op, CxOsOp::HideWindow(w) | CxOsOp::ShowWindow(w) if *w == id));
+        cx.platform_ops.push_back(if visible { CxOsOp::ShowWindow(id) } else { CxOsOp::HideWindow(id) });
+    }
 }
 
 /// A single RGBA8 pixel buffer for a window icon. Must be square.

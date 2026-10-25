@@ -294,6 +294,10 @@ impl Cx {
                 CxOsOp::MaximizeWindow(w) => self.hal.frames.w.window_state(hal_window_id(w), window_state::MAXIMIZE),
                 CxOsOp::FullscreenWindow(w) => self.hal.frames.w.window_state(hal_window_id(w), window_state::FULLSCREEN),
                 CxOsOp::HideWindow(w) => self.hal.frames.w.window_state(hal_window_id(w), window_state::HIDE),
+                CxOsOp::ShowWindow(w) => {
+                    self.hal.frames.w.window_state(hal_window_id(w), window_state::SHOW);
+                    if self.hal.hosted.is_none() { self.hal.frames.w.activate_app(); }
+                }
                 CxOsOp::HideWindowButtons(w) => self.hal.frames.w.window_buttons(hal_window_id(w), false),
                 CxOsOp::ShowWindowButtons(w) => self.hal.frames.w.window_buttons(hal_window_id(w), true),
                 CxOsOp::CenterWindowButtons(w, y_center) => {
@@ -428,6 +432,41 @@ impl Cx {
                     let mut bytes = Vec::new();
                     items.iter().for_each(|i| i.write(&mut bytes));
                     fb.w.menu_set(items.len() as u32, &bytes);
+                }
+                CxOsOp::SetTray(tray) => {
+                    if self.hal.hosted.is_some() {
+                        self.hal.frames.gap("a hosted app has no system tray");
+                        continue;
+                    }
+                    let fb = &mut self.hal.frames;
+                    let mut data = Vec::new();
+                    let mut count = 0;
+                    for item in &tray.menu {
+                        let (kind, cmd, label) = match item {
+                            crate::tray::TrayMenuItem::Item { id, label, enabled, checked } => {
+                                let mut kind = self::menu::ITEM;
+                                if !*enabled {
+                                    kind |= self::menu::DISABLED;
+                                }
+                                if let Some(on) = checked {
+                                    kind |= self::menu::CHECKABLE | if *on { self::menu::CHECKED } else { 0 };
+                                }
+                                (kind, id.0, fb.intern(label))
+                            }
+                            crate::tray::TrayMenuItem::Line => (self::menu::LINE, 0, 0),
+                        };
+                        MenuItem { parent: 0, kind, cmd, key: 0, str: label }.write(&mut data);
+                        count += 1;
+                    }
+                    let image = &tray.image;
+                    let pixels = image.width as usize * image.height as usize;
+                    let (w, h) = if image.alpha.len() >= pixels { (image.width, image.height) } else { (0, 0) };
+                    data.extend_from_slice(&image.alpha[..w as usize * h as usize]);
+                    let tooltip = fb.intern(&tray.tooltip);
+                    fb.w.tray_set(tray.id.0, w, h, tooltip, count, &data);
+                }
+                CxOsOp::RemoveTray(id) => {
+                    if self.hal.hosted.is_none() { self.hal.frames.w.tray_remove(id.0); }
                 }
                 // program-side networking, as every backend does it
                 CxOsOp::HttpRequest { request_id, request } => {

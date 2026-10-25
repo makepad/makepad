@@ -319,6 +319,8 @@ pub enum CxOsOp {
     NormalizeWindow(WindowId),
     RestoreWindow(WindowId),
     HideWindow(WindowId),
+    /// Shows a hidden window again and brings it (and the app) to the front.
+    ShowWindow(WindowId),
     HideWindowButtons(WindowId),
     ShowWindowButtons(WindowId),
     /// Centre the native window buttons (macOS traffic lights) on this
@@ -405,6 +407,8 @@ pub enum CxOsOp {
         items: Vec<DragItem>,
     },
     UpdateMacosMenu(MacosMenu),
+    SetTray(crate::tray::TrayIcon),
+    RemoveTray(LiveId),
     ShowClipboardActions {
         has_selection: bool,
         rect: Rect,
@@ -575,6 +579,7 @@ impl CxOsOp {
             Self::NormalizeWindow(..) => "NormalizeWindow",
             Self::RestoreWindow(..) => "RestoreWindow",
             Self::HideWindow(..) => "HideWindow",
+            Self::ShowWindow(..) => "ShowWindow",
             Self::HideWindowButtons(..) => "HideWindowButtons",
             Self::ShowWindowButtons(..) => "ShowWindowButtons",
             Self::CenterWindowButtons(..) => "CenterWindowButtons",
@@ -605,6 +610,8 @@ impl CxOsOp {
             Self::StartDragging(..) => "StartDragging",
             Self::StartExternalDragging { .. } => "StartExternalDragging",
             Self::UpdateMacosMenu(..) => "UpdateMacosMenu",
+            Self::SetTray(..) => "SetTray",
+            Self::RemoveTray(..) => "RemoveTray",
             Self::ShowClipboardActions { .. } => "ShowClipboardActions",
             Self::HideClipboardActions => "HideClipboardActions",
             Self::CopyToClipboard(..) => "CopyToClipboard",

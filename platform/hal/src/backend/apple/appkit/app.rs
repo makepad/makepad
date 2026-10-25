@@ -637,10 +637,12 @@ impl App {
         self.windows.borrow().iter().copied().find(|w| !w.retired.get())
     }
 
-    /// `applicationShouldTerminate:`: each session with a window is asked to quit; true when
+    /// `applicationShouldTerminate:`: each session with a window or a tray is asked to quit; true when
     /// there is anyone to ask (the termination is cancelled, the app's `Quit` ends it).
     pub fn ask_sessions_to_quit(&self) -> bool {
         let mut sids: Vec<u32> = self.windows.borrow().iter().filter(|w| !w.retired.get()).map(|w| w.sid.get()).collect();
+        // a tray app without a window is asked too
+        sids.extend(super::tray::sessions());
         sids.sort();
         sids.dedup();
         for sid in &sids {
@@ -1049,6 +1051,7 @@ fn apply(op: Op) {
             if app().menu_sid.get() == sid {
                 app().menu_sid.set(0);
             }
+            super::tray::session_closed(sid);
         }
         Op::Cmd(sid, cmd, _) => command(sid, cmd),
     }
@@ -1190,6 +1193,8 @@ fn command(sid: u32, cmd: OsCmd) {
             a.menu_sid.set(sid);
             update_menu(&items);
         }
+        OsCmd::TraySet { tray, w, h, alpha, tooltip, items } => super::tray::set(sid, tray, w, h, &alpha, &tooltip, &items),
+        OsCmd::TrayRemove { tray } => super::tray::remove(sid, tray),
         OsCmd::FileDialog { req, kind, title, location, filename, filters } => file_dialog(sid, req, kind, &title, &location, &filename, &filters),
         OsCmd::DragReply { id, to, answer } => {
             if let Some(win) = window_of(id) {

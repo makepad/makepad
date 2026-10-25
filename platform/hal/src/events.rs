@@ -322,4 +322,10 @@ hal_events! {
     /// The system back press or completed back gesture. Unless the app takes it, it answers
     /// `BackUnhandled`.
     BackPressed = 147, back_pressed { window: obj };
+
+    // ---- system tray (status items), appended
+    /// Menu item `item` (its `MenuItem::cmd`) of the app's tray `tray` (`TraySet::tray`) was chosen.
+    TrayMenu = 148, tray_menu { tray: u64, item: u64 };
+    /// A primary click on tray `tray` where the system gives one (Windows); macOS opens the menu.
+    TrayClick = 149, tray_click { tray: u64 };
 }

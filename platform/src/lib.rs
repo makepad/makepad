@@ -100,6 +100,7 @@ mod id_pool;
 pub mod ime;
 pub mod live_reload;
 mod macos_menu;
+pub mod tray;
 mod performance_stats;
 pub mod memory_watchdog;
 pub mod perf_monitor;
@@ -362,6 +363,7 @@ pub use {
             TextInputConfig,
         },
         macos_menu::MacosMenu,
+        tray::{TrayClickEvent, TrayIcon, TrayImage, TrayMenuEvent, TrayMenuItem},
         media_api::CxMediaApi,
         media_host::{MediaControlBridge, MediaEventBridge, MediaTextureBridge, MediaTextureInfo},
         media_plugin::{

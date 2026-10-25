@@ -72,13 +72,38 @@ pub struct FleetBeaconJson {
 
 pub const FLEET_SERVICE: &str = "makepad-ai-hub-tls";
 
-pub fn start_fleet_beacon(node_id: u64, tls_port: u16, fleet: String, node_key: String) {
+/// The running beacon: [`Beacon::stop`] (or a drop) ends it, so a hub switched off in-process
+/// is no longer announced (the desktop AI Hub app's Enabled switch).
+pub struct Beacon {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Beacon {
+    pub fn stop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            thread.thread().unpark();
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for Beacon {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+pub fn start_fleet_beacon(node_id: u64, tls_port: u16, fleet: String, node_key: String) -> Option<Beacon> {
     if std::env::var_os("MAKEPAD_AI_NO_BEACON").is_some_and(|v| v == "1")
         || !makepad_network::lan::service("ai-hub fleet beacon")
     {
-        return;
+        return None;
     }
-    std::thread::spawn(move || {
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopping = stop.clone();
+    let thread = std::thread::Builder::new().name("ai-hub-beacon".into()).spawn(move || {
         let Ok(socket) = UdpSocket::bind(("0.0.0.0", 0)) else {
             eprintln!("discovery: beacon socket bind failed — no LAN announce");
             return;
@@ -94,7 +119,7 @@ pub fn start_fleet_beacon(node_id: u64, tls_port: u16, fleet: String, node_key: 
             node_key,
         }
         .serialize_json();
-        loop {
+        while !stopping.load(std::sync::atomic::Ordering::SeqCst) {
             // 255.255.255.255 leaves by the default route only; each up
             // interface's directed broadcast reaches its own subnet too (a
             // Wi-Fi hotspot this machine hosts). Interfaces are read every
@@ -102,9 +127,10 @@ pub fn start_fleet_beacon(node_id: u64, tls_port: u16, fleet: String, node_key: 
             for target in beacon_targets() {
                 let _ = socket.send_to(beacon.as_bytes(), (target, DISCOVERY_PORT));
             }
-            std::thread::sleep(BEACON_INTERVAL);
+            std::thread::park_timeout(BEACON_INTERVAL);
         }
-    });
+    }).ok()?;
+    Some(Beacon { stop, thread: Some(thread) })
 }
 
 /// The TLS port a fleet node serves on unless configured otherwise.

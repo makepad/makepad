@@ -12,7 +12,7 @@
   },
   {
     "id": "ai-hub",
-    "title": "AI Hub",
+    "title": "AI Hub (headless)",
     "package": "makepad-app-ai-hub",
     "binary": "makepad-app-ai-hub",
     "workspace": "makepad/apps/ai-hub",
@@ -41,6 +41,16 @@
       "stems-native",
       "beats-native",
       "notes-native"
+    ]
+  },
+  {
+    "id": "aihub",
+    "title": "AI Hub",
+    "package": "makepad-app-aihub",
+    "binary": "makepad-app-aihub",
+    "workspace": "makepad/apps/aihub",
+    "features": [
+      "localai"
     ]
   },
   {

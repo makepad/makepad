@@ -78,7 +78,15 @@ mod tests {
     }
 }
 
-pub fn start_fleet_beacon(_node_id: u64, _tls_port: u16, _fleet: String, _node_key: String) {}
+pub struct Beacon;
+
+impl Beacon {
+    pub fn stop(&mut self) {}
+}
+
+pub fn start_fleet_beacon(_node_id: u64, _tls_port: u16, _fleet: String, _node_key: String) -> Option<Beacon> {
+    None
+}
 
 pub const DEFAULT_TLS_PORT: u16 = 8123;
 

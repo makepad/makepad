@@ -194,6 +194,12 @@ impl Shared {
         std::mem::take(&mut *lock(&self.ops))
     }
     pub fn command(&self, sid: u32, cmd: OsCmd) {
+        // Trays go to our WM's tray host (phase 2); until then they are dropped, said once.
+        if matches!(cmd, OsCmd::TraySet { .. } | OsCmd::TrayRemove { .. }) {
+            static SAID: std::sync::Once = std::sync::Once::new();
+            SAID.call_once(|| eprintln!("tray: not supported on this desktop yet"));
+            return;
+        }
         if log_enabled() {
             match &cmd {
                 OsCmd::WindowCreate { id, kind, parent, geom } => eprintln!(

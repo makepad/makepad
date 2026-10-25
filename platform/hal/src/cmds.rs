@@ -363,4 +363,13 @@ hal_commands! {
     /// atlas is full the HAL takes back the least recently DRAWN slots first (a slot's own use
     /// time is otherwise only its delivery).
     GlyphTouch = 150, glyph_touch { count: u32, slots: rng };
+
+    // ---- system tray (status items)
+    /// Creates or updates (in place) the app's tray `tray` (the app's own id): a `w` x `h`
+    /// monochrome glyph, the `tooltip`, and its menu. `data` is `count` flat `MenuItem`s (all
+    /// `parent` 0, `cmd` the item's id, `menu_kind::CHECKABLE`/`CHECKED` for check marks) followed
+    /// by `w * h` alpha bytes (one per pixel, rows top-down). Chosen items answer as `TrayMenu`.
+    TraySet = 151, tray_set { tray: u64, w: u32, h: u32, tooltip: sid, count: u32, data: rng };
+    /// Removes the app's tray `tray`.
+    TrayRemove = 152, tray_remove { tray: u64 };
 }

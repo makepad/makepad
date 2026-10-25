@@ -267,6 +267,12 @@ pub fn enable(bind: SocketAddr) -> Result<ModelSpec, String> {
     if !Path::new(SANDBOX_EXEC).is_file() {
         return Err(format!("{SANDBOX_EXEC} is missing: the claude-cli backend never runs unsandboxed"));
     }
+    // Enabled again in the same process (the desktop app switched it off and on): the
+    // configuration stands; the login is checked again.
+    if let Some(config) = CONFIG.get() {
+        (config.login)()?;
+        return Ok(model_spec());
+    }
     let exe = crate::providers::claude::find_cli()
         .ok_or("Claude Code CLI not found (set CLAUDE_CODE_PATH or put claude on PATH)")?;
     let exe = std::fs::canonicalize(&exe).map_err(|e| format!("claude executable {}: {e}", exe.display()))?;
@@ -281,6 +287,24 @@ pub fn enable(bind: SocketAddr) -> Result<ModelSpec, String> {
     keychain_login()?;
     let config = ClaudeCliConfig { exe, model, login: keychain_login, sandbox: Sandbox::MacProfile };
     CONFIG.set(config).map_err(|_| "the claude-cli backend is already enabled".to_string())?;
+    Ok(model_spec())
+}
+
+/// TEST BUILDS ONLY (cargo feature `claude-stub`, never in a shipped build): serve a fake
+/// `claude` executable (one that prints a stream-json turn, like the unit tests' fake CLI)
+/// unsandboxed and with a fixed fake token, so the hub, the app and the fleet round trip can
+/// be tested on any OS without anyone's Claude login. The LAN-bind rule still applies.
+#[cfg(feature = "claude-stub")]
+pub fn enable_stub(bind: SocketAddr, exe: PathBuf) -> Result<ModelSpec, String> {
+    makepad_network::fleet::lan::check_lan_bind("the claude-cli backend", bind)?;
+    fn stub_login() -> Result<Secret, String> {
+        Ok(Secret("stub-token-not-a-login".into()))
+    }
+    if CONFIG.get().is_none() {
+        let exe = std::fs::canonicalize(&exe).map_err(|e| format!("stub claude {}: {e}", exe.display()))?;
+        let _ = CONFIG.set(ClaudeCliConfig { exe, model: DEFAULT_MODEL.to_string(), login: stub_login, sandbox: Sandbox::None });
+    }
+    eprintln!("claude-cli: STUB backend (test build): {}", CONFIG.get().map(|c| c.exe.display().to_string()).unwrap_or_default());
     Ok(model_spec())
 }
 

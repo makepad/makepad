@@ -50,7 +50,7 @@ use std::process::{Child, Command, Stdio};
 
 use makepad_app_registry as registry;
 
-pub use crate::hub_control::{HubPhase, HubProcess};
+pub use makepad_ai_hub_panel::hub_control::{HubPhase, HubProcess};
 pub use makepad_ai_hub::activity::ComputeMode;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -563,8 +563,8 @@ impl HubChild {
     /// Once a second from the WM's tick: exit, restart, the start's progress.
     /// `answers` = the control client reached it; `model` = the chat model's state there.
     /// True when the chat model should be asked to load now.
-    pub fn tick(&mut self, now: f64, answers: bool, model: Option<crate::hub_control::ModelState>) -> bool {
-        use crate::hub_control::ModelState;
+    pub fn tick(&mut self, now: f64, answers: bool, model: Option<makepad_ai_hub_panel::hub_control::ModelState>) -> bool {
+        use makepad_ai_hub_panel::hub_control::ModelState;
         if let (Some(Running::Adopted(pid)), Some(at)) = (&self.running, self.kill_at) {
             if now >= at && hub_alive(*pid) {
                 makepad_widgets::log!("wm: AI hub: pid {pid} outlived its stop; SIGKILL");
@@ -750,7 +750,7 @@ const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(7);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hub_control::ModelState;
+    use makepad_ai_hub_panel::hub_control::ModelState;
 
     #[test]
     fn the_installed_cuda_toolkit_is_found_by_its_nvcc() {

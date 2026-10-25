@@ -31,7 +31,6 @@ use crate::wayland_view::MpWaylandView;
 use crate::run_view::{MpRunView, MpRunViewAction};
 use crate::domain_view::MpDomainView;
 use crate::tile::TileHost;
-use crate::theme;
 use crate::desktop::{DrawDesktopChrome, StyleTween};
 use crate::shell::ui::ShellDraw;
 use crate::skins::{DrawSkin, Light, Skin};
@@ -367,7 +366,7 @@ pub struct BorderTheme {
 }
 
 impl BorderTheme {
-    fn stop(s: theme::Stop) -> Vec4f {
+    fn stop(s: makepad_shell_kit::theme::Stop) -> Vec4f {
         Vec4f {
             x: s.rgb.r as f32 / 255.0,
             y: s.rgb.g as f32 / 255.0,
@@ -378,7 +377,7 @@ impl BorderTheme {
 
     /// Read the border keys out of a theme.splash source.
     pub fn from_theme_source(source: &str) -> Self {
-        let (active, inactive) = theme::scan_borders(source);
+        let (active, inactive) = makepad_shell_kit::theme::scan_borders(source);
         Self {
             active: Self::stop(active.start),
             active_end: Self::stop(active.end),
@@ -3712,7 +3711,7 @@ mod tests {
     fn border_theme_reads_the_theme_source() {
         // Tokyo night names no gradient of its own, so it wears
         // hyprland's default: cyan → green at 45°.
-        let t = BorderTheme::from_theme_source(theme::BUNDLED_TOKYO_NIGHT_SPLASH);
+        let t = BorderTheme::from_theme_source(makepad_shell_kit::theme::BUNDLED_TOKYO_NIGHT_SPLASH);
         assert!((t.active.x - 0x33 as f32 / 255.0).abs() < 0.01);
         assert!((t.active_end.y - 1.0).abs() < 0.01);
         assert_ne!(t.active, t.active_end);

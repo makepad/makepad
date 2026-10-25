@@ -51,6 +51,9 @@ pub enum OsCmd {
     SelectionSet { text: String },
     DragStart { id: Id, items: Vec<(u32, String)> },
     MenuSet { items: Vec<(MenuItem, String)> },
+    /// Create or update tray `tray`: `alpha` is `w * h` bytes, `items` its menu.
+    TraySet { tray: u64, w: u32, h: u32, alpha: Vec<u8>, tooltip: String, items: Vec<(MenuItem, String)> },
+    TrayRemove { tray: u64 },
     FileDialog { req: u32, kind: u32, title: String, location: String, filename: String, filters: Vec<String> },
     ShareText { text: String },
     ClipboardActions { id: Id, show: bool, area: [f32; 4], selection: bool },
@@ -992,6 +995,20 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
         HalCmd::MenuSet { count, items } => {
             let items: Vec<(MenuItem, String)> = read_items::<MenuItem>(items, count).map(|i| (i, s.string(i.str).unwrap_or("").to_string())).collect();
             gpu.os(sid, OsCmd::MenuSet { items });
+        }
+        HalCmd::TraySet { tray, w, h, tooltip, count, data } => {
+            let head = count as usize * <MenuItem as crate::buffers::Wire>::SIZE;
+            let pixels = w as usize * h as usize;
+            if data.len() < head + pixels {
+                s.bad();
+                return;
+            }
+            let items: Vec<(MenuItem, String)> = read_items::<MenuItem>(&data[..head], count).map(|i| (i, s.string(i.str).unwrap_or("").to_string())).collect();
+            let tooltip = s.string(tooltip).unwrap_or("").to_string();
+            gpu.os(sid, OsCmd::TraySet { tray, w, h, alpha: data[head..head + pixels].to_vec(), tooltip, items });
+        }
+        HalCmd::TrayRemove { tray } => {
+            gpu.os(sid, OsCmd::TrayRemove { tray });
         }
         HalCmd::ShareText { text } => {
             let text = String::from_utf8_lossy(text).into_owned();

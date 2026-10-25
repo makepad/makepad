@@ -591,7 +591,8 @@ impl Cx {
                     hosted.window_closed(window_id);
                 }
                 self.hal.frames.window_closed(hal_window_id(window_id));
-                if !self.hal.windows.values().any(|w| w.confirmed) {
+                // a tray app lives on in its tray without windows
+                if !self.hal.windows.values().any(|w| w.confirmed) && !self.has_tray() {
                     if user_closed {
                         crate::remote::note_user_closed_last_window();
                     }
@@ -675,6 +676,8 @@ impl Cx {
             }
             HalEvent::ResizeLoop { .. } => {} // the main thread tracks the resize, the sessions run on
             HalEvent::MenuCmd { cmd } => self.call_event_handler(&Event::MacosMenuCommand(LiveId(cmd))),
+            HalEvent::TrayMenu { tray, item } => self.call_event_handler(&Event::TrayMenu(crate::tray::TrayMenuEvent { tray: LiveId(tray), item: LiveId(item) })),
+            HalEvent::TrayClick { tray } => self.call_event_handler(&Event::TrayClick(crate::tray::TrayClickEvent { tray: LiveId(tray) })),
 
             // ---- app
             // (every backend paints its windows once after the app started)

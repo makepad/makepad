@@ -255,7 +255,7 @@ mod tests {
             crate::shell::ui::script_mod(vm);
         });
         let main = cx.with_vm(|vm| vm.heap_key());
-        let wm_icon = "apps/wm/resources/icons/menu.svg".replace('/', std::path::MAIN_SEPARATOR_STR);
+        let wm_icon = "libs/shell_kit/resources/icons/menu.svg".replace('/', std::path::MAIN_SEPARATOR_STR);
         let (path, handle) = {
             let resources = cx.script_data.resources.resources.borrow();
             let res = resources.iter().find(|r| r.abs_path.ends_with(&wm_icon)).expect("the shell's menu glyph is registered");

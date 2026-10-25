@@ -1,0 +1,28 @@
+[package]
+name = "makepad-app-aihub"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "AI Hub: serves this machine's AI (the sandboxed Claude backend, local models) to the fleet while it runs, with its control panel and tray icon"
+
+[[bin]]
+name = "makepad-app-aihub"
+path = "src/main.rs"
+
+[features]
+# The local model runtime (chat models on Metal / CPU). Speech is left out: it would
+# reach for the OS speech engines.
+default = ["localai"]
+localai = ["makepad-ai-hub/localai"]
+# TEST BUILDS ONLY: MAKEPAD_AI_HUB_CLAUDE_STUB=<fake claude> serves that fake CLI as the
+# Claude backend (pool-node tests without anyone's login). Never in a shipped build.
+claude-stub = ["makepad-ai-hub/claude-stub"]
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false }
+makepad-shell-kit = { path = "../../libs/shell_kit" }
+makepad-ai-hub-panel = { path = "../../libs/ai/hub_panel" }
+makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false }
+makepad-network = { path = "../../platform/network" }
+makepad-strict-json = { path = "../../libs/strict_json" }

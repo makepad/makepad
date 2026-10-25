@@ -829,23 +829,40 @@ impl GenRouter for NamingRouter {
     }
 }
 
-/// The claude-cli hub: the first pinned hub (`MAKEPAD_AI_HUB`, the
-/// client's `pinned` file) that serves it. It sends no beacon, so a pin is
-/// the only way to it.
+/// The claude-cli hub: the first pinned hub (`MAKEPAD_AI_HUB`, the client's `pinned`
+/// file) that serves it, else a hub heard on the LAN that does (an AI Hub app with Claude
+/// on beacons like any hub). The reason says which: no AI Hub running at the pin, or one
+/// running without Claude turned on.
 fn writer_hub() -> Result<String, String> {
     let pins = makepad_ai_hub::hub_order::pinned_bases();
+    let mut down = Vec::new();
+    let mut without = Vec::new();
     for base in &pins {
-        if let Ok(snapshot) = job::probe_node(base) {
-            if snapshot.models.iter().any(|m| m.id == WRITER_MODEL) {
-                return Ok(base.clone());
-            }
+        match job::probe_node(base) {
+            Ok(snapshot) if snapshot.models.iter().any(|m| m.id == WRITER_MODEL) => return Ok(base.clone()),
+            Ok(_) => without.push(node_name(base)),
+            Err(_) => down.push(node_name(base)),
         }
     }
-    Err(if pins.is_empty() {
-        "no song writer: pin the Claude Code hub (MAKEPAD_AI_HUB or ~/.makepad/ai-hub/pinned)".to_string()
+    for snapshot in job::fleet_snapshots(&pins) {
+        if snapshot.models.iter().any(|m| m.id == WRITER_MODEL) {
+            return Ok(snapshot.base_url.clone());
+        }
+    }
+    Err(writer_missing(&pins, &down, &without))
+}
+
+/// Why there is no song writer, as the AI page says it.
+fn writer_missing(pins: &[String], down: &[String], without: &[String]) -> String {
+    if !without.is_empty() {
+        format!("no song writer: the AI Hub on {} runs without Claude (turn on \u{201c}Claude (sandboxed)\u{201d} in its panel)", without.join(", "))
+    } else if !down.is_empty() {
+        format!("no song writer: AI Hub not running on {} (start the AI Hub app there)", down.join(", "))
+    } else if pins.is_empty() {
+        "no song writer: AI Hub not running (no hub on the LAN offers Claude; start the AI Hub app and turn Claude on)".to_string()
     } else {
         format!("no song writer: none of the pinned hubs ({}) serves {WRITER_MODEL}", pins.join(", "))
-    })
+    }
 }
 
 /// The music models the fleet offers, each once, the default first.
@@ -1092,6 +1109,16 @@ pub fn uri_of(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_writer_says_whether_the_ai_hub_runs() {
+        let pins = vec!["https://10.0.0.222:8124".to_string()];
+        let down = writer_missing(&pins, &["10.0.0.222".into()], &[]);
+        assert!(down.contains("AI Hub not running on 10.0.0.222"), "{down}");
+        let without = writer_missing(&pins, &[], &["10.0.0.222".into()]);
+        assert!(without.contains("runs without Claude"), "{without}");
+        assert!(writer_missing(&[], &[], &[]).contains("AI Hub not running"));
+    }
 
     #[test]
     fn every_listed_model_has_a_guide() {

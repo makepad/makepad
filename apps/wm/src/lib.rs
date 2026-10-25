@@ -48,15 +48,15 @@ mod dock_warp;
 mod desk_link;
 mod dock_layout;
 mod dock_autohide;
-mod hub_control;
+mod hub_link;
 #[cfg(not(target_arch = "wasm32"))]
 mod hub_child;
-mod hub_glow;
 mod gpu_yield;
 mod local_use;
 mod scroll_gesture;
 use scroll_gesture::Gesture as ScrollGesture;
-use hub_control::HubLink;
+use hub_link::HubLink;
+use makepad_ai_hub_panel::hub_control;
 use desk_link::DeskLink;
 use gpu_yield::YieldPolicy;
 use local_use::LocalUse;
@@ -3722,7 +3722,7 @@ impl App {
         let state = self.state_mut();
         state.theme_name = name.to_string();
         let source = theme::load_theme_source(name);
-        if let Some(palette) = theme::scan_term_palette(&source) {
+        if let Some(palette) = makepad_shell_kit::theme::scan_term_palette(&source) {
             state.term_env = palette.env_value();
         }
         if let Some(rgb) = scan_theme_color(&source, "accent") {
@@ -5960,7 +5960,7 @@ fn scan_theme_color(source: &str, key: &str) -> Option<Vec4f> {
             continue;
         };
         if k.trim() == key {
-            let rgb = theme::parse_hex(v.trim())?;
+            let rgb = makepad_shell_kit::theme::parse_hex(v.trim())?;
             return Some(Vec4f {
                 x: rgb.r as f32 / 255.0,
                 y: rgb.g as f32 / 255.0,
@@ -6027,7 +6027,7 @@ impl MatchEvent for App {
                 Err(e) => log!("wm portal: not served: {e}"),
             }
         }
-        let term_env = theme::scan_term_palette(&source)
+        let term_env = makepad_shell_kit::theme::scan_term_palette(&source)
             .map(|p| p.env_value())
             .unwrap_or_default();
         let accent = scan_theme_color(&source, "accent").unwrap_or(Vec4f {
@@ -6522,7 +6522,7 @@ impl AppMain for App {
         };
         if !eval_theme(vm, "wm_theme", &source) {
             // Fall back to the bundled default so the DSL still evaluates.
-            let mut fallback = theme::BUNDLED_TOKYO_NIGHT_SPLASH.to_string();
+            let mut fallback = makepad_shell_kit::theme::BUNDLED_TOKYO_NIGHT_SPLASH.to_string();
             fallback.push_str("\ntrue\n");
             eval_theme(vm, "wm_theme_fallback", &fallback);
         }
@@ -6532,7 +6532,7 @@ impl AppMain for App {
         // unless the theme ships its own `shell: {...}` block, which
         // replaces it wholesale.
         if !theme::theme_defines_shell(&source) {
-            let mut block = theme::shell_splash_block(&source);
+            let mut block = makepad_shell_kit::theme::shell_splash_block(&source);
             block.push_str("\ntrue\n");
             eval_theme(vm, "wm_theme_shell", &block);
         }

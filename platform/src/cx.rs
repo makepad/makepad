@@ -154,6 +154,8 @@ pub struct Cx {
     pub(crate) file_dialogs: FileDialogState,
 
     pub(crate) platform_ops: VecDeque<CxOsOp>,
+    /// the trays the app has (`Cx::set_tray`): while there is one the app outlives its windows
+    pub(crate) trays: Vec<LiveId>,
     pub(crate) pending_camera_playbacks: Vec<PendingCameraPlayback>,
 
     pub(crate) new_next_frames: HashSet<NextFrame>,
@@ -1040,6 +1042,7 @@ impl Cx {
             ime_area: Default::default(),
             keyboard_shift: 0.0,
             platform_ops: Default::default(),
+            trays: Vec::new(),
             pending_camera_playbacks: Vec::new(),
             studio_http: "".to_string(),
             new_next_frames: Default::default(),

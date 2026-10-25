@@ -1,6 +1,6 @@
 //! Local use of this machine, as the WM sees it, for its AI hub's admission. On a node the
 //! WM owns the screen, so no OS probe sees its games: the WM tells its hub (`POST
-//! /control/local-use`, through `hub_control`). In the Automatic compute mode the hub then
+//! /control/local-use`, through `hub_link`). In the Automatic compute mode the hub then
 //! closes admission (the fleet routes jobs to other nodes), cancels running jobs as
 //! `local-use: gaming` so their clients reroute, and unloads its models.
 //!

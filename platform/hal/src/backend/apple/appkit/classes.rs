@@ -20,6 +20,7 @@ pub struct Classes {
     pub window_delegate: *const Class,
     pub view: *const Class,
     pub menu_target: *const Class,
+    pub tray_target: *const Class,
     pub menu_delegate: *const Class,
     pub app_delegate: *const Class,
     pub pulse: *const Class,
@@ -34,6 +35,7 @@ impl Classes {
             window_delegate: define_window_delegate(),
             view: define_view_class(),
             menu_target: define_menu_target_class(),
+            tray_target: define_tray_target_class(),
             menu_delegate: define_menu_delegate(),
             app_delegate: define_app_delegate(),
             pulse: define_pulse_class(),
@@ -150,6 +152,24 @@ fn define_menu_target_class() -> *const Class {
         decl.add_method(sel!(menuAction:), menu_action as extern "C" fn(&Object, Sel, ObjcId));
     }
     decl.add_ivar::<usize>("command_u64");
+    decl.register()
+}
+
+/// The target of a tray menu item: which session's tray and item it is.
+fn define_tray_target_class() -> *const Class {
+    extern "C" fn tray_action(this: &Object, _sel: Sel, _item: ObjcId) {
+        shielded("tray menu", std::panic::AssertUnwindSafe(|| {
+            let (sid, tray, item): (usize, usize, usize) = unsafe { (*this.get_ivar("sid"), *this.get_ivar("tray_u64"), *this.get_ivar("item_u64")) };
+            super::tray::action(sid as u32, tray as u64, item as u64);
+        }));
+    }
+    let mut decl = ClassDecl::new("HalTrayTarget", class!(NSObject)).unwrap();
+    unsafe {
+        decl.add_method(sel!(trayAction:), tray_action as extern "C" fn(&Object, Sel, ObjcId));
+    }
+    decl.add_ivar::<usize>("sid");
+    decl.add_ivar::<usize>("tray_u64");
+    decl.add_ivar::<usize>("item_u64");
     decl.register()
 }
 

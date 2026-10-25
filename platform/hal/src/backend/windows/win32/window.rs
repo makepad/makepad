@@ -5,7 +5,7 @@
 //! click or a caption drag, as on X11).
 
 use super::super::super::exec::OsCmd;
-use super::{clipboard, dialog, drag, identity, ime, keys, lock, log_enabled, menu, rawinput, Key, Native, Op, Shared, WM_HAL_OPS};
+use super::{clipboard, dialog, drag, identity, ime, keys, lock, log_enabled, menu, rawinput, tray, Key, Native, Op, Shared, WM_HAL_OPS};
 use crate::types::*;
 use crate::Id;
 use makepad_windows_sys::core::PCWSTR;
@@ -317,6 +317,7 @@ fn apply(s: &'static Shared, op: Op) {
                 }
             }
             menu::session_closed(sid);
+            tray::session_closed(sid);
             clipboard::session_closed(sid);
             if let Some(icon) = APP.with_borrow_mut(|a| a.icons.remove(&sid)) {
                 unsafe {
@@ -615,6 +616,8 @@ fn command(s: &'static Shared, sid: u32, cmd: OsCmd) {
             }
         }
         OsCmd::MenuSet { items } => menu::set(sid, items),
+        OsCmd::TraySet { tray, w, h, alpha, tooltip, items } => tray::set(sid, tray, w, h, alpha, tooltip, items),
+        OsCmd::TrayRemove { tray } => tray::remove(sid, tray),
         OsCmd::FileDialog { req, kind, title, location, filename, filters } => {
             let owner = APP.with_borrow(|a| session_window(a, sid).map(|w| w.hwnd.get().0 as usize)).unwrap_or(0);
             dialog::open(dialog::Request { sid, req, kind, title, location, filename, filters, owner });
@@ -685,6 +688,8 @@ pub(super) fn handles(cmd: &OsCmd) -> bool {
             | OsCmd::ImeHide { .. }
             | OsCmd::ImeSync { .. }
             | OsCmd::MenuSet { .. }
+            | OsCmd::TraySet { .. }
+            | OsCmd::TrayRemove { .. }
             | OsCmd::FileDialog { .. }
             | OsCmd::AppIcon { .. }
     )

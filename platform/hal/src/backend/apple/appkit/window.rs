@@ -875,7 +875,13 @@ impl Win {
                     let () = msg_send![self.window, orderOut: nil];
                 }
                 window_state::SHOW => {
-                    let () = msg_send![self.window, orderFront: nil];
+                    // shown again (a tray app's panel): in front and, when this process may
+                    // take the focus, the key window
+                    if focus_allowed() {
+                        let () = msg_send![self.window, makeKeyAndOrderFront: nil];
+                    } else {
+                        let () = msg_send![self.window, orderFront: nil];
+                    }
                 }
                 _ => {
                     // restore: out of fullscreen, out of the Dock

@@ -185,10 +185,15 @@
     "policy": "always_new", "menu_visible": false, "wm_launchable": true, "features": ["engine", "gen"], "mobile": false
   },
   {
-    "id": "ai-hub", "label": "AI Hub", "package": "makepad-app-ai-hub",
+    "id": "ai-hub", "label": "AI Hub (headless)", "package": "makepad-app-ai-hub",
     "dir": "apps/ai-hub", "bin": "makepad-app-ai-hub", "manifest": null, "args": [],
     "policy": "or_focus", "menu_visible": false, "wm_launchable": false,
     "features": ["localai", "flux", "paint", "paint-cuda", "llm", "tts", "indextts", "speech", "stt", "video", "interpolate", "audio", "mesh", "matte-native", "depth-native", "segment-native", "body-native", "upscale-native", "motion-native", "rig-native", "splat-native", "stems-native", "beats-native", "notes-native"], "mobile": false
+  },
+  {
+    "id": "aihub", "label": "AI Hub", "package": "makepad-app-aihub",
+    "dir": "apps/aihub", "bin": "makepad-app-aihub", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": false, "wm_launchable": true, "features": ["localai"], "mobile": false
   },
   {
     "id": "wm", "label": "Makepad WM", "package": "makepad-app-wm",
