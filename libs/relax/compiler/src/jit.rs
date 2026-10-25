@@ -19335,6 +19335,7 @@ pub(crate) fn loader_symbol(name: &[u8]) -> Option<usize> {
         b"relax_store_file" => Some(crate::vfs::relax_store_file as *const () as usize),
         // `"..".parse::<TokenStream>()` in JIT-run proc macros (std proc_macro; pmhost.rs)
         b"relax_pm_parse" => Some(crate::pmhost::relax_pm_parse as *const () as usize),
+        b"relax_pm_getenv" => Some(crate::pmhost::relax_pm_getenv as *const () as usize),
         b"__relax_exit" => Some(__relax_exit as *const () as usize),
         // makepad inspect's timeline: makepad's UI phases (platform thread/ui_hang.rs), Relax std's
         // futex wakes and the recording flag they check

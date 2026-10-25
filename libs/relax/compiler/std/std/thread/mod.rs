@@ -389,6 +389,14 @@ impl<T> JoinHandle<T> {
     pub fn is_finished(&self) -> bool {
         self.0.is_finished()
     }
+    #[cfg(unix)]
+    pub(crate) fn as_raw(&self) -> usize {
+        self.0.native.raw()
+    }
+    #[cfg(unix)]
+    pub(crate) fn into_raw(self) -> usize {
+        self.0.native.into_raw()
+    }
 }
 
 impl<T> fmt::Debug for JoinHandle<T> {
@@ -482,6 +490,14 @@ impl<'scope, T> ScopedJoinHandle<'scope, T> {
     }
     pub fn is_finished(&self) -> bool {
         self.0.is_finished()
+    }
+    #[cfg(unix)]
+    pub(crate) fn as_raw(&self) -> usize {
+        self.0.native.raw()
+    }
+    #[cfg(unix)]
+    pub(crate) fn into_raw(self) -> usize {
+        self.0.native.into_raw()
     }
 }
 

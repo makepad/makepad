@@ -218,6 +218,11 @@ impl View {
             for (alias, root) in c.deps.iter().chain(c.image_dep_names.iter().filter(|_| c.cfg.session.options.rs_lazy)) {
                 map.entry(alias.as_str().into()).or_insert_with(|| root.split("::").map(|s| names.bindings.segment_id(s)).collect());
             }
+            for (m, alias, root, _) in &names.externs {
+                if m == &c.name {
+                    map.entry(alias.as_str().into()).or_insert_with(|| root.split("::").map(|s| names.bindings.segment_id(s)).collect());
+                }
+            }
             map
         });
         map.get(alias).map(Vec::as_slice)

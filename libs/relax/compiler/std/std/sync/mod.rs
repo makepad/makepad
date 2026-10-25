@@ -19,7 +19,7 @@ pub use core::sync::atomic;
 
 pub use self::barrier::{Barrier, BarrierWaitResult};
 pub use self::mutex::{Condvar, Mutex, MutexGuard, WaitTimeoutResult};
-pub use self::once::{LazyLock, Once, OnceLock, OnceState};
+pub use self::once::{LazyLock, Once, OnceLock, OnceState, ONCE_INIT};
 pub use self::poison::{LockResult, PoisonError, TryLockError, TryLockResult};
 pub use self::reentrant_lock::{ReentrantLock, ReentrantLockGuard};
 pub use self::rwlock::{RwLock, RwLockReadGuard, RwLockWriteGuard};

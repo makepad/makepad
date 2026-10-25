@@ -22,7 +22,7 @@ use crate::sip::{hash_bytes, Sip128};
 /// A crate's identity independent of load order: its name and root file.
 fn crate_ident(prog: &Program, krate: u32, h: &mut Sip128) {
     let c = &prog.crates[krate as usize];
-    h.str(prog.syms.str(c.name));
+    h.str(relax_front::crates::base_crate_name(prog.syms.str(c.name)));
     let root_file = prog.mods.get(c.root_mod as usize).map(|m| m.file);
     match root_file.and_then(|f| prog.file_paths.get(f as usize)) {
         Some(p) => h.str(p),

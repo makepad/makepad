@@ -701,7 +701,13 @@ impl<'a> Sim<'a> {
                 let Some(bind) = im.bind else { continue };
                 if p.syms.str(bind) == "_" { continue; }
                 let Some(&(kind, name)) = im.segs.last() else { continue };
-                let krate = if kind == SegKind::Crate { Some(p.mods[module as usize].krate) } else { p.crates[p.mods[module as usize].krate as usize].deps.iter().find(|x| x.0 == name).map(|x| x.1) };
+                let krate = if kind == SegKind::Crate {
+                    Some(p.mods[module as usize].krate)
+                } else {
+                    let cur_krate = p.mods[module as usize].krate;
+                    p.crates[cur_krate as usize].deps.iter().find(|x| x.0 == name).map(|x| x.1)
+                        .or_else(|| p.syms.str(name).strip_prefix("__relax_crate_").and_then(|cn| p.dollar_crate(cur_krate, cn)))
+                };
                 let Some(c) = krate else { continue };
                 let root = p.mods[p.crates[c as usize].root_mod as usize].def;
                 let src = self.alloc(Decl { def: Some(root), import: None, ambiguity: None, warn_ambiguity: false, vis: None, vis_max: None, vis_min: None, exp: 0 });
@@ -945,8 +951,10 @@ impl<'a> Sim<'a> {
             }
             Scope::ExternFlags => {
                 let krate = self.p.mods[ps.module as usize].krate;
-                match self.p.crates[krate as usize].deps.iter().find(|x| x.0 == name) {
-                    Some(&(_, c)) => {
+                let found = self.p.crates[krate as usize].deps.iter().find(|x| x.0 == name).map(|x| x.1)
+                    .or_else(|| self.p.syms.str(name).strip_prefix("__relax_crate_").and_then(|cn| self.p.dollar_crate(krate, cn)));
+                match found {
+                    Some(c) => {
                         let root = self.p.mods[self.p.crates[c as usize].root_mod as usize].def;
                         let d = self.alloc(Decl { def: Some(root), import: None, ambiguity: None, warn_ambiguity: false, vis: None, vis_max: None, vis_min: None, exp: 0 });
                         Ok(d)

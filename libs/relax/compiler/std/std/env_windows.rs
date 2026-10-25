@@ -59,7 +59,21 @@ impl fmt::Display for VarError {
 
 impl Error for VarError {}
 
+extern "C" {
+    fn relax_pm_getenv(key: *const u8, len: usize, out: *mut *const u8, out_len: *mut usize) -> i32;
+}
+
 pub fn var_os<K: AsRef<OsStr>>(key: K) -> Option<OsString> {
+    if let Some(ks) = key.as_ref().to_str() {
+        let kb = ks.as_bytes();
+        let mut pm_out: *const u8 = core::ptr::null();
+        let mut pm_len: usize = 0;
+        if unsafe { relax_pm_getenv(kb.as_ptr(), kb.len(), &mut pm_out, &mut pm_len) } == 0 && !pm_out.is_null() {
+            if let Ok(s) = core::str::from_utf8(unsafe { core::slice::from_raw_parts(pm_out, pm_len) }) {
+                return Some(OsString::from(s));
+            }
+        }
+    }
     let k = match to_wide(key.as_ref()) {
         Ok(k) => k,
         Err(_) => return None,

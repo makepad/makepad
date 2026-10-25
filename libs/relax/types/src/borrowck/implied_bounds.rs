@@ -273,7 +273,7 @@ impl ImpliedBounds {
             self.provisional.insert(def, required);
         };
         self.provisional.remove(&def);
-        if visiting.is_empty() { self.inferred.insert(def, required.clone()); tcx.inferred_outlives.insert(def, std::sync::Arc::new(required.clone())); }
+        if self.cycle_heads.is_empty() { self.inferred.insert(def, required.clone()); tcx.inferred_outlives.insert(def, std::sync::Arc::new(required.clone())); }
         required
     }
     fn required_to_be_wf(&mut self, tcx: &Tcx, prog: &Program, ty: TyId, visiting: &mut Vec<crate::program::DefId>, out: &mut Vec<OutlivesPredicate>) {

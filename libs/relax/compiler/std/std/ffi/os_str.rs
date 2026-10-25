@@ -150,15 +150,33 @@ impl From<String> for OsString {
     }
 }
 
-impl From<&str> for OsString {
-    fn from(s: &str) -> OsString {
-        OsString { inner: s.as_bytes().to_vec() }
+impl<T: ?Sized + AsRef<OsStr>> From<&T> for OsString {
+    fn from(s: &T) -> OsString {
+        s.as_ref().to_os_string()
     }
 }
 
-impl From<&OsStr> for OsString {
-    fn from(s: &OsStr) -> OsString {
-        s.to_os_string()
+impl<'a> From<&'a OsStr> for Cow<'a, OsStr> {
+    fn from(s: &'a OsStr) -> Cow<'a, OsStr> {
+        Cow::Borrowed(s)
+    }
+}
+
+impl<'a> From<OsString> for Cow<'a, OsStr> {
+    fn from(s: OsString) -> Cow<'a, OsStr> {
+        Cow::Owned(s)
+    }
+}
+
+impl<'a> From<&'a OsString> for Cow<'a, OsStr> {
+    fn from(s: &'a OsString) -> Cow<'a, OsStr> {
+        Cow::Borrowed(s.as_os_str())
+    }
+}
+
+impl<'a> From<Cow<'a, OsStr>> for OsString {
+    fn from(s: Cow<'a, OsStr>) -> OsString {
+        s.into_owned()
     }
 }
 

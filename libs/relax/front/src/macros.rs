@@ -168,6 +168,8 @@ pub struct CrateMods {
     pub externs: HashMap<String, String>,
     /// names `use .. as name` binds under another name
     pub renames: crate::fxhash::HashSet<String>,
+    /// crate-level `#![recursion_limit = ".."]` from the root file
+    pub recursion_limit: Option<u32>,
     /// the crate's resolved scopes, computed once on first use (CrateScope::compute)
     pub scope: std::sync::OnceLock<CrateScope>,
 }
@@ -671,6 +673,7 @@ impl MacroTable {
         let mut uses = old.uses.clone();
         let mut renames = old.renames.clone();
         let mut mods = old.mods.clone();
+        let mut externs = old.externs.clone();
         let mut added = false;
         let mut binds: Vec<(&(String, String), &Vec<String>)> = eu.iter().collect();
         binds.sort();
@@ -694,6 +697,14 @@ impl MacroTable {
                 }
                 continue;
             }
+            if m == &old.root {
+                if path.len() == 1 && path[0] == "crate" {
+                    externs.insert(b.clone(), k.to_string());
+                } else if path.len() == 2 && path[0].is_empty() {
+                    let target = externs.get(&path[1]).cloned().unwrap_or_else(|| path[1].clone());
+                    externs.insert(b.clone(), target);
+                }
+            }
             if v.iter().any(|u| u.bind.as_deref() == Some(b.as_str()) && &u.path == path) {
                 continue;
             }
@@ -706,14 +717,14 @@ impl MacroTable {
         if !added {
             return;
         }
-        let cm = CrateMods { root: old.root.clone(), src: old.src.clone(), mods, items: old.items.clone(), uses, externs: old.externs.clone(), renames, scope: Default::default() };
+        let cm = CrateMods { root: old.root.clone(), src: old.src.clone(), mods, items: old.items.clone(), uses, externs, renames, recursion_limit: old.recursion_limit, scope: Default::default() };
         self.add_crate(k.to_string(), std::sync::Arc::new(cm));
         // a crate not loaded yet whose scope a parse ahead of its load computed (preloaded files'
         // lookups) copied this crate's names as they were: computed afresh on next use
         let stale: Vec<String> = self.crates.iter().filter(|(n, c)| !self.sealed.contains(n.as_str()) && c.scope.get().is_some()).map(|(n, _)| n.clone()).collect();
         for n in stale {
             let c = self.crates[&n].clone();
-            let fresh = CrateMods { root: c.root.clone(), src: c.src.clone(), mods: c.mods.clone(), items: c.items.clone(), uses: c.uses.clone(), externs: c.externs.clone(), renames: c.renames.clone(), scope: Default::default() };
+            let fresh = CrateMods { root: c.root.clone(), src: c.src.clone(), mods: c.mods.clone(), items: c.items.clone(), uses: c.uses.clone(), externs: c.externs.clone(), renames: c.renames.clone(), recursion_limit: c.recursion_limit, scope: Default::default() };
             self.crates.insert(n, std::sync::Arc::new(fresh));
         }
     }
@@ -795,7 +806,8 @@ fn lookup_in_t<S: AsRef<str>>(table: &MacroTable, local: &[MacroRef], name: &str
     }
     if let Some(us) = table.macro_use.get(cur) {
         for u in us.iter().rev() {
-            if let Some(d) = r.exported(u, name) {
+            let u_key = cm.and_then(|c| c.externs.get(u.as_str())).map(|s| s.as_str()).unwrap_or(u.as_str());
+            if let Some(d) = r.exported(u_key, name) {
                 return Some(d);
             }
         }
@@ -871,6 +883,9 @@ impl<'a> Res<'a> {
     where
         'a: 'b,
     {
+        if let Some(c) = n.strip_prefix("__relax_crate_") {
+            return Some(self.crate_root(c));
+        }
         if let Some(c) = self.table.crates.get(k).and_then(|c| c.externs.get(n)) {
             // a bin naming its own package's lib (same crate name): the lib, not itself
             if c == k {
@@ -2326,7 +2341,7 @@ fn check_seq(nodes: &[MNode], after: &[Follow], edition: u16) -> Result<(), Stri
                 let mut inner_after: Vec<Follow> = match sep {
                     _ if *op == b'?' => Vec::new(),
                     Some(t) => vec![Follow::Tok(t.text.clone())],
-                    None => first_of(inner).0,
+                    None => Vec::new(),
                 };
                 inner_after.extend(followers);
                 check_seq(inner, &inner_after, edition)?;

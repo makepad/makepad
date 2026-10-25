@@ -36,8 +36,19 @@ fn c_bytes(p: *const c_char) -> Vec<u8> {
     unsafe { core::slice::from_raw_parts(p as *const u8, sys::strlen(p)).to_vec() }
 }
 
+extern "C" {
+    fn relax_pm_getenv(key: *const u8, len: usize, out: *mut *const u8, out_len: *mut usize) -> i32;
+}
+
 pub fn var_os<K: AsRef<OsStr>>(key: K) -> Option<OsString> {
-    let key = match CString::new(key.as_ref().as_encoded_bytes()) {
+    let kb = key.as_ref().as_encoded_bytes();
+    let mut pm_out: *const u8 = core::ptr::null();
+    let mut pm_len: usize = 0;
+    if unsafe { relax_pm_getenv(kb.as_ptr(), kb.len(), &mut pm_out, &mut pm_len) } == 0 && !pm_out.is_null() {
+        let bytes = unsafe { core::slice::from_raw_parts(pm_out, pm_len).to_vec() };
+        return Some(OsString::from_bytes_vec(bytes));
+    }
+    let key = match CString::new(kb) {
         Ok(k) => k,
         Err(_) => return None,
     };

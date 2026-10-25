@@ -790,6 +790,18 @@ impl<A, B, EA: Extend<A>, EB: Extend<B>> Extend<(A, B)> for (EA, EB) {
     }
 }
 
+impl<A, B, FromA, FromB> FromIterator<(A, B)> for (FromA, FromB)
+where
+    FromA: Default + Extend<A>,
+    FromB: Default + Extend<B>,
+{
+    fn from_iter<T: IntoIterator<Item = (A, B)>>(iter: T) -> (FromA, FromB) {
+        let mut res = (FromA::default(), FromB::default());
+        res.extend(iter);
+        res
+    }
+}
+
 pub trait Sum<A = Self>: Sized {
     fn sum<I: Iterator<Item = A>>(iter: I) -> Self;
 }

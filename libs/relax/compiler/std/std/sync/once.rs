@@ -32,6 +32,8 @@ pub struct Once {
     state_and_queued: Cell<State>,
 }
 
+pub const ONCE_INIT: Once = Once::new();
+
 #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
 unsafe impl Sync for Once {}
 

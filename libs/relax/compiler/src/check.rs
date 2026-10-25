@@ -111,22 +111,34 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         u.prog.crates[k as usize].validate = true;
     }
     u.prog.own_crates = own.clone();
+    let t_rsim0 = std::time::Instant::now();
     errors.extend(u.prog.strict_import_errors(&own));
     errors.extend(relax_types::lint::import_resolution_diags(&mut u.prog, &own));
+    let d_rsim = t_rsim0.elapsed();
+    let t_sigs0 = std::time::Instant::now();
     // every checked definition's signature, on MAKEPAD_RUN_JOBS threads (queries over the shared
     // context); errors in definition order
     {
+        let check_times = std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some();
         let defs: Vec<crate::program::DefId> = (0..u.prog.defs.len()).filter(|&i| own[u.prog.defs[i].krate as usize]).map(|i| crate::program::DefId(i as u32)).collect();
         let (prog, tcx) = (&u.prog, &u.tcx);
         for e in par_map(&defs, |&d| std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let t0 = std::time::Instant::now();
                 let mut e = tcx.check_def_signature(prog, d);
+                let dt_sig = t0.elapsed();
                 if prog.def(d).kind == DefKind::Impl { e.extend(relax_types::unsafety::check_impl(prog, tcx, d)); }
+                let dt = t0.elapsed();
+                if check_times && dt.as_millis() >= 500 {
+                    stderr_line!("makepad check: slow sig {:.2} s (check_def_sig {:.2} s): {:?} {}", dt.as_secs_f64(), dt_sig.as_secs_f64(), prog.def(d).kind, prog.def_path(d));
+                }
                 e
             }))
             .unwrap_or_else(|_| vec![format!("internal compiler error while checking the signature of {} -- makepad run bug, report it", prog.def_path(d))])) {
             errors.extend(e);
         }
     }
+    let d_sigs = t_sigs0.elapsed();
+    let t_items0 = std::time::Instant::now();
     errors.extend(relax_types::item_checks::duplicate_items(&u.prog, &own));
     errors.extend(relax_types::item_checks::duplicate_exported_macros(&u.prog, &own));
     errors.extend(relax_types::item_checks::super_paths(&u.prog, &own));
@@ -147,9 +159,12 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     errors.extend(u.prog.import_privacy_errors(&own));
     errors.extend(u.prog.attribute_errors(&own));
     errors.extend(u.prog.ast_validation_errors(&own));
+    let d_items = t_items0.elapsed();
+    let t_wf0 = std::time::Instant::now();
     // item well-formedness (rustc wfcheck): after the signatures, and only when they are sound -- an
     // item with an unresolved or ill-counted type has no well-formedness to speak of
     if errors.is_empty() {
+        let check_times = std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some();
         let defs: Vec<crate::program::DefId> = (0..u.prog.defs.len()).filter(|&i| own[u.prog.defs[i].krate as usize]).map(|i| crate::program::DefId(i as u32)).collect();
         let (prog, tcx) = (&u.prog, &u.tcx);
         // (a constant a well-formedness check evaluates may find the compiler's owner busy: preempted
@@ -157,10 +172,16 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         for e in par_map(&defs, |&d| {
             let mut tries = 0;
             loop {
+                let t0 = std::time::Instant::now();
                 let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let mut v = relax_types::wfcheck::obligations::check_def(prog, tcx, d);
+                    let dt_wf = t0.elapsed();
                     // rustc_privacy check_mod_privacy: the types of the item's signature
                     v.extend(relax_types::privacy_types::check_item(prog, tcx, d));
+                    let dt = t0.elapsed();
+                    if check_times && dt.as_millis() >= 500 {
+                        stderr_line!("makepad check: slow wf {:.2} s (check_def {:.2} s, tries {}): {:?} {}", dt.as_secs_f64(), dt_wf.as_secs_f64(), tries, prog.def(d).kind, prog.def_path(d));
+                    }
                     v
                 }));
                 match r {
@@ -179,6 +200,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
             }
         }
     }
+    let d_wf = t_wf0.elapsed();
     let options = &u.prog.session.clone().options;
     crate::borrowck::lazy::disable_gandalf();
     if options.borrowck_all != crate::options::BorrowckAll::Default {
@@ -229,6 +251,9 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     }
     let n_own = fns.len();
     let t_owners = t_check.elapsed();
+    if std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some() {
+        stderr_line!("makepad check: owners breakdown: rsim {:.2} s, sigs {:.2} s, item_checks {:.2} s, wfcheck {:.2} s", d_rsim.as_secs_f64(), d_sigs.as_secs_f64(), d_items.as_secs_f64(), d_wf.as_secs_f64());
+    }
     // typeck-audit 1.27: anonymous constants outside bodies are body owners of their own
     for anon in crates.iter().flat_map(|&k| crate::borrowck::body::signature_anon_consts(&u.prog, &u.tcx, k)).collect::<Vec<_>>() {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -272,7 +297,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     // every body owner type- and borrow-checked on MAKEPAD_RUN_JOBS threads: typeck and the borrow
     // checker are queries over the shared program and type context (as the run's typeck-ahead
     // workers use them); results are merged in owner order
-    struct Outcome { errors: Vec<String>, diags: Vec<crate::diag::Diagnostic>, seed: Option<crate::program::DefId>, retry: bool }
+    struct Outcome { errors: Vec<String>, diags: Vec<crate::diag::Diagnostic>, seed: Option<crate::program::DefId>, needs_load: bool, preempted: bool }
     let jobs = std::env::var("MAKEPAD_RUN_JOBS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0)
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()).min(16));
     let upn = up as usize;
@@ -281,7 +306,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         let (prog, tcx) = (&uu.prog, &uu.tcx);
         let d = owner.owner;
         if std::env::var_os("MAKEPAD_RUN_CHECK_TRACE").is_some() { stderr_line!("makepad check: body {}", prog.def_path(d)); }
-        let mut out = Outcome { errors: Vec::new(), diags: Vec::new(), seed: None, retry: false };
+        let mut out = Outcome { errors: Vec::new(), diags: Vec::new(), seed: None, needs_load: false, preempted: false };
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // the syntax-level lints do not wait for the types (rustc runs them before analysis)
             relax_types::lint_early::check_def(prog, tcx, d);
@@ -342,10 +367,10 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
             }
             // a module the check did not load (another crate's skipped file): checked again
             // once every file is loaded
-            Err(p) if p.is::<crate::preempt::NeedsLoad>() => out.retry = true,
+            Err(p) if p.is::<crate::preempt::NeedsLoad>() => out.needs_load = true,
             // a constant it needed was asked of the compiler's owner thread while an earlier
             // request held it up (owner.rs): checked again
-            Err(p) if crate::preempt::is_preempted(&*p) => out.retry = true,
+            Err(p) if crate::preempt::is_preempted(&*p) => out.preempted = true,
             Err(_) => {
                 let def = prog.def(d);
                 let pos = prog.files[def.file as usize].ast.item(def.item).lo;
@@ -353,7 +378,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
             }
         }
         // an error may be a name in a file the app check left unloaded: settled with all loaded
-        if !out.errors.is_empty() { out.retry = true; }
+        if !out.errors.is_empty() { out.needs_load = true; }
         out
     };
     let t_par = t_check.elapsed();
@@ -382,15 +407,32 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     if std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some() { stderr_line!("makepad check: owners {:.2} s, anon consts {:.2} s, bodies {:.2} s ({} jobs)", t_owners.as_secs_f64(), (t_par - t_owners).as_secs_f64(), (t_check.elapsed() - t_par).as_secs_f64(), jobs); }
     outcomes.sort_by_key(|(i, _)| *i);
     // owners that failed or met an unloaded module: every skipped file loaded, checked again
-    // (only when some other crate's file is still skipped: else the first answer stands)
+    // (only when some other crate's file is still skipped: else the first answer stands);
+    // owners preempted by OwnerBusy are always retried in parallel.
     let skipped_left = unsafe { !(&*up).prog.skipped_files.is_empty() };
-    if skipped_left && outcomes.iter().any(|(_, o)| o.retry) {
+    if skipped_left && outcomes.iter().any(|(_, o)| o.needs_load) {
+        let t_skip = std::time::Instant::now();
         unsafe { jit::load_all_skipped(up) };
-        for (i, o) in outcomes.iter_mut() {
-            if o.retry {
-                let (owner, generic) = &fns[*i];
-                *o = check_one(owner, *generic);
-            }
+        if std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some() {
+            stderr_line!("makepad check: load_all_skipped {:.2} s", t_skip.elapsed().as_secs_f64());
+        }
+    }
+    let retry_idxs: Vec<usize> = outcomes.iter().enumerate()
+        .filter(|(_, (_, o))| (skipped_left && o.needs_load) || o.preempted)
+        .map(|(idx, _)| idx)
+        .collect();
+    if !retry_idxs.is_empty() {
+        let t_retry = std::time::Instant::now();
+        let retried = par_map(&retry_idxs, |&idx| {
+            let fi = outcomes[idx].0;
+            let (owner, generic) = &fns[fi];
+            check_one(owner, *generic)
+        });
+        for (idx, new_o) in retry_idxs.iter().copied().zip(retried) {
+            outcomes[idx].1 = new_o;
+        }
+        if std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some() {
+            stderr_line!("makepad check: retried {} bodies in {:.2} s", retry_idxs.len(), t_retry.elapsed().as_secs_f64());
         }
     }
     let mut seeds = Vec::new();

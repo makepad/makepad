@@ -971,14 +971,24 @@ impl Drop for OutlineFinish<'_> {
 fn crate_modules(c: &PreCrate, scans: &[part::Scan]) -> crate::macros::CrateMods {
     let mut modules = crate::macros::CrateMods { root: c.name.clone(), src: c.root.clone(), ..Default::default() };
     modules.externs.extend(c.deps.iter().cloned());
-    for (_, _, _, scan, _, _) in scans {
+    for (_, path, _, scan, _, _) in scans {
         let Some(scan) = scan else { continue; };
+        if path == &c.root && scan.recursion_limit.is_some() {
+            modules.recursion_limit = scan.recursion_limit;
+        }
         modules.mods.extend(scan.mods.iter().cloned());
         modules.items.extend(scan.mod_items.iter().cloned());
         for u in &scan.uses {
             if let Some(bind) = &u.bind {
                 if u.path.last() != Some(bind) { modules.renames.insert(bind.clone()); }
-                if u.path == ["crate"] && u.module == c.name { modules.externs.insert(bind.clone(), c.name.clone()); }
+                if u.module == c.name {
+                    if u.path == ["crate"] {
+                        modules.externs.insert(bind.clone(), c.name.clone());
+                    } else if u.path.len() == 2 && u.path[0].is_empty() {
+                        let target = modules.externs.get(&u.path[1]).cloned().unwrap_or_else(|| u.path[1].clone());
+                        modules.externs.insert(bind.clone(), target);
+                    }
+                }
             }
             modules.uses.entry(u.module.clone()).or_default().push(u.clone());
         }

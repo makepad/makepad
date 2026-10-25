@@ -279,6 +279,7 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
     for (ci, c) in crates.iter().enumerate() {
         env[ci].push(("CARGO_CRATE_NAME".to_string(), c.name.clone()));
     }
+    crate::crates::disambiguate_multi_version_crates(&mut crates);
     let mut cfgs = vec![Vec::new(); n];
     for &ci in &test_crates {
         cfgs[ci].push("test".to_string());
@@ -607,11 +608,13 @@ fn script_units(bs: &BuildScript, raw: &[RawUnit], rewrite: Option<&noop::Rewrit
     }
     // the script: a bin of its package
     let pkg_dir = manifest_dir_of(&bs.src_path);
+    let sfeats: Vec<String> = bs.features.iter().map(|f| q(f)).collect();
     let script_unit = |src_path: &str| format!(
-        "{{\"pkg_id\":{},\"target\":{{\"kind\":[\"bin\"],\"name\":\"build-script-build\",\"src_path\":{},\"edition\":\"{}\"}},\"profile\":{{\"opt_level\":\"3\"}},\"mode\":\"build\",\"features\":[],\"dependencies\":[{}]}}",
+        "{{\"pkg_id\":{},\"target\":{{\"kind\":[\"bin\"],\"name\":\"build-script-build\",\"src_path\":{},\"edition\":\"{}\"}},\"profile\":{{\"opt_level\":\"3\"}},\"mode\":\"build\",\"features\":[{}],\"dependencies\":[{}]}}",
         q(&format!("path+file://{}#build-script-build@0.0.0", pkg_dir)),
         q(src_path),
         bs.edition,
+        sfeats.join(","),
         deps_json(&build_deps)
     );
     units.push(script_unit(&bs.src_path));

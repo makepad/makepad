@@ -363,7 +363,7 @@ pub fn lookup(name: &str) -> Builtin {
 /// A `macro_rules!` definition Relax replaces with a native expansion: the bitflags crate's
 /// `bitflags!` (MAKEPAD_RUN_NATIVE_BITFLAGS=0 keeps the crate's macro_rules, for A/B measurement).
 pub fn override_rules(options: &crate::options::Options, d: crate::macros::MacroRef) -> crate::macros::MacroRef {
-    if d.name == "bitflags" && d.krate == "bitflags" && options.native_bitflags {
+    if d.name == "bitflags" && crate::crates::base_crate_name(&d.krate) == "bitflags" && options.native_bitflags {
         crate::memo_local! {
             static BF: std::cell::OnceCell<crate::macros::MacroRef>;
         }
@@ -405,15 +405,7 @@ crate::memo_local! {
     static DEFS: std::cell::RefCell<Vec<Option<crate::macros::MacroRef>>>;
 }
 
-/// The macro definition standing for built-in `name` (no arms; `builtin` set), if any.
-pub fn macro_def(name: &str) -> Option<crate::macros::MacroRef> {
-    let id = match lookup(name) {
-        Builtin::None => match crate::macro_reg::bang_index(name) {
-            Some(i) if i < (256 - HOSTED as usize) => HOSTED + i as u8,
-            _ => return None,
-        },
-        b => b as u8,
-    };
+fn def_for_id(name: &str, id: u8) -> crate::macros::MacroRef {
     DEFS.with(|d| {
         let mut d = d.borrow_mut();
         let i = id as usize;
@@ -423,8 +415,33 @@ pub fn macro_def(name: &str) -> Option<crate::macros::MacroRef> {
         if d[i].is_none() {
             d[i] = Some(std::sync::Arc::new(crate::macros::MacroDef { name: name.to_string(), krate: String::new(), exported: true, arms: Vec::new(), builtin: id, def_file: String::new(), def_pos: 0, def_mod: String::new(), input: None }));
         }
-        d[i].clone()
+        d[i].clone().unwrap()
     })
+}
+
+/// The macro definition standing for compiler built-in `name` (`TABLE` only, never a hosted proc macro).
+pub fn builtin_macro_def(name: &str) -> Option<crate::macros::MacroRef> {
+    match lookup(name) {
+        Builtin::None => None,
+        b => Some(def_for_id(name, b as u8)),
+    }
+}
+
+/// The macro definition standing for built-in or hosted proc macro `name` as crate `krate` sees it.
+pub fn macro_def_for(krate: &str, name: &str) -> Option<crate::macros::MacroRef> {
+    let id = match lookup(name) {
+        Builtin::None => match crate::macro_reg::bang_index_for(krate, name) {
+            Some(i) if i < (256 - HOSTED as usize) => HOSTED + i as u8,
+            _ => return None,
+        },
+        b => b as u8,
+    };
+    Some(def_for_id(name, id))
+}
+
+/// The macro definition standing for built-in `name` (no arms; `builtin` set), if any.
+pub fn macro_def(name: &str) -> Option<crate::macros::MacroRef> {
+    macro_def_for("", name)
 }
 
 // ---------------------------------------------------------------- tokens -> proc_macro model
@@ -655,7 +672,7 @@ fn stringify_o(buf: Buf, toks: &(impl TokSeq + ?Sized), lo: usize, hi: usize, or
 /// This does not change identifier hygiene or the call-site position of line!().
 fn src_origin(p: &crate::parser::Parser, mut pos: u32) -> u32 {
     let base = p.src.len() as u32;
-    for _ in 0..64 {
+    for _ in 0..4096 {
         if pos < base {
             return pos;
         }
@@ -685,7 +702,7 @@ fn src_origin_end(p: &crate::parser::Parser, z: u32) -> Option<u32> {
 
 fn orig_pos(p: &crate::parser::Parser, mut pos: u32) -> u32 {
     let base = p.src.len() as u32;
-    for _ in 0..64 {
+    for _ in 0..4096 {
         if pos < base {
             break;
         }
@@ -724,7 +741,7 @@ pub fn expand(p: &crate::parser::Parser, id: u8, lo: usize, hi: usize, call_lo: 
     if let Some(x) = crate::parse_work::get(&key) { return Ok(x); }
     if id >= HOSTED {
         let i = (id - HOSTED) as usize;
-        let ts = expand_pm_ts(p, true, lo, hi, call_lo, call_hi, |input, call| crate::macro_reg::run_bang(p.session, i, input, call))?;
+        let ts = expand_pm_ts(p, true, lo, hi, call_lo, call_hi, |input, call| crate::macro_reg::run_bang_in(p.session, &p.krate, i, input, call))?;
         let mut out = Expansion { text: String::new(), toks: Vec::new(), origins: Vec::new() };
         emit_tokens(&ts.trees, p.edition, &mut out, &mut Vec::new())?;
         crate::parse_work::put(key, &out);
@@ -849,9 +866,14 @@ fn expand_buf(p: &crate::parser::Parser, id: u8, lo: usize, hi: usize, call_lo: 
             return Ok(one(T::Int, &if b == Builtin::Line { format!("{}u32", lc.line) } else { format!("{}u32", lc.column) }));
         }
         Builtin::ModulePath => {
+            // the package's crate name first, also for a crate renamed to tell two versions of it
+            // apart (crates.rs disambiguate_multi_version_crates; the module keys keep that name)
             let mut m = match ctx {
-                Some(c) => c.module_path.clone(),
-                None => p.krate.clone(),
+                Some(c) => match c.module_path.split_once("::") {
+                    Some((head, rest)) => format!("{}::{}", crate::crates::base_crate_name(head), rest),
+                    None => crate::crates::base_crate_name(&c.module_path).to_string(),
+                },
+                None => crate::crates::base_crate_name(&p.krate).to_string(),
             };
             for s in &p.mod_stack {
                 m.push_str("::");
@@ -1002,7 +1024,7 @@ fn expand_buf(p: &crate::parser::Parser, id: u8, lo: usize, hi: usize, call_lo: 
     let span_of = |a: u32, z: u32| Span { file: 0, lo: a, hi: z, start: LineColumn { line: 1, column: 1 }, end: LineColumn { line: 1, column: 1 } };
     let input = to_stream_buf(buf, toks, lo, hi, &span_of).ok_or_else(|| "unbalanced delimiters in macro input".to_string())?;
     if b == Builtin::Bitflags {
-        return crate::bitflags_native::expand(&input, p.krate == "bitflags", p.bctx.as_ref().map(|x| &x.cfg), p.edition);
+        return crate::bitflags_native::expand(&input, crate::crates::base_crate_name(&p.krate) == "bitflags", p.bctx.as_ref().map(|x| &x.cfg), p.edition);
     }
     let _ = (call_lo, call_hi);
     Err("not a built-in macro".to_string())
@@ -1207,7 +1229,7 @@ fn env_value_inner(ctx: Option<&FileCtx>, name: &str) -> Option<String> {
             "CARGO_MANIFEST_DIR" => return Some(c.manifest_dir.clone()),
             "CARGO_PKG_NAME" => return Some(c.pkg_name.clone()),
             "CARGO_PKG_VERSION" => return Some(c.pkg_version.clone()),
-            "CARGO_CRATE_NAME" => return Some(c.krate.clone()),
+            "CARGO_CRATE_NAME" => return Some(crate::crates::base_crate_name(&c.krate).to_string()),
             _ => {}
         }
     }
@@ -1358,7 +1380,7 @@ fn trace_on(what: &str) -> bool {
 }
 
 fn item_location(p: &crate::parser::Parser, mut origin: u32) -> (usize,usize) {
-    for _ in 0..64 {
+    for _ in 0..4096 {
         if origin < p.src.len() as u32 { break; }
         match p.exp_map.iter_rev().find(|(lo,hi,_)| *lo <= origin && origin <= *hi) {
             Some((_,_,at)) if at != origin => origin = at,
@@ -1422,7 +1444,7 @@ fn item_tokens(p: &crate::parser::Parser, buf: &Buf, lo: usize, hi: usize, item_
 
 /// Derives of one item, from its source bytes (`item_lo`: its position, for diagnostics).
 /// Linked derives run natively, the rest through the JIT host (pmhost.rs; any thread).
-fn expand_item(sess: &std::sync::Arc<crate::Session>, path: &str, item: &[u8], fresh: Vec<Tok>, item_lo: u32, location: (usize, usize), cfg: Option<&CfgSet>, edition: u16, authored: Option<&dyn Fn(u32, u32) -> Option<Span>>) -> Result<ItemOut, (u32, String)> {
+fn expand_item(sess: &std::sync::Arc<crate::Session>, krate: &str, path: &str, item: &[u8], fresh: Vec<Tok>, item_lo: u32, location: (usize, usize), cfg: Option<&CfgSet>, edition: u16, authored: Option<&dyn Fn(u32, u32) -> Option<Span>>) -> Result<ItemOut, (u32, String)> {
     let span_of = |a: u32, z: u32| authored.and_then(|f| f(item_lo + a, item_lo + z)).unwrap_or(Span { file: 0, lo: item_lo + a, hi: item_lo + z, start: LineColumn { line: 1, column: 1 }, end: LineColumn { line: 1, column: 1 } });
     // the item's own tokens (parsing rewrites tokens in place, `>>` closing two generic lists
     // becomes `>`: callers hand over the tokens as the source spelled them)
@@ -1451,7 +1473,7 @@ fn expand_item(sess: &std::sync::Arc<crate::Session>, path: &str, item: &[u8], f
     let mut scratch = Vec::new();
     for name in names {
         // The host selects a source-matched linked library or the sandboxed JIT.
-        let r = match crate::macro_reg::run_derive(sess, &name, &item_ts, call) {
+        let r = match crate::macro_reg::run_derive_in(sess, krate, &name, &item_ts, call) {
             Some(r) => r,
             // no host for this derive: leave the item as it is
             None => return Ok(ItemOut::Nothing),
@@ -1726,7 +1748,7 @@ fn derive_items_inner(p: &crate::parser::Parser, attrs: &[crate::ast::Attr], lo:
         v
     };
     let cfg = p.bctx.as_ref().map(|c| &c.cfg);
-    let r = expand_item(sess, p.bctx.as_ref().map_or("", |c| c.path.as_str()), buf.get(item_lo, item_hi), fresh, item_lo, item_location(p,item_lo), cfg, p.edition, Some(&|lo, hi| p.input_span(lo, hi)));
+    let r = expand_item(sess, &p.krate, p.bctx.as_ref().map_or("", |c| c.path.as_str()), buf.get(item_lo, item_hi), fresh, item_lo, item_location(p,item_lo), cfg, p.edition, Some(&|lo, hi| p.input_span(lo, hi)));
     match r? {
         ItemOut::Done(x) => {
             if let Some(reused) = reused {
@@ -1898,7 +1920,7 @@ pub fn expand_attr_macro(p: &crate::parser::Parser, attr: &crate::ast::Attr, lo:
 /// Expands the derives of a crate's files ahead of parsing, in parallel (the parser takes
 /// the results by item position; anything missed is expanded when parsed). `files`: (path,
 /// source, tokens) as the macro prescan lexed them.
-pub fn pre_expand_derives(files: &[(&str, &[u8], &[Tok])], cfg: &CfgSet, edition: u16) {
+pub fn pre_expand_derives(krate: &str, files: &[(&str, &[u8], &[Tok])], cfg: &CfgSet, edition: u16) {
     let sess = &cfg.session;
     if !cfg.session.options.derives || !cfg.session.options.pre_derives {
         return;
@@ -1933,7 +1955,7 @@ pub fn pre_expand_derives(files: &[(&str, &[u8], &[Tok])], cfg: &CfgSet, edition
                     }
                     let (fi, lo, hi) = sites[k];
                     let src = files[fi].1;
-                    out.push((k, expand_item(sess, files[fi].0, &src[lo as usize..hi as usize], site_tokens(files[fi].2, lo, hi), lo, crate::lexer::line_col_at(&lines[fi], src.len(), lo), Some(cfg), edition, None)));
+                    out.push((k, expand_item(sess, krate, files[fi].0, &src[lo as usize..hi as usize], site_tokens(files[fi].2, lo, hi), lo, crate::lexer::line_col_at(&lines[fi], src.len(), lo), Some(cfg), edition, None)));
                 }
                 out
             }));
@@ -2349,8 +2371,8 @@ pub fn prescan_defs(cfg: &CfgSet, name: &str, arg_src: &[u8], krate: &str) -> Ve
         Some(s) => s,
         None => return v,
     };
-    let r = match crate::macro_reg::bang_index(name) {
-        Some(i) => crate::macro_reg::run_bang(sess, i, input, Span::DUMMY),
+    let r = match crate::macro_reg::bang_index_for(krate, name).or_else(|| crate::macro_reg::bang_index(name)) {
+        Some(i) => crate::macro_reg::run_bang_in(sess, krate, i, input, Span::DUMMY),
         None => return v,
     };
     let text = match r.map(|ts| render(&ts)) {

@@ -210,6 +210,16 @@ pub fn current_thread() -> usize {
 /// An owned thread: joining consumes it; dropping it detaches.
 pub struct NativeThread(pthread_t);
 
+impl NativeThread {
+    pub fn raw(&self) -> usize {
+        self.0
+    }
+    pub fn into_raw(self) -> usize {
+        let t = core::mem::ManuallyDrop::new(self);
+        t.0
+    }
+}
+
 struct StartArg {
     f: fn(*mut u8),
     arg: *mut u8,

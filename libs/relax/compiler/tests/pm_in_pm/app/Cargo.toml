@@ -1,0 +1,10 @@
+[package]
+name = "pmpm-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+pmpm-outer = { path = "../outer" }
+pmpm-inner = { path = "../inner" }
+pmpm-hello = { path = "../hello" }

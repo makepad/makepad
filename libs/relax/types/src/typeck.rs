@@ -6065,6 +6065,10 @@ impl<'a> Fcx<'a> {
         let residual = adt.variants.iter().find(|v| Some(v.def) == break_def).unwrap().fields[0].ty;
         let flow_full = self.tcx.complete_args(self.prog, def, self.tcx.tys.list(flow_args), regions);
         let output = self.tcx.instantiate_ty(self.prog, def, &flow_full, output);
+        let so = self.shallow(output);
+        if matches!(self.tcx.tys.kind(so), TyKind::Infer(_)) {
+            self.diverging.push(so);
+        }
         let residual = self.tcx.instantiate_ty(self.prog, def, &flow_full, residual);
         let ret = *self.ret_stack.last().unwrap_or(&self.tcx.tys.error);
         let full = self.infer_item_args(from_residual, &[ret, residual]);
@@ -7823,11 +7827,22 @@ pub fn import_help(prog: &Program, module: u32, name: crate::program::Sym, ns_ty
     }
 }
 
+/// `item_path` as `type_name` prints it: a crate that shares its name with another version of
+/// itself in the graph (front crates.rs disambiguate_multi_version_crates) prints its package's
+/// crate name, as rustc does (`mvdep::Thing` for either version).
+fn type_path(prog: &Program, tcx: &Tcx, d: DefId) -> String {
+    let p = item_path(prog, tcx, d);
+    let (head, rest) = p.split_once("::").map_or((p.as_str(), ""), |(h, r)| (h, r));
+    let base = relax_front::crates::base_crate_name(head);
+    if base.len() == head.len() { return p; }
+    if rest.is_empty() { base.to_string() } else { format!("{base}::{rest}") }
+}
+
 pub fn type_name(prog: &Program, tcx: &Tcx, t: TyId) -> String {
     let list = |v: &[TyId]| v.iter().map(|x| type_name(prog, tcx, *x)).collect::<Vec<_>>().join(", ");
     match tcx.tys.kind(t) {
         TyKind::Adt(d, args, _) => {
-            let mut s = item_path(prog, tcx, *d);
+            let mut s = type_path(prog, tcx, *d);
             if !args.is_empty() {
                 s.push_str(&format!("<{}>", list(tcx.tys.list(*args))));
             }
@@ -7860,7 +7875,7 @@ pub fn type_name(prog: &Program, tcx: &Tcx, t: TyId) -> String {
             }
         }
         TyKind::FnDef(d, args, _) => {
-            let mut s = item_path(prog, tcx, *d);
+            let mut s = type_path(prog, tcx, *d);
             if !args.is_empty() {
                 s.push_str(&format!("<{}>", list(tcx.tys.list(*args))));
             }
@@ -7875,7 +7890,7 @@ pub fn type_name(prog: &Program, tcx: &Tcx, t: TyId) -> String {
                 _ => None,
             };
             let mut s = match owner_def {
-                Some(d) => item_path(prog, tcx, d),
+                Some(d) => type_path(prog, tcx, d),
                 None => String::new(),
             };
             let mut depth = 1;
@@ -7904,7 +7919,7 @@ pub fn type_name(prog: &Program, tcx: &Tcx, t: TyId) -> String {
             s
         }
         TyKind::Dyn(d, args, bindings, _, _, _, autos) => {
-            let (head, autos) = dyn_trait_names(*d, tcx.tys.list(*autos), |a| item_path(prog, tcx, a));
+            let (head, autos) = dyn_trait_names(*d, tcx.tys.list(*autos), |a| type_path(prog, tcx, a));
             let mut s = format!("dyn {}", head);
             // the Fn family as rustc prints it: `Fn(u32) -> u32`
             let fn_family = matches!(prog.name(*d), "Fn" | "FnMut" | "FnOnce") && Some(prog.def(*d).krate) == prog.prelude_crate;

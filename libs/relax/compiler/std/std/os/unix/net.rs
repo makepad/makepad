@@ -231,6 +231,14 @@ impl UnixListener {
         cvt(unsafe { sn::listen(s.raw(), backlog) })?;
         Ok(UnixListener { sock: s })
     }
+    pub fn bind_addr(socket_addr: &SocketAddr) -> io::Result<UnixListener> {
+        let (buf, len) = encode_addr(socket_addr)?;
+        let s = Socket::new(sn::AF_UNIX, sn::SOCK_STREAM)?;
+        cvt(unsafe { sn::bind(s.raw(), sn::storage_ptr(&buf), len) })?;
+        let backlog = if cfg!(target_os = "macos") { 128 } else { -1 };
+        cvt(unsafe { sn::listen(s.raw(), backlog) })?;
+        Ok(UnixListener { sock: s })
+    }
     pub fn accept(&self) -> io::Result<(UnixStream, SocketAddr)> {
         let (s, buf, len) = self.sock.accept()?;
         Ok((UnixStream { sock: s }, SocketAddr { path: sn::decode_unix(&buf, len) }))
@@ -250,6 +258,145 @@ impl UnixListener {
     }
     pub fn incoming(&self) -> Incoming<'_> {
         Incoming { listener: self }
+    }
+}
+
+pub struct UnixDatagram {
+    sock: Socket,
+}
+
+impl UnixDatagram {
+    pub fn bind<P: AsRef<Path>>(path: P) -> io::Result<UnixDatagram> {
+        let (buf, len) = encode_path(path.as_ref())?;
+        let s = Socket::new(sn::AF_UNIX, sn::SOCK_DGRAM)?;
+        cvt(unsafe { sn::bind(s.raw(), sn::storage_ptr(&buf), len) })?;
+        Ok(UnixDatagram { sock: s })
+    }
+    pub fn bind_addr(socket_addr: &SocketAddr) -> io::Result<UnixDatagram> {
+        let (buf, len) = encode_addr(socket_addr)?;
+        let s = Socket::new(sn::AF_UNIX, sn::SOCK_DGRAM)?;
+        cvt(unsafe { sn::bind(s.raw(), sn::storage_ptr(&buf), len) })?;
+        Ok(UnixDatagram { sock: s })
+    }
+    pub fn unbound() -> io::Result<UnixDatagram> {
+        let s = Socket::new(sn::AF_UNIX, sn::SOCK_DGRAM)?;
+        Ok(UnixDatagram { sock: s })
+    }
+    pub fn pair() -> io::Result<(UnixDatagram, UnixDatagram)> {
+        let mut fds = [0 as c_int; 2];
+        cvt(unsafe { sn::socketpair(sn::AF_UNIX, sn::SOCK_DGRAM, 0, fds.as_mut_ptr()) })?;
+        let a = Socket::from_fd(fds[0]);
+        let b = Socket::from_fd(fds[1]);
+        unsafe {
+            crate::sys::fcntl(fds[0], crate::sys::F_SETFD, crate::sys::FD_CLOEXEC);
+            crate::sys::fcntl(fds[1], crate::sys::F_SETFD, crate::sys::FD_CLOEXEC);
+        }
+        if cfg!(target_os = "macos") {
+            a.set_int(sn::SOL_SOCKET, sn::SO_NOSIGPIPE, 1)?;
+            b.set_int(sn::SOL_SOCKET, sn::SO_NOSIGPIPE, 1)?;
+        }
+        Ok((UnixDatagram { sock: a }, UnixDatagram { sock: b }))
+    }
+    pub fn connect<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        let (buf, len) = encode_path(path.as_ref())?;
+        self.sock.connect(&buf, len)
+    }
+    pub fn connect_addr(&self, socket_addr: &SocketAddr) -> io::Result<()> {
+        let (buf, len) = encode_addr(socket_addr)?;
+        self.sock.connect(&buf, len)
+    }
+    pub fn try_clone(&self) -> io::Result<UnixDatagram> {
+        Ok(UnixDatagram { sock: self.sock.try_clone()? })
+    }
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        let (buf, len) = self.sock.name(false)?;
+        Ok(SocketAddr { path: sn::decode_unix(&buf, len) })
+    }
+    pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+        let (buf, len) = self.sock.name(true)?;
+        Ok(SocketAddr { path: sn::decode_unix(&buf, len) })
+    }
+    pub fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        let mut addr = sn::zeroed();
+        let mut len: sn::socklen_t = 128;
+        let r = unsafe { sn::recvfrom(self.sock.raw(), buf.as_mut_ptr() as *mut core::ffi::c_void, buf.len(), 0, sn::storage_mut_ptr(&mut addr), &mut len as *mut sn::socklen_t) };
+        if r < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok((r as usize, SocketAddr { path: sn::decode_unix(&addr, len) }))
+        }
+    }
+    pub fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.sock.read(buf)
+    }
+    pub fn peek_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        let mut addr = sn::zeroed();
+        let mut len: sn::socklen_t = 128;
+        let r = unsafe { sn::recvfrom(self.sock.raw(), buf.as_mut_ptr() as *mut core::ffi::c_void, buf.len(), sn::MSG_PEEK, sn::storage_mut_ptr(&mut addr), &mut len as *mut sn::socklen_t) };
+        if r < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok((r as usize, SocketAddr { path: sn::decode_unix(&addr, len) }))
+        }
+    }
+    pub fn peek(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.sock.peek(buf)
+    }
+    pub fn send_to<P: AsRef<Path>>(&self, buf: &[u8], path: P) -> io::Result<usize> {
+        let (addr, len) = encode_path(path.as_ref())?;
+        let r = unsafe { sn::sendto(self.sock.raw(), buf.as_ptr() as *const core::ffi::c_void, buf.len(), sn::MSG_NOSIGNAL, sn::storage_ptr(&addr), len) };
+        if r < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(r as usize)
+        }
+    }
+    pub fn send_to_addr(&self, buf: &[u8], socket_addr: &SocketAddr) -> io::Result<usize> {
+        let (addr, len) = encode_addr(socket_addr)?;
+        let r = unsafe { sn::sendto(self.sock.raw(), buf.as_ptr() as *const core::ffi::c_void, buf.len(), sn::MSG_NOSIGNAL, sn::storage_ptr(&addr), len) };
+        if r < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(r as usize)
+        }
+    }
+    pub fn send(&self, buf: &[u8]) -> io::Result<usize> {
+        self.sock.write(buf)
+    }
+    pub fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
+        self.sock.set_timeout(dur, sn::SO_RCVTIMEO)
+    }
+    pub fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
+        self.sock.set_timeout(dur, sn::SO_SNDTIMEO)
+    }
+    pub fn read_timeout(&self) -> io::Result<Option<Duration>> {
+        self.sock.timeout(sn::SO_RCVTIMEO)
+    }
+    pub fn write_timeout(&self) -> io::Result<Option<Duration>> {
+        self.sock.timeout(sn::SO_SNDTIMEO)
+    }
+    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        self.sock.set_nonblocking(nonblocking)
+    }
+    pub fn take_error(&self) -> io::Result<Option<io::Error>> {
+        self.sock.take_error()
+    }
+    pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+        self.sock.shutdown(how)
+    }
+}
+
+impl fmt::Debug for UnixDatagram {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mut d = f.debug_struct("UnixDatagram");
+        d.field("fd", &self.sock.raw());
+        if let Ok(a) = self.local_addr() {
+            d.field("local", &a);
+        }
+        if let Ok(p) = self.peer_addr() {
+            d.field("peer", &p);
+        }
+        d.finish()
     }
 }
 
@@ -284,6 +431,11 @@ impl AsRawFd for UnixListener {
         self.sock.raw()
     }
 }
+impl AsRawFd for UnixDatagram {
+    fn as_raw_fd(&self) -> RawFd {
+        self.sock.raw()
+    }
+}
 impl AsFd for UnixStream {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.sock.owned().as_fd()
@@ -294,12 +446,37 @@ impl AsFd for UnixListener {
         self.sock.owned().as_fd()
     }
 }
+impl AsFd for UnixDatagram {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.sock.owned().as_fd()
+    }
+}
 impl FromRawFd for UnixStream {
     unsafe fn from_raw_fd(fd: RawFd) -> UnixStream {
         UnixStream { sock: Socket::from_fd(fd) }
     }
 }
+impl FromRawFd for UnixListener {
+    unsafe fn from_raw_fd(fd: RawFd) -> UnixListener {
+        UnixListener { sock: Socket::from_fd(fd) }
+    }
+}
+impl FromRawFd for UnixDatagram {
+    unsafe fn from_raw_fd(fd: RawFd) -> UnixDatagram {
+        UnixDatagram { sock: Socket::from_fd(fd) }
+    }
+}
 impl IntoRawFd for UnixStream {
+    fn into_raw_fd(self) -> RawFd {
+        self.sock.into_owned().into_raw_fd()
+    }
+}
+impl IntoRawFd for UnixListener {
+    fn into_raw_fd(self) -> RawFd {
+        self.sock.into_owned().into_raw_fd()
+    }
+}
+impl IntoRawFd for UnixDatagram {
     fn into_raw_fd(self) -> RawFd {
         self.sock.into_owned().into_raw_fd()
     }
@@ -312,5 +489,25 @@ impl From<UnixStream> for OwnedFd {
 impl From<OwnedFd> for UnixStream {
     fn from(fd: OwnedFd) -> UnixStream {
         UnixStream { sock: Socket::from_fd(fd.into_raw_fd()) }
+    }
+}
+impl From<UnixListener> for OwnedFd {
+    fn from(s: UnixListener) -> OwnedFd {
+        s.sock.into_owned()
+    }
+}
+impl From<OwnedFd> for UnixListener {
+    fn from(fd: OwnedFd) -> UnixListener {
+        UnixListener { sock: Socket::from_fd(fd.into_raw_fd()) }
+    }
+}
+impl From<UnixDatagram> for OwnedFd {
+    fn from(s: UnixDatagram) -> OwnedFd {
+        s.sock.into_owned()
+    }
+}
+impl From<OwnedFd> for UnixDatagram {
+    fn from(fd: OwnedFd) -> UnixDatagram {
+        UnixDatagram { sock: Socket::from_fd(fd.into_raw_fd()) }
     }
 }
