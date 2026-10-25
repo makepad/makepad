@@ -763,9 +763,9 @@ extern "C" fn tls_exit(p: *mut u8) {
 /// of a native worker's callback: domain_callback).
 fn tls_dtor(p: *mut u8) {
     // pthread clears its key before calling us. Reinstall it while Relax std destructors run.
-    os::tls::set(tls_key(), p);
+    set_tls_block(p);
     let registrations = unsafe { crate::domain_threads::finish(p as u64) };
-    os::tls::set(tls_key(), std::ptr::null_mut());
+    set_tls_block(std::ptr::null_mut());
     if crate::web32::on() {
         // its shadow stack (web32.rs) goes back with it
         crate::web32::thread_exit(p as u64);
@@ -799,12 +799,12 @@ pub(crate) fn domain_callback<R>(base: u64, token: u64, f: impl FnOnce() -> R) -
     impl Drop for Restore {
         fn drop(&mut self) {
             tls_dtor(os::tls::get(tls_key()));
-            os::tls::set(tls_key(), self.0 as *mut u8);
+            set_tls_block(self.0 as *mut u8);
             os::tls::static_tls_swap(&mut self.1);
             crate::domain::enter(unsafe { *(self.0 as *const u64) });
         }
     }
-    os::tls::set(tls_key(), std::ptr::null_mut());
+    set_tls_block(std::ptr::null_mut());
     // the program's thread-locals in static TLS start fresh too (the thread's come back after)
     let mut saved = Vec::new();
     os::tls::static_tls_swap(&mut saved);
@@ -1127,9 +1127,9 @@ rt_fn! {
 fn rt_tls_block() -> u64 {
     let _keep = os::proc::KeepLastError::new();
     ensure_altstack();
-    let key = tls_key();
-    let b = os::tls::get(key);
+    let b = os::tls::get(tls_key());
     if !b.is_null() {
+        TLS_BLOCK_COPY.with(|c| c.set(b as u64));
         return b as u64;
     }
     // the wasm32 program's thread-local blocks are in its window (`&THREAD_LOCAL` is an offset)
@@ -1137,7 +1137,7 @@ fn rt_tls_block() -> u64 {
     // a thread nothing assigned a domain to (one native code started, or the first use of a
     // thread JIT code started before its start put it in its parent's domain): the default
     unsafe { *(b as *mut u64) = crate::domain::default_base() };
-    os::tls::set(key, b as *mut u8);
+    set_tls_block(b as *mut u8);
     b
 }
 }
@@ -2043,8 +2043,28 @@ pub fn thunk_size() -> usize {
     THUNK_SIZE
 }
 
+thread_local! {
+    /// The runtime's copy of this thread's block pointer (the OS key's value, kept in step by
+    /// `set_tls_block`): `tls_block` reads it with one thread-local load. The OS key read
+    /// costs a pthread_getspecific / TlsGetValue plus the last-error save around it, and the
+    /// runtime asks for the block on every JIT entry (`domain::current`, twice per
+    /// catch_unwind).
+    static TLS_BLOCK_COPY: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Sets this thread's block in the OS key (what JIT code reads) and in the runtime's copy.
+fn set_tls_block(b: *mut u8) {
+    os::tls::set(tls_key(), b);
+    TLS_BLOCK_COPY.with(|c| c.set(b as u64));
+}
+
 /// This thread's thread-local block (allocated on first use).
+#[inline]
 pub fn tls_block() -> u64 {
+    let b = TLS_BLOCK_COPY.with(|c| c.get());
+    if b != 0 {
+        return b;
+    }
     rt_tls_block()
 }
 
@@ -2754,8 +2774,7 @@ rt_fn! {
 pub(crate) fn rt_catch_panic(f: u64, data: u64) -> u64 {
     ensure_altstack();
     let u = unsafe { UNIT };
-    // a recovery point inside running code: the domain of that code, not the unit's own
-    match unsafe { call_jit_in(u, crate::domain::current(), f, data) } {
+    match unsafe { call_jit_nested(u, f, data) } {
         Ok(_) => 0,
         Err(p) => {
             let r = owner::call(owner::Class::Job, || unsafe { (&*u).report(&p) });
@@ -6483,6 +6502,34 @@ pub unsafe fn call_jit(u: *mut Unit, entry: u64, arg: u64) -> Result<u64, PanicI
     call_jit_in(u, (&*u).syms.dom0(), entry, arg)
 }
 
+/// A recovery point inside running JIT code (core::intrinsics_rt::catch_panic: std's
+/// catch_unwind, every script VM call): `entry(arg)` runs in the unit, domain and heap phase of
+/// the code around it, which an entry through `call_jit_in` set up and noted (owner diagnostics,
+/// sampler) already; only the recovery context is new. A panic or fault that ends here unwound
+/// past the restores of the nested calls it crossed (`call_jit_in` into another unit or domain):
+/// their unit and domain are put back from what this point saw.
+unsafe fn call_jit_nested(u: *mut Unit, entry: u64, arg: u64) -> Result<u64, PanicInfo> {
+    let _kept = crate::zone_alloc::kept();
+    // MAKEPAD_RUN_PROFILE's sampler counts the thread's entries: one native code made (a callback
+    // thread) has no enclosing entry
+    let sampled = (&*u).tier1.is_some();
+    if sampled {
+        sampler_enter((&*u).exec_base, (&*u).exec_size);
+    }
+    let here = crate::domain::current();
+    let r = call_jit_inner(u, entry, arg);
+    if r.is_err() {
+        if crate::domain::current() != here {
+            crate::domain::enter(here);
+        }
+        UNIT = u;
+    }
+    if sampled {
+        sampler_leave();
+    }
+    r
+}
+
 /// `call_jit` in the domain whose static block is at `domain` (domain.rs): the code runs on the
 /// calling thread, whose domain comes back after the call.
 pub unsafe fn call_jit_in(u: *mut Unit, domain: u64, entry: u64, arg: u64) -> Result<u64, PanicInfo> {
@@ -6498,10 +6545,20 @@ pub unsafe fn call_jit_in(u: *mut Unit, domain: u64, entry: u64, arg: u64) -> Re
     if sampled {
         sampler_enter((&*u).exec_base, (&*u).exec_size);
     }
-    // a nested call (into another unit's world) leaves the thread's domain as it found it
-    let prev_domain = crate::domain::enter(domain);
+    // a nested call (into another unit's world) leaves the thread's domain as it found it. A call
+    // in the domain the thread is in does not enter it again (that re-registers the thread and
+    // re-selects the same heap under the registry lock). A call that returned put back whatever
+    // it switched; after a panic or fault the domain is checked, not assumed: it unwound past the
+    // restores of the nested calls it crossed.
+    let here = crate::domain::current();
+    let switch = domain != here;
+    if switch {
+        crate::domain::enter(domain);
+    }
     let r = call_jit_inner(u, entry, arg);
-    crate::domain::enter(prev_domain);
+    if switch || (r.is_err() && crate::domain::current() != here) {
+        crate::domain::enter(here);
+    }
     if sampled {
         sampler_leave();
     }

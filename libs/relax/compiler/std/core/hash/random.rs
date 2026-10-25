@@ -136,10 +136,12 @@ fn hashmap_random_keys() -> (u64, u64) {
     keys_from(&buf)
 }
 
-// sys/random/unsupported.rs (wasm32-unknown-unknown): the addresses of a stack and a heap value
+// The web profile: fixed keys. Real std's wasm32-unknown-unknown keys (sys/random/unsupported.rs)
+// are the addresses of a stack and a heap value: the same on every load of a page, so its
+// iteration orders are fixed too -- but a wasm export's trace runs the program natively, where
+// those addresses are the host process's, and the page must replay the trace exactly (the
+// export's frame gate: HashMap iteration orders reach what the page draws and frees)
 #[cfg(all(not(relax_check), relax_web))]
 fn hashmap_random_keys() -> (u64, u64) {
-    let stack = 0u8;
-    let heap = crate::boxed::Box::new(0u8);
-    (&stack as *const u8 as usize as u64, &*heap as *const u8 as usize as u64)
+    (0x082e_fa98_ec4e_6c89, 0x082e_fa98_ec4e_6c89)
 }
