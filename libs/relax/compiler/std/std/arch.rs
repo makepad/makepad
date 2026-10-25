@@ -62,6 +62,13 @@ pub mod detect {
         Avx512dq = 43,
         Avx512cd = 44,
         Vpclmulqdq = 45,
+        Cmpxchg16b = 46,
+        Movbe = 47,
+        Xsave = 48,
+        Fxsr = 49,
+        Adx = 50,
+        Rdrand = 51,
+        Rdseed = 52,
     }
 
     /// bit 63 = initialised
@@ -179,6 +186,13 @@ pub mod detect {
             | bit(Feature::Avx512bf16, avx512 && e1.eax & (1 << 5) != 0)
             | bit(Feature::Avx512fp16, avx512 && e.edx & (1 << 23) != 0)
             | bit(Feature::Vpclmulqdq, avx && e.ecx & (1 << 10) != 0)
+            | bit(Feature::Cmpxchg16b, p.ecx & (1 << 13) != 0)
+            | bit(Feature::Movbe, p.ecx & (1 << 22) != 0)
+            | bit(Feature::Xsave, p.ecx & (1 << 26) != 0)
+            | bit(Feature::Fxsr, p.edx & (1 << 24) != 0)
+            | bit(Feature::Adx, e.ebx & (1 << 19) != 0)
+            | bit(Feature::Rdrand, p.ecx & (1 << 30) != 0)
+            | bit(Feature::Rdseed, e.ebx & (1 << 18) != 0)
     }
 
     #[cfg(all(any(target_os = "linux", target_os = "android"), target_arch = "aarch64"))]
@@ -285,6 +299,13 @@ macro_rules! is_x86_feature_detected {
     ("avx512bf16") => { cfg!(target_feature = "avx512bf16") || $crate::arch::detect::check($crate::arch::detect::Feature::Avx512bf16) };
     ("avx512fp16") => { cfg!(target_feature = "avx512fp16") || $crate::arch::detect::check($crate::arch::detect::Feature::Avx512fp16) };
     ("vpclmulqdq") => { cfg!(target_feature = "vpclmulqdq") || $crate::arch::detect::check($crate::arch::detect::Feature::Vpclmulqdq) };
+    ("cmpxchg16b") => { cfg!(target_feature = "cmpxchg16b") || $crate::arch::detect::check($crate::arch::detect::Feature::Cmpxchg16b) };
+    ("movbe") => { cfg!(target_feature = "movbe") || $crate::arch::detect::check($crate::arch::detect::Feature::Movbe) };
+    ("xsave") => { cfg!(target_feature = "xsave") || $crate::arch::detect::check($crate::arch::detect::Feature::Xsave) };
+    ("fxsr") => { cfg!(target_feature = "fxsr") || $crate::arch::detect::check($crate::arch::detect::Feature::Fxsr) };
+    ("adx") => { cfg!(target_feature = "adx") || $crate::arch::detect::check($crate::arch::detect::Feature::Adx) };
+    ("rdrand") => { cfg!(target_feature = "rdrand") || $crate::arch::detect::check($crate::arch::detect::Feature::Rdrand) };
+    ("rdseed") => { cfg!(target_feature = "rdseed") || $crate::arch::detect::check($crate::arch::detect::Feature::Rdseed) };
     ($t:tt,) => { $crate::is_x86_feature_detected!($t) };
     ($t:tt) => { compile_error!(concat!("unknown x86 target feature: ", $t)) };
 }

@@ -218,6 +218,14 @@ pub fn zip<A: IntoIterator, B: IntoIterator>(a: A, b: B) -> Zip<A::IntoIter, B::
     Zip::new(a.into_iter(), b.into_iter())
 }
 
+pub fn chain<A, B>(a: A, b: B) -> super::Chain<A::IntoIter, B::IntoIter>
+where
+    A: IntoIterator,
+    B: IntoIterator<Item = A::Item>,
+{
+    super::Chain::new(a.into_iter(), b.into_iter())
+}
+
 // ---------------------------------------------------------------- Debug (as real core)
 
 impl<T> fmt::Debug for Empty<T> {

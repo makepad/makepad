@@ -91,6 +91,11 @@ impl<T, const CAP: usize> ArrayVec<T, CAP> {
         unsafe { ArrayVec { xs: MaybeUninit::uninit().assume_init(), len: 0 } }
     }
 
+    /// Create a new empty `ArrayVec` (const).
+    pub const fn new_const() -> ArrayVec<T, CAP> {
+        unsafe { ArrayVec { xs: MaybeUninit::uninit().assume_init(), len: 0 } }
+    }
+
     /// Return the number of elements in the `ArrayVec`.
     pub const fn len(&self) -> usize {
         self.len as usize

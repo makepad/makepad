@@ -12,8 +12,8 @@ pub use adapters::{
 };
 pub use range::Step;
 pub use sources::{
-    empty, from_fn, once, once_with, repeat, repeat_n, repeat_with, successors, zip, Empty, FromFn, Once, OnceWith,
-    Repeat, RepeatN, RepeatWith, Successors,
+    chain, empty, from_fn, once, once_with, repeat, repeat_n, repeat_with, successors, zip, Empty, FromFn, Once,
+    OnceWith, Repeat, RepeatN, RepeatWith, Successors,
 };
 
 use crate::cmp::Ordering;

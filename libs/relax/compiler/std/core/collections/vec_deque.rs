@@ -223,6 +223,11 @@ impl<T> VecDeque<T> {
         unsafe { ptr::write(self.slot(self.len), value) };
         self.len += 1;
     }
+    pub fn push_back_mut(&mut self, value: T) -> &mut T {
+        self.push_back(value);
+        let idx = self.len - 1;
+        unsafe { &mut *self.slot(idx) }
+    }
     pub fn push_front(&mut self, value: T) {
         if self.len == self.capacity() {
             self.grow_for(1);
@@ -230,6 +235,10 @@ impl<T> VecDeque<T> {
         self.head = if self.head == 0 { self.capacity() - 1 } else { self.head - 1 };
         unsafe { ptr::write(self.buf.as_ptr().add(self.head), value) };
         self.len += 1;
+    }
+    pub fn push_front_mut(&mut self, value: T) -> &mut T {
+        self.push_front(value);
+        unsafe { &mut *self.buf.as_ptr().add(self.head) }
     }
     pub fn pop_front(&mut self) -> Option<T> {
         if self.len == 0 {
@@ -246,6 +255,22 @@ impl<T> VecDeque<T> {
         }
         self.len -= 1;
         Some(unsafe { ptr::read(self.slot(self.len)) })
+    }
+    pub fn pop_front_if<F: FnOnce(&mut T) -> bool>(&mut self, predicate: F) -> Option<T> {
+        let first = self.front_mut()?;
+        if predicate(first) {
+            self.pop_front()
+        } else {
+            None
+        }
+    }
+    pub fn pop_back_if<F: FnOnce(&mut T) -> bool>(&mut self, predicate: F) -> Option<T> {
+        let last = self.back_mut()?;
+        if predicate(last) {
+            self.pop_back()
+        } else {
+            None
+        }
     }
 
     pub fn swap(&mut self, i: usize, j: usize) {
