@@ -133,14 +133,22 @@ impl Layout {
         };
         Layout::from_size_align(new_size, self.align())
     }
+    // library/core/src/alloc/layout.rs repeat: n-1 padded elements, then the last one unpadded
     pub const fn repeat(&self, n: usize) -> Result<(Layout, usize), LayoutError> {
         let padded = self.pad_to_align();
-        let alloc_size = match padded.size.checked_mul(n) {
-            Some(s) => s,
-            None => return Err(LayoutError),
+        let result = if let Some(k) = n.checked_sub(1) {
+            let repeated = match padded.repeat_packed(k) {
+                Ok(r) => r,
+                Err(e) => return Err(e),
+            };
+            repeated.extend_packed(*self)
+        } else {
+            self.repeat_packed(0)
         };
-        let layout = Layout::from_size_align(alloc_size, self.align())?;
-        Ok((layout, padded.size))
+        match result {
+            Ok(l) => Ok((l, padded.size)),
+            Err(e) => Err(e),
+        }
     }
     pub const fn repeat_packed(&self, n: usize) -> Result<Layout, LayoutError> {
         let size = match self.size.checked_mul(n) {

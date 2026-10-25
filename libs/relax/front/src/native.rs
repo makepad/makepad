@@ -179,6 +179,11 @@ pub fn build(g: &Graph, seeds: &[usize], req: &Request) -> Result<Built, String>
 
     // ---- the key
     let mut h = fnv(req.triple.as_bytes(), 0xcbf29ce484222325);
+    for f in &flags {
+        h = fnv(f.as_bytes(), h);
+        h = fnv(b"\0", h);
+    }
+    h = fnv(req.package.as_bytes(), h);
     h = fnv(&lockfile(req.workspace), h);
     let cc_version = Command::new(cc()).arg("--version").output().map(|o| o.stdout).unwrap_or_default();
     h = fnv(cc_version.split(|&b| b == b'\n').next().unwrap_or(&[]), h);

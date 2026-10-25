@@ -3202,6 +3202,14 @@ pub unsafe fn _mm256_setr_epi32(
     from256_i32([e0, e1, e2, e3, e4, e5, e6, e7])
 }
 
+pub unsafe fn _mm256_setr_ps(e0: f32, e1: f32, e2: f32, e3: f32, e4: f32, e5: f32, e6: f32, e7: f32) -> __m256 {
+    ps_join(_mm_setr_ps(e0, e1, e2, e3), _mm_setr_ps(e4, e5, e6, e7))
+}
+
+pub unsafe fn _mm256_set_ps(e7: f32, e6: f32, e5: f32, e4: f32, e3: f32, e2: f32, e1: f32, e0: f32) -> __m256 {
+    _mm256_setr_ps(e0, e1, e2, e3, e4, e5, e6, e7)
+}
+
 pub unsafe fn _mm256_setr_m128(lo: __m128, hi: __m128) -> __m256 {
     ps_join(lo, hi)
 }

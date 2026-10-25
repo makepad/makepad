@@ -631,8 +631,8 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     if driver_options.verbose { crate::tui::track_for_verbose(); }
     // the boot progress line (tui.rs): a terminal run of a program, with nothing asking for plain output
     unsafe { std::env::remove_var("MAKEPAD_RUN_PROGRESS") };
-    // a test harness or silent child is a terminal program: no progress line, no inspect socket, no live session
-    let hosted = !entries.is_empty() || !export_names.is_empty() || harness || SILENT.load(Ordering::Relaxed);
+    // a test harness is a terminal program: no progress line, no inspect socket, no live session
+    let hosted = !entries.is_empty() || !export_names.is_empty() || harness;
     // the `unused_macros` lints need the macro uses of the whole load
     if check { relax_types::macros::uses::record(true); relax_front::program::set_record_import_uses(true); }
     if !check && !watch && session.is_none() && !hosted {

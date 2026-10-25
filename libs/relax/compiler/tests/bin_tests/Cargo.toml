@@ -1,0 +1,11 @@
+[package]
+name = "bt-app"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[[bin]]
+name = "nh"
+path = "src/bin/nh.rs"
+harness = false

@@ -229,7 +229,10 @@ impl<T: crate::marker::PointeeSized> NonNull<T> {
         self.addr()
     }
     pub fn with_addr(self, addr: crate::num::NonZeroUsize) -> Self {
-        NonNull { pointer: self.pointer.with_addr(addr.get()) }
+        // real core: `self.as_ptr().with_addr(addr.get())`, i.e. a wrapping byte offset (keeps provenance)
+        let p = self.pointer as *const u8;
+        let delta = (addr.get() as isize).wrapping_sub(p as usize as isize);
+        NonNull { pointer: p.wrapping_offset(delta) as *const T }
     }
     pub fn map_addr(self, f: impl FnOnce(crate::num::NonZeroUsize) -> crate::num::NonZeroUsize) -> Self {
         self.with_addr(f(self.addr()))

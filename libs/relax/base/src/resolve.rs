@@ -1779,7 +1779,12 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
                 if !bt.required_features.iter().all(|f| rn.features.contains(f)) {
                     continue;
                 }
+                // `harness = false` bins (no libtest main): only an explicit `--bin <name>` is an error;
+                // `--bins` runs the harness ones (test_targets lists the same set)
                 if !bt.harness {
+                    if names.is_empty() {
+                        continue;
+                    }
                     return Err(format!("bin target `{}` of package `{}` has `harness = false`: makepad test runs libtest-harness targets only", bt.name, rm.name));
                 }
                 roots.push(add((root, false), UKind::BinTest(bi), &mut units));

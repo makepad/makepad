@@ -188,7 +188,7 @@ pub mod detect {
             | bit(Feature::Vpclmulqdq, avx && e.ecx & (1 << 10) != 0)
             | bit(Feature::Cmpxchg16b, p.ecx & (1 << 13) != 0)
             | bit(Feature::Movbe, p.ecx & (1 << 22) != 0)
-            | bit(Feature::Xsave, p.ecx & (1 << 26) != 0)
+            | bit(Feature::Xsave, avx_state && p.ecx & (1 << 26) != 0)
             | bit(Feature::Fxsr, p.edx & (1 << 24) != 0)
             | bit(Feature::Adx, e.ebx & (1 << 19) != 0)
             | bit(Feature::Rdrand, p.ecx & (1 << 30) != 0)

@@ -5039,6 +5039,15 @@ impl<'a> Fcx<'a> {
                 }
                 let is_shift = matches!(op, BinOp::Shl | BinOp::Shr);
                 let tb = self.check_expr(*b, if is_shift { None } else { Some(ta) });
+                // a primitive place with a non-primitive right operand is an `<Op>Assign` call
+                // (`n /= NonZero<u32>`; rustc is_builtin_binop needs both sides primitive)
+                let sb0 = self.shallow(tb);
+                if matches!(self.tcx.tys.kind(sb0), TyKind::Adt(..) | TyKind::Param(_) | TyKind::Alias(..)) {
+                    self.cur_binop = e.0;
+                    if self.prim_lhs_op(*op, e, sa, sb0, lo, true).is_some() {
+                        return unit;
+                    }
+                }
                 // `sum += &i` with i still open and sum a literal: only core's primitive
                 // `OpAssign<&T> for T` impls take a reference here, so the referent is sum's type
                 let tb = match self.tcx.tys.kind(self.shallow(tb)).clone() {
@@ -6328,7 +6337,7 @@ impl<'a> Fcx<'a> {
                 // needs both sides primitive)
                 if matches!(self.tcx.tys.kind(sb0), TyKind::Adt(..) | TyKind::Param(_) | TyKind::Alias(..) | TyKind::Infer(_)) {
                     let sa = self.shallow(ta);
-                    if let Some(r) = self.prim_lhs_op(op, e, sa, sb0, lo) {
+                    if let Some(r) = self.prim_lhs_op(op, e, sa, sb0, lo, false) {
                         return r;
                     }
                 }
@@ -7215,17 +7224,29 @@ impl<'a> Fcx<'a> {
 
     /// `prim op adt`: the operator trait impl of the primitive for the right type. A literal
     /// left operand takes the type of the single primitive impl with that right type.
-    fn prim_lhs_op(&mut self, op: BinOp, e: ExprId, sa: TyId, sb: TyId, lo: u32) -> Option<TyId> {
-        let (tr, m) = match op {
-            BinOp::Add => ("Add", "add"),
-            BinOp::Sub => ("Sub", "sub"),
-            BinOp::Mul => ("Mul", "mul"),
-            BinOp::Div => ("Div", "div"),
-            BinOp::Rem => ("Rem", "rem"),
-            BinOp::BitAnd => ("BitAnd", "bitand"),
-            BinOp::BitOr => ("BitOr", "bitor"),
-            BinOp::BitXor => ("BitXor", "bitxor"),
-            _ => return None,
+    /// With `assign`, `prim op= adt` through the `<Op>Assign` impl (`n /= NonZero<u32>`).
+    fn prim_lhs_op(&mut self, op: BinOp, e: ExprId, sa: TyId, sb: TyId, lo: u32, assign: bool) -> Option<TyId> {
+        let (tr, m) = match (op, assign) {
+            (BinOp::Add, true) => ("AddAssign", "add_assign"),
+            (BinOp::Sub, true) => ("SubAssign", "sub_assign"),
+            (BinOp::Mul, true) => ("MulAssign", "mul_assign"),
+            (BinOp::Div, true) => ("DivAssign", "div_assign"),
+            (BinOp::Rem, true) => ("RemAssign", "rem_assign"),
+            (BinOp::BitAnd, true) => ("BitAndAssign", "bitand_assign"),
+            (BinOp::BitOr, true) => ("BitOrAssign", "bitor_assign"),
+            (BinOp::BitXor, true) => ("BitXorAssign", "bitxor_assign"),
+            (_, true) => return None,
+            (op, false) => match op {
+                BinOp::Add => ("Add", "add"),
+                BinOp::Sub => ("Sub", "sub"),
+                BinOp::Mul => ("Mul", "mul"),
+                BinOp::Div => ("Div", "div"),
+                BinOp::Rem => ("Rem", "rem"),
+                BinOp::BitAnd => ("BitAnd", "bitand"),
+                BinOp::BitOr => ("BitOr", "bitor"),
+                BinOp::BitXor => ("BitXor", "bitxor"),
+                _ => return None,
+            },
         };
         let td = self.lang_item(&["ops", tr])?;
         let db = self.infcx.deeply_resolve_ignoring_regions(sb);

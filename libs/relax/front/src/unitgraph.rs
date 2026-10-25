@@ -297,15 +297,14 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
                 let td_str = target_dir.display().to_string();
                 let exe_str = exe.display().to_string();
                 let sh_quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
-                let allow_c = if std::env::var("MAKEPAD_RUN_ALLOW_C").ok().as_deref() == Some("1") { " --allow-c" } else { "" };
                 for bin_name in &g.bins {
                     let wrapper = bin_dir.join(if cfg!(windows) { format!("{bin_name}.cmd") } else { bin_name.clone() });
                     let script = if cfg!(windows) {
-                        format!("@echo off\r\nset MAKEPAD_RUN_SELF_EXEC=\r\nset MAKEPAD_RUN_SELF_EXEC_SILENT_ADDED=\r\n\"{}\" run --quiet --silent --no-live{} --run-dir \"{}\" --workspace-dir \"{}\" \"{}\" --bin \"{}\" -- %*\r\n",
-                            exe_str, allow_c, td_str, pkg_dir, pkg_name, bin_name)
+                        format!("@echo off\r\nset MAKEPAD_RUN_SELF_EXEC=\r\nset MAKEPAD_RUN_SELF_EXEC_SILENT_ADDED=\r\n\"{}\" run --quiet --silent --no-live --run-dir \"{}\" --workspace-dir \"{}\" \"{}\" --bin \"{}\" -- %*\r\n",
+                            exe_str, td_str, pkg_dir, pkg_name, bin_name)
                     } else {
-                        format!("#!/bin/sh\nunset MAKEPAD_RUN_SELF_EXEC MAKEPAD_RUN_SELF_EXEC_SILENT_ADDED\nexec {} run --quiet --silent --no-live{} --run-dir {} --workspace-dir {} {} --bin {} -- \"$@\"\n",
-                            sh_quote(&exe_str), allow_c, sh_quote(&td_str), sh_quote(pkg_dir), sh_quote(pkg_name), sh_quote(bin_name))
+                        format!("#!/bin/sh\nunset MAKEPAD_RUN_SELF_EXEC MAKEPAD_RUN_SELF_EXEC_SILENT_ADDED\nexec {} run --quiet --silent --no-live --run-dir {} --workspace-dir {} {} --bin {} -- \"$@\"\n",
+                            sh_quote(&exe_str), sh_quote(&td_str), sh_quote(pkg_dir), sh_quote(pkg_name), sh_quote(bin_name))
                     };
                     if std::fs::read(&wrapper).ok().as_deref() != Some(script.as_bytes()) {
                         let tmp = bin_dir.join(format!(".{}.tmp{}", bin_name, std::process::id()));
