@@ -4,5 +4,6 @@
 pub mod hub_control;
 pub mod hub_glow;
 mod panel;
+pub mod tray_glyph;
 
 pub use panel::{HubHit, HubPanel};

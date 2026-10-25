@@ -4231,6 +4231,12 @@ impl App {
         let processes = self.processes();
         let pool = cx.task_pool();
         self.hub_link.tick(processes, host::now(), &pool);
+        // Off (its Quit): the bar keeps a dim slot to start it again, until its own tray is back.
+        let off = self.hub_link.is_off(processes);
+        let hub_tray = self.state.as_ref().is_some_and(|s| s.clients.iter().any(|(id, c)| c.service && self.trays.has_tray(*id as u64)));
+        if self.trays.set_hub_off(cx, off, hub_tray) {
+            self.trays_changed(cx);
+        }
         self.gpu_yield_report(cx);
         let play = self.state.as_ref().and_then(|s| {
             if s.screens.any_fullscreen() {

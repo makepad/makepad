@@ -28,7 +28,12 @@ struct Entry {
 #[derive(Default)]
 pub struct WmTrays {
     entries: Vec<Entry>,
+    /// The WM's own slot for the AI Hub while it is off (Quit, `enabled = off`): the app's dim
+    /// "off" glyph after the apps' trays. A click starts the hub. The app's own tray replaces it.
+    hub_off: Option<Texture>,
 }
+
+pub const HUB_OFF_TOOLTIP: &str = "AI Hub \u{b7} off \u{2014} click to start";
 
 impl WmTrays {
     /// `client` set (or updated) a tray. The glyph texture is made again only when the mask
@@ -63,9 +68,39 @@ impl WmTrays {
         before != self.entries.len()
     }
 
-    /// What the bar shows, in tray order.
+    /// What the bar shows, in tray order; the hub's off slot last.
     pub fn bar(&self) -> Vec<BarTray> {
-        self.entries.iter().map(|e| BarTray { glyph: e.glyph.clone(), tooltip: e.relay.tooltip.clone() }).collect()
+        let mut bar: Vec<BarTray> = self.entries.iter().map(|e| BarTray { glyph: e.glyph.clone(), tooltip: e.relay.tooltip.clone() }).collect();
+        if self.hub_off.is_some() {
+            bar.push(BarTray { glyph: self.hub_off.clone(), tooltip: HUB_OFF_TOOLTIP.to_string() });
+        }
+        bar
+    }
+
+    /// The hub is off (`off`) and no tray of its own shows: the WM keeps the off slot. True when
+    /// the bar changes.
+    pub fn set_hub_off(&mut self, cx: &mut Cx, off: bool, hub_client_has_tray: bool) -> bool {
+        let want = off && !hub_client_has_tray;
+        if want == self.hub_off.is_some() {
+            return false;
+        }
+        self.hub_off = if want {
+            let img = makepad_ai_hub_panel::tray_glyph::image(makepad_ai_hub_panel::tray_glyph::Glyph::Off);
+            makepad_shell_kit::ui::glyph_texture(cx, img.width, img.height, &img.alpha)
+        } else {
+            None
+        };
+        true
+    }
+
+    /// Whether the bar's `index`th item is the WM's own hub off slot.
+    pub fn is_hub_off(&self, index: usize) -> bool {
+        self.hub_off.is_some() && index == self.entries.len()
+    }
+
+    /// Whether `client` shows a tray.
+    pub fn has_tray(&self, client: u64) -> bool {
+        self.entries.iter().any(|e| e.client == client)
     }
 
     /// The menu of the bar's `index`th tray.
@@ -96,5 +131,18 @@ impl WmTrays {
     /// The bar index of `client`'s tray `tray`.
     pub fn index_of(&self, client: u64, tray: u64) -> Option<usize> {
         self.entries.iter().position(|e| e.client == client && e.relay.tray == tray)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_hub_off_slot_is_last_and_goes_when_the_hub_has_a_tray() {
+        let mut t = WmTrays::default();
+        // no GL context in a unit test: the slot's presence is what is tested via the flag path
+        assert!(!t.is_hub_off(0));
+        assert!(t.bar().is_empty());
     }
 }

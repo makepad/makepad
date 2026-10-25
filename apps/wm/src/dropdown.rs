@@ -52,6 +52,9 @@ impl App {
     /// A primary press on the bar's `index`th tray item (segment `seg`). A tray whose primary
     /// click is its menu opens it; a dropdown tray toggles the app's dropdown.
     pub(super) fn tray_press(&mut self, cx: &mut Cx, seg: usize, index: usize) {
+        if self.trays.is_hub_off(index) {
+            return self.start_hub_from_tray(cx);
+        }
         let Some((client, tray, dropdown)) = self.trays.at(index) else { return };
         log!("wm: primary press on tray item {index} (client {client}, tray {tray:x}, dropdown {dropdown})");
         if !dropdown {
@@ -78,11 +81,22 @@ impl App {
 
     /// A secondary press on the bar's `index`th tray item: its menu.
     pub(super) fn tray_menu_press(&mut self, cx: &mut Cx, seg: usize, index: usize) {
+        if self.trays.is_hub_off(index) {
+            return self.start_hub_from_tray(cx);
+        }
         if self.trays.at(index).is_none() {
             return;
         }
         self.dismiss_dropdown(cx, "its menu opened");
         self.toggle_shell_panel(cx, seg, BarModule::Tray(index));
+    }
+
+    /// The hub's off slot was pressed: `enabled = on` and start it (the launcher's start); the
+    /// slot goes and the app's own tray takes its place once it runs.
+    fn start_hub_from_tray(&mut self, cx: &mut Cx) {
+        self.dismiss_dropdown(cx, "the AI Hub off slot pressed");
+        self.close_shell_panel(cx);
+        self.launch_app(cx, crate::clients::HUB_SERVICE_APP);
     }
 
     fn tray_item_rect(&self, cx: &mut Cx, seg: usize, index: usize) -> Rect {

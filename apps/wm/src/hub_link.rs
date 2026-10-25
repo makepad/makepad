@@ -74,6 +74,23 @@ impl HubLink {
         None
     }
 
+    /// The hub is off in the node's settings (`enabled = off`, its Quit): the bar keeps a dim
+    /// slot whose click starts it. False for a WM that runs none of its own (hidden, in-process).
+    pub fn is_off(&self, processes: bool) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if !processes || std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() && std::env::var_os(makepad_ai_hub::node_conf::CONF_ENV).is_none() {
+                return false;
+            }
+            !makepad_ai_hub::node_conf::NodeConf::load_from(&makepad_ai_hub::node_conf::NodeConf::path()).enabled
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = processes;
+            false
+        }
+    }
+
     /// The person asked for the AI Hub from the launcher: after its Quit (or with the settings
     /// off) it is turned on again (`enabled = on` in `ai-hub.conf`) and starts; with it running
     /// there is nothing to do. False where this WM runs no hub of its own (a hidden or
