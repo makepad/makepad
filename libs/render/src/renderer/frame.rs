@@ -499,6 +499,7 @@ impl Renderer {
         // the ANALYTIC dome (Preetham + setting sun + stars, tinted by an
         // authored palette); authored gradients under a fixed hour keep
         // DrawSceneSky.
+        let owner = cx.enter_draw_name("sky dome");
         if let Some(sky) = world.sky.as_ref().filter(|_| shows_environment) {
             let mut transform = Mat4f::identity();
             transform.v[12] = camera_pos.x;
@@ -581,6 +582,7 @@ impl Renderer {
             }
             stats.sky_drawn = true;
         }
+        cx.exit_draw_label(owner);
 
         // 2. The smooth terrain mesh, in CHUNK_SIZE tiles so the hills
         // behind the camera cost nothing. One draw item per visible tile —

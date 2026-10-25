@@ -1228,7 +1228,7 @@ impl Metal {
                 s.stale();
                 continue;
             };
-            if ablate.as_deref().is_some_and(|t| gpu_prof::shader_name(s, &pipe.desc) == t) {
+            if ablate.as_deref().is_some_and(|t| gpu_prof::ablates(s, &pipe.desc, d.owner, t)) {
                 continue;
             }
             let pso = match pipe.state.select(&self.dev, &formats, d.flags & Draw::BLEND != 0) {

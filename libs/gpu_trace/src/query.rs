@@ -62,7 +62,7 @@ pub fn json_str(s: &str) -> String {
 }
 
 pub const COMMANDS: &[(&str, &str, &str)] = &[
-    ("gpu prof start", "[s=60] [split=16] [hz=<display Hz>] [ablate=<shader> every=8]", "record every session's frames (ring of s seconds); every split-th frame cuts its passes per shader, for shader shares only (0: none; split encoders lose hidden-surface removal, so a shader hidden under opaque draws reads too high: confirm with ablate=)"),
+    ("gpu prof start", "[s=60] [split=16] [hz=<display Hz>] [ablate=<shader>|owner:<a>+<b> every=8]", "record every session's frames (ring of s seconds); every split-th frame cuts its passes per shader, for shader shares only (0: none; split encoders lose hidden-surface removal, so a shader hidden under opaque draws reads too high: confirm with ablate=)"),
     ("gpu prof stop", "[save=<path>] [sid=]", "stop; save= writes the busiest (or sid=) session's .mkgp"),
     ("gpu prof status", "", "recording state, sessions and frames held, what the device can sample"),
     ("gpu prof shader", "<name> [save=<path>]", "a shader's cost hints and (MAKEPAD_GPU_PROF=1 at launch) its generated source"),
@@ -1028,7 +1028,7 @@ fn ablate(rec: &Recording) -> Answer {
     shaders.sort();
     shaders.dedup();
     if shaders.is_empty() {
-        a.findings.push("no ablation frames: `gpu prof start ablate=<shader> [every=8]` (names from `gpu prof top by=shader`)".into());
+        a.findings.push("no ablation frames: `gpu prof start ablate=<shader> [every=8]` (names from `gpu prof top by=shader`, or owner:<a>+<b> for the draws whose owner contains each part)".into());
         return a;
     }
     for sh in shaders {

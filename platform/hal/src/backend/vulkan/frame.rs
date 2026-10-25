@@ -432,7 +432,7 @@ impl Vulkan {
             s.stats.draws += 1;
             if d.index[1] == 0 || d.inst.count == 0 { continue; }
             if let Some(t) = ablate.as_deref() {
-                if self.pipe.get(&(s.id, d.pipeline.index)).is_some_and(|p| gpu_prof::shader_name(s, &p.desc) == t) { continue; }
+                if self.pipe.get(&(s.id, d.pipeline.index)).is_some_and(|p| gpu_prof::ablates(s, &p.desc, d.owner, t)) { continue; }
             }
             match self.prepare(s, pass, d, view.arena, pick, render_pass.clone(), &attachments, batch, now, deps) {
                 Ok(Some(p)) => prepared.push((d, p)),

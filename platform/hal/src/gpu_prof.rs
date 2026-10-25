@@ -808,9 +808,19 @@ impl Default for StartOptions {
     }
 }
 
-/// The shader the current recording ablates.
+/// What the current recording ablates: a shader name, or `owner:<a>+<b>` (see [`ablates`]).
 pub fn ablate_target() -> Option<String> {
     lock().as_ref().and_then(|s| s.ablate.clone())
+}
+
+/// Whether an ablation frame leaves out a draw of pipeline `desc` noted for `owner`. The target
+/// is a shader name (as `gpu prof top by=shader` prints it), or `owner:<a>+<b>...`: every draw
+/// whose owner (`gpu prof top by=owner`) contains each `+`-separated part.
+pub fn ablates(s: &Session, desc: &PipelineDesc, owner: StrId, target: &str) -> bool {
+    match target.strip_prefix("owner:") {
+        Some(parts) => s.string(owner).is_some_and(|o| !o.is_empty() && parts.split('+').all(|p| o.contains(p))),
+        None => shader_name(s, desc) == target,
+    }
 }
 
 pub fn start(o: StartOptions) {
@@ -914,7 +924,8 @@ fn answer(req: &makepad_remote::Req) -> Result<Answer, String> {
             };
             let (keep, split) = (o.keep_s, o.split_every);
             if let Some(sh) = &o.ablate {
-                a.lines.push(format!("ablation: every {}th frame leaves out the draws of shader {sh} (those frames lack it on screen)", o.ablate_every.max(2)));
+                let what = match sh.strip_prefix("owner:") { Some(o) => format!("whose owner contains {}", o.replace('+', " and ")), None => format!("of shader {sh}") };
+                a.lines.push(format!("ablation: every {}th frame leaves out the draws {what} (those frames lack them on screen)", o.ablate_every.max(2)));
             }
             start(o);
             a.lines.push(format!("recording: ring {keep} s, split frame every {split}"));

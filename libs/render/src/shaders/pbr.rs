@@ -236,8 +236,6 @@ script_mod! {
                     let t2 = self.tex.sample_repeat(vec2(wp.x * 0.173 + 0.31, wp.z * 0.173 - 0.47))
                     tex = vec4(mix(tex.xyz, t2.xyz, 0.5 * far * bw.y), tex.w)
                 }
-                let drift = self.tn_noise(self.v_csm.xz * 0.017) * 0.65 + self.tn_noise(self.v_csm.xz * 0.061) * 0.35
-                tex = vec4(tex.xyz * (0.86 + 0.28 * drift), tex.w)
             } else {
                 tex = self.base_texel()
             }
@@ -262,6 +260,13 @@ script_mod! {
             }
             if self.surface_on<0.5 && tex.w<0.5 {self.clip()}
             if self.alpha_mode>0.5 && self.alpha_mode<1.5 && alpha<self.alpha_cutoff {self.clip()}
+            if self.triplanar != 0.0 {
+                // The brightness drift over ~60 m (tex.w, which the cuts
+                // above read, is untouched): after the cuts, so a splat
+                // overlay's discarded pixels skip its two noise reads.
+                let drift = self.tn_noise(self.v_csm.xz * 0.017) * 0.65 + self.tn_noise(self.v_csm.xz * 0.061) * 0.35
+                tex = vec4(tex.xyz * (0.86 + 0.28 * drift), tex.w)
+            }
             let base = self.to_scene(vec3(tex.x, tex.y, tex.z))
             // `surface` is the game.material hook (DrawSceneCustom overrides
             // it; stock PBR keeps the identity). A custom surface that cuts
