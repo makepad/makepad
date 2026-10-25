@@ -126,11 +126,9 @@ pub fn runtime_body(source_root: &Path, stripped: &[&str]) -> Result<String, Str
     Ok(js)
 }
 
-/// The runtime and the start of a page whose ONE `<wasm_name>.wasm` is
-/// deflated (zlib; `wasm-export`): fetched once and inflated by the
-/// browser's `DecompressionStream("deflate")`, unless the host already
-/// decoded it (the bytes begin with the wasm magic). The rest of the start
-/// is [`runtime_js`]'s.
+/// The runtime and the start of a page whose ONE `<wasm_name>.wasm` ships raw
+/// (`wasm-export`; the host compresses it on the wire): fetched once. The rest
+/// of the start is [`runtime_js`]'s.
 pub fn one_wasm_js(source_root: &Path, stripped: &[&str], wasm_name: &str) -> Result<String, String> {
     let from = START_JS.find(FETCH_START).ok_or("web_pack: START_JS lost its fetch")?;
     let to = START_JS.find(APP_START).ok_or("web_pack: START_JS lost start_app")?;
@@ -139,7 +137,7 @@ pub fn one_wasm_js(source_root: &Path, stripped: &[&str], wasm_name: &str) -> Re
     let start = start.replace("makepad_crash_reporter.set_wasm(wasm);", "if (wasm._has_thread_support) throw new Error(\"This page requires an unshared wasm memory\");\n    makepad_crash_reporter.set_wasm(wasm);");
     let mut stripped = stripped.to_vec();
     stripped.push("threads");
-    let mut js = format!("// {wasm_name}.js: Makepad's web runtime and the page's start (one deflated wasm).\n");
+    let mut js = format!("// {wasm_name}.js: Makepad's web runtime and the page's start (one wasm).\n");
     js.push_str(&runtime_body(source_root, &stripped)?);
     js.push_str(&start.replace("__WASM__", wasm_name));
     Ok(js)
@@ -218,14 +216,13 @@ pub fn check_exports(js: &str, wasm: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-const ONE_WASM_FETCH_JS: &str = r#"// The wasm's bytes: __WASM__.wasm, deflated (zlib), or already decoded by the host.
+const ONE_WASM_FETCH_JS: &str = r#"// The wasm's bytes: __WASM__.wasm, raw (the host compresses it on the wire).
 async function pack_fetch_wasm(sizes, on_progress) {
     const response = await fetch("__WASM__.wasm");
     if (!response.ok) throw new Error(`__WASM__.wasm: ${response.status}`);
-    const bytes = await pack_read(response, got => on_progress(got / (sizes.deflated || sizes.raw)));
-    if (pack_is_wasm(bytes)) return bytes;
-    const inflated = new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate")));
-    return new Uint8Array(await inflated.arrayBuffer());
+    const bytes = await pack_read(response, got => on_progress(got / sizes.raw));
+    if (!pack_is_wasm(bytes)) throw new Error("__WASM__.wasm: not a wasm module");
+    return bytes;
 }
 
 "#;
@@ -348,7 +345,7 @@ mod tests {
     fn the_one_wasm_start_fetches_one_file() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let js = one_wasm_js(&root, &SECTIONS, "app").unwrap();
-        assert!(js.contains("export async function start_app") && js.contains("fetch(\"app.wasm\")") && js.contains("DecompressionStream(\"deflate\")"));
+        assert!(js.contains("export async function start_app") && js.contains("fetch(\"app.wasm\")") && !js.contains("DecompressionStream(\"deflate\")"));
         assert!(!js.contains("app.wasm.br"));
     }
 

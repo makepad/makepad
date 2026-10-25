@@ -211,23 +211,32 @@ pub struct InlineLimits {
     pub hot_insts: usize,
     /// Original caller growth ceiling, shared by both O3 rounds.
     pub growth_limit: Option<usize>,
+    /// Size-first (an AOT build that ships its code, the wasm export): a site that is neither
+    /// hot (frequency below HOT_FREQ) nor in a loop takes only callees that do not grow the
+    /// caller (no bigger than the call, or within the free size) and single-caller bodies --
+    /// LLVM's cold-callsite threshold with `minsize` (-Oz) on cold code
+    pub cold_tiny: bool,
+    /// A whole-program build (a wasm export; rustc's fat LTO): a cross-crate callee inlines as a
+    /// local one, and a single caller takes its callee's body whatever its size (LLVM's last call
+    /// to a local function: the body moves, nothing is duplicated)
+    pub lto: bool,
 }
 
 impl InlineLimits {
     /// O1 ("obviously inline"); MAKEPAD_RUN_INLINE_LEAF=insts,blocks overrides the leaf rule
     pub fn tier0(options: &relax_session::Options) -> InlineLimits {
         let (leaf_insts, leaf_blocks) = leaf_budget(options);
-        InlineLimits { budget: INLINE_BUDGET, leaf_insts, leaf_blocks, hint_insts: INLINE_HINT_INSTS, chain_insts: INLINE_CHAIN_INSTS, always_insts: 200, free_any: false, ordered: false, hot_insts: 0, growth_limit: None }
+        InlineLimits { budget: INLINE_BUDGET, leaf_insts, leaf_blocks, hint_insts: INLINE_HINT_INSTS, chain_insts: INLINE_CHAIN_INSTS, always_insts: 200, free_any: false, ordered: false, hot_insts: 0, growth_limit: None, cold_tiny: false, lto: false }
     }
     /// O1 (startup code, no opt pipeline): only Relax core callees whose optimised
     /// body is about as small as the call that reaches them (accessors, index, len, next, the
     /// checked/wrapping integer helpers); jit.rs base_inline_wanted picks the candidates
     pub fn baseline() -> InlineLimits {
-        InlineLimits { budget: 400, leaf_insts: 16, leaf_blocks: 3, hint_insts: 24, chain_insts: 0, always_insts: 24, free_any: true, ordered: false, hot_insts: 0, growth_limit: None }
+        InlineLimits { budget: 400, leaf_insts: 16, leaf_blocks: 3, hint_insts: 24, chain_insts: 0, always_insts: 24, free_any: true, ordered: false, hot_insts: 0, growth_limit: None, cold_tiny: false, lto: false }
     }
     /// O3 (hot functions): rustc --release-like reach
     pub fn tier1() -> InlineLimits {
-        InlineLimits { budget: 4000, leaf_insts: 150, leaf_blocks: 24, hint_insts: 250, chain_insts: 300, always_insts: 600, free_any: true, ordered: true, hot_insts: 80, growth_limit: None }
+        InlineLimits { budget: 4000, leaf_insts: 150, leaf_blocks: 24, hint_insts: 250, chain_insts: 300, always_insts: 600, free_any: true, ordered: true, hot_insts: 80, growth_limit: None, cold_tiny: false, lto: false }
     }
 }
 
@@ -406,6 +415,8 @@ pub const WHY_GROWTH: u8 = 7;
 pub const WHY_BUDGET: u8 = 8;
 /// an inspect experiment forbade it (`-inl@<slot>`)
 pub const WHY_FORBIDDEN: u8 = 9;
+/// a size-first build's cold site (`InlineLimits::cold_tiny`) takes only callees that do not grow it
+pub const WHY_COLD_SITE: u8 = 10;
 
 impl SiteRemark {
     /// The refusal in words, with its numbers.
@@ -425,6 +436,7 @@ impl SiteRemark {
             WHY_GROWTH => format!("growth ceiling: the caller would grow to {} insts, ceiling {} (callee {} insts)", self.a, self.b, self.size),
             WHY_BUDGET => format!("inline budget spent: callee costs {} insts, {} left", self.a, self.b),
             WHY_FORBIDDEN => "forbidden by an inspect experiment (noinline)".into(),
+            WHY_COLD_SITE => format!("size-first build, site neither hot nor in a loop: callee {} insts grows the caller", self.size),
             _ => "kept a call".into(),
         }
     }
@@ -615,7 +627,10 @@ fn site_rule(options: &relax_session::Options, callee: &Func, id: u32, nargs: us
         || !callee.blocks.iter().any(|b| matches!(b.term, Term::Ret(_))) {
         return None;
     }
-    if attrs & ATTR_XCRATE != 0 {
+    if single && lim.lto && attrs & ATTR_COLD == 0 {
+        return Some(RULE_SINGLE);
+    }
+    if attrs & ATTR_XCRATE != 0 && !lim.lto {
         let (n, leaf, _) = callee_shape(callee, id);
         if n <= nargs + nrets + 2 && callee.blocks.len() <= 2 {
             return Some(RULE_TINY);
@@ -866,15 +881,16 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
             let growth = size.saturating_add(args.len()).saturating_add(
                 shape.blocks.iter().filter(|b| matches!(b.term, Term::Ret(_))).count().saturating_mul(rets.len())
             ).saturating_sub(1);
+            let cold_site = lim.cold_tiny && !priorities[bi].1 && !loop_sites[bi] && !tiny && !no_growth && rule != Some(RULE_SINGLE);
             let refused = matches!(f.blocks[bi].term, Term::Unreachable | Term::Resume)
-                || ancestry[bi].contains(&id) || rule.is_none()
+                || ancestry[bi].contains(&id) || rule.is_none() || cold_site
                 || attrs & ATTR_COLD != 0 && !free && rule != Some(RULE_COST)
                 || attrs & ATTR_COLD_SRC != 0 && !free
                 || callee.params.len() != args.len() || callee.rets.len() != rets.len()
                 || match rule.unwrap() {
                     _ if no_growth => false,
                     RULE_COST => size > free_budget || !tiny && priced.saturating_add(growth) > growth_limit,
-                    RULE_SINGLE => priced.saturating_add(growth) > growth_limit,
+                    RULE_SINGLE => !lim.lto && priced.saturating_add(growth) > growth_limit,
                     _ => !free && (cost > budget || !tiny && priced > growth_limit),
                 };
             if !refused {
@@ -891,6 +907,8 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
                     mk(WHY_COLD_ATTR, 0, 0)
                 } else if callee.params.len() != args.len() || callee.rets.len() != rets.len() {
                     mk(WHY_ARITY, 0, 0)
+                } else if cold_site {
+                    mk(WHY_COLD_SITE, 0, 0)
                 } else {
                     match rule.unwrap() {
                         RULE_COST if size > free_budget => mk(WHY_FREE_SPENT, free_budget, 0),
@@ -5980,6 +5998,30 @@ mod inline_priority_tests {
         let mut lim = InlineLimits::tier1();
         lim.budget = 25; // 30 - (one argument + one return + 3)
         assert_eq!(inline_calls(options, &mut f, 0, &get, &|_| false, &lim).len(), 1);
+        f.verify().unwrap();
+    }
+
+    #[test]
+    fn size_first_cold_sites_take_only_callees_that_do_not_grow_them() {
+        let options = &relax_session::Options::default();
+        let big = callee(30);
+        let small = callee(3);
+        // block 0 runs once and is not in a loop; block 1 is the loop
+        let freqs = [0.01, 1.0, 0.0];
+        let mut lim = InlineLimits::tier1();
+        let get = |_: u32| Some((&big as *const Func, 0));
+        let mut f = caller();
+        assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &|_, _| false, &|_| false, &lim, Some(&freqs), None).len(), 2);
+        lim.cold_tiny = true;
+        let mut f = caller();
+        let mut stats = InlineStats::default();
+        assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &|_, _| false, &|_| false, &lim, Some(&freqs), Some(&mut stats)), vec![(2, RULE_SMALL_LEAF)]);
+        assert!(stats.remarks.iter().any(|r| r.callee == 1 && r.why == WHY_COLD_SITE));
+        f.verify().unwrap();
+        // a callee within the free size still goes in at the cold site
+        let get = |id: u32| Some((if id == 1 { &small } else { &big } as *const Func, 0));
+        let mut f = caller();
+        assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &|_, _| false, &|_| false, &lim, Some(&freqs), None).len(), 2);
         f.verify().unwrap();
     }
 

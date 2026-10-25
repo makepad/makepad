@@ -212,6 +212,61 @@ fn switch_lowering_matches_the_compare_chain() {
     assert!(tables > 10, "only {tables} jump tables");
 }
 
+/// A match on 64-bit hashes (`LiveId` constants): each test block holds the constant's Iconst
+/// (no immediate fits it) and an ICmp of the value with it -- the chain is a switch too, and
+/// gives the reference's results.
+#[test]
+fn switch_lowering_takes_tests_against_register_constants() {
+    let options = relax_session::Options::default();
+    let mut r = Rng(0x51de_c0de_1234_5677);
+    for case in 0..200 {
+        let n = 3 + r.below(60) as usize;
+        let ks: Vec<i64> = (0..n).map(|_| r.next() as i64).collect();
+        let mut f = Func::new("swk".into(), 0);
+        let x = f.vreg(Cls::I);
+        f.params = vec![x];
+        f.rets = vec![Cls::I];
+        let entry = f.block();
+        let ret_block = |f: &mut Func, v: i64| -> u32 {
+            let b = f.block();
+            let r = f.vreg(Cls::I);
+            f.blocks[b as usize].insts.push(Inst::Iconst(r, v));
+            f.blocks[b as usize].pos.push(0);
+            f.blocks[b as usize].term = Term::Ret(vec![r]);
+            b
+        };
+        let default = ret_block(&mut f, 7);
+        let targets: Vec<u32> = (0..n).map(|i| ret_block(&mut f, 100 + i as i64)).collect();
+        let blocks: Vec<u32> = (0..n).map(|i| if i == 0 { entry } else { f.block() }).collect();
+        for i in 0..n {
+            let (k, d) = (f.vreg(Cls::I), f.vreg(Cls::I));
+            let b = blocks[i] as usize;
+            // the constant on either side of the compare
+            let cmp = if case % 2 == 0 { Inst::ICmp(Cond::Eq, false, d, x, k) } else { Inst::ICmp(Cond::Eq, false, d, k, x) };
+            f.blocks[b].insts.extend([Inst::Iconst(k, ks[i]), cmp]);
+            f.blocks[b].pos.extend([0, 0]);
+            f.blocks[b].term = Term::Branch(d, targets[i], if i + 1 < n { blocks[i + 1] } else { default });
+        }
+        f.verify().unwrap();
+        let (g, _) = switch::lower_switches(&options, &f, switch::MIN_TABLE_CLUSTERS).expect("a chain of register-constant tests is a switch");
+        g.verify().unwrap();
+        let mut xs: Vec<u64> = vec![0, 1, u64::MAX, i64::MIN as u64];
+        for &k in &ks {
+            for d in -2i64..=2 {
+                xs.push(k.wrapping_add(d) as u64);
+            }
+        }
+        let first = |x: u64| ks.iter().position(|k| *k as u64 == x).map_or(7, |i| 100 + i as u64);
+        for regs in [false, true] {
+            let code = Code::new(&compile(&options, &f, regs)).unwrap();
+            let run: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(code.ptr()) };
+            for &x in &xs {
+                assert_eq!(run(x), first(x), "case {case} regs {regs} x {}", x as i64);
+            }
+        }
+    }
+}
+
 /// The same chains inside a loop with many values live around it (spills, spill windows, loop
 /// splitting in the thorough allocation): sum over an array of what the chain selects.
 fn build_loop(arms: &[Vec<Vec<T>>], live: usize) -> Func {

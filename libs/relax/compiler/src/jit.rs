@@ -8511,13 +8511,17 @@ pub unsafe fn export_rir(up: *mut Unit, id: u32, optimized: bool) -> Result<rela
         r?;
     }
     // MAKEPAD_RUN_WASM_EXPORT_O3: which shipping bodies take the JIT's O3 pipeline: `hot`
-    // (default: the slots the trace ran at O3), `all`, `0` (none: normal O1 only)
+    // (default: the slots the trace ran at O3 and the O3 crates' own code, if the run's CPU
+    // samples put them in the hot set: wasm_export::sampled_hot), `all`, `0` (none: normal O1 only)
     let o3 = optimized && match crate::wasm_export::o3_policy() {
         crate::wasm_export::O3Policy::Off => false,
         crate::wasm_export::O3Policy::All => true,
-        crate::wasm_export::O3Policy::Hot => trace_o3(&*up, id) || crate::wasm_export::o3_crate(&*up, id),
+        crate::wasm_export::O3Policy::Hot => (trace_o3(&*up, id) || crate::wasm_export::o3_crate(&*up, id)) && crate::wasm_export::sampled_hot(id),
     };
     let o3_body = if o3 { export_o3_rir(up, id) } else { None };
+    if o3_body.is_some() {
+        crate::wasm_export::note_o3_body(id);
+    }
     let u = &*up;
     let session = u.prog.session.clone();
     let rir = u.fns[id as usize].rir.clone().ok_or("no RIR for this slot")?;
@@ -10995,13 +10999,16 @@ fn opt_pipeline_inner(options: &crate::options::Options, func: &mut relax_backen
             // link per forwarding, and the drop-flag tests the moves left behind fold only once
             // the copies sit in one block (Score: SamplerBackend::new kept its 108 KB value in a
             // slot, copied into the result buffer, on the CoreAudio IO thread's 512 KB stack)
+            // A wasm export's shipping body does this for every aggregate: each copy through a
+            // temporary is code (a memory.copy) in the module, at any size
+            let dests_min = if export_full() { EXPORT_DEST_SLOT } else { BIG_SLOT };
             for _ in 0..3 {
-                if !(cfg.sroa && func.slots.iter().any(|s| s.size >= BIG_SLOT)) {
+                if !(cfg.sroa && func.slots.iter().any(|s| s.size >= dests_min)) {
                     break;
                 }
                 let mut ch = relax_codegen::opt::forward_slot_dests(func);
                 verify_pass(func, "forward_slot_dests");
-                ch |= relax_codegen::opt::forward_slot_dests_x(options, func, BIG_SLOT);
+                ch |= relax_codegen::opt::forward_slot_dests_x(options, func, dests_min);
                 verify_pass(func, "forward_slot_dests_x");
                 if !full {
                     ch |= relax_codegen::opt::forward_slot_copies(func);
@@ -11082,6 +11089,9 @@ fn opt_pipeline_inner(options: &crate::options::Options, func: &mut relax_backen
 
 /// slots from this size up make O1 forward big copies too
 const BIG_SLOT: u32 = 4096;
+/// The smallest slot a wasm export's shipping O1 builds in its copy's destination
+/// (forward_slot_dests_x): a whole copy of one is a `memory.copy` in the module
+const EXPORT_DEST_SLOT: u32 = 8;
 
 /// MAKEPAD_RUN_VERIFY_PASSES=1: verify the RIR after every pass (names the pass that broke it).
 /// Fatal: a broken function panics with the pass's name (an ICE for the build: the body is
@@ -12618,6 +12628,9 @@ impl<'a> InlineBodies<'a> {
 /// with the callees that round inlined.
 fn tier1_simplify(options: &crate::options::Options, func: &mut relax_backend::rir::Func, id: u32, name: &str, get: &dyn Fn(u32) -> Option<(*const relax_backend::rir::Func, u8)>, prepared: &dyn Fn(u32) -> Option<(*const relax_backend::rir::Func, *const relax_backend::rir::Func)>, single: &dyn Fn(u32, u32) -> bool, ro: Option<relax_backend::passes::RoReader>, cfg: &relax_codegen::opt::OptCfg, nounwind: &dyn Fn(u32) -> bool, frequencies: &mut dyn FnMut(usize, &relax_backend::rir::Func) -> Option<Vec<f32>>, mut inline_stats: Option<&mut relax_codegen::opt::InlineStats>, inlined_only: Option<&mut (relax_backend::rir::Func, Vec<(u32, usize)>)>, growth_cap: Option<usize>, hot: bool) -> Vec<(u32, usize)> {
     let mut limits = relax_codegen::opt::InlineLimits::tier1_for(func, hot);
+    // a wasm export's O3 body ships: size-first at its cold sites
+    limits.cold_tiny = export_o3_mode() && crate::wasm_export::o3_cold_tiny();
+    limits.lto = export_o3_mode() && crate::wasm_export::o3_lto();
     if let (Some(cap), Some(g)) = (growth_cap, limits.growth_limit.as_mut()) {
         *g = (*g).min(cap.max(relax_codegen::opt::inst_count(func)));
     }
@@ -12666,7 +12679,7 @@ fn tier1_simplify(options: &crate::options::Options, func: &mut relax_backend::r
             relax_backend::passes::simplify(options, func, ro, cfg.imm, cfg.cse);
             // simplify merges the blocks a copy and its reads were split over: forward again
             for _ in 0..2 {
-                if !(cfg.sroa && (relax_codegen::opt::forward_const_slots(func, ro) | relax_codegen::opt::forward_slot_copies(func) | relax_codegen::opt::forward_slot_dests(func) | relax_codegen::opt::forward_slot_dests_x(options, func, BIG_SLOT) | relax_codegen::opt::forward_slot_loads(func))) {
+                if !(cfg.sroa && (relax_codegen::opt::forward_const_slots(func, ro) | relax_codegen::opt::forward_slot_copies(func) | relax_codegen::opt::forward_slot_dests(func) | relax_codegen::opt::forward_slot_dests_x(options, func, if export_o3_mode() { EXPORT_DEST_SLOT } else { BIG_SLOT }) | relax_codegen::opt::forward_slot_loads(func))) {
                     break;
                 }
                 relax_backend::passes::simplify(options, func, ro, cfg.imm, false);
@@ -12745,9 +12758,15 @@ static EXEC_HI: AtomicU64 = AtomicU64::new(0);
 static SAMPLED: relax_session::sync::Mutex<Vec<(u64, u32, os::sample::Handle)>> = relax_session::sync::Mutex::new(Vec::new());
 static SAMPLER: std::sync::Once = std::sync::Once::new();
 
+/// The CPU sampler runs for a profile (MAKEPAD_RUN_PROFILE) and for a wasm export's run (its
+/// samples pick the shipping O3 set: wasm_export::sampled_hot).
+fn sampling_on() -> bool {
+    profile_path().is_some() || crate::wasm_export::enabled()
+}
+
 fn sampler_enter(exec_base: u64, exec_size: u64) {
     progress_start();
-    if profile_path().is_none() {
+    if !sampling_on() {
         return;
     }
     EXEC_LO.store(exec_base, Ordering::Relaxed);
@@ -12772,7 +12791,7 @@ fn sampler_enter(exec_base: u64, exec_size: u64) {
 }
 
 fn sampler_leave() {
-    if profile_path().is_none() {
+    if !sampling_on() {
         return;
     }
     let me = os::thread::current();
@@ -13243,12 +13262,22 @@ fn sampler_thread() {
             continue;
         }
         last_batch = std::time::Instant::now();
-        if profile_path().is_some() && !selfs.is_empty() && profile_started() && !TIER_STOP.load(Ordering::SeqCst) {
+        let profiling = profile_path().is_some() && profile_started();
+        // a wasm export's run: every slot's CPU samples decide which shipping bodies take O3
+        // (wasm_export::sampled_hot)
+        let exporting = crate::wasm_export::enabled();
+        if (profiling || exporting) && !selfs.is_empty() && !TIER_STOP.load(Ordering::SeqCst) {
             owner::publish(|| {
                 let _k = crate::zone_alloc::kept();
                 let up = unsafe { UNIT };
                 if !up.is_null() {
                     let u = unsafe { &*up };
+                    if exporting {
+                        crate::wasm_export::note_samples(u, selfs.iter().filter_map(|s| u.find_fn(s.pc).map(|id| (id, s.weight as u64))));
+                    }
+                    if !profiling {
+                        return;
+                    }
                     if field_prof_on() {
                         let mut fh = FIELD_HIST.lock().unwrap();
                         let fh = fh.get_or_insert_with(std::collections::HashMap::new);

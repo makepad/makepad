@@ -51,6 +51,20 @@ pub fn sleb(out: &mut Vec<u8>, mut v: i64) {
     }
 }
 
+/// The bytes of `v` as an unsigned LEB128.
+fn uleb_len(v: u64) -> usize {
+    let mut out = Vec::new();
+    uleb(&mut out, v);
+    out.len()
+}
+
+/// The bytes of `v` as a signed LEB128.
+fn sleb_len(v: i64) -> i64 {
+    let mut out = Vec::new();
+    sleb(&mut out, v);
+    out.len() as i64
+}
+
 fn name(out: &mut Vec<u8>, s: &str) {
     uleb(out, s.len() as u64);
     out.extend_from_slice(s.as_bytes());
@@ -216,7 +230,7 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { memory64: false, shared_max_pages: None, stack_size: 1 << 20, heap_pages: 16, untraced_import: true, names: false, export_tag: true, exnref: false, data_first: false, tee: true, remat: true, remat_slots: false, sp0: false, panic_abort: false, order_by_name: true, fold_identical: true, order_by_bytes: true }
+        Options { memory64: false, shared_max_pages: None, stack_size: 1 << 20, heap_pages: 16, untraced_import: true, names: false, export_tag: true, exnref: false, data_first: false, tee: true, remat: true, remat_slots: true, sp0: false, panic_abort: false, order_by_name: true, fold_identical: true, order_by_bytes: true }
     }
 }
 
@@ -449,7 +463,7 @@ impl<'a> Module<'a> {
     /// rounds: a parameter's uses as a narrow argument of another function count from the second.
     fn signatures(&self, funcs: &[(u32, &Func)], body_of: &dyn Fn(usize) -> &'a Func, link: &dyn Link) -> Vec<Sig> {
         let n = funcs.len();
-        let mut sigs: Vec<Sig> = funcs.iter().map(|(_, f)| Sig { params: vec![0; f.params.len()], ret: 0 }).collect();
+        let mut sigs: Vec<Sig> = funcs.iter().map(|(_, f)| Sig { params: vec![0; f.params.len()], ret: vec![0; f.rets.len()] }).collect();
         if self.opts.memory64 {
             return sigs;
         }
@@ -479,36 +493,58 @@ impl<'a> Module<'a> {
                 }
             }
         }
-        for _round in 0..2 {
+        // per function, per parameter: what every direct call passes (the meet of the arguments'
+        // kinds over the module's call sites, from the previous round's kinds; UNSET: no call
+        // seen). A parameter every caller passes zero- or sign-extended from its low 32 bits (a
+        // usize, u32 or i32 of a wasm32 program: their values are always extended) is that kind
+        // in the callee -- an i32 -- as rustc's wasm32 ABI passes them.
+        const UNSET: u8 = 0xFF;
+        let mut passed: Vec<Vec<u8>> = funcs.iter().map(|(_, f)| vec![UNSET; f.params.len()]).collect();
+        for _round in 0..4 {
             let prev = sigs.clone();
             let csig = |id: u32| self.fn_ix.get(&id).map(|&u| &prev[u as usize]);
+            let mut next: Vec<Vec<u8>> = funcs.iter().map(|(_, f)| vec![UNSET; f.params.len()]).collect();
             for u in 0..n {
-                if fixed[u] {
-                    continue;
-                }
                 let f = body_of(u);
-                let seeds: Vec<u8> = f.params.iter().map(|p| {
-                    if f.vregs[p.0 as usize] != Cls::I {
+                let seeds: Vec<u8> = f.params.iter().enumerate().map(|(i, p)| {
+                    if fixed[u] || f.vregs[p.0 as usize] != Cls::I {
                         0
                     } else if f.nonnull.contains(p) || f.deref.iter().any(|(d, _)| d == p) {
                         KZ
+                    } else if passed[u][i] != UNSET && passed[u][i] & (KZ | KS) != 0 {
+                        passed[u][i] & (KZ | KS)
                     } else {
                         KL
                     }
                 }).collect();
                 let k = narrow_kinds(f, &self.opts, link, &seeds, &csig);
+                for b in &f.blocks {
+                    for i in &b.insts {
+                        if let Inst::Call(Callee::Fn(id), args, _) = i {
+                            if let Some(&c) = self.fn_ix.get(id) {
+                                let acc = &mut next[c as usize];
+                                for (j, a) in args.iter().enumerate().take(acc.len()) {
+                                    acc[j] &= k[a.0 as usize] & (KZ | KS);
+                                }
+                            }
+                        }
+                    }
+                }
+                if fixed[u] {
+                    continue;
+                }
                 let params: Vec<u8> = f.params.iter().map(|p| k[p.0 as usize]).collect();
-                let mut ret = 0u8;
-                if f.rets.len() == 1 && f.rets[0] == Cls::I {
-                    ret = KZ | KS;
-                    for b in &f.blocks {
-                        if let Term::Ret(vs) = &b.term {
-                            ret &= vs.first().map_or(0, |v| k[v.0 as usize] & (KZ | KS));
+                let mut ret: Vec<u8> = f.rets.iter().map(|c| if *c == Cls::I { KZ | KS } else { 0 }).collect();
+                for b in &f.blocks {
+                    if let Term::Ret(vs) = &b.term {
+                        for (r, v) in ret.iter_mut().zip(vs) {
+                            *r &= k[v.0 as usize] & (KZ | KS);
                         }
                     }
                 }
                 sigs[u] = Sig { params, ret };
             }
+            passed = next;
         }
         sigs
     }
@@ -1220,6 +1256,9 @@ enum Ctx {
     Loop(u32),
     Block(u32),
     Plain,
+    /// the function's shared exit (Fx::exit): returns branch here, its end restores the stack
+    /// pointer once
+    Exit,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1318,8 +1357,13 @@ fn narrow_kinds<'s>(f: &Func, o: &Options, link: &dyn Link, pk: &[u8], csig: &dy
                     Inst::Sel(d, _, a, x) if f.vregs[d.0 as usize] == Cls::I => put(&mut n, d, top(&k, a) & top(&k, x)),
                     Inst::Mov(d, a) if f.vregs[d.0 as usize] == Cls::I => put(&mut n, d, top(&k, a)),
                     Inst::VExtract(d, _, _) if f.vregs[d.0 as usize] == Cls::I => put(&mut n, d, KS),
+                    Inst::Call(Callee::Fn(id) | Callee::CFn(id, _), _, ref rets) if rets.len() > 1 => {
+                        for (k, r) in rets.iter().enumerate() {
+                            put(&mut n, *r, csig(id).map_or(0, |s| s.ret.get(k).copied().unwrap_or(0)));
+                        }
+                    }
                     Inst::Call(Callee::Fn(id) | Callee::CFn(id, _), _, ref rets) if rets.len() == 1 => {
-                        put(&mut n, rets[0], csig(id).map_or(0, |s| s.ret))
+                        put(&mut n, rets[0], csig(id).map_or(0, |s| s.ret[0]))
                     }
                     _ => i.defs(|d| put(&mut n, d, 0)),
                 }
@@ -1502,7 +1546,16 @@ struct Fx<'a> {
     tmp64: u32,
     lbl: u32,
     dispatch: bool,
+    /// returns branch to one exit block that restores the shadow stack pointer (a frame and two
+    /// or more returns): `br` instead of each return's `global.set` + `return`
+    exit: bool,
+    /// ... and its branches carry the function's result
+    exit_vals: bool,
     last_br0: usize,
+    /// (start, end, depth) of the last unconditional `br`
+    last_br: (usize, usize, u32),
+    /// per vreg: the slot whose SlotAddr is its one definition
+    slot_addr: Vec<Option<u32>>,
     last_transfer: usize,
     last_ret: usize,
     /// (end, opcode position, local, vreg) of the last `local.set`
@@ -1529,7 +1582,9 @@ fn prepare(o: &Options, options: &relax_session::Options, f0: &Func, fn_ix: &Has
         g
     });
     let f2: &Func = legal.as_ref().unwrap_or(f1);
-    match crate::switch::lower_switches(options, f2, crate::switch::MIN_TABLE_CLUSTERS) {
+    // shipping O1 (`full`: the code outside a wasm export's hot set) keeps sparse chains: their
+    // binary search is more compares than the chain
+    match crate::switch::lower_switches_sized(options, f2, crate::switch::MIN_TABLE_CLUSTERS, f2.full) {
         Some(s) => Some(s.0),
         None => legal.or(pruned),
     }
@@ -1541,7 +1596,7 @@ fn prepare(o: &Options, options: &relax_session::Options, f0: &Func, fn_ix: &Has
 #[derive(Clone, Debug, Default)]
 struct Sig {
     params: Vec<u8>,
-    ret: u8,
+    ret: Vec<u8>,
 }
 
 fn func_type_sig(f: &Func, sig: &Sig) -> Result<FnType, String> {
@@ -1551,8 +1606,10 @@ fn func_type_sig(f: &Func, sig: &Sig) -> Result<FnType, String> {
             *p = Val::I32;
         }
     }
-    if sig.ret != 0 {
-        t.results[0] = Val::I32;
+    for (r, k) in t.results.iter_mut().zip(&sig.ret) {
+        if *k != 0 {
+            *r = Val::I32;
+        }
     }
     Ok(t)
 }
@@ -1584,7 +1641,22 @@ fn lower_func(o: &Options, options: &relax_session::Options, f: &Func, me: usize
         fp: NONE,
         tmp64: NONE,
         lbl: NONE,
+        exit: false,
+        exit_vals: false,
         last_br0: usize::MAX,
+        last_br: (usize::MAX, usize::MAX, 0),
+        slot_addr: {
+            let mut n = vec![0u32; f.vregs.len()];
+            let mut sa = vec![None; f.vregs.len()];
+            for p in &f.params { n[p.0 as usize] += 1; }
+            for b in &f.blocks {
+                for i in &b.insts {
+                    i.defs(|d| n[d.0 as usize] += 1);
+                    if let Inst::SlotAddr(d, sl) = i { sa[d.0 as usize] = Some(*sl); }
+                }
+            }
+            sa.iter().zip(&n).map(|(s, n)| if *n == 1 { *s } else { None }).collect()
+        },
         last_transfer: usize::MAX,
         last_ret: usize::MAX,
         last_set: (usize::MAX, 0, 0, 0),
@@ -1621,11 +1693,12 @@ fn lower_func(o: &Options, options: &relax_session::Options, f: &Func, me: usize
             return Err(format!("parameter {} narrowed to {} in the body, {} in the signature", k, fx.nk[p.0 as usize], sigs[me].params[k]));
         }
     }
-    fx.plan_folds();
+    // the frame first: rematerialising a slot address prices its offset (plan_remat)
     let (slot_at, end) = crate::frame::slot_layout(f, 0, true);
     let frame = ((end + 15) & !15) as u32;
     fx.slot_at = slot_at;
     fx.frame = frame;
+    fx.plan_folds();
     let has_invoke = f.blocks.iter().any(|b| matches!(b.term, Term::Invoke(..)));
     let n_ret = fx.cfg.rpo.iter().filter(|b| matches!(f.blocks[**b as usize].term, Term::Ret(_))).count();
     let want_sp0 = o.sp0 && frame > 0 && n_ret >= 2;
@@ -1664,6 +1737,15 @@ fn lower_func(o: &Options, options: &relax_session::Options, f: &Func, me: usize
         let fp = fx.fp;
         uleb(&mut fx.out, fp as u64);
     }
+    // one exit for every return of a function with a frame (results of at most one value: a
+    // block type is a value type then)
+    fx.exit = frame > 0 && fx.sp0 == NONE && n_ret >= 2 && ft.results.len() <= 1;
+    if fx.exit {
+        fx.exit_vals = !ft.results.is_empty();
+        fx.op(BLOCK);
+        fx.op(ft.results.first().map_or(0x40, |v| *v as u8));
+        fx.ctx.push(Ctx::Exit);
+    }
     if fx.dispatch {
         fx.emit_dispatch()?;
     } else {
@@ -1671,6 +1753,15 @@ fn lower_func(o: &Options, options: &relax_session::Options, f: &Func, me: usize
     }
     if !ft.results.is_empty() && fx.last_transfer != fx.out.len() {
         fx.out.push(0x00);
+    }
+    if fx.exit {
+        // the last return's branch is the fallthrough
+        if fx.last_br0 == fx.out.len() {
+            fx.out.truncate(fx.out.len() - 2);
+        }
+        fx.ctx.pop();
+        fx.op(END);
+        fx.restore_sp();
     }
     // a trailing `return` is the function's end
     if fx.last_ret == fx.out.len() && fx.ctx.is_empty() {
@@ -1957,7 +2048,24 @@ impl<'a> Fx<'a> {
                 let d = match x {
                     Inst::Iconst(d, k) if self.o.remat && small(*k) => *d,
                     Inst::Addr(d, s) | Inst::TlsAddr(d, s) | Inst::TlsStatic(d, s) if self.o.remat && small(self.link.sym(s.id).wrapping_add(s.off as u64) as i64) => *d,
-                    Inst::SlotAddr(d, _) if self.o.remat_slots && self.uses[d.0 as usize] <= 2 * base_uses[d.0 as usize] + 1 => *d,
+                    // a frame address (merge_slot_addr_defs puts one definition at the entry, for
+                    // the native allocators to rematerialise): recomputed at each use when that is
+                    // no bigger than a local -- at a memory access it is the frame pointer and the
+                    // access's offset, elsewhere `fp + offset`, against its definition, local.set
+                    // and a local.get per use
+                    Inst::SlotAddr(d, sl) if self.o.remat_slots && defs[d.0 as usize] == 1 => {
+                        let so = self.slot_off(*sl);
+                        let add = if so == 0 { 0 } else { 1 + sleb_len(so) };
+                        let (uses, base) = (self.uses[d.0 as usize] as i64, base_uses[d.0 as usize] as i64);
+                        let local = 2 + add + 2 + 2 * uses;
+                        let remat = 2 * uses + (uses - base) * add;
+                        if remat > local {
+                            continue;
+                        }
+                        self.folded[b as usize][i] = true;
+                        self.fold_def[d.0 as usize] = (b, i as u32);
+                        continue;
+                    }
                     _ => continue,
                 };
                 if defs[d.0 as usize] != 1 || self.uses[d.0 as usize] < 2 {
@@ -2320,13 +2428,58 @@ impl<'a> Fx<'a> {
         self.ctx.iter().rev().position(|x| *x == c).map(|p| p as u32)
     }
     fn br(&mut self, d: u32) {
+        let start = self.out.len();
         self.op(BR);
         self.u(d as u64);
+        self.last_br = (start, self.out.len(), d);
         if d == 0 {
             self.last_br0 = self.out.len();
         }
         self.transfer();
     }
+    /// The frame slot whose address `v` is, when its one definition is that slot's SlotAddr.
+    fn slot_of(&self, v: VReg) -> Option<u32> {
+        let (fb, fi) = self.fold_def[v.0 as usize];
+        if fb != NONE {
+            return match self.f.blocks[fb as usize].insts[fi as usize] {
+                Inst::SlotAddr(_, sl) => Some(sl),
+                _ => None,
+            };
+        }
+        self.slot_addr[v.0 as usize]
+    }
+
+    /// The unconditional `br` the code emitted so far ends with: (start, depth).
+    fn tail_br(&self) -> Option<(usize, u32)> {
+        (self.last_br.1 == self.out.len()).then_some((self.last_br.0, self.last_br.2))
+    }
+
+    /// Removes the emitted bytes `start..end` (an instruction that turned out redundant), keeping
+    /// the call fixups and the end markers of what follows in place.
+    fn cut(&mut self, start: usize, end: usize) {
+        let n = end - start;
+        self.out.drain(start..end);
+        for (p, _) in &mut self.fix {
+            if *p as usize >= end {
+                *p -= n as u32;
+            }
+        }
+        let shift = |m: &mut usize| {
+            if *m != usize::MAX && *m >= end {
+                *m -= n;
+            } else if *m != usize::MAX && *m > start {
+                *m = usize::MAX;
+            }
+        };
+        shift(&mut self.last_br0);
+        shift(&mut self.last_transfer);
+        shift(&mut self.last_ret);
+        shift(&mut self.last_set.0);
+        shift(&mut self.last_set.1);
+        shift(&mut self.last_br.0);
+        shift(&mut self.last_br.1);
+    }
+
     fn open(&mut self, op: u8, c: Ctx) {
         self.op(op);
         self.op(0x40);
@@ -2583,6 +2736,14 @@ impl<'a> Fx<'a> {
             if let (Inst::IBinI(IOp::Add, it, _, a, imm), Want::Addr(off)) = (inst, want) {
                 if it.bits == 64 {
                     return self.value(b, *a, Want::Addr(off.wrapping_add(*imm)));
+                }
+            }
+            // a frame address (narrow or not) at an access: the frame pointer, its offset in the memarg
+            if let (Inst::SlotAddr(_, sl), Want::Addr(off)) = (inst, want) {
+                let t = self.slot_off(*sl) + off;
+                if (0..=u32::MAX as i64).contains(&t) {
+                    self.lget(self.fp);
+                    return Ok(t as u64);
                 }
             }
             if k != 0 {
@@ -3395,8 +3556,8 @@ impl<'a> Fx<'a> {
                     }
                     self.call(FRef::User(u));
                     // a narrow result into a wide vreg: extended here (the value's whole form)
-                    if cs.ret != 0 && rets.len() == 1 && self.nk[rets[0].0 as usize] == 0 {
-                        self.op(if cs.ret & KZ != 0 { EXT_U } else { EXT_S });
+                    if rets.len() == 1 && cs.ret[0] != 0 && self.nk[rets[0].0 as usize] == 0 {
+                        self.op(if cs.ret[0] & KZ != 0 { EXT_U } else { EXT_S });
                     }
                 }
                 None => {
@@ -3492,7 +3653,18 @@ impl<'a> Fx<'a> {
             if self.last_transfer != before && self.last_transfer == self.out.len() {
                 return Ok(()); // a trap
             }
-            for r in rets.iter().rev() {
+            // a callee's narrow results into wide vregs: extended as each leaves the stack (a single
+            // result was extended by call_inst)
+            let rk: Vec<u8> = match &inst {
+                Inst::Call(Callee::Fn(id) | Callee::CFn(id, _), _, _) if rets.len() > 1 => {
+                    self.fn_ix.get(id).map_or_else(|| vec![0; rets.len()], |&u| self.sigs[u as usize].ret.clone())
+                }
+                _ => vec![0; rets.len()],
+            };
+            for (k, r) in rets.iter().enumerate().rev() {
+                if rk.get(k).is_some_and(|x| *x != 0) && self.nk[r.0 as usize] == 0 {
+                    self.op(if rk[k] & KZ != 0 { EXT_U } else { EXT_S });
+                }
                 self.set(*r);
             }
             return Ok(());
@@ -3502,12 +3674,34 @@ impl<'a> Fx<'a> {
                 return Ok(());
             }
             if let Inst::Mov(d, a) = &inst {
-                if self.fold_def[a.0 as usize].0 == NONE && self.loc[d.0 as usize] == self.loc[a.0 as usize] {
+                // through folded moves: `d = a = x` with x in d's local is no code
+                let mut src = *a;
+                loop {
+                    let (fb, fi) = self.fold_def[src.0 as usize];
+                    if fb == NONE { break; }
+                    match self.f.blocks[fb as usize].insts[fi as usize] {
+                        Inst::Mov(_, x) => src = x,
+                        _ => break,
+                    }
+                }
+                if self.fold_def[src.0 as usize].0 == NONE && self.loc[d.0 as usize] == self.loc[src.0 as usize] && self.loc[d.0 as usize] != NONE {
                     return Ok(());
                 }
             }
             let w = if self.nk[d.0 as usize] != 0 { Want::Low } else { Want::Nat };
+            let at = self.out.len();
             self.expr(b, i, w)?;
+            // the value is its own local already (a move or a no-op narrow conversion of a
+            // coalesced register): no code
+            let l = self.loc[d.0 as usize];
+            if l != NONE && self.uses[d.0 as usize] != 0 && self.out.len() > at && self.out[at] == LGET {
+                let mut one = vec![LGET];
+                uleb(&mut one, l as u64);
+                if self.out[at..] == one[..] {
+                    self.out.truncate(at);
+                    return Ok(());
+                }
+            }
             self.set(d);
             return Ok(());
         }
@@ -3544,7 +3738,9 @@ impl<'a> Fx<'a> {
                 self.memarg(0, o);
             }
             Inst::Copy(dst, src, n) => {
-                if *n > 0 {
+                // a copy of a frame slot onto itself (a result forwarded into the slot it came
+                // from) is no code
+                if *n > 0 && !(dst == src || self.slot_of(*dst).is_some_and(|x| Some(x) == self.slot_of(*src))) {
                     self.addr_exact(b, *dst)?;
                     self.addr_exact(b, *src)?;
                     self.aconst(*n as i64);
@@ -3692,14 +3888,19 @@ impl<'a> Fx<'a> {
             Term::Jump(x) => self.do_branch(b, *x)?,
             Term::Branch(c, x, y) => self.branch(b, *c, *x, *y)?,
             Term::Ret(vs) => {
-                let narrow = self.sigs[self.me].ret != 0;
-                for v in vs {
+                for (k, v) in vs.iter().enumerate() {
+                    let narrow = self.sigs[self.me].ret.get(k).is_some_and(|x| *x != 0);
                     self.value(b, *v, if narrow { Want::Low } else { Want::Nat })?;
                 }
-                self.restore_sp();
-                self.op(RETURN);
-                self.transfer();
-                self.last_ret = self.out.len();
+                if self.exit {
+                    let d = self.depth(Ctx::Exit).unwrap();
+                    self.br(d);
+                } else {
+                    self.restore_sp();
+                    self.op(RETURN);
+                    self.transfer();
+                    self.last_ret = self.out.len();
+                }
             }
             Term::Unreachable => {
                 self.op(0x00);
@@ -3821,10 +4022,25 @@ impl<'a> Fx<'a> {
                 self.value(b, c, w)?;
                 self.open(IF, Ctx::If);
                 self.do_tree(first)?;
+                let then_br = self.tail_br();
                 self.op(ELSE);
                 self.do_tree(second)?;
+                let else_br = self.tail_br();
                 self.ctx.pop();
-                self.op(END);
+                // both arms leave for the same label beyond the `if` (a merge): one branch after
+                // it instead (a fallthrough when the label's block ends there: `close`)
+                // (not a return's branch with its result on the stack)
+                let carries = |s: &Self, d: u32| s.exit_vals && s.ctx.len() >= d as usize && s.ctx[s.ctx.len() - d as usize] == Ctx::Exit;
+                match (then_br, else_br) {
+                    (Some((ts, d)), Some((es, d2))) if d == d2 && d >= 1 && !carries(self, d) => {
+                        let te = ts + 1 + uleb_len(d as u64);
+                        self.out.truncate(es);
+                        self.cut(ts, te);
+                        self.op(END);
+                        self.br(d - 1);
+                    }
+                    _ => self.op(END),
+                }
             }
         }
         Ok(())

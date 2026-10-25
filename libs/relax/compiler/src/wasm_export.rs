@@ -41,6 +41,67 @@ static CLOSURE_PARENTS: Mutex<BTreeMap<u32, u32>> = Mutex::new(BTreeMap::new());
 // reached by the optimized closure. Never seed reachability from this ledger.
 static CLOSURE_VIA: Mutex<BTreeMap<u32, u32>> = Mutex::new(BTreeMap::new());
 static CLOSURE_VTABLES: Mutex<BTreeMap<u32, (Option<u32>, Vec<u32>, String)>> = Mutex::new(BTreeMap::new());
+/// The run's CPU samples per slot (the tier-up sampler's self samples, by weight): which code the
+/// program spends its time in.
+static SAMPLES: Mutex<Option<HashMap<u32, u64>>> = Mutex::new(None);
+pub(crate) fn note_samples(u: &Unit, it: impl Iterator<Item = (u32, u64)>) {
+    let mut g = SAMPLES.lock().unwrap_or_else(|e| e.into_inner());
+    let m = g.get_or_insert_with(HashMap::new);
+    for (mut id, w) in it {
+        // a twin's time is its slot's (the export ships the slot)
+        while let crate::jit::FnKey::Plain(p) | crate::jit::FnKey::Sandbox(p) = u.fns[id as usize].key {
+            if p == id || p as usize >= u.fns.len() { break; }
+            id = p;
+        }
+        *m.entry(id).or_insert(0) += w;
+    }
+}
+
+/// MAKEPAD_RUN_WASM_EXPORT_HOT=<fraction> (default 0.99): an O3 candidate (o3_policy) ships an O3
+/// body only if it is among the slots that took this fraction of the run's CPU samples, hottest
+/// first (LLVM's profile summary: hot = the counts that make up 99% of the total). The rest of the
+/// shipping code is O1: it runs too rarely for O3's size to pay (`Imdct::new`, run once per
+/// decoder: 22 KB unrolled at O3, 1 KB at rustc's opt z). `1`: every candidate (the trace's
+/// tier-up alone decides).
+fn hot_fraction() -> f64 {
+    static F: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var("MAKEPAD_RUN_WASM_EXPORT_HOT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.99))
+}
+
+/// Slot `id` is in the sampled hot set (hot_fraction) of the run that is exporting.
+pub(crate) fn sampled_hot(id: u32) -> bool {
+    static HOT: std::sync::OnceLock<Option<std::collections::HashSet<u32>>> = std::sync::OnceLock::new();
+    let hot = HOT.get_or_init(|| {
+        let frac = hot_fraction();
+        if frac >= 1.0 {
+            return None;
+        }
+        let g = SAMPLES.lock().unwrap_or_else(|e| e.into_inner());
+        let mut v: Vec<(u64, u32)> = g.as_ref().map(|m| m.iter().map(|(id, w)| (*w, *id)).collect()).unwrap_or_default();
+        v.sort_unstable_by(|a, b| b.cmp(a));
+        let total: u64 = v.iter().map(|x| x.0).sum();
+        let mut set = std::collections::HashSet::new();
+        let mut acc = 0u64;
+        for (w, id) in v {
+            if acc as f64 >= frac * total as f64 {
+                break;
+            }
+            acc += w;
+            set.insert(id);
+        }
+        if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
+            eprintln!("wasm export: sampled hot set: {} slots take {:.1}% of {} CPU samples", set.len(), 100.0 * acc as f64 / total.max(1) as f64, total);
+        }
+        Some(set)
+    });
+    hot.as_ref().map_or(true, |h| h.contains(&id))
+}
+
+/// The shipping bodies the JIT's O3 built (export_rir), for the FNLIST's tier column.
+static O3_BODIES: Mutex<Option<std::collections::HashSet<u32>>> = Mutex::new(None);
+pub(crate) fn note_o3_body(id: u32) {
+    O3_BODIES.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(id);
+}
 static POSTOPT_EFFECTS: [std::sync::atomic::AtomicUsize; 5] = [const { std::sync::atomic::AtomicUsize::new(0) }; 5];
 
 /// Process start (the loader's main): `MAKEPAD_RUN_WASM_EXPORT_BLOCKS=1` turns block coverage on
@@ -550,7 +611,14 @@ fn force_union(up: *mut Unit, hits: &HashMap<String, std::collections::HashSet<(
                 eprintln!("wasm export: missing union key {key}: slots (id, compiled, tried) {slots:?}");
             }
         }
-        return Err(format!("union: {} training functions were not captured:\n{}", missing.len(), missing.join("\n")));
+        // MAKEPAD_RUN_WASM_EXPORT_UNION_LENIENT=1: a size A/B that replays an older export's training
+        // union with a compiler whose std renamed some functions (local/wasmcg/recap.sh); never a
+        // shipping export (the replay gate needs every trained function)
+        if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_UNION_LENIENT").is_some_and(|v| v != "0") {
+            eprintln!("wasm export: union: {} training keys absent in this build (lenient A/B replay)", missing.len());
+        } else {
+            return Err(format!("union: {} training functions were not captured:\n{}", missing.len(), missing.join("\n")));
+        }
     }
     // Ahead/inlined bodies can already have RIR without installed native code.
     for id in captured.funcs.keys() {
@@ -1041,7 +1109,7 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
     drop(origins);
     // MAKEPAD_RUN_WASM_EXPORT_FNLIST=<file>: one line per module function for size analysis:
     // slot, wasm bytes (0: folded into an identical one), RIR insts, blocks, direct call sites to
-    // it in the module, address taken, kept (keep_reachable, not traced), name
+    // it in the module, address taken, kept (keep_reachable, not traced), name, tier (o3 / o1)
     if let Ok(fl) = std::env::var("MAKEPAD_RUN_WASM_EXPORT_FNLIST") {
         use relax_backend::rir::Callee;
         let mut calls_in: HashMap<u32, usize> = HashMap::new();
@@ -1055,11 +1123,12 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
             }
         }
         let taken: std::collections::HashSet<u32> = seeds.iter().copied().collect();
+        let o3 = O3_BODIES.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_default();
         let mut txt = String::new();
         for (id, n, b) in &out.stats.fn_sizes {
             let f = &funcs[id];
             let ni: usize = f.blocks.iter().map(|b| b.insts.len()).sum();
-            txt.push_str(&format!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n", id, b, ni, f.blocks.len(), calls_in.get(id).copied().unwrap_or(0), taken.contains(id) as u8, kept.contains(id) as u8, n));
+            txt.push_str(&format!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n", id, b, ni, f.blocks.len(), calls_in.get(id).copied().unwrap_or(0), taken.contains(id) as u8, kept.contains(id) as u8, n, if o3.contains(id) { "o3" } else { "o1" }));
         }
         let fl = fl.replace("%p", &std::process::id().to_string());
         let _ = std::fs::write(&fl, txt);
@@ -1315,11 +1384,28 @@ pub(crate) fn full_o1() -> bool {
     *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_WASM_EXPORT_FULL").map_or(true, |v| v != "0"))
 }
 
-/// MAKEPAD_RUN_WASM_EXPORT_INLINE=1: the shipping module's own inlining (module_inline) and
-/// static reachability from the entry, exports and taken addresses.
+/// MAKEPAD_RUN_WASM_EXPORT_O3_LTO (default on; `0` off): shipping O3 bodies inline as a fat-LTO
+/// build does (InlineLimits::lto: cross-crate callees as local ones, single callers take their
+/// callee's body: the Splash VM's opcode dispatch into run_core, as LLVM has it)
+pub(crate) fn o3_lto() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_WASM_EXPORT_O3_LTO").map_or(true, |v| v != "0"))
+}
+
+/// MAKEPAD_RUN_WASM_EXPORT_O3_COLD (default `tiny`): a shipping O3 body's sites that are neither
+/// hot nor in a loop inline only callees that do not grow it (InlineLimits::cold_tiny); `0`: O3's
+/// own reach everywhere (A/B)
+pub(crate) fn o3_cold_tiny() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_WASM_EXPORT_O3_COLD").map_or(true, |v| v != "0"))
+}
+
+/// MAKEPAD_RUN_WASM_EXPORT_INLINE (default on; `0` off): the shipping module's own inlining
+/// (module_inline) and static reachability from the entry, exports and taken addresses. P(DOOM)
+/// (WASMCG runs A/B, both gated): 10.29 MB br11 with it, 10.79 without, CPU equal.
 fn module_inline_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_WASM_EXPORT_INLINE").is_ok_and(|v| v != "0"))
+    *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_WASM_EXPORT_INLINE").map_or(true, |v| v != "0"))
 }
 
 /// The shipping module's inlining, as a size-first AOT compiler's: bottom-up over the direct-call
@@ -1391,13 +1477,21 @@ fn module_inline(u: &Unit, funcs: &mut BTreeMap<u32, Func>, kept: &std::collecti
     let single: std::collections::HashSet<u32> = site_count.iter().filter(|(c, n)| **n == 1 && !taken.contains(c)
         && !((**c as usize) < u.fns.len() && crate::jit::keep_reachable(u, **c))
         && funcs.get(c).is_some_and(|f| loop_free(f) && relax_codegen::opt::inst_count(f) <= 400)).map(|(c, _)| *c).collect();
-    let lim = relax_codegen::opt::InlineLimits { budget: usize::MAX / 4, leaf_insts: 0, leaf_blocks: 0, hint_insts: 0, chain_insts: 0, always_insts: 4000, free_any: false, ordered: false, hot_insts: 0, growth_limit: None };
+    let never: std::collections::HashSet<u32> = funcs.keys().copied().filter(|&c| (c as usize) < u.fns.len() && match &u.fns[c as usize].key {
+        crate::jit::FnKey::Inst(d, _) => crate::jit::inline_never(&u.prog, *d),
+        _ => false,
+    }).collect();
+    let lim = relax_codegen::opt::InlineLimits { budget: usize::MAX / 4, leaf_insts: 0, leaf_blocks: 0, hint_insts: 0, chain_insts: 0, always_insts: 4000, free_any: false, ordered: false, hot_insts: 0, growth_limit: None, cold_tiny: false, lto: false };
     let (mut sites, mut bodies) = (0usize, 0usize);
     for id in order {
         let Some(mut f) = funcs.remove(&id) else { continue };
         let calls_any = f.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, Inst::Call(Callee::Fn(_), _, _)));
         if calls_any {
+            // `#[inline(never)]` stays a call, as rustc's and LLVM's inliners keep it
             let get = |c: u32| -> Option<(*const Func, u8)> {
+                if never.contains(&c) {
+                    return None;
+                }
                 funcs.get(&c).map(|g| (g as *const Func, if single.contains(&c) { relax_codegen::opt::ATTR_ALWAYS } else { 0u8 }))
             };
             let n = relax_codegen::opt::inline_calls(&options, &mut f, id, &get, &|_| true, &lim).len();
@@ -1431,11 +1525,28 @@ pub(crate) fn slot_crate(u: &Unit, id: u32) -> &str {
 /// MAKEPAD_RUN_WASM_EXPORT_O3_CRATES=a,b: crates whose functions all take the O3 pipeline, as the
 /// rustc web build compiles its hot crates at opt-level 3 (default: the Splash VM, makepad_script,
 /// the old film exporter's HOT_CRATES).
+/// Only the crate's own code, as rustc compiles it: a generic instance (or a closure of one) is
+/// codegened in the crate that instantiates it, at that crate's opt-level (opt z for the derive
+/// helpers the widget crates instantiate: `script_derive_proto_field::<T>`, 316 instances at O3
+/// were 3.8 MB of code against rustc's 35 KB); trace-hot instances still take O3 (o3_policy).
 pub(crate) fn o3_crate(u: &Unit, id: u32) -> bool {
     static C: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     let crates = C.get_or_init(|| std::env::var("MAKEPAD_RUN_WASM_EXPORT_O3_CRATES").unwrap_or_else(|_| "makepad_script".to_string())
         .split(',').filter(|c| !c.is_empty()).map(|c| c.replace('-', "_")).collect());
-    !crates.is_empty() && crates.iter().any(|c| c == slot_crate(u, id))
+    !crates.is_empty() && !generic_instance(u, id) && crates.iter().any(|c| c == slot_crate(u, id))
+}
+
+/// Slot `id` is an instance with generic arguments, or a closure / shim / twin of one.
+fn generic_instance(u: &Unit, id: u32) -> bool {
+    let mut owner = id;
+    loop {
+        match &u.fns[owner as usize].key {
+            crate::jit::FnKey::Inst(_, args) => return !args.is_empty(),
+            crate::jit::FnKey::Closure(_, _, p) | crate::jit::FnKey::Plain(p) | crate::jit::FnKey::Sandbox(p)
+                if *p != owner && (*p as usize) < u.fns.len() => owner = *p,
+            _ => return true,
+        }
+    }
 }
 
 /// MAKEPAD_RUN_WASM_EXPORT_O3=hot|all|0: shipping bodies built by the JIT's O3 pipeline.

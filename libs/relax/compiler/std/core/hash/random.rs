@@ -5,11 +5,23 @@
 //! The OS sources are real std's (library/std/src/sys/random/{linux,apple,mod}.rs), except
 //! Windows, which uses RtlGenRandom like the rest of Relax's std instead of ProcessPrng.
 
-#[cfg(not(relax_check))]
+#[cfg(all(not(relax_check), not(relax_web)))]
 use crate::cell::Cell;
 
+// The web profile: every RandomState takes the same fixed keys (hashmap_random_keys below), with
+// no per-thread k0 + 1. A wasm export's trace runs the program natively, where its code can run on
+// more than one OS thread (each with its own count of RandomStates made) and the host can make maps
+// the page never makes; any difference in those counts gave a later map other keys on the page
+// than in the trace, and so another iteration order (P(DOOM) nodegate a1 with fixed base keys:
+// first difference still the freed texture order at frame 16727). Iteration orders then depend
+// on each map's contents and history only, the same in the trace and on the page.
+#[cfg(all(not(relax_check), relax_web))]
+pub(crate) fn next_keys() -> (u64, u64) {
+    hashmap_random_keys()
+}
+
 /// The calling thread's next keys (std's `KEYS.with(|keys| ..)` in RandomState::new).
-#[cfg(not(relax_check))]
+#[cfg(all(not(relax_check), not(relax_web)))]
 pub(crate) fn next_keys() -> (u64, u64) {
     // None until the thread's first RandomState (std: the thread_local's lazy initialiser)
     #[thread_local]

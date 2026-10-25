@@ -117,7 +117,9 @@ fn subtract(a: &Ranges, b: &Ranges) -> Ranges {
 
 struct Chain<'a> {
     tests: &'a [Option<Test>],
-    f: &'a Func,
+    /// per block: it holds only its test (the compare, and the constant it compares with when
+    /// that does not fit an immediate: a 64-bit `LiveId` hash)
+    lone: &'a [bool],
     x: VReg,
     signed: bool,
     /// the order of the compares was fixed by a signed or unsigned relation
@@ -140,7 +142,7 @@ impl Chain<'_> {
         }
         self.budget -= 1;
         let link = match self.tests[b as usize] {
-            Some(t) if t.x == self.x && (head || self.f.blocks[b as usize].insts.len() == 1) => Some(t),
+            Some(t) if t.x == self.x && (head || self.lone[b as usize]) => Some(t),
             _ => None,
         };
         let Some(t) = link else {
@@ -389,6 +391,13 @@ impl Emit<'_> {
 /// the new function and, per its block, the block of `f` whose execution frequency it shares (the
 /// blocks are renumbered, and block frequencies are by number).
 pub fn lower_switches(options: &relax_session::Options, f: &Func, min_table: usize) -> Option<(Func, Vec<u32>)> {
+    lower_switches_sized(options, f, min_table, false)
+}
+
+/// lower_switches; `size_first`: only chains that become a jump table or bit tests (smaller than
+/// the compares), never a binary search (more compares than the chain: code that ships and runs
+/// rarely, a wasm export's O1 bodies, keeps its chains).
+pub fn lower_switches_sized(options: &relax_session::Options, f: &Func, min_table: usize, size_first: bool) -> Option<(Func, Vec<u32>)> {
     if options.no_jump_tables || f.baseline {
         return None;
     }
@@ -462,13 +471,19 @@ pub fn lower_switches(options: &relax_session::Options, f: &Func, min_table: usi
             _ => None,
         };
     }
-    // a block holding only its compare, entered from a test of the same value, continues that chain
+    // a block holding only its compare (and that compare's own constant), entered from a test of
+    // the same value, continues that chain
+    let lone: Vec<bool> = f.blocks.iter().enumerate().map(|(bi, b)| match (tests[bi], b.insts.as_slice()) {
+        (Some(_), [_]) => true,
+        (Some(t), [Inst::Iconst(k, kv), Inst::ICmp(_, _, _, x, y)]) => *kv == t.k && uses[k.0 as usize] == 1 && (y == k && *x == t.x || x == k && *y == t.x),
+        _ => false,
+    }).collect();
     let mut is_link = vec![false; nb];
     for bi in 0..nb {
         if let Some(t) = tests[bi] {
             for s in [t.t, t.e] {
                 let s = s as usize;
-                if s != bi && f.blocks[s].insts.len() == 1 && matches!(tests[s], Some(u) if u.x == t.x) {
+                if s != bi && lone[s] && matches!(tests[s], Some(u) if u.x == t.x) {
                     is_link[s] = true;
                 }
             }
@@ -482,7 +497,7 @@ pub fn lower_switches(options: &relax_session::Options, f: &Func, min_table: usi
         if is_link[head] {
             continue;
         }
-        let mut chain = Chain { tests: &tests, f, x: h.x, signed: false, fixed: false, budget: 600, leaves: Vec::new() };
+        let mut chain = Chain { tests: &tests, lone: &lone, x: h.x, signed: false, fixed: false, budget: 600, leaves: Vec::new() };
         let mut tries = 0;
         let ok = loop {
             chain.leaves.clear();
@@ -532,6 +547,9 @@ pub fn lower_switches(options: &relax_session::Options, f: &Func, min_table: usi
         }
         let planner = Planner { default, min_table };
         let node = planner.plan(&cl);
+        if size_first && !matches!(node, Node::Table { .. } | Node::Bits { .. }) {
+            continue;
+        }
         let g = out.get_or_insert_with(|| f.clone());
         let pos = g.blocks[head].term_pos;
         // the head's compare is replaced by the switch

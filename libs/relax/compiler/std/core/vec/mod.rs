@@ -67,6 +67,68 @@ const fn capacity_overflow() -> ! {
     crate::panicking::panic_str("capacity overflow")
 }
 
+// Real alloc's RawVecInner: the element-independent half of a Vec's buffer (its growth, the
+// layout arithmetic and the allocator calls) is one body for every element type, the element's
+// layout passed as a value, so the `Vec<T>` instances keep only a capacity compare and a call
+// (P(DOOM)'s wasm had 694 `try_grow_to`, 88 `try_reserve`, 875 `do_reserve_and_handle` copies).
+
+/// `n` elements of `elem` (Layout::array).
+fn raw_array(elem: Layout, n: usize) -> Result<Layout, crate::collections::TryReserveError> {
+    match elem.size().checked_mul(n) {
+        Some(size) => Layout::from_size_align(size, elem.align()).map_err(|_| crate::collections::TryReserveError::capacity_overflow()),
+        None => Err(crate::collections::TryReserveError::capacity_overflow()),
+    }
+}
+
+/// Reallocates the buffer to exactly `new_cap` elements of `elem` (not a ZST).
+#[inline(never)]
+fn raw_grow_to(ptr: &mut crate::ptr::NonNull<u8>, cap: &mut Cap, new_cap: usize, elem: Layout) -> Result<(), crate::collections::TryReserveError> {
+    let new_layout = raw_array(elem, new_cap)?;
+    let p = if cap.get() == 0 {
+        heap::alloc_or_abort(new_layout)
+    } else {
+        // the current allocation's layout was valid when it was made
+        let old = unsafe { Layout::from_size_align_unchecked(elem.size() * cap.get(), elem.align()) };
+        heap::realloc_or_abort(ptr.as_ptr(), old, new_layout.size())
+    };
+    *ptr = unsafe { crate::ptr::NonNull::new_unchecked(p) };
+    // raw_array checked that the allocation fits in isize::MAX bytes (a non-ZST: u8 stands in)
+    *cap = unsafe { Cap::new::<u8>(new_cap) };
+    Ok(())
+}
+
+/// Room for `additional` more after `len`, growing amortized (doubling, at least the minimum
+/// non-zero capacity), as RawVecInner::grow_amortized.
+#[inline(never)]
+fn raw_reserve(ptr: &mut crate::ptr::NonNull<u8>, cap: &mut Cap, len: usize, additional: usize, elem: Layout) -> Result<(), crate::collections::TryReserveError> {
+    if elem.size() == 0 {
+        // a ZST's capacity is usize::MAX already
+        return Err(crate::collections::TryReserveError::capacity_overflow());
+    }
+    let required = match len.checked_add(additional) {
+        Some(r) => r,
+        None => return Err(crate::collections::TryReserveError::capacity_overflow()),
+    };
+    let mut new_cap = cap.get() * 2;
+    if new_cap < required {
+        new_cap = required;
+    }
+    let min = min_non_zero_cap(elem.size());
+    if new_cap < min {
+        new_cap = min;
+    }
+    raw_grow_to(ptr, cap, new_cap, elem)
+}
+
+/// raw_reserve that aborts on overflow (RawVecInner's do_reserve_and_handle).
+#[cold]
+#[inline(never)]
+fn raw_reserve_or_abort(ptr: &mut crate::ptr::NonNull<u8>, cap: &mut Cap, len: usize, additional: usize, elem: Layout) {
+    if raw_reserve(ptr, cap, len, additional, elem).is_err() {
+        capacity_overflow();
+    }
+}
+
 impl<T> Vec<T> {
     pub const fn new() -> Vec<T> {
         Vec { ptr: crate::ptr::NonNull::dangling(), cap: Cap::ZERO, len: 0, _marker: crate::marker::PhantomData }
@@ -115,19 +177,14 @@ impl<T> Vec<T> {
     }
 
     fn try_grow_to(&mut self, new_cap: usize) -> Result<(), crate::collections::TryReserveError> {
-        let new_layout = match Layout::array::<T>(new_cap) {
-            Ok(l) => l,
-            Err(_) => return Err(crate::collections::TryReserveError::capacity_overflow()),
-        };
-        let p = if self.cap.get() == 0 {
-            heap::alloc_or_abort(new_layout)
-        } else {
-            heap::realloc_or_abort(self.ptr.as_ptr() as *mut u8, Vec::<T>::layout_for(self.cap.get()), new_layout.size())
-        };
-        self.ptr = unsafe { crate::ptr::NonNull::new_unchecked(p as *mut T) };
-        // Layout::array checked that the non-ZST allocation fits in isize::MAX bytes.
-        self.cap = unsafe { Cap::new::<T>(new_cap) };
-        Ok(())
+        let (ptr, cap) = self.raw_parts_mut();
+        raw_grow_to(ptr, cap, new_cap, Layout::new::<T>())
+    }
+
+    /// The buffer's pointer (as bytes) and capacity, for the element-independent growth.
+    fn raw_parts_mut(&mut self) -> (&mut crate::ptr::NonNull<u8>, &mut Cap) {
+        // NonNull<T> and NonNull<u8> are one pointer
+        (unsafe { &mut *(&mut self.ptr as *mut crate::ptr::NonNull<T>).cast::<crate::ptr::NonNull<u8>>() }, &mut self.cap)
     }
 
     /// Real alloc's RawVecInner::reserve: only the capacity check inline, the growth and its
@@ -142,9 +199,9 @@ impl<T> Vec<T> {
 
     #[cold]
     fn do_reserve_and_handle(&mut self, additional: usize) {
-        if self.try_reserve(additional).is_err() {
-            capacity_overflow();
-        }
+        let len = self.len;
+        let (ptr, cap) = self.raw_parts_mut();
+        raw_reserve_or_abort(ptr, cap, len, additional, Layout::new::<T>());
     }
 
     pub fn reserve_exact(&mut self, additional: usize) {
@@ -157,19 +214,9 @@ impl<T> Vec<T> {
         if self.capacity() - self.len >= additional {
             return Ok(());
         }
-        let required = match self.len.checked_add(additional) {
-            Some(r) => r,
-            None => return Err(crate::collections::TryReserveError::capacity_overflow()),
-        };
-        let mut cap = self.cap.get() * 2;
-        if cap < required {
-            cap = required;
-        }
-        let min = min_non_zero_cap(crate::mem::size_of::<T>());
-        if cap < min {
-            cap = min;
-        }
-        self.try_grow_to(cap)
+        let len = self.len;
+        let (ptr, cap) = self.raw_parts_mut();
+        raw_reserve(ptr, cap, len, additional, Layout::new::<T>())
     }
 
     pub fn try_reserve_exact(&mut self, additional: usize) -> Result<(), crate::collections::TryReserveError> {
