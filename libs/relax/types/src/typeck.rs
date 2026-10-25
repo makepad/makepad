@@ -5470,8 +5470,13 @@ impl<'a> Fcx<'a> {
                 self.tcx.tys.never
             }
             ExprKind::Tuple(v) => {
+                // expr.rs check_expr_tuple: the expectation is resolved with the pending
+                // obligations selected (resolve_vars_with_obligations): `map.get(&(&s, w))` with
+                // `K = (&str, W)` learns `Q = (&str, W)` from `K: Borrow<Q>` (one impl), so
+                // `&s` coerces to `&str`
                 let exp_elems = match expected {
                     Some(t) => {
+                        let t = self.deeply_resolve_ignoring_regions_with_obligations(t);
                         let s = self.shallow(t);
                         match self.tcx.tys.kind(s).clone() {
                             TyKind::Tuple(x) if self.tcx.tys.list(x).len() == v.len() => Some(x),
@@ -5495,7 +5500,8 @@ impl<'a> Fcx<'a> {
                         None if matches!(self.tcx.tys.kind(self.shallow(t)), TyKind::Never) => self.fresh(0),
                         None => t,
                     };
-                    if et != t { self.coerce_or_unify(t, et, Some(*x), lo); }
+                    // (check_expr_coercible_to_type: a mismatch is reported at the element)
+                    if et != t { let xlo = self.ast().expr(*x).lo; self.coerce_or_unify(t, et, Some(*x), xlo); }
                     ts.push(et);
                 }
                 self.tcx.tys.intern(TyKind::Tuple(self.tcx.tys.mk_list(&ts)))

@@ -180,6 +180,9 @@ impl Vulkan {
     /// image copied into a free composed image of its size (one a presentation or a snapshot
     /// still holds is not reused). `None`: nothing rendered yet.
     fn begin_compose(&mut self, key: (u32, Id), batch: &mut Batch) -> Option<Arc<Image>> {
+        // the retained image is an older frame than the one last shown (the newest went straight
+        // to the shell's target): nothing to compose over until the app's next frame lands in it
+        if self.retained_stale.contains(&key.1.index) { return None; }
         let base = self.win.get(&(key.0, key.1.index)).filter(|t| t.gen == key.1.gen)?.image.clone();
         let badged = self.badged.get_mut(&key.1.index)?;
         badged.last = None;
@@ -318,6 +321,8 @@ impl Vulkan {
             // window kept yet (an app parked before it drew under the layer) the window's
             // retained image is made at the panel's size and composed over as it is
             if self.compose.is_none() && kind & target::OVERLAY != 0 {
+                // (whatever the retained image holds is covered)
+                self.retained_stale.remove(&layer_key.1.index);
                 if let Some(v) = view.passes[pr.clone()].first().map(|p| p.viewport) {
                     let size = [(v[0] + v[2]).ceil().max(1.0) as u32, (v[1] + v[3]).ceil().max(1.0) as u32];
                     if self.offscreen(s, target, size, now).is_ok() {
@@ -463,8 +468,12 @@ impl Vulkan {
                     match self.compose.clone() {
                         Some(composed) => composed,
                         // the retained image a badge layer is composed over
-                        None if layered => self.offscreen(s, target, size, now)?,
-                        None => match self.windows.source.target(key.0, key.1, size) { Some(image) => image, None => self.offscreen(s, target, size, now)? },
+                        None if layered => { self.retained_stale.remove(&key.1.index); self.offscreen(s, target, size, now)? }
+                        None => match self.windows.source.target(key.0, key.1, size) {
+                            // the retained image no longer holds the newest frame
+                            Some(image) => { if key.0 == HOST { self.retained_stale.insert(key.1.index); } image }
+                            None => { self.retained_stale.remove(&key.1.index); self.offscreen(s, target, size, now)? }
+                        },
                     }
                 }
             };

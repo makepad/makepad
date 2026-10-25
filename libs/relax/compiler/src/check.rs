@@ -445,7 +445,6 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         if let Some(d) = o.seed { seeds.push(d); }
     }
     let checked = seeds.len();
-    relax_types::lint_dead::finish(&u.prog, &u.tcx, &own, root);
     relax_types::lint_early::finish(&u.prog, &own);
     errors.extend(static_self_access(up, &own));
     // the feature gates (E0658 and friends): items and signatures, then the loaded bodies
@@ -458,6 +457,13 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     // item of the checked crates is evaluated, used or not; one that cannot be evaluated is an
     // E0080 (the unit notes it, reported below with the builds' other notes)
     eval_items(up, &own, &tainted);
+    // rustc_interface passes.rs analysis: an error (lint errors excluded) of the required analyses
+    // -- resolution, feature gates, type and borrow checks, constant evaluation of items -- ends the
+    // compilation before misc_checking_3, so check_mod_deathness (dead_code, unnameable_types)
+    // never runs: a body that failed its check reported nothing it uses as dead. Nor does
+    // check_expectations (unfulfilled_lint_expectations).
+    let analyses_ok = errors.is_empty() && borrow_diagnostics.is_empty() && unsafe { (&*up).errors.iter().all(|e| e.starts_with("compile error in ")) };
+    if analyses_ok { relax_types::lint_dead::finish(&u.prog, &u.tcx, &own, root); }
     // rustc_monomorphize: a program's `main` and what it reaches, instantiated -- the constants
     // generic code evaluates there (post-monomorphization E0080) -- in a check of a program
     if options.const_fuel && !compile && errors.is_empty() && borrow_diagnostics.is_empty() && unsafe { (&*up).errors.is_empty() } { mono_check(up, &own, root); }
@@ -533,7 +539,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     } else {
         eprintln!("makepad check: {} crates type- and borrow-checked in {:.1} s", crates.len(), t_front.as_secs_f64());
     }
-    relax_types::lint_levels::finish(&u.prog);
+    if analyses_ok { relax_types::lint_levels::finish(&u.prog); }
     let (lint_errors, mut lint_warnings) = relax_types::lint::take();
     errors.extend(lint_errors);
     lint_warnings.sort_by_cached_key(|e| error_position(e));

@@ -77,3 +77,37 @@ seed found on 2026-10-24 (x86-64): the register-allocation check reports `v27` r
 holds `[65]`. Reproduce and shrink it with `FUZZ_REDUCE=166db5d4c1538fe3` on the same test. That
 prints the smallest program that still disagrees and the first tier where it does. Then add the
 seed to `FOUND_SEEDS` in libs/relax/codegen/tests/fuzz_tiers.rs.
+
+## 6. Late lints still print when the check has an error
+
+```rust
+#![allow(dead_code)]
+fn BadName() {}
+struct lower_struct;
+fn bad() -> u32 { "no" }
+fn main() {}
+```
+
+- rustc: E0308 and the `lower_struct` warning (non_camel_case_types is an early lint). No
+  `BadName` warning: rustc_interface passes.rs `analysis` stops at an error of the required analyses
+  (lint errors excluded) before `misc_checking_3`, so the late lint pass (rustc_lint::check_crate)
+  never runs.
+- Relax: E0308 and both warnings (non_snake_case is reported too).
+
+dead_code, unnameable_types and unfulfilled_lint_expectations already follow that rule
+(compiler/src/check.rs `analyses_ok`, GitHub #1328). The late lints of types/src/lint_late*.rs are
+emitted while the bodies are checked, so they need to be held back (or dropped) once an error is
+known. Start with a "late" mark on the lints rustc runs in LateLintPass.
+
+## 7. `let mut x` assigned but never used: Relax reports at `x`, rustc at `mut x`
+
+```rust
+struct WriteOnly { w: u32 }
+fn make_wo() -> u32 { let mut x = WriteOnly { w: 1 }; x.w = 2; 0 }
+fn main() { make_wo(); }
+```
+
+- rustc: `2:27: warning: variable `x` is assigned to, but never used` (the span starts at `mut`).
+- Relax: the same warning at 2:31.
+
+Start in types/src/lint_liveness.rs (the span of the binding it reports).

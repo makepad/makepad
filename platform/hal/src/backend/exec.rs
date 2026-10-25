@@ -180,6 +180,9 @@ pub trait Gpu {
     /// window's output, draws the layer over it there and presents the output. A BADGES frame
     /// without REPLAY is the layer's new frame (answered with `FrameDone`); with REPLAY it is
     /// not answered. The retained image never holds the layer, so it is never drawn twice.
+    /// A layer is only ever composed over the window's newest frame: while the retained image
+    /// holds an older one (the newest went straight to the window system), a layer frame shows
+    /// nothing new and waits for the app's next frame (`sync_layer` asks for one).
     fn badge_layer(&mut self, _window: Id, _on: bool) {}
     /// A command for the window system, validated against the tables. True when the backend's
     /// window system took it and reports the outcome itself (events from the OS).
@@ -278,6 +281,12 @@ pub(crate) fn sync_layer(gpu: &mut dyn Gpu, world: &mut World, window: Id) {
     if want != w.val.layer_on {
         w.val.layer_on = want;
         gpu.badge_layer(window, want);
+        if want {
+            // The layer is composed over the window's retained image, which holds the newest frame
+            // only once the app drew one under the layer (its frames went straight to the window
+            // system before): the app draws a complete frame now, and the layer shows over it.
+            redraw_borrower(world, window);
+        }
     }
 }
 
