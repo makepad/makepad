@@ -186,7 +186,13 @@ impl Watch {
         // a program thread compiles lazily: the UI thread's JIT duty is up, or other threads'
         // first compiles finished
         let lazy = self.duty > 0.02 || self.demand;
-        if block {
+        use relax_compiler::reload::host::{status, Phase};
+        let rebuild = match status().0 {
+            Phase::Building => 1,
+            Phase::Restarting => 2,
+            Phase::Idle | Phase::Failed => 0,
+        };
+        if block || rebuild != 0 {
             self.worked = Some(now);
         }
         let busy = self.worked.is_some_and(|t| now.duration_since(t) < RING_SETTLE_AFTER);
@@ -220,6 +226,7 @@ impl Watch {
             linking: self.linking,
             rate: self.rate,
             busy: self.busy_since.map_or(Duration::ZERO, |t| now.duration_since(t)),
+            rebuild,
         };
         // the trace: what the ring was told, at most 4 times a second while it shows
         if self.trace && (self.shown || self.traced.is_some()) && self.traced.is_none_or(|t| now.duration_since(t) >= Duration::from_millis(250)) {
@@ -256,6 +263,16 @@ impl Watch {
         let stalled = Duration::from_nanos(ui_hang_ns().max(ui_stall_ns()));
         Some(BLOCK_AFTER.saturating_sub(stalled).max(Duration::from_millis(20)))
     }
+}
+
+/// A failed makepad rebuild shows the amber dot until it is clicked (or the next rebuild starts).
+fn rebuild_failed_shown(ack: &mut Option<String>) -> bool {
+    use relax_compiler::reload::host::{failure, status, Phase};
+    if status().0 != Phase::Failed {
+        *ack = None;
+        return false;
+    }
+    ack.as_deref() != Some(failure().as_str())
 }
 
 /// Where the window layer over the app is in its sequence.
@@ -962,6 +979,8 @@ fn pump(
     // the parked stop the ring's dot was clicked for, and the run's inspect view (the halted view
     // over the app, opened from the ring)
     let mut ring_ack: Option<String> = None;
+    // the failed rebuild whose dot was clicked away
+    let mut rebuild_ack: Option<String> = None;
     let mut inspect_open = false;
     let mut warm_up_at: Option<Instant> = None;
     // MAKEPAD_RUN_POSTFRAME_LOG (the responsiveness trace): the JIT ring's UI blocks too
@@ -1325,7 +1344,8 @@ fn pump(
             .parked
             .as_ref()
             .filter(|p| ring_ack.as_ref() != Some(&p.id))
-            .map(|p| if p.stale { RingAlert::Stale } else { RingAlert::Panic });
+            .map(|p| if p.stale { RingAlert::Stale } else { RingAlert::Panic })
+            .or_else(|| rebuild_failed_shown(&mut rebuild_ack).then_some(RingAlert::RebuildFailed));
         if running && host.badges() {
             let want = watch.look(host.dump_ms()).filter(|_| data.parked.is_none());
             if inspect_open {
@@ -1442,6 +1462,9 @@ fn pump(
                     if let Some(parked) = &data.parked {
                         ring_ack = Some(parked.id.clone());
                         overlay_dismissed = false;
+                    } else if rebuild_failed_shown(&mut rebuild_ack) {
+                        // the failed rebuild's dot: seen (the terminal has the errors)
+                        rebuild_ack = Some(relax_compiler::reload::host::failure());
                     } else if relax_compiler::inspect::pstream::viewing() {
                         relax_compiler::inspect::flightrec::event("attention", "the JIT ring was clicked", std::process::id() as u64, 0);
                     } else {

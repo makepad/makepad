@@ -60,6 +60,8 @@ pub static HOST: relax_runner::Host = relax_runner::Host {
     // apps for users: third-party compile-time code stays sandboxed
     proc_macros: relax_compiler::pmhost::Policy::Sandboxed,
     default_launch: Some(checkout_runner),
+    package: env!("CARGO_PKG_NAME"),
+    manifest: concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
 };
 
 /// `makepad` with no arguments and no `runner` launch record (an installation's entry script

@@ -63,11 +63,16 @@ pub struct Host {
     /// what `makepad` with no arguments runs when no launch record says (launch.rs): None prints
     /// the usage
     pub default_launch: Option<fn() -> Option<launch::Launch>>,
+    /// the cargo package of this binary and its manifest: a change the running process cannot
+    /// take (provided crates, std, the binary's own sources) rebuilds it with cargo and restarts
+    /// into it (reload::host)
+    pub package: &'static str,
+    pub manifest: &'static str,
 }
 
 /// The bare runner (bin `relax`): provides nothing; tests, checks and agents' boots compile only
 /// what runs.
-pub const BARE: Host = Host { provenance: env!("RELAX_RUNNER_PROVENANCE"), init: || {}, provide: || {}, ahead: relax_compiler::options::AheadLevel::Minimal, proc_macros: relax_compiler::pmhost::Policy::Open, default_launch: None };
+pub const BARE: Host = Host { provenance: env!("RELAX_RUNNER_PROVENANCE"), init: || {}, provide: || {}, ahead: relax_compiler::options::AheadLevel::Minimal, proc_macros: relax_compiler::pmhost::Policy::Open, default_launch: None, package: env!("CARGO_PKG_NAME"), manifest: concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml") };
 
 static HOST: std::sync::OnceLock<&'static Host> = std::sync::OnceLock::new();
 
@@ -79,6 +84,7 @@ fn host() -> &'static Host {
 pub fn set_host(host: &'static Host) {
     if HOST.set(host).is_ok() {
         relax_compiler::pmhost::set_policy(host.proc_macros);
+        relax_compiler::reload::set_loader_package(host.package, host.manifest);
         // the entry point's ahead level, unless the environment names one; MAKEPAD_RUN_AHEAD
         // carries it to the session (options.rs) and to every process this one starts
         if std::env::var_os("MAKEPAD_RUN_AHEAD").is_none() {

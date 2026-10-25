@@ -55,6 +55,8 @@ pub enum Alert {
     Stale,
     /// a panic (red)
     Panic,
+    /// rebuilding makepad for a change it cannot patch failed: the app runs the previous code (amber)
+    RebuildFailed,
 }
 
 /// What the run sees of the JIT (hal_run): it is busy (a ring without a `Want` fades out).
@@ -81,6 +83,9 @@ pub struct Want {
     pub rate: f32,
     /// how long the JIT has been busy
     pub busy: Duration,
+    /// makepad rebuilds itself in the background (1) or waits for the app to restart into the
+    /// rebuilt binary (2), for a change the running process cannot take
+    pub rebuild: u8,
 }
 
 impl Want {
@@ -264,7 +269,7 @@ impl Ring {
         // a dot that goes (clicked, nothing else to show) fades out as the dot
         let alert = self.alert.or(self.want.is_none().then_some(self.last_alert).filter(|_| self.dot));
         let mode = match alert {
-            Some(Alert::Stale) => 2.0,
+            Some(Alert::Stale | Alert::RebuildFailed) => 2.0,
             Some(Alert::Panic) => 3.0,
             None => self.back,
         };
@@ -287,10 +292,16 @@ pub fn summary(want: Option<Want>, alert: Option<Alert>) -> String {
         return match alert {
             Alert::Stale => "paused on invalidated code · click to inspect".into(),
             Alert::Panic => "paused on a panic · click to inspect".into(),
+            Alert::RebuildFailed => "rebuilding makepad failed · the app runs the previous code (see the terminal)".into(),
         };
     }
     let Some(w) = want else { return "settled".into() };
     let mut parts = Vec::new();
+    match w.rebuild {
+        1 => parts.push("rebuilding makepad".to_string()),
+        2 => parts.push("restarting into the rebuilt makepad".to_string()),
+        _ => {}
+    }
     if w.block {
         parts.push("UI waiting on the JIT".to_string());
     }

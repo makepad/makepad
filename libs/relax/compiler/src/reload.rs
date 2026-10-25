@@ -3432,7 +3432,18 @@ pub fn domain_stopping(id: u32) {
 }
 
 pub(crate) fn domain_loaded(inputs: Option<Inputs>) {
-    *DOMAIN_RESTORED.lock().unwrap_or_else(|e| e.into_inner()) = DOMAIN_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()).take();
+    // the first domain of a process that restarted into a rebuilt makepad gets the state the
+    // previous process left (MAKEPAD_RUN_RESTORE, read once)
+    static FIRST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+    let mut restored = DOMAIN_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if FIRST.swap(false, std::sync::atomic::Ordering::AcqRel) && restored.is_none() {
+        if let Some(path) = std::env::var_os("MAKEPAD_RUN_RESTORE") {
+            let _k = crate::zone_alloc::kept();
+            restored = std::fs::read_to_string(&path).ok();
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    *DOMAIN_RESTORED.lock().unwrap_or_else(|e| e.into_inner()) = restored;
     *DOMAIN_INPUTS.lock().unwrap_or_else(|e| e.into_inner()) = inputs;
     DOMAIN_REVISION.fetch_add(1, std::sync::atomic::Ordering::Release);
     DOMAIN_LOADING.store(false, std::sync::atomic::Ordering::Release);
@@ -3517,6 +3528,8 @@ pub extern "C" fn __relax_restored_state(buf: *mut u8, cap: usize) -> usize {
 /// A directly running program writes MAKEPAD_RUN_RESTORE and replaces its process as before.
 pub extern "C" fn __relax_restart_now(state: *const u8, len: usize) {
     let st = unsafe { if state.is_null() { &[][..] } else { std::slice::from_raw_parts(state, len) } };
+    // a rebuilt makepad waits: the process restarts into it (or this returns, said why)
+    if host::restart_now(st) { return; }
     if crate::domain::current_app_domain().is_some() && crate::domain::current_app_domain() == crate::run::app_domain() {
         *DOMAIN_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()) = Some(String::from_utf8_lossy(st).into_owned());
         RESTART_REQUESTED.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -3539,6 +3552,9 @@ pub extern "C" fn __relax_restart_now(state: *const u8, len: usize) {
         // the run's end as at exit: compiles stop and this run's code goes into the disk cache,
         // so the restarted run links it instead of compiling it again (exec skips the exit handlers)
         crate::run::summary("restart");
+        // a restart is a clean end of this process (its transcript is not kept)
+        crate::tui::exit_code(0);
+        crate::tui::finish(false);
         eprintln!("makepad live: restarting with the program's state ({})", RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()));
         let t0 = RESTART_SAVED_MS.load(std::sync::atomic::Ordering::Relaxed);
         let e = std::process::Command::new(exe).args(&args[1..]).env("MAKEPAD_RUN_RESTORE", &path).env("MAKEPAD_RUN_RESTART_T0", t0.to_string()).exec();
@@ -4084,6 +4100,9 @@ pub extern "C" fn __relax_live_stream(p: *const u8, n: usize, t: *const u8, len:
 #[path = "reload_inputs.rs"]
 mod inputs;
 pub use inputs::Inputs;
+#[path = "reload_host.rs"]
+pub mod host;
+pub use host::set_loader_package;
 
 pub fn start_watcher(up: *mut Unit, inputs: Inputs) {
     let session = unsafe { crate::jit::unit_session(up) };
@@ -4119,6 +4138,7 @@ fn gate_note(g: u8) {
 }
 
 unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
+    inputs.add_runner();
     let std_dir = std::env::var("MAKEPAD_RUN_STD").unwrap_or_default();
     // (path, running file index, last stamp)
     // the program's own source files (not std, registry or git dependencies), loaded so far
@@ -4187,6 +4207,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             revision = latest;
             if let Some(next) = DOMAIN_INPUTS.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 inputs = next;
+                inputs.add_runner();
             }
             let loaded = crate::owner::call_quick(crate::owner::Class::Program, || own_files(&*up));
             files = inputs.paths.iter().map(|(p, (s, _))| (p.clone(), u32::MAX, *s)).collect();
@@ -4360,6 +4381,20 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
                 .then_some("sources outside the loaded program changed")
         });
         if let Some(reason) = reason {
+            // a change the running process cannot take: makepad rebuilds itself in the background
+            // and restarts into the new binary; the app keeps running (and patching) meanwhile
+            let what = if changed.iter().any(|&k| std::path::Path::new(&files[k].0).is_dir()) { "source inputs" } else { "files" };
+            // the last two path parts say which crate and file
+            let short = |p: &str| -> String { let v: Vec<&str> = p.rsplit('/').take(2).collect(); v.into_iter().rev().collect::<Vec<_>>().join("/") };
+            let names: Vec<String> = changed.iter().take(3).map(|&k| short(&files[k].0)).collect();
+            let why = format!("{} {what} changed ({}{}): {reason}", changed.len(), names.join(", "), if changed.len() > 3 { ", ..." } else { "" });
+            match host::request(why, inputs.process_paths()) {
+                Ok(()) => {
+                    for &k in &changed { files[k].2 = stamp(&files[k].0); stalled.remove(&k); }
+                    continue;
+                }
+                Err(e) => eprintln!("makepad live: cannot rebuild and restart makepad here: {e}"),
+            }
             if auto_relaunch() && !inputs.host_restart_required(changed.iter().map(|&k| files[k].0.as_str())) && restart_domain(reason.to_string()) {
                 eprintln!("makepad live: {reason}; relaunching the app domain (window kept)");
                 restart_required = true;
