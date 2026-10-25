@@ -6157,15 +6157,18 @@ impl Unit {
         crate::borrowck::lazy::check_before_run(&self.prog, &self.tcx, &src, d, epoch, key, cached)
     }
 
-    /// `--check-first` in a crate with relaxed Rust's `disjoint-index`: the check runs before the first
-    /// lowering of slot `id`, so its first code makes the verdict's run-time disjoint-index checks (the
-    /// install then takes this verdict).
+    /// `--check-first`: the check runs before the first lowering of slot `id` (a closure: its
+    /// parent's), so the lowering already has the verdict: a body the checker cannot certify
+    /// (Verdict::Unverifiable) is lowered as unverified code, as a lazy run lowers it once its verdict
+    /// is in (and with relaxed Rust's `disjoint-index`, its first code makes the verdict's run-time
+    /// disjoint-index checks). The install then takes this verdict.
     pub(crate) fn check_before_lowering(&mut self, id: u32) {
         if !CHECK_FIRST.load(Ordering::Relaxed) || self.fns[id as usize].compiled { return; }
-        let FnKey::Inst(d, _) = &self.fns[id as usize].key else { return };
-        let k = self.prog.def(*d).krate as usize;
-        if !self.prog.crates[k].relaxed(&self.prog).iter().any(|f| f == "disjoint-index") { return; }
-        let _ = self.check_first_events(id);
+        match self.fns[id as usize].key {
+            FnKey::Inst(..) => { let _ = self.check_first_events(id); }
+            FnKey::Closure(_, _, parent) => self.check_before_lowering(parent),
+            _ => {}
+        }
     }
 
     fn install_unchecked(&mut self, id: u32, code: &[u8], relocs: &[relax_backend::rir::RelocAt], pc_map: Vec<(u32, u64)>, gen: u32) -> Result<u64, String> {
@@ -6335,7 +6338,7 @@ impl Unit {
     pub(crate) fn verdict_state(&self, id: u32) -> Verdict {
         use crate::borrowck::lazy::FnVerdict;
         let options = &self.prog.session.options;
-        if CHECK_FIRST.load(Ordering::Relaxed) || !crate::borrowck::lazy::gandalf_enabled(options) { return Verdict::Clean; }
+        if !crate::borrowck::lazy::gandalf_enabled(options) { return Verdict::Clean; }
         match &self.fns[id as usize].key {
             FnKey::Inst(d, args) => {
                 if !crate::borrowck::event::admit(&self.prog, self.prog.def(*d).krate) || crate::borrowck::body::CheckedBody::item(&self.prog, *d).is_none() { return Verdict::Clean; }
@@ -6347,8 +6350,14 @@ impl Unit {
                     FnVerdict::Errors(events) => return Verdict::Failed(events),
                     FnVerdict::Pending => Verdict::Pending,
                     FnVerdict::Unchecked(why) if matches!(why.as_str(), "stale" | "not queued" | "changed") => Verdict::Pending,
+                    // the checker ended without a verdict: never verified, `--check-first` too (it runs
+                    // such a body, as a lazy run does, as unverified code: the deterministic O3 profile
+                    // runs use check-first and must build the code a live run builds)
                     FnVerdict::Unchecked(why) => return Verdict::Unverifiable(why),
                 };
+                // `--check-first`: every body is checked before its first lowering and refused when it
+                // fails, so one without a verdict yet runs as verified code
+                if CHECK_FIRST.load(Ordering::Relaxed) { return Verdict::Clean; }
                 // not checked in this run yet: the owner's verdict stored by an earlier run (the one the
                 // background checker reuses when it reaches this body; it waits for the start, so a warm
                 // launch would otherwise lower every app body it compiles as unverified code)
@@ -14712,7 +14721,7 @@ pub(crate) fn tier_explain(u: &Unit, id: u32) -> (String, Vec<(String, String)>)
         let body = u.body_users.values().filter(|v| v.contains(&id)).count();
         let vstate = |c: u32| match u.verdict_state(c) { Verdict::Clean => "clean", Verdict::Failed(_) => "failed", Verdict::Pending => "pending", Verdict::Unverifiable(_) => "unverifiable" };
         rows.push(("SPEC-V".into(), format!("flagged unverified {}; verdict {}; waits to be built again for: {} unverified callee(s) [{}], {} never-run, {} building",
-            f.unverified.load(Ordering::Relaxed), vstate(id), left.len(),
+            f.unverified.load(Ordering::Relaxed), match u.verdict_state(id) { Verdict::Unverifiable(w) => format!("unverifiable ({})", w), _ => vstate(id).to_string() }, left.len(),
             left.iter().take(6).map(|&c| format!("#{} {} {}{}", c, short_name(&u.fns[c as usize].name), vstate(c), if u.fns[c as usize].unverified.load(Ordering::Relaxed) { " flagged" } else { "" })).collect::<Vec<_>>().join(", "), cold, body)));
     }
     if !allowed || awaiting {
@@ -15129,16 +15138,23 @@ impl Unit {
             return;
         }
         let replay = t1prof_replay(&self.prog.session.options);
-        let recorded = replay && unsafe {
-            T1PROF.lock().unwrap().as_ref().unwrap().map.contains_key(&t1_key(self, id))
-        };
+        let key = replay.then(|| unsafe { t1_key(self, id) });
+        let recorded = key.as_ref().is_some_and(|k| {
+            let mut g = T1PROF.lock().unwrap();
+            let p = g.as_mut().unwrap();
+            // a body recorded builds took as O2 RIR: its slot, for their O2-first builds
+            if p.full_keys.contains(k) {
+                crate::zone_alloc::kept_with(|| p.full_slots.insert(k.clone(), id));
+            }
+            p.map.contains_key(k)
+        });
         // strict replay: only the recorded decisions build O3 code. A slot the profile does not
         // name keeps the code it has, without a count stub: no tier-up from this run's timing
         // (hotness rates, sampler, counted windows), no rt_hot on the program's threads.
         if replay && !recorded {
             // ... its recorded O2 decision is replayed: the O2 build, queued once
-            let o2 = unsafe {
-                let k = t1_key(self, id);
+            let o2 = {
+                let k = key.unwrap();
                 let mut g = T1PROF.lock().unwrap();
                 let p = g.as_mut().unwrap();
                 let want = p.o2.contains(&k);
@@ -15675,6 +15691,15 @@ fn tier1_thread(runtime: &crate::options::RuntimeOptions, k: usize, normal: usiz
         // build (the first worker's poll alone waited out its own builds: hot slots came out of
         // the window one at a time behind a long O3 build)
         pgo_poll();
+        // SPEC-V: the first worker sweeps the verdicts before each build too, not only when the
+        // queue is empty (rate-limited inside: once per TIER1_POLL, and only when verdicts or
+        // patches moved). With a long O3 queue the idle-only sweep starved: the race's cold launch
+        // left its draw roots ({closure#241}, whose verdict was clean at 29 s) flagged unverified
+        // until 141 s, their unverified lowerings calling the whole draw path as twins; those
+        // entries went into the cache and every warm launch ran the twins
+        if k == 0 {
+            sweep_verdicts();
+        }
         // the deferred cache records (its O3 installs' among them) are encoded here too, not only
         // by the run monitor: cold races where the monitor stopped draining at ~40 s left 12k
         // records (4k of them O3 code) for the quit write, and the warm launch re-tiered them
@@ -15805,6 +15830,9 @@ struct T1Entry {
     inlined: Vec<String>,
     /// the input bodies' hashes (O3Assembled::rir_hashes): root first
     rirs: Vec<(String, u64)>,
+    /// the input bodies that were O2 RIR (an O2 build had replaced their O1 RIR before the
+    /// snapshot): their keys, "" for the root. Replay builds those O2 builds first (t1prof_o2_first)
+    full: Vec<String>,
 }
 struct T1Profile {
     replay: bool,
@@ -15823,6 +15851,11 @@ struct T1Profile {
     o2: std::collections::BTreeSet<String>,
     /// replay: recorded O2 slots queued for their O2 build
     o2_queued: std::collections::HashSet<String>,
+    /// replay: the slots of the bodies recorded builds took as O2 RIR (T1Entry::full), by key, as
+    /// they are armed
+    full_slots: std::collections::HashMap<String, u32>,
+    /// replay: the keys T1Entry::full names (besides roots)
+    full_keys: std::collections::HashSet<String>,
 }
 static T1PROF: relax_session::sync::Mutex<Option<T1Profile>> = relax_session::sync::Mutex::new(None);
 
@@ -15842,7 +15875,7 @@ fn t1prof_on(options: &crate::options::Options) -> bool {
                         o2.insert(x[1].to_string());
                         continue;
                     }
-                    if x.len() != 14 {
+                    if x.len() != 15 {
                         continue;
                     }
                     let list = |t: &str| -> Vec<String> { if t.is_empty() { Vec::new() } else { t.split('\u{1f}').map(|c| c.to_string()).collect() } };
@@ -15855,14 +15888,15 @@ fn t1prof_on(options: &crate::options::Options) -> bool {
                     let hot = x[9] == "1";
                     let counts = x.get(10).and_then(|v| parse_freq(v));
                     let callee_counts = x.get(11).map_or_else(Vec::new, |v| v.split('\u{1e}').filter_map(|e| e.split_once('\u{1d}')).filter_map(|(k, c)| Some((k.to_string(), parse_freq(c)?))).collect());
-                    map.insert(x[0].to_string(), T1Entry { cold: list(x[1]), snap: list(x[2]), single, freq, inline_freq, hot, counts, callee_counts, input: u64::from_str_radix(x[4], 16).unwrap_or(0), code: u64::from_str_radix(x[5], 16).unwrap_or(0), inlined: list(x[12]), rirs: x[13].split('\u{1e}').filter_map(|e| e.split_once('\u{1d}')).filter_map(|(k, h)| Some((k.to_string(), u64::from_str_radix(h, 16).ok()?))).collect() });
+                    map.insert(x[0].to_string(), T1Entry { cold: list(x[1]), snap: list(x[2]), single, freq, inline_freq, hot, counts, callee_counts, input: u64::from_str_radix(x[4], 16).unwrap_or(0), code: u64::from_str_radix(x[5], 16).unwrap_or(0), inlined: list(x[12]), rirs: x[13].split('\u{1e}').filter_map(|e| e.split_once('\u{1d}')).filter_map(|(k, h)| Some((k.to_string(), u64::from_str_radix(h, 16).ok()?))).collect() , full: list(x[14]) });
                 }
                 true
             }
             _ => false,
         };
         eprintln!("makepad: O3 profile {} ({}, {} entries, {} O2)", p, if replay { "replay" } else { "record" }, map.len(), o2.len());
-        *T1PROF.lock().unwrap() = Some(T1Profile { replay, path: p, map, installed: 0, live: std::collections::HashSet::new(), differ: Vec::new(), done: std::collections::HashSet::new(), refused: Default::default(), o2, o2_queued: Default::default() });
+        let full_keys = map.values().flat_map(|e: &T1Entry| e.full.iter().filter(|k| !k.is_empty()).cloned()).collect();
+        *T1PROF.lock().unwrap() = Some(T1Profile { replay, path: p, map, installed: 0, live: std::collections::HashSet::new(), differ: Vec::new(), done: std::collections::HashSet::new(), refused: Default::default(), o2, o2_queued: Default::default(), full_slots: Default::default(), full_keys });
         true
     })
 }
@@ -15895,8 +15929,48 @@ unsafe fn t1_key(up: *const Unit, id: u32) -> String {
     inst.replace('\t', " ")
 }
 
+/// Deterministic O3 replay (on the owner, before slot `id`'s snapshot): the bodies its recorded build
+/// took as O2 RIR (T1Entry::full: the root, inline candidates) get their O2 build now. In the record an
+/// O2 build that finished first replaced their O1 RIR, and O3 starts from that RIR (o2_finish); a
+/// replay builds O3 at the first call, before an O2 worker would have, so the snapshot took the O1
+/// RIR: a different input (root-differ / callee-differ), whose recorded block frequencies no longer
+/// fit it (frequency-shape: they were dropped, and the hot sites of set_uniform, set_material,
+/// reconcile inlined nothing). A body whose O2 RIR could not be made is a divergence ("o2-first";
+/// "o2-first-noslot": its slot was not armed in this run yet).
+unsafe fn t1prof_o2_first(up: *mut Unit, id: u32) {
+    let key = t1_key(up, id);
+    let ids: Vec<(u32, String)> = {
+        let g = T1PROF.lock().unwrap();
+        let p = g.as_ref().unwrap();
+        let Some(e) = p.map.get(&key) else { return };
+        e.full.iter().map(|k| (if k.is_empty() { Some(id) } else { p.full_slots.get(k).copied() }, k)).map(|(c, k)| (c.unwrap_or(u32::MAX), if k.is_empty() { key.clone() } else { k.clone() })).collect()
+    };
+    for (c, k) in ids {
+        let has_o2 = |c: u32| (c as usize) < (&*up).fns.len() && (&*up).fns[c as usize].rir.as_ref().is_some_and(|r| r.full);
+        if c != u32::MAX && !has_o2(c) && (&*up).fns[c as usize].compiled {
+            // (once: a later queue entry for it is not built again)
+            O2_SEEN.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert((up as usize, c));
+            // (a failed or bailed O2 build leaves the O1 RIR: the divergence below)
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if let Some(w) = o2_begin(up, c) {
+                    let done = w.run();
+                    o2_finish(up, done);
+                }
+            }));
+        }
+        if c == u32::MAX {
+            // (not armed in this run yet: a closure, glue, or a body not compiled before this build)
+            t1prof_divergence("o2-first-noslot", &k);
+        } else if !has_o2(c) {
+            t1prof_divergence("o2-first", &k);
+        }
+    }
+}
+
 /// Hash of a RIR dump without fn slot numbers, symbol ids and host addresses (they differ
-/// between runs).
+/// between runs), its virtual registers numbered by first appearance (two lowerings of one body can
+/// number them differently, e.g. core::heap::from_size_align: an O1 build's and an O2 front's: the
+/// same code, which read as callee-differ in every replay).
 fn t1_norm_hash(rir: &relax_backend::rir::Func) -> u64 {
     let d = rir.dump();
     // The key already identifies the instance. Closure display names include the
@@ -15904,14 +15978,33 @@ fn t1_norm_hash(rir: &relax_backend::rir::Func) -> u64 {
     let d = d.find(" params ").map_or(d.as_str(), |i| &d[i..]);
     let b = d.as_bytes();
     let mut norm: Vec<u8> = Vec::with_capacity(b.len());
+    let mut vregs: HashMap<u64, u64> = HashMap::new();
+    let mut fn_addr = false;
     let mut i = 0;
     while i < b.len() {
-        // FnAddr(VReg(v), slot): the slot
-        if b[i..].starts_with(b"FnAddr(VReg(") {
-            while i < b.len() && b[i] != b')' {
-                norm.push(b[i]);
+        // VReg(n): numbered by first appearance
+        if b[i..].starts_with(b"VReg(") {
+            norm.extend_from_slice(b"VReg(");
+            i += 5;
+            let mut n = 0u64;
+            while i < b.len() && b[i].is_ascii_digit() {
+                n = n * 10 + (b[i] - b'0') as u64;
                 i += 1;
             }
+            let k = vregs.len() as u64;
+            let k = *vregs.entry(n).or_insert(k);
+            norm.extend_from_slice(k.to_string().as_bytes());
+            continue;
+        }
+        // FnAddr(VReg(v), slot): the slot (v as every register)
+        if b[i..].starts_with(b"FnAddr(VReg(") {
+            norm.extend_from_slice(b"FnAddr(");
+            i += 7;
+            fn_addr = true;
+            continue;
+        }
+        if fn_addr && b[i..].starts_with(b"), ") {
+            fn_addr = false;
             norm.extend_from_slice(b"), ");
             i += 3;
             while i < b.len() && b[i].is_ascii_digit() {
@@ -16042,7 +16135,7 @@ fn t1prof_finish() {
         };
         let inline = e.inline_freq.as_ref().expect("recorded inlining frequencies");
         let callees = e.callee_counts.iter().map(|(k, c)| format!("{}\u{1d}{}", k, fmt_freq(&Some(c.clone())))).collect::<Vec<_>>().join("\u{1e}");
-        out.push_str(&format!("{}\t{}\t{}\t{}\t{:016x}\t{:016x}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n", k, e.cold.join("\u{1f}"), e.snap.join("\u{1f}"), fmt_freq(&e.freq), e.input, e.code, fmt_freq(&inline[0]), fmt_freq(&inline[1]), e.single.join("\u{1f}"), if e.hot { "1" } else { "0" }, fmt_freq(&e.counts), callees, e.inlined.join("\u{1f}"), e.rirs.iter().map(|(k, h)| format!("{}\u{1d}{:x}", k, h)).collect::<Vec<_>>().join("\u{1e}")));
+        out.push_str(&format!("{}\t{}\t{}\t{}\t{:016x}\t{:016x}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n", k, e.cold.join("\u{1f}"), e.snap.join("\u{1f}"), fmt_freq(&e.freq), e.input, e.code, fmt_freq(&inline[0]), fmt_freq(&inline[1]), e.single.join("\u{1f}"), if e.hot { "1" } else { "0" }, fmt_freq(&e.counts), callees, e.inlined.join("\u{1f}"), e.rirs.iter().map(|(k, h)| format!("{}\u{1d}{:x}", k, h)).collect::<Vec<_>>().join("\u{1e}"), e.full.join("\u{1f}")));
     }
     for k in &p.o2 {
         out.push_str(&format!("o2\t{}\n", k));
@@ -16167,6 +16260,10 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
     // (deterministic O3, record too: both runs build the same way, their inputs on one path)
     if t1prof_on(options) && !owner::is_owner() {
         return owner::call(owner::Class::Program, || compile_tier1(up, id));
+    }
+    // replay: the O2 builds whose RIR the recorded build took, first (MAKEPAD_RUN_OPT=-o2first: not; A/B)
+    if t1prof_replay(options) && !relax_backend::stats::opt_off(options, "-o2first") {
+        t1prof_o2_first(up, id);
     }
     // SPEC-V: unverified code gets O3 code too, built as it is (Unit::o3_allowed)
     if !owner::publish(|| (&*up).o3_allowed(id)) {
@@ -16737,6 +16834,16 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
         a
     });
     let O3Assembled { mut snap, singles, cold_keys: t1_cold_keys, snap_keys: t1_snap_keys, single_keys: t1_single_keys, rir_hashes: t1_rir_hashes, snap_counts, unverified_left, root_unverified, unverified_in, .. } = assembled;
+    // deterministic O3 (record): the input bodies that were O2 RIR ("" the root), T1Entry::full
+    let t1_full_keys: Vec<String> = match &t1key {
+        Some(_) => {
+            let mut v: Vec<String> = std::iter::once(String::new()).filter(|_| rir.full)
+                .chain(snap.iter().filter(|x| x.1.full).map(|x| unsafe { t1_key(up, x.0) })).collect();
+            v.sort();
+            v
+        }
+        None => Vec::new(),
+    };
     // nocapture facts for the calls the build keeps (coalesce_slot_copies); the callees the answers
     // need RIR of are built off the owner first (a foreground build takes what exists)
     let nocapture = if relax_backend::stats::opt_off(options, "-o3nocap") { Vec::new() } else {
@@ -16899,7 +17006,7 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                 _ => {}
             }
             if !p.replay {
-                profile_entry = Some(T1Entry { cold: t1_cold_keys.clone(), snap: t1_snap_keys.clone(), single: t1_single_keys.clone(), freq: freq.clone(), inline_freq: Some(inline_freq.clone()), hot: hot_root, counts: counts.clone(), callee_counts: snap_counts.iter().filter_map(|(_, k, c)| Some((k.clone()?, c.clone()))).collect(), input, code, inlined: Vec::new(), rirs: t1_rir_hashes.clone() });
+                profile_entry = Some(T1Entry { cold: t1_cold_keys.clone(), snap: t1_snap_keys.clone(), single: t1_single_keys.clone(), freq: freq.clone(), inline_freq: Some(inline_freq.clone()), hot: hot_root, counts: counts.clone(), callee_counts: snap_counts.iter().filter_map(|(_, k, c)| Some((k.clone()?, c.clone()))).collect(), input, code, inlined: Vec::new(), rirs: t1_rir_hashes.clone(), full: t1_full_keys.clone() });
             }
         }
         note_frame(id, c.frame_size, slot_bytes(&func), true);
