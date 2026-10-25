@@ -43,6 +43,13 @@ impl Cache {
                 chosen.push((id, k, crates));
             }
         }
+        // SPEC-V: the image sends a verified-clean caller's calls to a twin to the twin's base when the
+        // base's code is in the image too (a twin's key is its base's key behind tag 4): the code is
+        // the caller's earlier (unverified) lowering, sound to call verified code once the caller's
+        // own verdict is clean. Later warm launches then never run the cold launch's twins (the race's
+        // draw path: draw_view .. set_uniform), at no link cost (twin_link_target for the lazy path).
+        let twinlink = !relax_backend::stats::opt_off(&u.prog.session.options, "-twinlink");
+        let in_image: std::collections::HashSet<Vec<u8>> = if twinlink { chosen.iter().filter_map(|(id, _, _)| self.slot_bytes_known(*id)).collect() } else { Default::default() };
         let mut tab = ImageTables::default();
         let mut slots = E::default();
         let mut blob: Vec<u8> = Vec::new();
@@ -52,7 +59,10 @@ impl Cache {
             let Some(payload) = self.image_payload(*k, &pend) else { continue };
             let Some(bytes) = self.slot_bytes_known(*id) else { continue };
             let mut cr: Vec<u32> = crates.clone();
-            if image_slot(&mut tab, &mut slots, &mut blob, *k, bytes, payload, &mut cr, &self.crate_by_ident).is_some() {
+            let body = match u.fns[*id as usize].key { crate::jit::FnKey::Plain(b) => b, _ => *id };
+            let clean = twinlink && u.verdict_clean(body);
+            let retarget = |t: &[u8]| -> bool { clean && t.first() == Some(&4) && in_image.contains(&t[1..]) };
+            if image_slot(&mut tab, &mut slots, &mut blob, *k, bytes, payload, &mut cr, &self.crate_by_ident, &retarget).is_some() {
                 n += 1;
             }
         }
@@ -519,7 +529,7 @@ const IMG_CALL: u8 = 6;
 /// decode, or names a crate this program does not have. `crates`:
 /// the crates its key names (the certificate's are added).
 #[allow(clippy::too_many_arguments)]
-fn image_slot(tab: &mut ImageTables, out: &mut E, blob: &mut Vec<u8>, entry_key: u128, key: Vec<u8>, payload: &[u8], crates: &mut Vec<u32>, crate_by_ident: &HashMap<u128, u32>) -> Option<()> {
+fn image_slot(tab: &mut ImageTables, out: &mut E, blob: &mut Vec<u8>, entry_key: u128, key: Vec<u8>, payload: &[u8], crates: &mut Vec<u32>, crate_by_ident: &HashMap<u128, u32>, retarget: &dyn Fn(&[u8]) -> bool) -> Option<()> {
     let mut d = D { b: payload, p: 0 };
     if d.u32()? != ENTRY_VERSION {
         return None;
@@ -557,7 +567,9 @@ fn image_slot(tab: &mut ImageTables, out: &mut E, blob: &mut Vec<u8>, entry_key:
         match tag {
             20 | 21 | 25 => {
                 d.u8()?;
-                rel.push((at, kind, match tag { 20 => IMG_SLOT, 25 => IMG_CALL, _ => IMG_THUNK }, tab.keys.id(d.bytes()?)));
+                let t = d.bytes()?;
+                let t = if retarget(t) { crate::jit::TWIN_RETARGETS.fetch_add(1, std::sync::atomic::Ordering::Relaxed); &t[1..] } else { t };
+                rel.push((at, kind, match tag { 20 => IMG_SLOT, 25 => IMG_CALL, _ => IMG_THUNK }, tab.keys.id(t)));
             }
             22..=24 => {
                 d.u8()?;

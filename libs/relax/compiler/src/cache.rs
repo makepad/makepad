@@ -346,7 +346,7 @@ pub fn warm_summary() -> String {
         s.push_str(&format!("; fresh builds over the stored entry (none/baseline/O1/O2/O3): O3 {}, O2 {}", over(RETIER_O3_OVER), over(RETIER_O2_OVER)));
     }
     if g(REC_UNVERIFIED) + g(SPECV_LATE) > 0 {
-        s.push_str(&format!("; SPEC-V: {} records of unverified lowerings, {} compiled slots below O3 verified after their build, {} base slots ran their twins' code until their own build (none compiled on a program thread for it), {} of them have their own code now, {} callees built ahead of a replacement's install", k(g(REC_UNVERIFIED)), k(g(SPECV_LATE)), k(crate::jit::SPECV_BORROWS.load(std::sync::atomic::Ordering::Relaxed)), k(crate::jit::SPECV_BORROWS_OWN.load(std::sync::atomic::Ordering::Relaxed)), k(crate::jit::SPECV_PREBUILT.load(std::sync::atomic::Ordering::Relaxed))));
+        s.push_str(&format!("; SPEC-V: {} records of unverified lowerings, {} compiled slots below O3 verified after their build, {} base slots ran their twins' code until their own build (none compiled on a program thread for it), {} of them have their own code now, {} callees built ahead of a replacement's install, {} calls of linked code sent to a twin's base", k(g(REC_UNVERIFIED)), k(g(SPECV_LATE)), k(crate::jit::SPECV_BORROWS.load(std::sync::atomic::Ordering::Relaxed)), k(crate::jit::SPECV_BORROWS_OWN.load(std::sync::atomic::Ordering::Relaxed)), k(crate::jit::SPECV_PREBUILT.load(std::sync::atomic::Ordering::Relaxed)), k(crate::jit::TWIN_RETARGETS.load(std::sync::atomic::Ordering::Relaxed))));
     }
     if g(O3_QUEUED) + g(O3_UNVERIFIED) + g(O3_FRAME) + g(O3_SPEC) > 0 {
         s.push_str(&format!("; O3 installs kept as entries: {} queued (written {}, same as stored {}, not encodable {}, stale {}, dropped {}; {} deferred records waiting, last drain {} with {}), not kept: unverified {}, frame too big {}, speculative/inspect {}; O2 entries written {}",
@@ -7199,7 +7199,7 @@ impl Linker {
             } else {
                 found = true;
                 trace_lookup(u, id, "hit");
-                r = self.link_entry(u, payload);
+                r = self.link_entry(u, id, payload);
             }
         }
         if !found {
@@ -7276,7 +7276,7 @@ impl Linker {
     }
 
     /// Links one code entry (sets `last_callees`, `last_tier1`).
-    fn link_entry(&mut self, u: &mut Unit, payload: &[u8]) -> Option<(Vec<u8>, Vec<(u32, u64)>, Vec<RelocAt>)> {
+    fn link_entry(&mut self, u: &mut Unit, id: u32, payload: &[u8]) -> Option<(Vec<u8>, Vec<(u32, u64)>, Vec<RelocAt>)> {
         #[cfg(test)]
         {
             let hook = data_tests::BEFORE_LINK.with(|hook| hook.borrow_mut().take());
@@ -7313,6 +7313,7 @@ impl Linker {
                     d.u8()?;
                     let b = d.bytes()?;
                     let sid = self.slot_of_bytes(u, b)?;
+                    let sid = u.twin_link_target(id, sid);
                     if tag == 21 {
                         thunks.push(sid);
                     } else {
