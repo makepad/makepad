@@ -64,3 +64,9 @@ path = "src/inspect_eval.rs"
 [[bin]]
 name = "relax-fork-busy"
 path = "src/fork_busy.rs"
+
+# a font crate's ScaledFont<F: Font> metrics (blanket impls, dyn) in a hot layout loop: its O3
+# snapshots finish and the boot bar does not stay on them (font_tier.sh)
+[[bin]]
+name = "relax-font-tier"
+path = "src/font_tier.rs"

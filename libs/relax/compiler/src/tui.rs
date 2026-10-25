@@ -387,7 +387,19 @@ mod unix {
         const SPIN: [&str; 10] = ["\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}", "\u{280f}"];
         let spin = style("1;36", SPIN[(ms / 80.0) as usize % SPIN.len()]);
         let p = PHASE.load(Ordering::Relaxed) as usize;
-        let label = LABELS[p.min(LABELS.len() - 1)];
+        let mut label = LABELS[p.min(LABELS.len() - 1)];
+        // after main: "compiling" only while something compiles (a queue, a startup compile, an
+        // item in flight); a program that never presents a frame (a terminal program, a window
+        // drawn by other means) otherwise read as compiling forever over an idle compiler (T1STUCK)
+        let (queued, active, item) = if p == 9 {
+            let (q, a) = crate::jit::compile_progress();
+            (q, a, longest_item())
+        } else {
+            (None, 0, None)
+        };
+        if p == 9 && queued == Some(0) && active == 0 && item.is_none() {
+            label = "running";
+        }
         let mut text = style("1", &format!("{label:<9}"));
         match p {
             3 => {
@@ -402,10 +414,13 @@ mod unix {
             }
             9 => {
                 let n = crate::jit::COMPILED_FNS.load(Ordering::Relaxed);
-                let (queued, active) = crate::jit::compile_progress();
-                let queued = queued.map_or_else(|| "busy".to_string(), |n| n.to_string());
-                text.push_str(&format!(" {n} fns · {queued} queued · {active} active"));
-                if let Some((name, ms)) = longest_item().filter(|x| x.1 > 500.0) {
+                if label == "running" {
+                    text.push_str(&format!(" {n} fns compiled"));
+                } else {
+                    let queued = queued.map_or_else(|| "busy".to_string(), |n| n.to_string());
+                    text.push_str(&format!(" {n} fns · {queued} queued · {active} active"));
+                }
+                if let Some((name, ms)) = item.filter(|x| x.1 > 500.0) {
                     text.push_str(&format!(" {} {} {}", style("2", "\u{b7}"), cut(&name, 40), style("2", &secs(ms))));
                 }
             }

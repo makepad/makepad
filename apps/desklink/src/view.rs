@@ -35,6 +35,17 @@ script_mod! {
         draw_note_bg +: { color: #x000000aa }
     }
 
+    mod.widgets.TimelineBase = #(Timeline::register_widget(vm))
+    mod.widgets.Timeline = set_type_default() do mod.widgets.TimelineBase {
+        width: Fill height: Fill
+        draw_bg +: { color: #x0c0d10ee }
+        draw_bar +: { color: #x6b7a99 }
+        draw_text +: {
+            color: #xe8e8ea
+            text_style: theme.font_code{font_size: 9}
+        }
+    }
+
     mod.widgets.ConnListBase = #(ConnList::register_widget(vm))
     mod.widgets.ConnList = set_type_default() do mod.widgets.ConnListBase {
         width: Fill height: Fill
@@ -145,6 +156,9 @@ pub struct RemoteView {
     pub drawn: Option<(u32, u64, u64)>,
     #[rust]
     pending: Option<(u32, u64)>,
+    /// Room kept free at the bottom (the history timeline over the view).
+    #[rust]
+    pub inset_bottom: f64,
 }
 
 /// GPU pictures kept alive after they were replaced (frames in flight may sample them).
@@ -233,7 +247,8 @@ impl RemoteView {
     /// Where the picture goes, on whole device pixels (a fractional offset would blur every
     /// pixel): 1:1, fit at a whole-number scale, or fit (letterboxed, aspect locked).
     /// Returns the rect and whether every remote pixel is a whole block of device pixels.
-    fn place(&self, cx: &Cx2d, view: Rect) -> (Rect, bool) {
+    fn place(&self, cx: &Cx2d, mut view: Rect) -> (Rect, bool) {
+        view.size.y = (view.size.y - self.inset_bottom).max(1.0);
         let [w, h] = self.size;
         if w == 0 || h == 0 {
             return (Rect::default(), false);
@@ -347,6 +362,8 @@ pub struct Row {
 #[derive(Clone, Debug, Default)]
 pub enum ConnListAction {
     Select(usize),
+    /// The row's "reconnect": drop the session and open it again now.
+    Reconnect(usize),
     #[default]
     None,
 }
@@ -374,6 +391,9 @@ pub struct ConnList {
     hover: Option<usize>,
     #[rust]
     rects: Vec<Rect>,
+    /// Each row's "reconnect" label.
+    #[rust]
+    reconnect_rects: Vec<Rect>,
 }
 
 const ROW_H: f64 = 44.0;
@@ -400,7 +420,9 @@ impl Widget for ConnList {
                 }
             }
             Event::MouseDown(e) => {
-                if let Some(i) = hit(e.abs, &self.rects) {
+                if let Some(i) = hit(e.abs, &self.reconnect_rects) {
+                    cx.widget_action(uid, ConnListAction::Reconnect(i));
+                } else if let Some(i) = hit(e.abs, &self.rects) {
                     self.selected = i;
                     self.draw_row.redraw(cx);
                     cx.widget_action(uid, ConnListAction::Select(i));
@@ -413,6 +435,7 @@ impl Widget for ConnList {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         let area = cx.walk_turtle(walk);
         self.rects.clear();
+        self.reconnect_rects.clear();
         for (i, row) in self.rows.iter().enumerate() {
             let r = Rect { pos: dvec2(area.pos.x, area.pos.y + i as f64 * ROW_H), size: dvec2(area.size.x, ROW_H) };
             self.rects.push(r);
@@ -427,6 +450,12 @@ impl Widget for ConnList {
             self.draw_dot.draw_abs(cx, Rect { pos: r.pos + dvec2(10.0, 16.0), size: dvec2(9.0, 9.0) });
             self.draw_name.draw_abs(cx, r.pos + dvec2(28.0, 7.0), &row.name);
             self.draw_detail.draw_abs(cx, r.pos + dvec2(28.0, 25.0), &row.detail);
+            // "reconnect" at the row's right end (on hover or for the selected row)
+            let rr = Rect { pos: dvec2(r.pos.x + r.size.x - 62.0, r.pos.y + 4.0), size: dvec2(58.0, 18.0) };
+            if i == self.selected || Some(i) == self.hover {
+                self.draw_detail.draw_abs(cx, rr.pos + dvec2(4.0, 3.0), "reconnect");
+            }
+            self.reconnect_rects.push(rr);
         }
         DrawStep::done()
     }
@@ -479,6 +508,268 @@ pub fn latency_line(l: &Latency) -> String {
 /// the decoder.
 pub fn flow_line(read_gap_ms: f64, decode_queue: usize) -> String {
     format!("read gap {:>5.1} ms · decode queue {:>3}", read_gap_ms.clamp(0.0, 9999.9), decode_queue.min(999))
+}
+
+/// What the timeline shows: the paused history, the shown picture, the range to save.
+pub struct TimelineData {
+    pub snap: std::sync::Arc<crate::history::Snapshot>,
+    pub cur: usize,
+    pub range: (Option<usize>, Option<usize>),
+    /// The play speed (None: stopped).
+    pub playing: Option<f64>,
+    /// Status: the scrub decoder (cache, work, failure) and the last save.
+    pub status: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum TimelineAction {
+    Seek(usize),
+    Step(i64),
+    Live,
+    Play(f64),
+    Stop,
+    In,
+    Out,
+    SaveClip,
+    SaveFrame,
+    #[default]
+    None,
+}
+
+/// The history timeline (shown while the view is paused): an overview of the whole history
+/// (each column a slice of time: picture sizes, key frames yellow, gaps / skipped frames /
+/// failed decodes red), a strip of the pictures around the shown one (one cell each, sizes as
+/// bars), the shown picture's numbers, and the buttons.
+#[derive(Script, ScriptHook, Widget)]
+pub struct Timeline {
+    #[uid]
+    uid: WidgetUid,
+    #[walk]
+    walk: Walk,
+    #[redraw]
+    #[live]
+    draw_bg: DrawColor,
+    #[live]
+    draw_bar: DrawColor,
+    #[live]
+    draw_text: DrawText,
+    #[rust]
+    pub data: Option<TimelineData>,
+    #[rust]
+    buttons: Vec<(Rect, TimelineAction)>,
+    #[rust]
+    overview: Rect,
+    #[rust]
+    strip: Rect,
+    /// The strip's first picture and its cell width.
+    #[rust]
+    strip_first: usize,
+    #[rust]
+    strip_cell: f64,
+    /// 1: dragging in the overview, 2: in the strip.
+    #[rust]
+    drag: u8,
+}
+
+/// The timeline's height (points).
+pub const TIMELINE_H: f64 = 124.0;
+
+const KEY_COLOR: Vec4f = vec4(0.95, 0.80, 0.25, 1.0);
+const MARK_COLOR: Vec4f = vec4(0.95, 0.30, 0.30, 1.0);
+const BAR_COLOR: Vec4f = vec4(0.42, 0.48, 0.60, 1.0);
+
+impl Timeline {
+    pub fn set_data(&mut self, cx: &mut Cx, data: Option<TimelineData>) {
+        self.data = data;
+        self.draw_bg.redraw(cx);
+    }
+
+    fn pick(&self, abs: Vec2d) -> Option<usize> {
+        let d = self.data.as_ref()?;
+        let n = d.snap.len();
+        if n == 0 {
+            return None;
+        }
+        if self.drag == 1 {
+            let (a, b) = (d.snap.pictures[0].built_ns, d.snap.pictures[n - 1].built_ns);
+            let u = ((abs.x - self.overview.pos.x) / self.overview.size.x.max(1.0)).clamp(0.0, 1.0);
+            return Some(d.snap.at_time(a + ((b - a) as f64 * u) as u64));
+        }
+        let k = ((abs.x - self.strip.pos.x) / self.strip_cell.max(1.0)).floor().max(0.0) as usize;
+        Some((self.strip_first + k).min(n - 1))
+    }
+}
+
+impl Widget for Timeline {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if self.data.is_none() {
+            return;
+        }
+        let uid = self.uid;
+        match event {
+            Event::MouseDown(e) => {
+                if let Some((_, a)) = self.buttons.iter().find(|(r, _)| r.contains(e.abs)) {
+                    cx.widget_action(uid, *a);
+                    return;
+                }
+                self.drag = if self.overview.contains(e.abs) { 1 } else if self.strip.contains(e.abs) { 2 } else { 0 };
+                if let Some(i) = (self.drag != 0).then(|| self.pick(e.abs)).flatten() {
+                    cx.widget_action(uid, TimelineAction::Seek(i));
+                }
+            }
+            Event::MouseMove(e) if self.drag != 0 => {
+                if let Some(i) = self.pick(e.abs) {
+                    cx.widget_action(uid, TimelineAction::Seek(i));
+                }
+            }
+            Event::MouseUp(_) => self.drag = 0,
+            _ => {}
+        }
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        let area = cx.walk_turtle(walk);
+        self.buttons.clear();
+        let Some(d) = self.data.as_ref() else {
+            self.overview = Rect::default();
+            self.strip = Rect::default();
+            return DrawStep::done();
+        };
+        let snap = &d.snap;
+        let n = snap.len();
+        let panel = Rect { pos: dvec2(area.pos.x, area.pos.y + area.size.y - TIMELINE_H), size: dvec2(area.size.x, TIMELINE_H) };
+        self.draw_bg.draw_abs(cx, panel);
+        let x0 = panel.pos.x + 10.0;
+        let w = (panel.size.x - 20.0).max(10.0);
+        if n == 0 {
+            self.draw_text.draw_abs(cx, dvec2(x0, panel.pos.y + 10.0), "the history is empty");
+            return DrawStep::done();
+        }
+        let cur = d.cur.min(n - 1);
+        let max_bytes = snap.pictures.iter().map(|p| p.bytes).max().unwrap_or(1).max(2) as f64;
+        // square root: small pictures stay visible next to key frames
+        let bar_h = |bytes: usize, full: f64| ((bytes as f64 / max_bytes).sqrt().clamp(0.06, 1.0)) * full;
+        use crate::history::flag;
+        let flagged = |i: usize| snap.flags(i) & (flag::GAP | flag::SKIP | flag::FAILED) != 0;
+
+        // the overview: the whole history over time, one column per 2 points
+        let ov = Rect { pos: dvec2(x0, panel.pos.y + 8.0), size: dvec2(w, 26.0) };
+        self.overview = ov;
+        let (t0, t1) = (snap.pictures[0].built_ns, snap.pictures[n - 1].built_ns.max(snap.pictures[0].built_ns + 1));
+        let x_of = |t: u64| ov.pos.x + (t - t0) as f64 / (t1 - t0) as f64 * ov.size.x;
+        if let (Some(a), Some(b)) = (d.range.0, d.range.1) {
+            let (a, b) = (a.min(b), a.max(b).min(n - 1));
+            self.draw_bar.color = vec4(0.25, 0.45, 0.85, 0.35);
+            let (xa, xb) = (x_of(snap.pictures[a].built_ns), x_of(snap.pictures[b].built_ns));
+            self.draw_bar.draw_abs(cx, Rect { pos: dvec2(xa, ov.pos.y), size: dvec2((xb - xa).max(2.0), ov.size.y) });
+        }
+        let columns = (ov.size.x / 2.0).floor().max(1.0) as usize;
+        // (largest picture, a key frame, a flagged picture) per column
+        let mut col: Vec<(usize, bool, bool)> = vec![(0, false, false); columns];
+        for i in 0..n {
+            let c = (((snap.pictures[i].built_ns - t0) as f64 / (t1 - t0) as f64 * columns as f64) as usize).min(columns - 1);
+            let p = &snap.pictures[i];
+            col[c].0 = col[c].0.max(p.bytes);
+            col[c].1 |= p.key;
+            col[c].2 |= flagged(i);
+        }
+        for (c, (bytes, key, flag)) in col.iter().enumerate() {
+            if *bytes == 0 && !flag {
+                continue;
+            }
+            let h = bar_h(*bytes, ov.size.y - 4.0);
+            let x = ov.pos.x + c as f64 * 2.0;
+            self.draw_bar.color = if *key { KEY_COLOR } else { BAR_COLOR };
+            self.draw_bar.draw_abs(cx, Rect { pos: dvec2(x, ov.pos.y + ov.size.y - h), size: dvec2(2.0, h) });
+            if *flag {
+                self.draw_bar.color = MARK_COLOR;
+                self.draw_bar.draw_abs(cx, Rect { pos: dvec2(x, ov.pos.y), size: dvec2(2.0, 3.0) });
+            }
+        }
+        self.draw_bar.color = vec4(1.0, 1.0, 1.0, 1.0);
+        self.draw_bar.draw_abs(cx, Rect { pos: dvec2(x_of(snap.pictures[cur].built_ns) - 1.0, ov.pos.y - 3.0), size: dvec2(2.0, ov.size.y + 6.0) });
+
+        // the strip: one cell per picture around the shown one
+        let st = Rect { pos: dvec2(x0, ov.pos.y + ov.size.y + 8.0), size: dvec2(w, 30.0) };
+        self.strip = st;
+        let cell = 12.0;
+        let cells = (st.size.x / cell).floor().max(1.0) as usize;
+        let first = cur.saturating_sub(cells / 2).min(n.saturating_sub(cells));
+        self.strip_first = first;
+        self.strip_cell = cell;
+        for k in 0..cells.min(n - first) {
+            let i = first + k;
+            let p = &snap.pictures[i];
+            let x = st.pos.x + k as f64 * cell;
+            if i == cur {
+                self.draw_bar.color = vec4(1.0, 1.0, 1.0, 0.22);
+                self.draw_bar.draw_abs(cx, Rect { pos: dvec2(x, st.pos.y - 2.0), size: dvec2(cell, st.size.y + 4.0) });
+            }
+            if let (Some(a), Some(b)) = (d.range.0, d.range.1) {
+                if (a.min(b)..=a.max(b)).contains(&i) {
+                    self.draw_bar.color = vec4(0.25, 0.45, 0.85, 0.30);
+                    self.draw_bar.draw_abs(cx, Rect { pos: dvec2(x, st.pos.y), size: dvec2(cell, st.size.y) });
+                }
+            }
+            let h = bar_h(p.bytes, st.size.y - 6.0);
+            self.draw_bar.color = if p.key { KEY_COLOR } else { BAR_COLOR };
+            self.draw_bar.draw_abs(cx, Rect { pos: dvec2(x + 2.0, st.pos.y + st.size.y - h), size: dvec2(cell - 4.0, h) });
+            if snap.flags(i) != 0 {
+                self.draw_bar.color = MARK_COLOR;
+                self.draw_bar.draw_abs(cx, Rect { pos: dvec2(x + 2.0, st.pos.y), size: dvec2(cell - 4.0, 3.0) });
+            }
+        }
+
+        // the shown picture's numbers
+        let p = &snap.pictures[cur];
+        let last = &snap.pictures[n - 1];
+        let marks = snap.marks(cur);
+        let info = format!(
+            "frame {} · {}/{} · {:+.3} s · {:>7.1} KB{} · decode {:.1} ms · dt {:.2} ms{}{}",
+            p.frame,
+            cur + 1,
+            n,
+            -(last.built_ns.saturating_sub(p.built_ns) as f64 / 1e9),
+            p.bytes as f64 / 1024.0,
+            if p.count > 1 { format!(" ({} parts)", p.count) } else { String::new() },
+            p.decode_us as f64 / 1000.0,
+            snap.dt_ns(cur) as f64 / 1e6,
+            if marks.is_empty() { String::new() } else { format!(" · {}", marks.join(", ")) },
+            match (d.range.0, d.range.1) {
+                (Some(a), Some(b)) => format!(" · range {}..{}", snap.pictures[a.min(b)].frame, snap.pictures[a.max(b).min(n - 1)].frame),
+                (Some(a), None) | (None, Some(a)) => format!(" · range from {}", snap.pictures[a].frame),
+                _ => String::new(),
+            }
+        );
+        self.draw_text.draw_abs(cx, dvec2(x0, st.pos.y + st.size.y + 6.0), &info);
+
+        // the buttons, then the status
+        let by = panel.pos.y + TIMELINE_H - 26.0;
+        let mut bx = x0;
+        let play_label = |speed: f64| if d.playing == Some(speed) { "Stop".to_string() } else if speed == 1.0 { "Play 1x".to_string() } else { "Play 1/4x".to_string() };
+        let buttons = [
+            ("Live (Esc)".to_string(), TimelineAction::Live),
+            ("< 1".to_string(), TimelineAction::Step(-1)),
+            ("1 >".to_string(), TimelineAction::Step(1)),
+            (play_label(1.0), if d.playing == Some(1.0) { TimelineAction::Stop } else { TimelineAction::Play(1.0) }),
+            (play_label(0.25), if d.playing == Some(0.25) { TimelineAction::Stop } else { TimelineAction::Play(0.25) }),
+            ("In".to_string(), TimelineAction::In),
+            ("Out".to_string(), TimelineAction::Out),
+            ("Save clip".to_string(), TimelineAction::SaveClip),
+            ("Save frame".to_string(), TimelineAction::SaveFrame),
+        ];
+        for (label, action) in buttons {
+            let bw = label.chars().count() as f64 * 7.2 + 16.0;
+            let r = Rect { pos: dvec2(bx, by), size: dvec2(bw, 20.0) };
+            self.draw_bar.color = vec4(1.0, 1.0, 1.0, 0.10);
+            self.draw_bar.draw_abs(cx, r);
+            self.draw_text.draw_abs(cx, dvec2(bx + 8.0, by + 4.0), &label);
+            self.buttons.push((r, action));
+            bx += bw + 6.0;
+        }
+        self.draw_text.draw_abs(cx, dvec2(bx + 8.0, by + 4.0), &d.status);
+        DrawStep::done()
+    }
 }
 
 #[cfg(test)]

@@ -16552,7 +16552,16 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
     let s0 = cpu_ns();
         trace_tier1_phase(id, "snapshot");
         cost_name(up, id);
+        // the owner's item while this take runs, and only then: every exit (a give-back, a walk's
+        // WALK_ITEMS stop, a bail's unwind, the snapshot) ends it -- the boot bar showed the last
+        // take's name as the longest item for the rest of the run (T1STUCK: "tier1 locked:
+        // ...ScaledFont::descent" over an idle compiler, read as compiling forever)
+        struct TakeWatch;
+        impl Drop for TakeWatch {
+            fn drop(&mut self) { compile_watch(None); }
+        }
         compile_watch(Some((&format!("tier1 locked: {}", (&*up).fns[id as usize].name), 0)));
+        let _take_watch = TakeWatch;
         // a round's walk resumed where the last publish of the round stopped (WALK_ITEMS)
         let resumed = walk.borrow_mut().take();
         let (epoch, rir, version, t1key, sandboxed, mut callees, mut seen, src_toks, inline_all, t1_rec, mut frontier, mut level, mut idx) = if let Some(w) = resumed { w } else {

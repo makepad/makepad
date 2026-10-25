@@ -9,22 +9,38 @@
 //! Fullscreen hides the panel (the picture is the whole screen, 1:1); Cmd+Shift+P (Ctrl+Shift+P
 //! off macOS) shows or hides it in any window.
 //!
-//! Dev flags: `--connect host[:port]` (repeatable), `--select N`, `--stats` (latency lines on
+//! Dev flags: `--connect host[:port]` (repeatable; `--connect-only`: no other desktops), `--select N`, `--stats` (latency lines on
 //! stderr once a second), `--dump-check <file.h264>` (decode an Annex-B dump with the hardware
 //! decoder, print what came out, exit), `--dump-play <dump dir | file.h264[@x0,y0],...>` (show a dump, or the tiles of one, as a desktop, at
 //! 60 pictures a second, looping; `--cpu-decode` takes the CPU NV12 path instead of GPU pictures, `--still N` stops at picture N),
 //! `--decode-bench <dir>` (the tile streams of a `desk-link-probe --dump`: each on its own decoder
 //! thread as the viewer runs them, every picture's tiles at once; prints the decode time of a
 //! whole picture and the pictures a second the decoders sustain, exit).
+//! `--scrub-check SECS`: after SECS of pictures, pause, scrub the history (steps back and
+//! forward, a far jump, a saved clip), print the timings on stderr and exit.
+//!
+//! Reconnect: the panel row's "reconnect" or Cmd+R (Ctrl+Shift+R elsewhere) drops the shown
+//! desktop's session and opens it again at once.
+//!
+//! History: every connection keeps the last 30 s of its received bitstream. "Pause: history"
+//! (or the left arrow while the keyboard is not driving the desktop) freezes it into a timeline:
+//! left / right step one picture (shift: ten), Home / End, space plays, Escape goes back to live;
+//! "Save clip" writes the range (In / Out, else a second around the shown picture) to
+//! local/screencap: the bitstream as received, PNGs and frame notes.
 
+mod clip;
 mod conn;
+mod history;
+mod scrub;
 mod view;
 
 pub use makepad_widgets;
 use conn::{Connection, Latency, State};
 use makepad_desk_link::{self as proto, ClientMsg, GamepadState};
 use makepad_widgets::*;
-use view::{ConnList, ConnListAction, RemoteView, Row};
+use scrub::Scrub;
+use std::sync::{Arc, Mutex};
+use view::{ConnList, ConnListAction, RemoteView, Row, Timeline, TimelineAction, TimelineData};
 
 app_main!(App);
 
@@ -55,11 +71,14 @@ script_mod! {
                             details := CheckBox{text: "Latency details"}
                             screen_next := Button{width: Fill text: "Next screen"}
                             split_mode := Button{width: Fill text: "Engines: tiles"}
+                            history_btn := Button{width: Fill text: "Pause: history"}
                             rate_cap := Button{width: Fill text: "Rate: auto"}
                         }
                         View{
                             width: Fill height: Fill
+                            flow: Overlay
                             remote := RemoteView{}
+                            timeline := Timeline{}
                         }
                     }
                 }
@@ -127,6 +146,54 @@ pub struct App {
     /// Present times waiting for their report: (frame, decode_us, present_us).
     #[rust]
     last_stats: Option<(u32, u32, u32)>,
+    /// The paused history (None: live).
+    #[rust]
+    scrub: Option<Scrub>,
+    /// The picture of the history to show, and the one shown.
+    #[rust]
+    cur: usize,
+    #[rust]
+    hist_shown: Option<usize>,
+    /// The range to save (In / Out).
+    #[rust]
+    range: (Option<usize>, Option<usize>),
+    /// Playing the history: (speed, start time, the picture's host time at the start).
+    #[rust]
+    playing: Option<(f64, f64, u64)>,
+    #[rust]
+    play_frame: NextFrame,
+    #[rust]
+    clip_status: Arc<Mutex<String>>,
+    /// `--scrub-check`.
+    #[rust]
+    check: Option<Check>,
+}
+
+/// `--scrub-check`: a scripted scrub of the history, timed on the UI thread.
+struct Check {
+    /// Seconds of pictures before pausing.
+    after: f64,
+    started: Option<std::time::Instant>,
+    /// The steps still to do: picture deltas (`JUMP`: to the middle, `SAVE`: a clip).
+    steps: std::collections::VecDeque<i64>,
+    /// The step being waited for: (its kind, when it was asked).
+    waiting: Option<(i64, std::time::Instant)>,
+    /// (kind, ms until the picture showed).
+    times: Vec<(i64, f64)>,
+    last_step: Option<std::time::Instant>,
+    /// `--check-reconnect`: reconnect halfway through the live part; (asked at, seen offline,
+    /// ms until connected again).
+    reconnect: Option<(std::time::Instant, bool, Option<f64>)>,
+    reconnect_wanted: bool,
+    created: std::time::Instant,
+    timer: Timer,
+}
+
+impl Check {
+    const JUMP: i64 = i64::MIN + 1;
+    const SAVE: i64 = i64::MIN;
+    /// The first picture shown after pausing.
+    const FIRST: i64 = 0;
 }
 
 fn port_of(spec: &str) -> (String, u16) {
@@ -154,6 +221,10 @@ fn hosts() -> Vec<(String, String, u16, bool)> {
         if w[0] == "--connect" {
             add(w[1].clone(), &w[1]);
         }
+    }
+    // `--connect-only`: just the `--connect` desktops (a check that must not knock on other machines)
+    if args.iter().any(|a| a == "--connect-only") {
+        return out;
     }
     let home = makepad_network::fleet::makepad_home();
     if let Ok(text) = std::fs::read_to_string(home.join("desklink/hosts")) {
@@ -287,6 +358,10 @@ impl App {
         if index >= self.conns.len() {
             return;
         }
+        if self.scrub.is_some() {
+            // the history is the shown connection's
+            self.leave_history(cx);
+        }
         if let Some(c) = self.conns.get(self.selected) {
             c.show(false);
         }
@@ -332,7 +407,12 @@ impl App {
             l.set_rows(cx, rows);
         }
         let Some(c) = self.conns.get(self.selected) else { return };
-        let picture = c.latest.lock().unwrap().take();
+        // paused: live pictures go on arriving (and recording) but are not shown
+        let picture = c.latest.lock().unwrap().take().filter(|_| self.scrub.is_none());
+        let history_line = {
+            let h = c.history.lock().unwrap();
+            format!("history {:.1} s · {} packets · {:.0} MB", h.span_ns() as f64 / 1e9, h.len(), h.bytes() as f64 / (1 << 20) as f64)
+        };
         let (state, welcome, cursor, offset, fps, mbps, warning, stream_fps, read_gap_ms, decode_queue, stream_rate) = {
             let s = c.shared.lock().unwrap();
             (s.state.clone().unwrap_or(State::Connecting), s.welcome.clone(), s.cursor, s.offset_ns, s.fps, s.mbps, s.warning.clone(), s.stream_fps, s.read_gap_ms, s.decode_queue, s.stream_rate)
@@ -347,6 +427,15 @@ impl App {
             l.network = (p.received_ns as i64 - local(p.sent_ns)) as f64 / 1e6;
             l.decode = p.decode_ns as f64 / 1e6;
             view.set_picture(cx, p.width, p.height, p.parts, p.frame, p.decoded_ns);
+        }
+        if let Some(d) = self.scrub.as_ref().and_then(Scrub::take_ready) {
+            let frame = self.scrub.as_ref().map_or(0, |s| s.snap.pictures[d.index].frame);
+            view.set_picture(cx, d.width, d.height, d.view_parts(), frame, 0);
+            self.hist_shown = Some(d.index);
+        }
+        if self.scrub.is_some() {
+            // a history picture's draw is no latency figure
+            view.drawn = None;
         }
         if let Some((frame, decoded, drawn)) = view.drawn.take() {
             self.latency.present = drawn.saturating_sub(decoded) as f64 / 1e6;
@@ -377,6 +466,7 @@ impl App {
             lines.push(view::rate_details_line(fps, stream_fps, crate::conn::DISPLAY_HZ.load(std::sync::atomic::Ordering::Acquire), stream_rate));
             lines.push(view::latency_line(&self.latency));
             lines.push(view::flow_line(read_gap_ms, decode_queue));
+            lines.push(history_line);
         }
         if let Some(w) = warning {
             lines.push(format!("WARNING: {w}"));
@@ -393,9 +483,15 @@ impl App {
             view.remote_cursor = (visible && !(self.local_over && ours)).then_some((x, y));
         }
         view.redraw(cx);
+        drop(view);
+        self.update_timeline(cx);
     }
 
     fn pointer_event(&mut self, cx: &mut Cx, event: &Event) {
+        if self.scrub.is_some() {
+            // paused: the keyboard and mouse scrub the history, nothing goes to the desktop
+            return;
+        }
         let placement = match self.remote(cx).borrow::<RemoteView>() {
             Some(v) => v.placement,
             None => return,
@@ -489,6 +585,315 @@ const RATE_CAPS: [u32; 6] = [0, 800, 400, 250, 150, 80];
 /// The panel toggle: Cmd+Shift+P on macOS, Ctrl+Shift+P elsewhere (never sent to the desktop).
 fn is_panel_toggle(e: &KeyEvent) -> bool {
     e.key_code == KeyCode::KeyP && e.modifiers.shift && if cfg!(target_os = "macos") { e.modifiers.logo } else { e.modifiers.control }
+}
+
+/// The history: pausing, stepping, playing, saving.
+impl App {
+    /// Drops connection `i`'s session and opens it again now (the panel's "reconnect", Cmd+R).
+    fn reconnect(&mut self, cx: &mut Cx, i: usize) {
+        if let Some(c) = self.conns.get(i) {
+            c.reconnect();
+            if i == self.selected {
+                self.held = 0;
+                self.last_pointer = None;
+            }
+        }
+        self.refresh(cx);
+    }
+
+    fn enter_history(&mut self, cx: &mut Cx) {
+        let Some(c) = self.conns.get(self.selected) else { return };
+        let snap = Arc::new(c.history.lock().unwrap().snapshot());
+        if snap.len() == 0 {
+            return;
+        }
+        // buttons held on the desktop are let go (the mouse now scrubs)
+        for b in 0..8u8 {
+            if self.held & (1 << b) != 0 {
+                c.send(ClientMsg::Button { down: false, button: b });
+            }
+        }
+        self.held = 0;
+        self.cur = snap.len() - 1;
+        self.hist_shown = None;
+        self.range = (None, None);
+        self.playing = None;
+        self.scrub = Some(Scrub::start(snap, self.cur, self.signal.clone()));
+        self.ui.button(cx, ids!(history_btn)).set_text(cx, "Back to live");
+        if let Some(mut v) = self.remote(cx).borrow_mut::<RemoteView>() {
+            v.inset_bottom = view::TIMELINE_H;
+        }
+        self.show_cur(cx);
+    }
+
+    fn leave_history(&mut self, cx: &mut Cx) {
+        self.scrub = None;
+        self.playing = None;
+        self.hist_shown = None;
+        self.ui.button(cx, ids!(history_btn)).set_text(cx, "Pause: history");
+        if let Some(mut v) = self.remote(cx).borrow_mut::<RemoteView>() {
+            v.inset_bottom = 0.0;
+        }
+        self.refresh(cx);
+    }
+
+    /// Shows picture `cur`: at once when it is decoded already, else when the scrub decoder
+    /// has it (`Scrub::take_ready`, on the signal).
+    fn show_cur(&mut self, cx: &mut Cx) {
+        let Some(scrub) = &self.scrub else { return };
+        if let Some(d) = scrub.seek(self.cur) {
+            let frame = scrub.snap.pictures[d.index].frame;
+            if let Some(mut v) = self.remote(cx).borrow_mut::<RemoteView>() {
+                v.set_picture(cx, d.width, d.height, d.view_parts(), frame, 0);
+            }
+            self.hist_shown = Some(d.index);
+        }
+        if self.hist_shown != Some(self.cur) {
+            // the timeline follows the decode until the picture is there
+            self.play_frame = cx.new_next_frame();
+        }
+        self.update_timeline(cx);
+    }
+
+    fn step(&mut self, cx: &mut Cx, delta: i64) {
+        let Some(n) = self.scrub.as_ref().map(|s| s.snap.len()) else { return };
+        self.playing = None;
+        self.cur = (self.cur as i64 + delta).clamp(0, n as i64 - 1) as usize;
+        self.show_cur(cx);
+    }
+
+    fn update_timeline(&mut self, cx: &mut Cx) {
+        let data = self.scrub.as_ref().map(|scrub| {
+            let (behind, ahead, work, failed) = scrub.status();
+            let mut status = format!("decoded -{behind}/+{ahead}");
+            if self.hist_shown != Some(self.cur) {
+                status.push_str(" · decoding");
+            }
+            if !work.is_empty() {
+                status.push_str(&format!(" · {work}"));
+            }
+            if let Some(f) = failed {
+                status.push_str(&format!(" · FAILED: {f}"));
+            }
+            let saved = self.clip_status.lock().unwrap().clone();
+            if !saved.is_empty() {
+                status.push_str(&format!(" · {saved}"));
+            }
+            TimelineData { snap: scrub.snap.clone(), cur: self.cur, range: self.range, playing: self.playing.map(|p| p.0), status }
+        });
+        if let Some(mut t) = self.ui.widget(cx, ids!(timeline)).borrow_mut::<Timeline>() {
+            t.set_data(cx, data);
+        }
+    }
+
+    /// The pictures to save: In..Out, from the one set to the shown one, or a second around it.
+    fn save(&mut self, cx: &mut Cx, frame_only: bool) {
+        let (Some(scrub), Some(c)) = (&self.scrub, self.conns.get(self.selected)) else { return };
+        let n = scrub.snap.len();
+        let (from, to) = match self.range {
+            (Some(a), Some(b)) => (a.min(b), a.max(b)),
+            (Some(a), None) | (None, Some(a)) => (a.min(self.cur), a.max(self.cur)),
+            (None, None) => (self.cur.saturating_sub(60), (self.cur + 60).min(n - 1)),
+        };
+        let chosen = self.range != (None, None);
+        let req = clip::ClipRequest { snap: scrub.snap.clone(), from, to, shown: self.cur, frame_only, chosen, host: c.host.clone() };
+        clip::save(req, self.clip_status.clone(), self.signal.clone());
+        self.update_timeline(cx);
+    }
+
+    fn timeline_action(&mut self, cx: &mut Cx, action: TimelineAction) {
+        match action {
+            TimelineAction::Seek(i) => {
+                self.playing = None;
+                self.cur = i.min(self.scrub.as_ref().map_or(0, |s| s.snap.len().saturating_sub(1)));
+                self.show_cur(cx);
+            }
+            TimelineAction::Step(d) => self.step(cx, d),
+            TimelineAction::Live => self.leave_history(cx),
+            TimelineAction::Play(speed) => {
+                let built = self.scrub.as_ref().map_or(0, |s| s.snap.pictures[self.cur.min(s.snap.len() - 1)].built_ns);
+                // from the start when at the end
+                if self.scrub.as_ref().is_some_and(|s| self.cur + 1 >= s.snap.len()) {
+                    self.cur = 0;
+                }
+                let built = self.scrub.as_ref().map_or(built, |s| s.snap.pictures[self.cur].built_ns);
+                self.playing = Some((speed, -1.0, built));
+                self.play_frame = cx.new_next_frame();
+                self.update_timeline(cx);
+            }
+            TimelineAction::Stop => {
+                self.playing = None;
+                self.update_timeline(cx);
+            }
+            TimelineAction::In => {
+                self.range.0 = Some(self.cur);
+                self.update_timeline(cx);
+            }
+            TimelineAction::Out => {
+                self.range.1 = Some(self.cur);
+                self.update_timeline(cx);
+            }
+            TimelineAction::SaveClip => self.save(cx, false),
+            TimelineAction::SaveFrame => self.save(cx, true),
+            TimelineAction::None => {}
+        }
+    }
+
+    /// A frame while playing (the picture whose host time is due) or waiting for a decode.
+    fn play_tick(&mut self, cx: &mut Cx, time: f64) {
+        let Some(scrub) = &self.scrub else { return };
+        if let Some((speed, t0, built0)) = self.playing {
+            let t0 = if t0 < 0.0 { time } else { t0 };
+            self.playing = Some((speed, t0, built0));
+            let due = built0 + ((time - t0) * speed * 1e9) as u64;
+            let i = scrub.snap.at_time(due).max(self.cur);
+            let end = i + 1 >= scrub.snap.len();
+            if i != self.cur {
+                self.cur = i;
+                let playing = self.playing;
+                self.show_cur(cx);
+                self.playing = playing;
+            }
+            if end {
+                self.playing = None;
+            }
+        }
+        if self.playing.is_some() || self.hist_shown != Some(self.cur) {
+            self.play_frame = cx.new_next_frame();
+        }
+        self.update_timeline(cx);
+    }
+
+    fn history_key(&mut self, cx: &mut Cx, e: &KeyEvent) {
+        let big = if e.modifiers.shift { 10 } else { 1 };
+        match e.key_code {
+            KeyCode::ArrowLeft => self.step(cx, -big),
+            KeyCode::ArrowRight => self.step(cx, big),
+            KeyCode::Home => self.timeline_action(cx, TimelineAction::Seek(0)),
+            KeyCode::End => self.timeline_action(cx, TimelineAction::Seek(usize::MAX / 2)),
+            KeyCode::Space if !e.is_repeat => self.timeline_action(cx, if self.playing.is_some() { TimelineAction::Stop } else { TimelineAction::Play(1.0) }),
+            KeyCode::Escape if !e.is_repeat => self.leave_history(cx),
+            _ => {}
+        }
+    }
+
+    /// `--scrub-check`: one step of the script each tick, once the shown picture is there.
+    fn check_tick(&mut self, cx: &mut Cx) {
+        let Some(mut check) = self.check.take() else { return };
+        let have = self.conns.get(self.selected).is_some_and(|c| c.history.lock().unwrap().len() > 0);
+        if check.started.is_none() && have {
+            check.started = Some(std::time::Instant::now());
+        }
+        // no pictures at all for a minute: the check cannot run (says why, exits 1)
+        let waited = check.created.elapsed().as_secs_f64();
+        if check.started.is_none() && waited > 60.0 {
+            let state = self.conns.get(self.selected).map(|c| format!("{:?}", c.state())).unwrap_or_else(|| "no desktop".into());
+            eprintln!("scrub-check: FAILED: no pictures in {waited:.0} s ({state})");
+            std::process::exit(1);
+        }
+        if self.scrub.is_none() {
+            let elapsed = check.started.map_or(0.0, |t| t.elapsed().as_secs_f64());
+            if check.reconnect_wanted && check.reconnect.is_none() && elapsed >= check.after / 2.0 {
+                let i = self.selected;
+                self.reconnect(cx, i);
+                check.reconnect = Some((std::time::Instant::now(), false, None));
+            }
+            if let Some((at, offline, None)) = check.reconnect {
+                let state = self.conns.get(self.selected).map(|c| c.state());
+                if state != Some(State::Connected) {
+                    check.reconnect = Some((at, true, None));
+                } else if offline && self.conns.get(self.selected).is_some_and(|c| c.shared.lock().unwrap().welcome.is_some()) {
+                    check.reconnect = Some((at, true, Some(at.elapsed().as_secs_f64() * 1000.0)));
+                }
+            }
+            if check.started.is_some_and(|t| t.elapsed().as_secs_f64() >= check.after) {
+                self.enter_history(cx);
+                check.waiting = Some((Check::FIRST, std::time::Instant::now()));
+            }
+            self.check = Some(check);
+            return;
+        }
+        if let Some((kind, at)) = check.waiting {
+            let done = if kind == Check::SAVE {
+                let s = self.clip_status.lock().unwrap().clone();
+                s.starts_with("saved") || s.starts_with("save failed")
+            } else {
+                self.hist_shown == Some(self.cur)
+            };
+            if !done {
+                self.check = Some(check);
+                return;
+            }
+            check.times.push((kind, at.elapsed().as_secs_f64() * 1000.0));
+            check.waiting = None;
+        }
+        let Some(step) = check.steps.pop_front() else {
+            report_check(&check, self);
+            if std::env::args().any(|a| a == "--check-hold") {
+                // stays paused on the last picture (a grab of the timeline)
+                self.update_timeline(cx);
+                return;
+            }
+            self.scrub = None;
+            std::process::exit(0);
+        };
+        // steps at the pace of a held arrow key (about 30 a second)
+        if check.last_step.is_some_and(|t| t.elapsed().as_secs_f64() < 1.0 / 30.0) {
+            check.steps.push_front(step);
+            self.check = Some(check);
+            return;
+        }
+        let n = self.scrub.as_ref().map_or(0, |s| s.snap.len());
+        let now = std::time::Instant::now();
+        check.last_step = Some(now);
+        check.waiting = Some((step, now));
+        self.check = Some(check);
+        match step {
+            Check::SAVE => self.save(cx, false),
+            Check::JUMP => self.timeline_action(cx, TimelineAction::Seek(n / 2)),
+            d => self.step(cx, d),
+        }
+        // a decoded picture shows at once: no wait at all
+        if step != Check::SAVE && self.hist_shown == Some(self.cur) {
+            if let Some(c) = self.check.as_mut() {
+                c.times.push((step, 0.0));
+                c.waiting = None;
+            }
+        }
+    }
+}
+
+/// The `--scrub-check` summary (one line, answer first).
+fn report_check(check: &Check, app: &App) {
+    let pick = |f: &dyn Fn(i64) -> bool| -> Vec<f64> { check.times.iter().filter(|(k, _)| f(*k)).map(|t| t.1).collect() };
+    let stats = |mut v: Vec<f64>| -> String {
+        if v.is_empty() {
+            return "none".into();
+        }
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let instant = v.iter().filter(|t| **t == 0.0).count();
+        format!("n {} median {:.1} p90 {:.1} max {:.1} ms ({} instant)", v.len(), v[v.len() / 2], v[v.len() * 9 / 10], v[v.len() - 1], instant)
+    };
+    let (n, span, mb) = app.scrub.as_ref().map_or((0, 0.0, 0.0), |s| {
+        let p = &s.snap.pictures;
+        (p.len(), p.last().map_or(0, |l| l.built_ns - p[0].built_ns) as f64 / 1e9, s.snap.packets.iter().map(|p| p.data.len()).sum::<usize>() as f64 / (1 << 20) as f64)
+    });
+    let first = pick(&|k| k == Check::FIRST).first().copied().unwrap_or(-1.0);
+    let jump = pick(&|k| k == Check::JUMP).first().copied().unwrap_or(-1.0);
+    let save = pick(&|k| k == Check::SAVE).first().copied().unwrap_or(-1.0);
+    if let Some((_, offline, ms)) = check.reconnect {
+        eprintln!("scrub-check: reconnect: {}", match ms {
+            Some(ms) => format!("session dropped and back (Welcome) in {ms:.0} ms"),
+            None if offline => "dropped, not back before the pause".into(),
+            None => "the session never dropped".into(),
+        });
+    }
+    eprintln!(
+        "scrub-check: history {n} pictures {span:.1} s {mb:.0} MB · first {first:.1} ms · back {} · forward {} · far jump {jump:.1} ms · save {save:.0} ms: {}",
+        stats(pick(&|k| k < 0 && k > Check::JUMP)),
+        stats(pick(&|k| k > 0)),
+        app.clip_status.lock().unwrap()
+    );
 }
 
 impl App {
@@ -692,6 +1097,14 @@ impl MatchEvent for App {
             dump_check(args.get(i + 1).map(String::as_str).unwrap_or(""));
         }
         self.stats_log = args.iter().any(|a| a == "--stats");
+        if let Some(after) = args.windows(2).find(|w| w[0] == "--scrub-check").and_then(|w| w[1].parse::<f64>().ok()) {
+            // pause, the newest picture; 120 steps back, 60 forward; the middle; a saved clip
+            let mut steps: std::collections::VecDeque<i64> = std::iter::repeat_n(-1, 120).chain(std::iter::repeat_n(1, 60)).collect();
+            steps.push_back(Check::JUMP);
+            steps.extend(std::iter::repeat_n(-1, 30));
+            steps.push_back(Check::SAVE);
+            self.check = Some(Check { after, started: None, steps, waiting: None, times: Vec::new(), last_step: None, reconnect: None, reconnect_wanted: args.iter().any(|a| a == "--check-reconnect"), created: std::time::Instant::now(), timer: cx.start_interval(0.004) });
+        }
         self.panel_shown = true;
         if let Some(path) = args.windows(2).find(|w| w[0] == "--dump-play").map(|w| w[1].clone()) {
             let gpu = !args.iter().any(|a| a == "--cpu-decode");
@@ -714,9 +1127,13 @@ impl MatchEvent for App {
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         for action in actions.filter_widget_actions_cast::<ConnListAction>(self.ui.widget(cx, ids!(conn_list)).widget_uid()) {
-            if let ConnListAction::Select(i) = action {
-                self.keyboard = false;
-                self.select(cx, i);
+            match action {
+                ConnListAction::Select(i) => {
+                    self.keyboard = false;
+                    self.select(cx, i);
+                }
+                ConnListAction::Reconnect(i) => self.reconnect(cx, i),
+                ConnListAction::None => {}
             }
         }
         let input = self.ui.text_input(cx, ids!(host_input));
@@ -768,6 +1185,16 @@ impl MatchEvent for App {
                 c.send(ClientMsg::RequestKeyframe);
             }
         }
+        if self.ui.button(cx, ids!(history_btn)).clicked(actions) {
+            if self.scrub.is_some() {
+                self.leave_history(cx);
+            } else {
+                self.enter_history(cx);
+            }
+        }
+        for action in actions.filter_widget_actions_cast::<TimelineAction>(self.ui.widget(cx, ids!(timeline)).widget_uid()) {
+            self.timeline_action(cx, action);
+        }
         // the stream's rate: auto (the desktop adapts it to the link and its encoder, up to its
         // own cap) or at most a chosen rate
         if self.ui.button(cx, ids!(rate_cap)).clicked(actions) {
@@ -805,9 +1232,31 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if let Event::Shutdown = event {
-            // every connection's threads end and are joined before the app goes
+            // every connection's threads (and the scrub decoder) end and are joined before the app goes
+            self.scrub = None;
             self.conns.clear();
             return;
+        }
+        match event {
+            // Cmd+R (Ctrl+R off macOS): reconnect the shown desktop (never sent to it)
+            Event::KeyDown(e) if e.key_code == KeyCode::KeyR && (if cfg!(target_vendor = "apple") { e.modifiers.logo } else { e.modifiers.control && e.modifiers.shift }) && !e.is_repeat => {
+                let i = self.selected;
+                self.reconnect(cx, i);
+                return;
+            }
+            Event::KeyDown(e) if self.scrub.is_some() => self.history_key(cx, e),
+            // the left arrow while the keyboard is not driving the desktop: pause and step back
+            Event::KeyDown(e) if !self.keyboard && e.key_code == KeyCode::ArrowLeft && cx.key_focus().is_empty() => {
+                self.enter_history(cx);
+                self.step(cx, -1);
+            }
+            _ => {}
+        }
+        if let Some(e) = self.play_frame.is_event(event) {
+            self.play_tick(cx, e.time);
+        }
+        if self.check.as_ref().is_some_and(|c| c.timer.is_event(event).is_some()) {
+            self.check_tick(cx);
         }
         if let Event::KeyDown(e) = event {
             if is_panel_toggle(e) && !e.is_repeat {

@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use crate::history::{HistPacket, History, CHANGE_BYTES, KEY_EVERY};
 
 /// This process's clock (ns): the viewer side of every latency figure.
 pub fn now_ns() -> u64 {
@@ -141,7 +142,10 @@ struct Packet {
     encoded_ns: u64,
     sent_ns: u64,
     received_ns: u64,
-    data: Vec<u8>,
+    /// Shared with the history (no copy).
+    data: Arc<Vec<u8>>,
+    /// Its place in the history (`History::push`), for the decode's numbers.
+    seq: u64,
 }
 
 pub struct Connection {
@@ -150,9 +154,13 @@ pub struct Connection {
     pub port: u16,
     pub shared: Arc<Mutex<Shared>>,
     pub latest: Arc<Mutex<Option<Picture>>>,
+    /// The received bitstream of the last seconds (always recorded).
+    pub history: Arc<Mutex<History>>,
     tx: Sender<ClientMsg>,
     paused: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
+    /// Drop the session and open it again now (`Connection::reconnect`).
+    reconnect: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -174,11 +182,13 @@ impl Connection {
     pub fn open(name: String, host: String, port: u16, paused: bool, discovered: bool, signal: SignalToUI) -> Connection {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let latest = Arc::new(Mutex::new(None));
+        let history = Arc::new(Mutex::new(History::default()));
         let (tx, rx) = channel();
         let paused = Arc::new(AtomicBool::new(paused));
         let stop = Arc::new(AtomicBool::new(false));
+        let reconnect = Arc::new(AtomicBool::new(false));
         let max_backoff = Duration::from_secs(if discovered { 600 } else { 30 });
-        let net = Net { host: host.clone(), port, shared: shared.clone(), latest: latest.clone(), rx, paused: paused.clone(), stop: stop.clone(), signal, cmd: tx.clone(), max_backoff };
+        let net = Net { host: host.clone(), port, shared: shared.clone(), latest: latest.clone(), history: history.clone(), rx, paused: paused.clone(), stop: stop.clone(), reconnect: reconnect.clone(), signal, cmd: tx.clone(), max_backoff };
         let thread = match std::thread::Builder::new().name(format!("desklink-net-{host}")).spawn(move || net.run()) {
             Ok(t) => Some(t),
             Err(e) => {
@@ -186,7 +196,7 @@ impl Connection {
                 None
             }
         };
-        Connection { name, host, port, shared, latest, tx, paused, stop, thread }
+        Connection { name, host, port, shared, latest, history, tx, paused, stop, reconnect, thread }
     }
 
     /// A desktop played from an Annex-B dump (dev: `--dump-play`): its pictures decoded the way
@@ -196,16 +206,23 @@ impl Connection {
     pub fn play_dump(path: String, gpu: bool, still: Option<u32>, signal: SignalToUI) -> Connection {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let latest = Arc::new(Mutex::new(None));
+        let history = Arc::new(Mutex::new(History::default()));
         let (tx, _rx) = channel();
         let stop = Arc::new(AtomicBool::new(false));
         shared.lock().unwrap().state = Some(State::Connected);
-        let (s, l, st) = (shared.clone(), latest.clone(), stop.clone());
-        let thread = std::thread::Builder::new().name("desklink-dump".into()).spawn(move || play_loop(path, gpu, still, s, l, st, signal)).ok();
-        Connection { name: "dump".into(), host: "dump".into(), port: 0, shared, latest, tx, paused: Arc::new(AtomicBool::new(false)), stop, thread }
+        let (s, l, h, st) = (shared.clone(), latest.clone(), history.clone(), stop.clone());
+        let thread = std::thread::Builder::new().name("desklink-dump".into()).spawn(move || play_loop(path, gpu, still, s, l, h, st, signal)).ok();
+        Connection { name: "dump".into(), host: "dump".into(), port: 0, shared, latest, history, tx, paused: Arc::new(AtomicBool::new(false)), stop, reconnect: Arc::new(AtomicBool::new(false)), thread }
     }
 
     pub fn send(&self, msg: ClientMsg) {
         let _ = self.tx.send(msg);
+    }
+
+    /// Drops the session (if any) and opens it again at once, skipping any backoff wait (a
+    /// desktop that was changed or restarted). The history stays.
+    pub fn reconnect(&self) {
+        self.reconnect.store(true, Ordering::Release);
     }
 
     pub fn show(&self, on: bool) {
@@ -224,9 +241,11 @@ struct Net {
     port: u16,
     shared: Arc<Mutex<Shared>>,
     latest: Arc<Mutex<Option<Picture>>>,
+    history: Arc<Mutex<History>>,
     rx: Receiver<ClientMsg>,
     paused: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
+    reconnect: Arc<AtomicBool>,
     signal: SignalToUI,
     cmd: Sender<ClientMsg>,
     max_backoff: Duration,
@@ -243,6 +262,8 @@ impl Net {
         // quick reconnects left after a session that was up broke
         let mut quick = 0u32;
         while !self.stop.load(Ordering::Acquire) {
+            // a reconnect asked while offline (or now) is this attempt
+            self.reconnect.store(false, Ordering::Release);
             if quick == 0 {
                 self.set_state(State::Connecting);
             }
@@ -253,6 +274,11 @@ impl Net {
             };
             if self.stop.load(Ordering::Acquire) {
                 return;
+            }
+            if self.reconnect.swap(false, Ordering::AcqRel) {
+                backoff = Duration::from_secs(2);
+                quick = 0;
+                continue;
             }
             let was_up = matches!(self.shared.lock().unwrap().state, Some(State::Connected));
             let refused = reason.starts_with("refused");
@@ -275,7 +301,7 @@ impl Net {
             }
             let wait = if refused { Duration::from_secs(30) } else { backoff };
             let until = Instant::now() + wait;
-            while Instant::now() < until && !self.stop.load(Ordering::Acquire) {
+            while Instant::now() < until && !self.stop.load(Ordering::Acquire) && !self.reconnect.load(Ordering::Acquire) {
                 // commands while offline are void (input for a desktop that is not there)
                 while self.rx.try_recv().is_ok() {}
                 std::thread::sleep(Duration::from_millis(100));
@@ -319,9 +345,10 @@ impl Net {
         let (dec_tx, dec_rx) = channel::<Packet>();
         // packets sent to the decoder and not decoded yet
         let queued = Arc::new(AtomicUsize::new(0));
+        self.history.lock().unwrap().session_start();
         let decoder = {
-            let (latest, signal, shared, cmd, queued) = (self.latest.clone(), self.signal.clone(), self.shared.clone(), self.cmd.clone(), queued.clone());
-            std::thread::Builder::new().name(format!("desklink-dec-{}", self.host)).spawn(move || decode_loop(dec_rx, latest, signal, shared, cmd, queued, true)).map_err(|e| e.to_string())?
+            let (latest, signal, shared, cmd, queued, history) = (self.latest.clone(), self.signal.clone(), self.shared.clone(), self.cmd.clone(), queued.clone(), self.history.clone());
+            std::thread::Builder::new().name(format!("desklink-dec-{}", self.host)).spawn(move || decode_loop(dec_rx, latest, signal, shared, cmd, queued, history, true)).map_err(|e| e.to_string())?
         };
         let (mut read_gap, mut queue_max, mut last_read) = (Duration::ZERO, 0usize, Instant::now());
 
@@ -340,6 +367,9 @@ impl Net {
         let result = loop {
             if self.stop.load(Ordering::Acquire) {
                 break Ok("closed".into());
+            }
+            if self.reconnect.load(Ordering::Acquire) {
+                break Ok("reconnecting".into());
             }
             let hz = DISPLAY_HZ.load(Ordering::Acquire);
             if hz != told_hz {
@@ -431,6 +461,7 @@ impl Net {
                 last_heard = Instant::now();
                 match msg {
                     ServerMsg::Welcome { screens, screen, stream: size, input, input_note, server, .. } => {
+                        self.history.lock().unwrap().stream_size = size;
                         let mut s = self.shared.lock().unwrap();
                         s.welcome = Some(Welcome { screens, screen, stream: size, input, input_note, server });
                         s.state = Some(State::Connected);
@@ -452,7 +483,7 @@ impl Net {
                         }
                         second.2 += data.len();
                         queue_max = queue_max.max(queued.fetch_add(1, Ordering::AcqRel) + 1);
-                        let _ = dec_tx.send(Packet { frame, key, stream, parts, x0, y0, built_ns, encoded_ns, sent_ns, received_ns: now_ns(), data });
+                        let _ = dec_tx.send(Packet { frame, key, stream, parts, x0, y0, built_ns, encoded_ns, sent_ns, received_ns: now_ns(), data: Arc::new(data), seq: 0 });
                     }
                     ServerMsg::Cursor { x, y, shape, visible } => {
                         self.shared.lock().unwrap().cursor = Some((x, y, shape, visible));
@@ -477,6 +508,7 @@ impl Net {
                         self.signal.set();
                     }
                     ServerMsg::Stream { screen, stream: size } => {
+                        self.history.lock().unwrap().stream_size = size;
                         if let Some(w) = self.shared.lock().unwrap().welcome.as_mut() {
                             w.screen = screen;
                             w.stream = size;
@@ -519,7 +551,8 @@ impl Net {
 
 /// `path`: one Annex-B file, or several comma separated: the tiles of each picture, top to
 /// bottom (a tiled desktop's `dump`, one file per stream).
-fn play_loop(path: String, gpu: bool, still: Option<u32>, shared: Arc<Mutex<Shared>>, latest: Arc<Mutex<Option<Picture>>>, stop: Arc<AtomicBool>, signal: SignalToUI) {
+#[allow(clippy::too_many_arguments)]
+fn play_loop(path: String, gpu: bool, still: Option<u32>, shared: Arc<Mutex<Shared>>, latest: Arc<Mutex<Option<Picture>>>, history: Arc<Mutex<History>>, stop: Arc<AtomicBool>, signal: SignalToUI) {
     use makepad_widgets::makepad_platform::video_file::annex_b;
     let fail = |e: String| {
         shared.lock().unwrap().state = Some(State::Offline(e));
@@ -574,8 +607,8 @@ fn play_loop(path: String, gpu: bool, still: Option<u32>, shared: Arc<Mutex<Shar
     while !stop.load(Ordering::Acquire) {
         let (dec_tx, dec_rx) = channel::<Packet>();
         let queued = Arc::new(AtomicUsize::new(0));
-        let (l, sig, sh, c, q) = (latest.clone(), signal.clone(), shared.clone(), cmd.clone(), queued.clone());
-        if let Err(e) = std::thread::Builder::new().name("desklink-dump-dec".into()).spawn(move || decode_loop(dec_rx, l, sig, sh, c, q, gpu)) {
+        let (l, sig, sh, c, q, h) = (latest.clone(), signal.clone(), shared.clone(), cmd.clone(), queued.clone(), history.clone());
+        if let Err(e) = std::thread::Builder::new().name("desklink-dump-dec".into()).spawn(move || decode_loop(dec_rx, l, sig, sh, c, q, h, gpu)) {
             return fail(format!("thread: {e}"));
         }
         for at in 0..pictures {
@@ -587,7 +620,7 @@ fn play_loop(path: String, gpu: bool, still: Option<u32>, shared: Arc<Mutex<Shar
                 let data = units[at].clone();
                 let key = annex_b::split_annex_b(&data).iter().any(|nal| annex_b::nal_unit_type(nal) == 5);
                 queued.fetch_add(1, Ordering::AcqRel);
-                let _ = dec_tx.send(Packet { frame, key, stream: stream as u8, parts, x0: *x0, y0: *y0, built_ns: now, encoded_ns: now, sent_ns: now, received_ns: now, data });
+                let _ = dec_tx.send(Packet { frame, key, stream: stream as u8, parts, x0: *x0, y0: *y0, built_ns: now, encoded_ns: now, sent_ns: now, received_ns: now, data: Arc::new(data), seq: 0 });
             }
             if still == Some(frame) {
                 // the decoders (and their pictures) stay alive while the view shows this one
@@ -602,7 +635,31 @@ fn play_loop(path: String, gpu: bool, still: Option<u32>, shared: Arc<Mutex<Shar
     }
 }
 
-fn decode_loop(rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal: SignalToUI, shared: Arc<Mutex<Shared>>, cmd: Sender<ClientMsg>, queued: Arc<AtomicUsize>, gpu: bool) {
+/// Records a packet in the history (its bytes shared, not copied); returns its place there.
+fn record(history: &mut History, packet: &Packet) -> u64 {
+    history.push(HistPacket {
+        seq: 0,
+        frame: packet.frame,
+        stream: packet.stream,
+        parts: packet.parts,
+        x0: packet.x0,
+        y0: packet.y0,
+        size: [0, 0],
+        key: packet.key,
+        built_ns: packet.built_ns,
+        encoded_ns: packet.encoded_ns,
+        received_ns: packet.received_ns,
+        decode_us: 0,
+        failed: false,
+        data: packet.data.clone(),
+    })
+}
+
+fn decode_loop(rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal: SignalToUI, shared: Arc<Mutex<Shared>>, cmd: Sender<ClientMsg>, queued: Arc<AtomicUsize>, history: Arc<Mutex<History>>, gpu: bool) {
+    // changing pictures since the last key frame, and when one was last asked for: the history
+    // decodes any of its pictures from a key frame at most KEY_EVERY changes before it; whether
+    // the picture being received changes something (any part over CHANGE_BYTES)
+    let (mut since_key, mut asked, mut changes) = (0u32, Instant::now(), false);
     // one decoder per encoder stream (a tile, or an interleaved stream), each on a thread of its
     // own: the tiles of a picture decode at once, put together by frame number before they show
     let gathering: Arc<Mutex<Assembly>> = Arc::new(Mutex::new(Assembly::default()));
@@ -618,13 +675,27 @@ fn decode_loop(rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => return,
         };
+        let mut packet = packet;
+        changes |= packet.data.len() > CHANGE_BYTES;
+        if packet.key {
+            since_key = 0;
+        } else if packet.parts <= 1 || packet.stream + 1 == packet.parts {
+            since_key += std::mem::take(&mut changes) as u32;
+            if since_key >= KEY_EVERY && asked.elapsed() > Duration::from_secs(1) {
+                asked = Instant::now();
+                let _ = cmd.send(ClientMsg::RequestKeyframe);
+            }
+        }
+        // recorded here, in arrival order (the stream decoders finish in any order); the decode's
+        // numbers follow from the stream's decoder (`History::note`)
+        packet.seq = record(&mut history.lock().unwrap(), &packet);
         let s = packet.stream as usize;
         while workers.len() <= s {
             let (tx, wrx) = channel::<Packet>();
-            let (latest2, signal2, shared2, cmd2, gathering2, streams2) = (latest.clone(), signal.clone(), shared.clone(), cmd.clone(), gathering.clone(), streams.clone());
+            let (latest2, signal2, shared2, cmd2, gathering2, streams2, history2) = (latest.clone(), signal.clone(), shared.clone(), cmd.clone(), gathering.clone(), streams.clone(), history.clone());
             let index = workers.len();
             streams.store(index + 1, Ordering::Release);
-            let spawned = std::thread::Builder::new().name(format!("desklink-dec-{index}")).spawn(move || decode_stream(index, wrx, latest2, signal2, shared2, cmd2, gathering2, streams2, gpu));
+            let spawned = std::thread::Builder::new().name(format!("desklink-dec-{index}")).spawn(move || decode_stream(index, wrx, latest2, signal2, shared2, cmd2, gathering2, streams2, history2, gpu));
             if let Err(e) = spawned {
                 shared.lock().unwrap().warning = Some(format!("decoder thread: {e}"));
                 return;
@@ -727,7 +798,8 @@ impl Assembly {
 /// One encoder stream's decoder: waits for its key frame after a failure; a whole picture
 /// goes out at once, a tile once its picture's other tiles are here (never a torn picture; a
 /// newer picture complete first drops the older incomplete ones, see `Assembly`).
-fn decode_stream(s: usize, rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal: SignalToUI, shared: Arc<Mutex<Shared>>, cmd: Sender<ClientMsg>, gathering: Arc<Mutex<Assembly>>, streams: Arc<AtomicUsize>, gpu: bool) {
+#[allow(clippy::too_many_arguments)]
+fn decode_stream(s: usize, rx: Receiver<Packet>, latest: Arc<Mutex<Option<Picture>>>, signal: SignalToUI, shared: Arc<Mutex<Shared>>, cmd: Sender<ClientMsg>, gathering: Arc<Mutex<Assembly>>, streams: Arc<AtomicUsize>, history: Arc<Mutex<History>>, gpu: bool) {
     let mut decoder: Option<VideoStreamDecoder> = None;
     let mut waiting_key = false;
     // the last picture of a single-stream desktop: a picture missing in between means the next
@@ -735,6 +807,7 @@ fn decode_stream(s: usize, rx: Receiver<Packet>, latest: Arc<Mutex<Option<Pictur
     let mut last_frame: Option<u32> = None;
     while let Ok(packet) = rx.recv() {
         if waiting_key && !packet.key {
+            history.lock().unwrap().note(packet.seq, 0, true, [0, 0]);
             continue;
         }
         if streams.load(Ordering::Acquire) == 1 && packet.parts <= 1 && !packet.key {
@@ -744,6 +817,7 @@ fn decode_stream(s: usize, rx: Receiver<Packet>, latest: Arc<Mutex<Option<Pictur
                     waiting_key = true;
                     last_frame = None;
                     let _ = cmd.send(ClientMsg::RequestKeyframe);
+                    history.lock().unwrap().note(packet.seq, 0, true, [0, 0]);
                     continue;
                 }
             }
@@ -769,9 +843,11 @@ fn decode_stream(s: usize, rx: Receiver<Packet>, latest: Arc<Mutex<Option<Pictur
                 eprintln!("desklink: decode of picture {} (stream {s}): {e:?}; asking for a key frame", packet.frame);
                 waiting_key = true;
                 let _ = cmd.send(ClientMsg::RequestKeyframe);
+                history.lock().unwrap().note(packet.seq, ((decoded_ns - start) / 1000) as u32, true, [0, 0]);
                 continue;
             }
         };
+        let size = frames.first().map_or([0, 0], |f| [f.width, f.height]);
         for f in frames {
             let part = Part { x0: packet.x0, y0: packet.y0, width: f.width, height: f.height, nv12: f.nv12, gpu: f.gpu };
             let mut picture = Picture {
@@ -807,6 +883,8 @@ fn decode_stream(s: usize, rx: Receiver<Packet>, latest: Arc<Mutex<Option<Pictur
                 shared.lock().unwrap().dropped += dropped;
             }
         }
+        // after the picture went out: its decode time and size for the history
+        history.lock().unwrap().note(packet.seq, ((decoded_ns - start) / 1000) as u32, false, size);
     }
 }
 
