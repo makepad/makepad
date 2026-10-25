@@ -564,6 +564,11 @@ impl Widget for MpRunView {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let dpi_factor = Self::host_dpi_factor(cx);
         let rect = cx.walk_turtle(walk).dpi_snap(1.0 / dpi_factor);
+        // MAKEPAD_TRACE=tile: where each hosted frame is drawn, in device pixels, and the size it has
+        if makepad_error_log::trace_enabled("tile") {
+            log!("tile c{} px {:.3},{:.3} {:.3}x{:.3} dpi {dpi_factor} frame {:?}", self.hosted.client().unwrap_or(0),
+                rect.pos.x * dpi_factor, rect.pos.y * dpi_factor, rect.size.x * dpi_factor, rect.size.y * dpi_factor, self.hosted.presented_px());
+        }
         // Only the "starting..." state gets a backdrop; a presented frame is
         // composited straight over the wallpaper so translucent children
         // (Omarchy's 0.985/0.96 window opacity) show it through.
@@ -601,7 +606,8 @@ impl Widget for MpRunView {
             .draw_vars
             .set_dyn_instance(cx, id!(host_dpi_factor), &[dpi_factor as f32]);
         let told = self.hosted.trace_config().0 * dpi_factor;
-        let told = [told.x.ceil() as u32, told.y.ceil() as u32];
+        // the pixels the app draws for the size it was told: rounded, as the hosted shell sizes its frames
+        let told = [told.x.round() as u32, told.y.round() as u32];
         if self.anchor_frames && !self.live_resize && self.hosted.presented_px() == Some(told) {
             self.anchor_frames = false;
         }

@@ -101,7 +101,10 @@ script_mod! {
             if self.radius<0.001 {
                 return self.image.sample(uv)*self.opacity
             }
-            let sdf=Sdf2d.viewport(self.pos*self.rect_size)
+            // Edges centred on the pixel: a window on whole pixels covers its outermost
+            // ones fully (`viewport` half-covered them: a line of the desktop showing
+            // through every window edge, flickering with what moved behind).
+            let sdf=Sdf2d.viewport_px(self.pos*self.rect_size,0.0)
             sdf.box(0.0,0.0,self.rect_size.x,self.rect_size.y,self.radius)
             // The capture is premultiplied already: `fill` would multiply
             // by alpha again — opacity squared, the grey ghost of a card

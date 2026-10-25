@@ -1203,6 +1203,10 @@ impl Cx {
             return None;
         }
         let (tw, th) = (size.x as usize, size.y as usize);
+        if crate::makepad_error_log::trace_enabled("passpx") {
+            crate::log!("passpx {:?} window {:?} rect {:?} dpi {dpi} target {tw}x{th} inner*dpi {:?}", self.passes[pass_id].debug_name, window.map(|w| w.0),
+                pass_rect, window.map(|w| self.windows[w].window_geom.inner_size * dpi));
+        }
         let hosted_target = match (window, self.hal.hosted.as_ref()) {
             (Some(window), Some(hosted)) => Some(hosted.target(window, tw, th)?),
             _ => None,

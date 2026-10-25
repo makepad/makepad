@@ -1921,6 +1921,8 @@ impl Widget for View {
                                 .draw_vars
                                 .set_texture(0, &texture_cache.color_texture);
                             let mut rect = cx.walk_turtle_with_area(&mut self.area, walk);
+                            // drawn back where the pass rendered it, pixel for pixel
+                            rect = Cx::pass_device_rect(rect, self.dpi_factor.unwrap_or(cx.current_dpi_factor()));
                             // NOTE(eddyb) see comment lower below for why this is
                             // disabled (it used to match `set_pass_scaled_area`).
                             if false {
@@ -2118,6 +2120,8 @@ impl Widget for View {
                         self.draw_bg
                             .draw_vars
                             .set_texture(0, &texture_cache.color_texture);
+                        // drawn back where the pass renders it (`Cx::pass_device_rect`), pixel for pixel
+                        let rect = Cx::pass_device_rect(rect, self.dpi_factor.unwrap_or(cx.current_dpi_factor()));
                         self.draw_bg.draw_abs(cx, rect);
                         let area = self.draw_bg.area();
                         let texture_cache = self.texture_cache.as_mut().unwrap();
@@ -2317,6 +2321,7 @@ impl View {
         self.draw_bg
             .draw_vars
             .set_texture(0, &texture_cache.color_texture);
+        let rect = Cx::pass_device_rect(rect, self.dpi_factor.unwrap_or(cx.current_dpi_factor()));
         self.draw_bg.draw_abs(cx, rect);
         cx.make_child_pass(&texture_cache.pass);
         true

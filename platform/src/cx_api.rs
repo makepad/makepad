@@ -2037,13 +2037,7 @@ impl Cx {
     pub fn get_pass_rect(&self, draw_pass_id: DrawPassId, dpi: f64) -> Option<Rect> {
         let size = |size: Vec2d| Self::pass_logical_size(size, dpi);
         match self.passes[draw_pass_id].pass_rect {
-            Some(CxDrawPassRect::Area(area)) => {
-                let rect = area.rect(self);
-                Some(Rect {
-                    pos: ((rect.pos * dpi) + 0.01).floor() / dpi,
-                    size: size(rect.size),
-                })
-            }
+            Some(CxDrawPassRect::Area(area)) => Some(Self::pass_device_rect(area.rect(self), dpi)),
             Some(CxDrawPassRect::AreaOrigin(area, origin)) => {
                 let rect = area.rect(self);
                 Some(Rect {
@@ -2067,6 +2061,16 @@ impl Cx {
     }
 
     /// A pass's logical size snapped to its whole pixels (`pass_pixel_size` / dpi).
+    /// Where a texture pass for `rect` lies in whole device pixels: its origin floored to a pixel
+    /// (a hundredth of a pixel is rounding) and its size [`Self::pass_pixel_size`]. A cached view
+    /// or capture renders its content relative to this rect, so it must also be drawn back at
+    /// exactly this rect: drawn at the raw rect (26 pt below the top at 1.75x is 45.5 px) the
+    /// texture was resampled half a pixel off and up to a pixel squeezed -- every window and every
+    /// glyph of the WM blurred at fractional scales.
+    pub fn pass_device_rect(rect: Rect, dpi: f64) -> Rect {
+        Rect { pos: ((rect.pos * dpi) + 0.01).floor() / dpi, size: Self::pass_logical_size(rect.size, dpi) }
+    }
+
     pub fn pass_logical_size(size: Vec2d, dpi: f64) -> Vec2d {
         let (w, h) = Self::pass_pixel_size(size, dpi);
         dvec2(w as f64 / dpi, h as f64 / dpi)
@@ -2873,6 +2877,28 @@ macro_rules! register_component_factory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cached view (the WM's whole desk, `WmScene`) is drawn back at the rect its pass renders:
+    /// whole device pixels at every scale, and a draw-back at that rect snaps to itself. At 1.75 the
+    /// desk sits 26 pt (45.5 px) below the top; drawn there its texture was resampled half a pixel
+    /// off and squeezed a pixel, and every window and glyph of the WM blurred (WMSYNC).
+    #[test]
+    fn a_cached_pass_is_drawn_back_on_whole_pixels_at_its_own_rect() {
+        for step in 100..=300 {
+            let dpi = step as f64 / 100.0;
+            for (x, y, w, h) in [(0.0, 26.0, 2194.2857142857, 1208.2857142857), (976.15, 458.46, 1000.77, 699.23), (0.3, 0.7, 333.3, 77.7)] {
+                let rect = Rect { pos: dvec2(x, y), size: dvec2(w, h) };
+                let snapped = Cx::pass_device_rect(rect, dpi);
+                for v in [snapped.pos.x, snapped.pos.y, snapped.size.x, snapped.size.y] {
+                    let px = v * dpi;
+                    assert!((px - px.round()).abs() < 1e-6, "{rect:?} at {dpi}: {snapped:?} is not on whole pixels");
+                }
+                assert_eq!(Cx::pass_device_rect(snapped, dpi), snapped, "{rect:?} at {dpi}: snapping is not idempotent");
+                let (tw, th) = Cx::pass_pixel_size(rect.size, dpi);
+                assert_eq!(((snapped.size.x * dpi).round() as usize, (snapped.size.y * dpi).round() as usize), (tw, th));
+            }
+        }
+    }
 
     /// A texture pass and its render target come out the same pixel size for every scale and
     /// window size: the target sized with `pass_pixel_size` of the logical size the pass is set

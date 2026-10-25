@@ -143,10 +143,15 @@ impl Rect {
         }
     }
 
+    /// Snapped down to whole device pixels of size `f` (1 / dpi). A hundredth of a pixel is
+    /// rounding, not content: 1000.8 pt at 1.25 is 1250.9999999 px and floored without the
+    /// allowance it was 1250, a pixel narrower than the 1251-px frame a WM-hosted app drew for it
+    /// (the WM then squeezed every frame and blurred it).
     pub fn dpi_snap(&self, f: f64) -> Rect {
+        let snap = |v: f64| (v / f + 0.01).floor() * f;
         Rect {
-            pos: dvec2((self.pos.x / f).floor() * f, (self.pos.y / f).floor() * f),
-            size: dvec2((self.size.x / f).floor() * f, (self.size.y / f).floor() * f),
+            pos: dvec2(snap(self.pos.x), snap(self.pos.y)),
+            size: dvec2(snap(self.size.x), snap(self.size.y)),
         }
     }
 
@@ -579,5 +584,29 @@ impl ops::Neg for Vec2d {
             x: -self.x,
             y: -self.y,
         }
+    }
+}
+
+#[cfg(test)]
+mod dpi_snap_tests {
+    use super::*;
+
+    /// A size that is a whole number of device pixels stays that number after the snap, whatever
+    /// the f64 rounding of pt * dpi: 1000.8 pt at 1.25 is 1251 px, not 1250 (a WM-hosted app
+    /// drew 1251 px, the WM's quad was 1250, every frame was squeezed and blurred; WMSYNC).
+    #[test]
+    fn dpi_snap_keeps_whole_pixel_sizes() {
+        for step in 100..=300 {
+            let dpi = step as f64 / 100.0;
+            for px in [1u32, 45, 1251, 1301, 1752, 2110, 3840] {
+                let pt = px as f64 / dpi;
+                let r = Rect { pos: dvec2(pt, pt), size: dvec2(pt, pt) }.dpi_snap(1.0 / dpi);
+                assert_eq!((r.size.x * dpi).round() as u32, px, "{px} px at {dpi}");
+                assert_eq!((r.pos.y * dpi).round() as u32, px, "{px} px at {dpi}");
+                assert!((r.size.x * dpi - px as f64).abs() < 1e-6);
+            }
+        }
+        let r = Rect { pos: dvec2(1035.2, 492.0), size: dvec2(1000.8, 699.2) }.dpi_snap(1.0 / 1.25);
+        assert_eq!((r.size.x * 1.25).round() as u32, 1251);
     }
 }
