@@ -1111,7 +1111,8 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
     drop(origins);
     // MAKEPAD_RUN_WASM_EXPORT_FNLIST=<file>: one line per module function for size analysis:
     // slot, wasm bytes (0: folded into an identical one), RIR insts, blocks, direct call sites to
-    // it in the module, address taken, kept (keep_reachable, not traced), name, tier (o3 / o1)
+    // it in the module, address taken, kept (keep_reachable, not traced), name, tier (o3 / o1),
+    // the trace's CPU samples, size-first build shipped (1)
     if let Ok(fl) = std::env::var("MAKEPAD_RUN_WASM_EXPORT_FNLIST") {
         use relax_backend::rir::Callee;
         let mut calls_in: HashMap<u32, usize> = HashMap::new();
@@ -1126,11 +1127,12 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
         }
         let taken: std::collections::HashSet<u32> = seeds.iter().copied().collect();
         let o3 = O3_BODIES.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_default();
+        let sf = SIZE_FIRST_SHIPPED.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_default();
         let mut txt = String::new();
         for (id, n, b) in &out.stats.fn_sizes {
             let f = &funcs[id];
             let ni: usize = f.blocks.iter().map(|b| b.insts.len()).sum();
-            txt.push_str(&format!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n", id, b, ni, f.blocks.len(), calls_in.get(id).copied().unwrap_or(0), taken.contains(id) as u8, kept.contains(id) as u8, n, if o3.contains(id) { "o3" } else { "o1" }));
+            txt.push_str(&format!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n", id, b, ni, f.blocks.len(), calls_in.get(id).copied().unwrap_or(0), taken.contains(id) as u8, kept.contains(id) as u8, n, if o3.contains(id) { "o3" } else { "o1" }, samples(*id), sf.contains(id) as u8));
         }
         let fl = fl.replace("%p", &std::process::id().to_string());
         let _ = std::fs::write(&fl, txt);
@@ -1405,20 +1407,61 @@ pub(crate) fn full_o1() -> bool {
     *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_WASM_EXPORT_FULL").map_or(true, |v| v != "0"))
 }
 
-/// MAKEPAD_RUN_WASM_EXPORT_O1_INLINE=hint,leaf,leaf_blocks,chain (A/B): a shipping O1 body's
-/// inline limits for `#[inline]` callees, small leaves and closure-chain adapters (RIR
-/// instructions); unset: the JIT's O1 limits
-pub(crate) fn o1_inline_limits(lim: relax_codegen::opt::InlineLimits, var: &'static str) -> relax_codegen::opt::InlineLimits {
+/// A cold shipping O1 body's inline limits for `#[inline]` callees, small leaves and
+/// closure-chain adapters (RIR instructions), size first as LLVM -Oz: no `#[inline]` hint counts
+/// (minsize ignores it; rustc's MIR inliner is off at opt-level z), leaves only as small as their
+/// call (8 instructions, 2 blocks), closure-chain adapters as the JIT.
+pub(crate) const EXPORT_O1_INLINE: [usize; 4] = [0, 8, 2, 120];
+
+/// `var`=hint,leaf,leaf_blocks,chain (A/B; MAKEPAD_RUN_WASM_EXPORT_O1_INLINE for cold shipping
+/// bodies, MAKEPAD_RUN_O1_INLINE for every O1 build) overrides `default` (None: the JIT's O1 limits)
+pub(crate) fn o1_inline_limits(lim: relax_codegen::opt::InlineLimits, var: &'static str, default: Option<[usize; 4]>) -> relax_codegen::opt::InlineLimits {
     static L: std::sync::OnceLock<std::sync::Mutex<HashMap<&'static str, Option<[usize; 4]>>>> = std::sync::OnceLock::new();
-    let l = *L.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).entry(var).or_insert_with(|| {
+    let l = (*L.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).entry(var).or_insert_with(|| {
         let v = std::env::var(var).ok()?;
         let n: Vec<usize> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
         (n.len() == 4).then(|| [n[0], n[1], n[2], n[3]])
-    });
+    })).or(default);
     match l {
         Some([hint, leaf, leaf_blocks, chain]) => relax_codegen::opt::InlineLimits { hint_insts: hint, leaf_insts: leaf, leaf_blocks, chain_insts: chain, ..lim },
         None => lim,
     }
+}
+
+/// MAKEPAD_RUN_WASM_EXPORT_SIZE_FIRST (default on; `0`: every shipping O1 body as the JIT's O1, A/B):
+/// a shipping O1 body the trace never sampled ships its size-first build (EXPORT_O1_INLINE), every
+/// other body its JIT-limit build. Every export O1 build makes both (jit.rs build_rir_body): the
+/// JIT-limit one stays the slot's RIR, so O3 bodies, the inliners' inputs and the module's
+/// references are the same as without size first, and the hot path's code with them.
+pub(crate) fn size_first_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_WASM_EXPORT_SIZE_FIRST").map_or(true, |v| v != "0"))
+}
+
+/// The size-first builds of shipping O1 bodies (jit.rs build_rir_body), until export_rir takes them.
+static SIZE_FIRST: Mutex<Option<HashMap<u32, Func>>> = Mutex::new(None);
+/// The shipping bodies that took their size-first build, for the FNLIST.
+static SIZE_FIRST_SHIPPED: Mutex<Option<std::collections::HashSet<u32>>> = Mutex::new(None);
+
+pub(crate) fn stash_size_first(id: u32, f: Func) {
+    SIZE_FIRST.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(id, f);
+}
+
+/// The run's CPU samples of slot `id` (note_samples; its twins' count as its own).
+fn samples(id: u32) -> u64 {
+    SAMPLES.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&id).copied()).unwrap_or(0)
+}
+
+/// The size-first build of shipping O1 body `id` when the trace never sampled it (cold: its
+/// whole inlined body took no CPU sample of the run) and the slot never ran at O3; None: it
+/// ships its JIT-limit RIR. Either way the stashed build is dropped.
+pub(crate) fn take_size_first(id: u32, o3: bool) -> Option<Func> {
+    let f = SIZE_FIRST.lock().unwrap_or_else(|e| e.into_inner()).as_mut()?.remove(&id)?;
+    if o3 || samples(id) > 0 {
+        return None;
+    }
+    SIZE_FIRST_SHIPPED.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(id);
+    Some(f)
 }
 
 /// MAKEPAD_RUN_WASM_EXPORT_O1_FOLDS (default on; `0` off): shipping O1 bodies also take the O3
@@ -1909,6 +1952,9 @@ fn keep_closure(funcs: &mut BTreeMap<u32, Func>, u: &Unit, whole: bool) -> Resul
         let n = POSTOPT_EFFECTS.each_ref().map(|x| x.load(std::sync::atomic::Ordering::Relaxed));
         eprintln!("wasm export: postopt semantics: {} abort unwind edges, {} constant host bindings, {} semantic trap tails, {} immutable static reads resolved", n[0], n[1], n[2], n[3]);
         eprintln!("wasm export: postopt: {} symbolic function addresses exposed to devirtualization", n[4]);
+        let shipped = SIZE_FIRST_SHIPPED.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(0, |s| s.len());
+        let sampled = SAMPLES.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(0, |m| m.len());
+        eprintln!("wasm export: size first: {} cold O1 bodies shipped their size-first build; {} slots sampled", shipped, sampled);
     }
     Ok((kept, failed))
 }

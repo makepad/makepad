@@ -8623,9 +8623,12 @@ pub unsafe fn export_rir(up: *mut Unit, id: u32, optimized: bool) -> Result<rela
     let u = &*up;
     let session = u.prog.session.clone();
     let rir = u.fns[id as usize].rir.clone().ok_or("no RIR for this slot")?;
-    let mut f = match o3_body {
-        Some(f) => f,
-        None => tier0_codegen_rir(&session.options, &rir, u.opt.fold, u.opt.layout).into_owned(),
+    // a cold slot ships its size-first build (wasm_export::take_size_first)
+    let size_first = if optimized && !shipped_o3 { crate::wasm_export::take_size_first(id, trace_o3(u, id)) } else { None };
+    let mut f = match (o3_body, size_first) {
+        (Some(f), _) => f,
+        (None, Some(sf)) => tier0_codegen_rir(&session.options, &sf, u.opt.fold, u.opt.layout).into_owned(),
+        (None, None) => tier0_codegen_rir(&session.options, &rir, u.opt.fold, u.opt.layout).into_owned(),
     };
     if optimized {
         // Instrumentation is not program semantics. Remove it before the final
@@ -8760,21 +8763,37 @@ thread_local! {
     /// without O3 (`Func::full`: the whole O1 pipeline, Relax core's helpers inlined everywhere),
     /// its inline candidates too -- an AOT build, not a tier below a JIT's O3
     static EXPORT_FULL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// build_rir_body's second optimisation of an export O1 build: the size-first body a cold
+    /// slot ships (wasm_export::take_size_first)
+    static SIZE_FIRST_BUILD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// The O1 inliner's limits: a wasm export's shipping build takes its own (wasm_export::o1_inline_limits);
+/// Sets SIZE_FIRST_BUILD for a scope (restores the outer value).
+struct SizeFirstBuild(bool);
+impl SizeFirstBuild {
+    fn set(on: bool) -> SizeFirstBuild {
+        SizeFirstBuild(SIZE_FIRST_BUILD.with(|c| c.replace(on)))
+    }
+}
+impl Drop for SizeFirstBuild {
+    fn drop(&mut self) {
+        SIZE_FIRST_BUILD.with(|c| c.set(self.0));
+    }
+}
+
+/// The O1 inliner's limits: a wasm export's size-first build takes its own (wasm_export::o1_inline_limits);
 /// MAKEPAD_RUN_O1_INLINE=hint,leaf,leaf_blocks,chain overrides every O1 build (tests of the inliner's
 /// callers under other limits: diff_fast, the tier fuzzer)
 /// (MAKEPAD_RUN_O1_INLINE_FN=a,b: ... only in callers whose name contains one of them: bisection)
 fn o1_inline_limits(options: &crate::options::Options, caller: &str) -> relax_codegen::opt::InlineLimits {
     let lim = relax_codegen::opt::InlineLimits::tier0(options);
-    let lim = if export_full() { crate::wasm_export::o1_inline_limits(lim, "MAKEPAD_RUN_WASM_EXPORT_O1_INLINE") } else { lim };
+    let lim = if export_full() && SIZE_FIRST_BUILD.with(|c| c.get()) { crate::wasm_export::o1_inline_limits(lim, "MAKEPAD_RUN_WASM_EXPORT_O1_INLINE", Some(crate::wasm_export::EXPORT_O1_INLINE)) } else { lim };
     static FNS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     let fns = FNS.get_or_init(|| std::env::var("MAKEPAD_RUN_O1_INLINE_FN").map(|v| v.split(',').filter(|x| !x.is_empty()).map(String::from).collect()).unwrap_or_default());
     if !fns.is_empty() && !fns.iter().any(|p| caller.contains(p.as_str())) {
         return lim;
     }
-    crate::wasm_export::o1_inline_limits(lim, "MAKEPAD_RUN_O1_INLINE")
+    crate::wasm_export::o1_inline_limits(lim, "MAKEPAD_RUN_O1_INLINE", None)
 }
 
 fn export_full() -> bool {
@@ -10401,7 +10420,12 @@ unsafe fn build_rir_body(up: *mut Unit, id: u32, lowered: Option<relax_backend::
     let session = unsafe { crate::jit::unit_session(up) };
     let options = &session.options;
     let given = lowered.is_some();
+    // (the bodies built while this one is: their own limits, never a caller's size-first build's)
+    let _outer = SizeFirstBuild::set(false);
     let prep = prepare_rir_from(up, id, false, lowered, mode)?;
+    // a wasm export's O1 build also makes the size-first body a cold slot ships
+    // (wasm_export::size_first_on); the JIT-limit body stays the slot's RIR
+    let size_first = (export_full() && !prep.0.func.baseline && crate::wasm_export::size_first_on()).then(|| prep.0.clone());
     let t0 = cpu_ns();
     let (func, inlined) = optimize_rir(options, id, prep.0)?;
     let dt = cpu_ns() - t0;
@@ -10413,6 +10437,12 @@ unsafe fn build_rir_body(up: *mut Unit, id: u32, lowered: Option<relax_backend::
         unsafe { (*e).0 += 1; (*e).1 += dt; }
     }
     store_rir(up, id, func, inlined, dt + prep.1);
+    if let Some(p) = size_first {
+        let _size_first = SizeFirstBuild::set(true);
+        if let Ok((f, _)) = optimize_rir(options, id, p) {
+            crate::wasm_export::stash_size_first(id, crate::zone_alloc::kept_with(|| f.clone()));
+        }
+    }
     Ok(())
 }
 
@@ -10468,6 +10498,7 @@ pub struct TlsPlace {
     pub init: Option<u32>,
 }
 
+#[derive(Clone)]
 pub struct Prep {
     func: relax_backend::rir::Func,
     cfg: relax_codegen::opt::OptCfg,
