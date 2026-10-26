@@ -307,6 +307,9 @@ impl NodeView {
         if !c.spec.is_empty() {
             s.push_str(&format!(" \u{b7} {}", c.spec));
         }
+        if let Some(d) = c.desk_link.as_ref().filter(|d| d.on) {
+            s.push_str(&if d.port > 0 { format!(" \u{b7} desk link :{}", d.port) } else { " \u{b7} desk link waiting".to_string() });
+        }
         s
     }
 

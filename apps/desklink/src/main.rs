@@ -3,7 +3,8 @@
 //! A window is the picture alone under its caption. The caption carries, left to right: the
 //! machines as tabs (a live / connecting / offline dot and the short name), the stream's stats,
 //! and the history toggle. The machines are the app's, not a window's: every window lists every
-//! machine the app knows (saved hosts in `~/.makepad/desklink/hosts`, `--connect host[:port]`;
+//! machine the app knows (saved hosts in `~/.makepad/desklink/hosts`, `--connect host[:port]`,
+//! the devhub's JIT hosts in `~/.makepad/devhub/desk-links`: PROTOCOL.md "Finding desktops";
 //! never this machine itself) and differs only in which one it shows. Each window streams its
 //! machine live at once with the others (no connection pauses or closes for another); windows
 //! on the same machine share its connection and pictures; the window that showed it or had the
@@ -244,7 +245,26 @@ pub(crate) fn short_name(name: &str, host: &str) -> String {
     }
 }
 
-/// The desktops to list: `--connect` ones and saved hosts.
+/// The Desk Link endpoints of the devhub's JIT hosts (a headset, a phone serving its own
+/// render): the master writes the ones its nodes report to `~/.makepad/devhub/desk-links`, one
+/// `<node> <ip>:<port>` line each (no LAN discovery here: PROTOCOL.md, "Finding desktops").
+fn devhub_desktops() -> Vec<(String, String, u16)> {
+    let path = makepad_network::fleet::makepad_home().join("devhub").join("desk-links");
+    parse_desk_links(&std::fs::read_to_string(path).unwrap_or_default())
+}
+
+fn parse_desk_links(text: &str) -> Vec<(String, String, u16)> {
+    text.lines()
+        .filter_map(|l| {
+            let mut w = l.split_whitespace();
+            let (name, spec) = (w.next()?, w.next()?);
+            let (host, port) = port_of(spec);
+            (!host.is_empty()).then(|| (short_name(name, &host), host, port))
+        })
+        .collect()
+}
+
+/// The desktops to list: `--connect` ones, saved hosts, the devhub's JIT hosts.
 fn hosts() -> Vec<(String, String, u16)> {
     let mut out: Vec<(String, String, u16)> = Vec::new();
     let mut add = |name: String, spec: &str| {
@@ -274,6 +294,11 @@ fn hosts() -> Vec<(String, String, u16)> {
                 (Some(spec), None) => add(spec.to_string(), spec),
                 _ => {}
             }
+        }
+    }
+    for (name, host, port) in devhub_desktops() {
+        if !is_self(&host) {
+            add(name, &format!("{host}:{port}"));
         }
     }
     out
@@ -436,6 +461,22 @@ pub(crate) fn shortcut(e: &KeyEvent) -> Option<Shortcut> {
         };
     }
     None
+}
+
+impl App {
+    /// A JIT host the devhub lists since the launch (`makepad devhub desk <node> on`) becomes a
+    /// tab, connected and paused like every desktop no window shows (`--connect-only`: none).
+    fn add_devhub_desktops(&mut self) {
+        if std::env::args().any(|a| a == "--connect-only") {
+            return;
+        }
+        for (name, host, port) in devhub_desktops() {
+            if self.conns.iter().any(|c| c.host == host && c.port == port) || is_self(&host) {
+                continue;
+            }
+            self.conns.push(Connection::open(name, host, port, true, self.signal.clone()));
+        }
+    }
 }
 
 impl App {
@@ -993,6 +1034,7 @@ impl AppMain for App {
             for vi in 0..self.viewers.len() {
                 self.viewer_second(vi);
             }
+            self.add_devhub_desktops();
             self.refresh(cx);
             self.check_ui_tick(cx);
             if self.restore_dirty {
@@ -1068,5 +1110,11 @@ mod tests {
         assert_eq!(short_name("10.0.0.123", "10.0.0.123"), "n123");
         assert_eq!(short_name("127.0.0.1:18796", "127.0.0.1"), "local");
         assert_eq!(short_name("mini.lan", "mini.lan"), "mini");
+    }
+
+    #[test]
+    fn devhub_endpoints_are_named_by_node() {
+        let list = parse_desk_links("quest 10.0.0.201:8790\nphone 10.0.0.50\n\nbroken\n");
+        assert_eq!(list, vec![("quest".to_string(), "10.0.0.201".to_string(), 8790), ("phone".to_string(), "10.0.0.50".to_string(), proto::DEFAULT_PORT)]);
     }
 }

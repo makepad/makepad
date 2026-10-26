@@ -8,9 +8,13 @@ description = "Desk Link: the remote desktop wire protocol of the window manager
 [features]
 # The server (listener, TLS, fleet credentials, sessions): desktops that serve Desk Link.
 server = ["dep:makepad-network"]
+# The deskhost engine (`host`): a picture source (a desktop's screens, a JIT host's render)
+# served through the platform's hardware encoder.
+host = ["server", "dep:makepad-platform-video"]
 
 [dependencies]
 makepad-network = { path = "../../platform/network", optional = true }
+makepad-platform-video = { path = "../../platform/video", optional = true }
 
 [[bin]]
 name = "desk-link-probe"

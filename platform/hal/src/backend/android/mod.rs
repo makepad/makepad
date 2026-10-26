@@ -10,6 +10,8 @@ mod xr;
 #[cfg(target_os = "android")]
 pub mod jni;
 #[cfg(target_os = "android")]
+pub mod inject;
+#[cfg(target_os = "android")]
 pub use shell::{AndroidBackend, AndroidParams};
 #[cfg(target_os = "android")]
 pub use surface::AndroidSurfaces;

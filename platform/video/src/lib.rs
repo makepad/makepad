@@ -227,8 +227,6 @@ use apple_encoder::MacosVideoFileEncoder as OsVideoFileEncoder;
 #[cfg(target_os = "linux")]
 mod linux_gst_sys;
 #[cfg(target_os = "linux")]
-mod linux_stream_encoder;
-#[cfg(target_os = "linux")]
 mod linux_encoder;
 #[cfg(target_os = "linux")]
 mod linux_decoder;
@@ -236,6 +234,10 @@ mod linux_decoder;
 use linux_decoder::LinuxVideoFileDecoder as OsVideoFileDecoder;
 #[cfg(target_os = "linux")]
 use linux_encoder::LinuxVideoFileEncoder as OsVideoFileEncoder;
+
+// Linux's and Android's stream encoders are the HAL's (Vulkan Video; MediaCodec), one op set.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+mod hal_stream_encoder;
 
 // Android arm: NDK MediaExtractor + MediaCodec in the HAL host, reached through its ops.
 #[cfg(target_os = "android")]

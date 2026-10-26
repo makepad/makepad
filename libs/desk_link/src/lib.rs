@@ -1,6 +1,7 @@
 //! Desk Link: the wire protocol between the window manager's remote desktop server and its
 //! viewer app. The format is documented in `apps/desklink/PROTOCOL.md`; this crate is its one
-//! implementation (both ends use it), with no dependencies.
+//! implementation (both ends use it), with no dependencies (features `server`, the listener and
+//! its sessions, and `host`, the deskhost engine over the platform's encoder, add them).
 //!
 //! Transport: TLS over TCP. Every message is `type u8 | length u32 LE | payload`, fixed fields
 //! little-endian, strings and byte blobs `length u32 LE | bytes`. A message over [`MAX_MESSAGE`]
@@ -10,6 +11,8 @@ use std::io::{self, Write};
 
 #[cfg(feature = "server")]
 pub mod server;
+#[cfg(feature = "host")]
+pub mod host;
 
 pub const VERSION: u16 = 7;
 pub const DEFAULT_PORT: u16 = 8790;

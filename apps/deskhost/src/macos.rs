@@ -6,7 +6,8 @@
 //! Recording (the capture) and Accessibility (posting events). `permissions(true)` asks for
 //! them; macOS opens the panes where the user enables "Desk Host".
 
-use crate::{log, Desktop, Frame};
+use crate::log;
+use makepad_desk_link::host::{clock_ns, Desktop, Frame, Picture};
 use makepad_apple_sys::*;
 use makepad_desk_link::server::{Input, InputFactory};
 use makepad_desk_link::{button, GamepadState, ScreenInfo};
@@ -149,10 +150,10 @@ fn output_class() -> *const Class {
                     return;
                 }
                 let frame = Frame {
-                    handle: IOSurfaceGetID(surface) as u64,
+                    picture: Picture::Shared(IOSurfaceGetID(surface) as u64),
                     width: CVPixelBufferGetWidth(pixel_buffer) as u32,
                     height: CVPixelBufferGetHeight(pixel_buffer) as u32,
-                    captured_ns: crate::clock_ns(),
+                    captured_ns: clock_ns(),
                     _hold: Box::new(Retained(CFRetain(pixel_buffer as *const c_void))),
                 };
                 let _ = sink.lock().unwrap().frames.send(frame);
@@ -283,6 +284,12 @@ impl Desktop for MacDesktop {
 
     fn grants(&mut self) -> String {
         self.permissions(false)
+    }
+
+    /// Each turn of the host loop drains its own autorelease pool (the capture's and the
+    /// encoder's Objective-C objects).
+    fn turn(&mut self) -> Option<Box<dyn std::any::Any>> {
+        Some(Box::new(Pool::new()))
     }
 
     fn capture(&mut self, index: usize, fps: u32, frames: Sender<Frame>) -> Result<(), String> {

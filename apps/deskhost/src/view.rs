@@ -3,7 +3,7 @@
 //! the stream, Disconnect), the allowed peers (read-only), the OS grants it misses, Open at login
 //! and Quit.
 
-use crate::{HostState, Report};
+use makepad_desk_link::host::{HostState, Report, ViewerRow};
 use makepad_shell_kit::ui::{contains, cut_top, inset, rect, HAlign, Ico, ShellDraw};
 use makepad_shell_kit::{darker, CtrlState, ShellTokens};
 use makepad_widgets::*;
@@ -51,6 +51,14 @@ pub struct ViewState {
 }
 
 const PAD: f64 = 16.0;
+
+/// The host's viewer as the panel's row: its stream line says what it got over the last second
+/// (a still screen sends nothing).
+fn panel_row(v: &ViewerRow) -> makepad_desk_link_panel::ViewerRow {
+    let base = makepad_desk_link_panel::stream_line(v.hevc, false, v.fps, 0, 1);
+    let stream = if v.pictures > 0 { format!("{base} \u{b7} {:.1} Mbit/s \u{b7} {} sent/s", v.bytes as f64 * 8.0 / 1e6, v.pictures) } else { format!("{base} \u{b7} idle (the screen is still)") };
+    makepad_desk_link_panel::ViewerRow { session: v.session, name: v.name.clone(), peer: v.peer.clone(), paused: v.paused, secs: v.secs, stream }
+}
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct DeskHostView {
@@ -158,7 +166,8 @@ impl DeskHostView {
                 _ => None,
             };
             let mut hits = Vec::new();
-            rest = makepad_desk_link_panel::draw_viewers(cx, &mut self.d, &tok, rest, &r.viewers, hot, &mut hits);
+            let rows: Vec<makepad_desk_link_panel::ViewerRow> = r.viewers.iter().map(panel_row).collect();
+            rest = makepad_desk_link_panel::draw_viewers(cx, &mut self.d, &tok, rest, &rows, hot, &mut hits);
             self.hits.extend(hits.into_iter().map(|(s, r)| (Hit::Disconnect(s), r)));
         }
 

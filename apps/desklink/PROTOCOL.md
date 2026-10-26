@@ -1,9 +1,29 @@
 # Desk Link protocol, version 7
 
 Desk Link is how a viewer (this app) sees and drives a desktop (the window manager's
-`desk_link` server, `apps/wm/src/desk_link/`). It runs between machines on one LAN only: no
-relays, no NAT traversal, no discovery service. The one implementation of the format is
-`libs/desk_link`, used by both ends.
+`desk_link` server, `apps/wm/src/desk_link/`; the macOS / Windows Desk Host; a JIT host serving
+its own render through the deskhost engine, `makepad_desk_link::host`). It runs between machines
+on one LAN only: no relays, no NAT traversal, no discovery service. The one implementation of
+the format is `libs/desk_link`, used by both ends.
+
+## Finding desktops
+
+The viewer never broadcasts or listens for announcements (on macOS that asks the Local Network
+question). It lists, in this order:
+- `--connect host[:port]` (repeatable; `--connect-only`: nothing else);
+- its saved hosts, `~/.makepad/desklink/hosts` (`[name] host[:port]` lines);
+- the devhub's JIT hosts: an embedded devhub node (a headset, a phone) reports its Desk Link
+  endpoint in the `caps` the Mac's devhub master asks for every 10 s (`desk_link`:
+  `{"on","port","note"}`; `libs/devhub/src/embed.rs`). The master writes the listening ones to
+  `~/.makepad/devhub/desk-links`, one `<node> <ip>:<port>` line each, and the viewer adds those as
+  desktops named by node (`quest`), at launch and once a second after (a tab stays when its
+  endpoint goes off and shows it offline). The master already dials every node from its
+  `nodes.conf` over fleet TLS, so nothing new listens or announces.
+
+`makepad devhub desk <node> on|off` switches a JIT host's endpoint (the node's `desk` service,
+through the master's router; `desk <node>` says what it does). The host registers the switch with
+`makepad_devhub::embed::set_desk_link_control`. This machine itself is never one of the
+viewer's desktops.
 
 ## Transport and security
 

@@ -406,6 +406,11 @@ impl Vulkan {
                                     eprintln!("[hal-stamp] frame {} ({}) {}x{} seq {}", packet.frame, packet.frame & 0xffff, self.window_px[0], self.window_px[1], image.hosted_sequence().map_or(0, |s| s + 2));
                                 }
                                 presenter.scheduled(key.0, key.1);
+                                // a scanout copy is immutable while held: a frame tap may read it
+                                // after the fence (a shell's own target goes back to its host)
+                                if !self.windows.source.is_target(&image) && crate::frame_tap::wanted(key.0, key.1) {
+                                    batch.tap = Some((key.0, key.1, image.clone()));
+                                }
                                 batch.scanout = Some((presenter, image, Self::token(s), target, key.1, key.0, packet.frame));
                             }
                             Err(e) => { eprintln!("[hal-vulkan] scanout target: {e}"); s.bad(); }
@@ -416,6 +421,14 @@ impl Vulkan {
                             // frame that gets no image there is not reported as presented.
                             presented = offscreen || chain.is_some();
                             if let Some(chain) = chain {
+                                // the window target is drawn into again next frame: a frame tap
+                                // gets a scanout copy of it (made only while one is subscribed)
+                                if crate::frame_tap::wanted(key.0, key.1) {
+                                    match self.scanout_image(key, &image, &mut batch) {
+                                        Ok(copy) => batch.tap = Some((key.0, key.1, copy)),
+                                        Err(e) => eprintln!("[hal-vulkan] frame tap copy: {e}"),
+                                    }
+                                }
                                 image.transition(batch.cb, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
                                 batch.images.push(image.clone());
                                 chain.latest.store(packet.frame, std::sync::atomic::Ordering::Release);

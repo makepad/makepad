@@ -106,6 +106,34 @@ fn write_dev(path: &Path, node: &str, on: bool) -> std::io::Result<()> {
 }
 
 /// The user's block list (`blocked`: one lane or agent per line).
+/// `~/.makepad/devhub/desk-links`: the Desk Link endpoints the nodes report in their caps (JIT
+/// hosts that serve their own render), one `<node> <ip>:<port>` line each, for the viewer
+/// (apps/desklink lists them as desktops). Rewritten when it changes; empty when none listens.
+pub fn desk_links_path(home: &Path) -> PathBuf {
+    home.join("desk-links")
+}
+
+pub fn desk_links(nodes: &[NodeView]) -> String {
+    let mut text = String::new();
+    for n in nodes.iter().filter(|n| n.up) {
+        let Some(d) = n.caps.as_ref().and_then(|c| c.desk_link.as_ref()).filter(|d| d.on && d.port > 0) else { continue };
+        let ip = n.addr.rsplit_once(':').map_or(n.addr.as_str(), |(h, _)| h);
+        if !ip.is_empty() {
+            text.push_str(&format!("{} {ip}:{}\n", n.name, d.port));
+        }
+    }
+    text
+}
+
+fn write_desk_links(home: &Path, nodes: &[NodeView]) {
+    let path = desk_links_path(home);
+    let text = desk_links(nodes);
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
+        let tmp = path.with_extension("new");
+        let _ = std::fs::write(&tmp, &text).and_then(|_| std::fs::rename(&tmp, &path));
+    }
+}
+
 fn read_blocked(home: &Path) -> Vec<String> {
     std::fs::read_to_string(home.join("blocked")).unwrap_or_default().lines().map(str::trim).filter(|l| crate::trust::valid_name(l)).map(str::to_string).collect()
 }
@@ -469,6 +497,7 @@ impl LeaseMaster {
                 None => self.sched.lock().unwrap().set_down(name),
             }
         }
+        write_desk_links(&self.home, &self.nodes());
         self.pump();
     }
 
@@ -750,6 +779,24 @@ pub fn register(ep: &makepad_remote::Endpoint, machine: &str, publish: Publish) 
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn desk_links_list_the_listening_endpoints() {
+        let view = |name: &str, addr: &str, up: bool, desk: Option<(bool, u16)>| NodeView {
+            name: name.into(),
+            addr: addr.into(),
+            up,
+            dev: false,
+            dev_set: false,
+            caps: Some(Caps { desk_link: desk.map(|(on, port)| crate::embed::DeskLinkState { on, port, note: String::new() }), ..Default::default() }),
+            leases: 0,
+            waiting: 0,
+            draining: false,
+            hold: None,
+        };
+        let nodes = [view("quest", "10.0.0.201:8788", true, Some((true, 8790))), view("phone", "10.0.0.50", true, Some((true, 0))), view("off", "10.0.0.51", true, Some((false, 8790))), view("gone", "10.0.0.52", false, Some((true, 8790))), view("217", "10.0.0.217", true, None)];
+        assert_eq!(desk_links(&nodes), "quest 10.0.0.201:8790\n");
+    }
 
     /// A node that answers the node services and remembers what it was asked.
     struct FakeNode {

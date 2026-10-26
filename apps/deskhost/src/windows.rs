@@ -20,7 +20,8 @@
 //! The process is per-monitor DPI aware: the duplication's desktop coordinates, the cursor's
 //! position and SendInput's virtual desktop are all physical pixels.
 
-use crate::{log, Desktop, Frame};
+use crate::log;
+use makepad_desk_link::host::{clock_ns, Desktop, Frame, Picture};
 use makepad_desk_link::server::{Input, InputFactory};
 use makepad_desk_link::{button, GamepadState, ScreenInfo};
 use makepad_windows_sys as windows;
@@ -233,7 +234,7 @@ fn capture_loop(adapter: IDXGIAdapter1, output: IDXGIOutput, frames: Sender<Fram
                         ctx.CopyResource(s.texture.as_ID3D11Resource(), texture.as_ID3D11Resource());
                         let _ = s.mutex.ReleaseSync(0);
                         ctx.Flush();
-                        let _ = frames.send(Frame { handle: s.key, width: s.width, height: s.height, captured_ns: crate::clock_ns(), _hold: Box::new(()) });
+                        let _ = frames.send(Frame { picture: Picture::Shared(s.key), width: s.width, height: s.height, captured_ns: clock_ns(), _hold: Box::new(()) });
                     }
                 }
             }

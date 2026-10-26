@@ -130,6 +130,8 @@ struct Conf {
     privileged: bool,
     /// the embedded devhub node (`devhub_name=`, `rev=<repo> <sha>`, `prefix=<repo> <path>`)
     store: crate::devhub::StoreConf,
+    /// the embedded Desk Link endpoint (`desk_link=on|off`, `desk_link_fps=`)
+    desk: crate::deskhost::DeskConf,
 }
 
 fn parse_conf(text: &str) -> Result<Conf, String> {
@@ -137,6 +139,7 @@ fn parse_conf(text: &str) -> Result<Conf, String> {
     let mut env = Vec::new();
     let mut privileged = false;
     let mut store = crate::devhub::StoreConf::default();
+    let mut desk = crate::deskhost::DeskConf::default();
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         let (k, v) = line.split_once('=').ok_or_else(|| format!("{CONF_ASSET}: bad line {line:?}"))?;
         match k {
@@ -148,6 +151,8 @@ fn parse_conf(text: &str) -> Result<Conf, String> {
             }
             "privileged" => privileged = v == "1",
             "devhub_name" => store.name = v.to_string(),
+            "desk_link" => desk.on = v == "on",
+            "desk_link_fps" => desk.fps = Some(v.parse().map_err(|_| format!("{CONF_ASSET}: desk_link_fps wants a number, got {v:?}"))?),
             "rev" | "prefix" => {
                 let (repo, val) = v.split_once(' ').ok_or_else(|| format!("{CONF_ASSET}: {k} wants `<repo> <value>`, got {v:?}"))?;
                 let list = if k == "rev" { &mut store.revs } else { &mut store.prefixes };
@@ -159,7 +164,7 @@ fn parse_conf(text: &str) -> Result<Conf, String> {
     if apps.is_empty() {
         return Err(format!("{CONF_ASSET}: no app"));
     }
-    Ok(Conf { apps, env, privileged, store })
+    Ok(Conf { apps, env, privileged, store, desk })
 }
 
 /// Starts the process app on its own thread; Activity callbacks never wait for compilation.
@@ -327,8 +332,13 @@ fn boot_thread(
         // the window manager is the app the APK boots first; a launch-intent app is an ordinary one
         privileged: conf.privileged && app.is_empty(),
         on_mounted: {
-            let (files, store) = (files.to_path_buf(), conf.store.clone());
-            Some(Box::new(move |workspace: &str| crate::devhub::start(&files, workspace, store)))
+            let (files, store, desk) = (files.to_path_buf(), conf.store.clone(), conf.desk.clone());
+            Some(Box::new(move |workspace: &str| {
+                let name = if store.name.is_empty() { makepad_devhub::proto::default_machine_name() } else { store.name.clone() };
+                // after devhub's start: it sets the fleet dir the endpoint's credential is in
+                crate::devhub::start(&files, workspace, store);
+                crate::deskhost::start(&files, name, desk);
+            }))
         },
     };
     logcat::log(&format!("booting {} from {} at {offset}+{len}", b.package, apk.display()));

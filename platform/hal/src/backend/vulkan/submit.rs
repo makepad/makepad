@@ -203,6 +203,9 @@ pub(super) struct Batch {
     pub tickets: Vec<Ticket>,
     pub scanout: Option<(Arc<dyn super::surface::FramePresenter>, Arc<Image>, Token, Id, Id, u32, u64)>,
     pub present: Option<Present>,
+    /// The frame image a frame tap gets after the fence (`crate::frame_tap::offer`): its
+    /// window as the core presents it (session, window) and an image nothing writes while held.
+    pub tap: Option<(u32, Id, Arc<Image>)>,
     /// the arena being filled and its used bytes
     arena: Option<(Arc<Buffer>, u64)>,
     arenas: Vec<Arc<Buffer>>,
@@ -277,7 +280,7 @@ impl Batch {
         let mut b = Self { dev, spares: spares.clone(), reusable: false, pool: vk::CommandPool::null(), cb: vk::CommandBuffer::null(), fence: vk::Fence::null(),
             query: (vk::QueryPool::null(), 0), idle_query: (vk::QueryPool::null(), 0), prof: None, prof_key: None,
             images: Vec::new(), buffers: Vec::new(), pipelines: Vec::new(), passes: Vec::new(), framebuffers: Vec::new(),
-            descriptors: FastMap::default(), tickets: Vec::new(), scanout: None, present: None, arena: None, arenas: Vec::new(), reserve, allocs: 0, draw_counts: FastMap::default(), finished_ns: 0,
+            descriptors: FastMap::default(), tickets: Vec::new(), scanout: None, present: None, tap: None, arena: None, arenas: Vec::new(), reserve, allocs: 0, draw_counts: FastMap::default(), finished_ns: 0,
             #[cfg(target_os = "linux")] external_waits: Vec::new(),
             #[cfg(target_os = "linux")] external_signals: Vec::new(),
             #[cfg(target_os = "linux")] release_fence: None,
@@ -705,11 +708,13 @@ impl Batch {
             }
         }
         let scanout = self.scanout.take();
+        let tap = self.tap.take().filter(|_| !failed);
         let self_prof_key = self.prof_key;
         // the fence signalled (or nothing was submitted): the objects may be reset and reused
         self.reusable = !failed;
         drop(self);
         for (token, event) in out { mailbox.push(token, event); }
+        if let Some((sid, window, image)) = tap { crate::frame_tap::offer(sid, window, &image); }
         if let Some((presenter, image, token, target, native, owner, frame)) = scanout {
             if failed {
                 presenter.dropped(owner, native);

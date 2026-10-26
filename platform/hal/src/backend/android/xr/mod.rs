@@ -78,6 +78,9 @@ static EYE_PX: OnceLock<[u32; 2]> = OnceLock::new();
 /// focus are not used).
 pub(super) fn active() -> bool { ACTIVE.load(Ordering::Acquire) }
 
+/// One eye's pixels while an XR session runs (the XR window is two of them side by side).
+pub(super) fn eye_px() -> Option<[u32; 2]> { EYE_PX.get().copied().filter(|_| active()) }
+
 /// XR lines go straight to logcat (tag `hal-xr`), live, whatever stderr is redirected to.
 pub(super) fn log(text: &str) {
     extern "C" { fn __android_log_write(prio: i32, tag: *const std::ffi::c_char, text: *const std::ffi::c_char) -> i32; }

@@ -14,7 +14,7 @@ name = "makepad-app-deskhost"
 path = "src/main.rs"
 
 [dependencies]
-makepad-desk-link = { path = "../../libs/desk_link", features = ["server"] }
+makepad-desk-link = { path = "../../libs/desk_link", features = ["host"] }
 makepad-network = { path = "../../platform/network" }
 makepad-platform-video = { path = "../../platform/video" }
 makepad-key-code = { path = "../../platform/key_code" }

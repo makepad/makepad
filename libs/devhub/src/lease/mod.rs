@@ -150,6 +150,8 @@ pub struct Caps {
     pub timed: bool,
     /// `checkout` (desktop) or `store` (JIT hosts): DEVHUB2's applier
     pub apply: String,
+    /// The Desk Link endpoint of a JIT host that embeds one ([`crate::embed`]); None elsewhere.
+    pub desk_link: Option<crate::embed::DeskLinkState>,
 }
 
 impl Caps {
@@ -173,7 +175,7 @@ impl Caps {
             .collect();
         let slots: Vec<String> = self.slots.iter().map(|(k, n)| format!("\"{}\":{n}", k.as_str())).collect();
         format!(
-            "{{\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cores\":{},\"cpu_pct\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"apply\":{}}}",
+            "{{\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cores\":{},\"cpu_pct\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"apply\":{},\"desk_link\":{}}}",
             json_str(&self.node),
             json_str(&self.arch),
             json_str(&self.os),
@@ -195,6 +197,7 @@ impl Caps {
             self.disk_warn_gb,
             self.timed,
             json_str(&self.apply),
+            self.desk_link.as_ref().map_or("null".to_string(), |d| d.to_json()),
         )
     }
 
@@ -221,6 +224,7 @@ impl Caps {
             disk_warn_gb: f("disk_warn_gb"),
             timed: v.get("timed").and_then(|x| x.as_bool()).unwrap_or(false),
             apply: s("apply"),
+            desk_link: v.get("desk_link").and_then(crate::embed::DeskLinkState::parse),
             ..Default::default()
         };
         if let Some(a) = v.get("gpus").and_then(|x| x.as_arr()) {
@@ -291,7 +295,10 @@ mod tests {
             disk_warn_gb: 50.0,
             timed: true,
             apply: "checkout".into(),
+            desk_link: Some(crate::embed::DeskLinkState { on: true, port: 8790, note: "listens on 10.0.0.201:8790".into() }),
         };
-        assert_eq!(Caps::parse(&c.to_json()), Some(c));
+        assert_eq!(Caps::parse(&c.to_json()), Some(c.clone()));
+        let none = Caps { desk_link: None, ..c };
+        assert_eq!(Caps::parse(&none.to_json()), Some(none));
     }
 }

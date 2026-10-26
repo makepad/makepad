@@ -16,6 +16,9 @@
 //! - Linux: the GPU's hardware H.264 encoder through Vulkan Video on the HAL's device
 //!   (`makepad_hal::stream_encode`), Annex-B natively. Takes shared textures
 //!   ([`VideoStreamEncoder::push_shared_texture`]) as well as CPU NV12.
+//! - Android: the phone's MediaCodec encoder in the HAL host (`makepad_hal::stream_encode`, the
+//!   same ops as Linux's), CPU NV12 pictures; it may keep one picture back (a push then returns
+//!   no packet, the next one the picture before).
 //! - Other platforms: [`VideoFileError`] (`UNSUPPORTED`).
 //!
 //! `keyint` 0 means no scheduled key frames: one at the start and on
@@ -120,10 +123,10 @@ pub enum GpuReady {
 use crate::apple_stream_encoder::AppleStreamEncoder as OsStreamEncoder;
 #[cfg(target_os = "windows")]
 use crate::windows_stream_encoder::WindowsStreamEncoder as OsStreamEncoder;
-#[cfg(target_os = "linux")]
-use crate::linux_stream_encoder::LinuxStreamEncoder as OsStreamEncoder;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use crate::hal_stream_encoder::HalStreamEncoder as OsStreamEncoder;
 
-#[cfg(not(any(target_vendor = "apple", target_os = "windows", target_os = "linux")))]
+#[cfg(not(any(target_vendor = "apple", target_os = "windows", target_os = "linux", target_os = "android")))]
 const UNSUPPORTED: &str = "hardware video stream encode is not implemented on this platform yet";
 
 pub struct VideoStreamEncoder {
@@ -131,7 +134,7 @@ pub struct VideoStreamEncoder {
     /// The band of its pictures this encoder takes (all of them: `y0` 0, `source_height` its
     /// height).
     tile: StreamTile,
-    #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
+    #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux", target_os = "android"))]
     os: OsStreamEncoder,
 }
 
@@ -194,18 +197,18 @@ impl VideoStreamEncoder {
         if options.fps == 0 {
             return Err(VideoFileError::new("invalid stream encoder fps 0"));
         }
-        #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
+        #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux", target_os = "android"))]
         {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "android"))]
             let os = OsStreamEncoder::new(&options, tile.engine, tuning)?;
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
             let os = {
                 let _ = tuning;
                 OsStreamEncoder::new(&options)?
             };
             return Ok(Self { options, tile, os });
         }
-        #[cfg(not(any(target_vendor = "apple", target_os = "windows", target_os = "linux")))]
+        #[cfg(not(any(target_vendor = "apple", target_os = "windows", target_os = "linux", target_os = "android")))]
         {
             let _ = (&options, tile, tuning);
             return Err(VideoFileError::new(UNSUPPORTED));
@@ -248,9 +251,9 @@ impl VideoStreamEncoder {
                 nv12.len()
             )));
         }
-        #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
+        #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux", target_os = "android"))]
         return self.os.push_frame_nv12(nv12, pts_100ns);
-        #[cfg(not(any(target_vendor = "apple", target_os = "windows", target_os = "linux")))]
+        #[cfg(not(any(target_vendor = "apple", target_os = "windows", target_os = "linux", target_os = "android")))]
         {
             let _ = pts_100ns;
             return Err(VideoFileError::new(UNSUPPORTED));
@@ -283,7 +286,7 @@ impl VideoStreamEncoder {
     /// The rate for the pictures from the next one on.
     pub fn set_bitrate_kbps(&mut self, kbps: u32) {
         self.options.bitrate_kbps = kbps;
-        #[cfg(any(target_os = "linux", target_vendor = "apple", target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple", target_os = "windows"))]
         self.os.set_bitrate_kbps(kbps);
     }
 
@@ -307,9 +310,9 @@ impl VideoStreamEncoder {
 
     /// What encodes (codec, size, rate, device), for logs and status lines.
     pub fn description(&self) -> String {
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "android", target_os = "windows"))]
         return self.os.description();
-        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "windows")))]
         return format!("{:?} {}x{} {} fps {} kbit/s", self.options.codec, self.options.width, self.options.height, self.options.fps, self.options.bitrate_kbps);
     }
 
@@ -326,7 +329,7 @@ impl VideoStreamEncoder {
     /// decoding immediately instead of waiting for the next scheduled
     /// keyframe (up to `keyint` frames away).
     pub fn request_keyframe(&mut self) {
-        #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
+        #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux", target_os = "android"))]
         self.os.request_keyframe();
     }
 }

@@ -333,7 +333,9 @@ impl Exec {
             "lease-conf" => vec![self.lease_conf(rest)],
             "caps" => {
                 let apply = if crate::sync::store::source_store().is_some() { "store" } else { "checkout" };
-                vec![caps::measure(&self.machine, &self.conf(), apply).to_json()]
+                let mut c = caps::measure(&self.machine, &self.conf(), apply);
+                c.desk_link = crate::embed::desk_link_state();
+                vec![c.to_json()]
             }
             "disk" => match rest.strip_prefix("clean ") {
                 Some(lane) => vec![self.clean_lane(lane.trim())],

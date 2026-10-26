@@ -1,12 +1,17 @@
-//! The host API of the Linux hardware stream encoder (`backend::vulkan::video_encode`): what
-//! `makepad_video::VideoStreamEncoder` drives on Linux. JIT-compiled code (makepad run) reaches
-//! the process's Vulkan device only through these functions, like the DMA-BUF ops
-//! (`crate::dmabuf`). An encoder is named by a number; a failure's text is the calling thread's
-//! last error (`hal_stream_encoder_error`). Each encode call is synchronous: it returns once
-//! the picture's bitstream is ready (`hal_stream_encoder_read` takes it).
+//! The host API of the hardware stream encoders: what `makepad_video::VideoStreamEncoder` drives on
+//! Linux (Vulkan Video, `backend::vulkan::video_encode`) and Android (MediaCodec,
+//! `backend::android::media::stream_encode`). JIT-compiled code (makepad run) reaches the
+//! process's encoders only through these functions, like the DMA-BUF ops (`crate::dmabuf`). An
+//! encoder is named by a number; a failure's text is the calling thread's last error
+//! (`hal_stream_encoder_error`). Each encode call is synchronous: it returns once the picture's
+//! bitstream is ready (`hal_stream_encoder_read` takes it). Texture pictures are Linux's.
 
+#[cfg(target_os = "android")]
+use crate::backend::android::media::stream_encode::{Codec, StreamEncoder, Tuning};
+#[cfg(target_os = "linux")]
 use crate::backend::vulkan::{share::copy, video_encode::{Codec, StreamEncoder, Tuning}};
 use std::collections::HashMap;
+#[cfg(target_os = "linux")]
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::sync::{Arc, Mutex};
 
@@ -56,14 +61,22 @@ pub fn hal_stream_encoder_error(out: &mut [u8]) -> u64 {
 /// lack the window system's extensions). False when no device could be made.
 #[makepad_relax_api::relax_api]
 pub fn hal_stream_encoder_offscreen_device() -> bool {
-    StreamEncoder::offscreen_device()
+    #[cfg(target_os = "linux")]
+    return StreamEncoder::offscreen_device();
+    // MediaCodec needs no GPU device
+    #[cfg(target_os = "android")]
+    return true;
 }
 
 /// How many hardware encode engines the GPU has (its encode queues): the tiles a picture is
 /// best split into. 0 when this machine has no hardware encoder.
 #[makepad_relax_api::relax_api]
 pub fn hal_stream_encoder_engines() -> u32 {
-    StreamEncoder::engines()
+    #[cfg(target_os = "linux")]
+    return StreamEncoder::engines();
+    // one codec a stream (MediaCodec does not split pictures)
+    #[cfg(target_os = "android")]
+    return 1;
 }
 
 /// The largest picture one stream encodes (`flags`: `FULL_CHROMA`, `HEVC`), width in the high 32
@@ -71,7 +84,14 @@ pub fn hal_stream_encoder_engines() -> u32 {
 /// larger picture is split into tiles (columns and bands) of at most this size.
 #[makepad_relax_api::relax_api]
 pub fn hal_stream_encoder_max_size(flags: u32) -> u64 {
-    StreamEncoder::max_size(codec_of(flags), flags & FULL_CHROMA != 0).map_or(0, |[w, h]| (w as u64) << 32 | h as u64)
+    #[cfg(target_os = "linux")]
+    return StreamEncoder::max_size(codec_of(flags), flags & FULL_CHROMA != 0).map_or(0, |[w, h]| (w as u64) << 32 | h as u64);
+    // not asked of the codec
+    #[cfg(target_os = "android")]
+    {
+        let _ = flags;
+        return 0;
+    }
 }
 
 /// Flag of `hal_stream_encoder_open`: 4:4:4 (High 4:4:4 Predictive / Format range extensions);
@@ -97,7 +117,15 @@ fn codec_of(flags: u32) -> Codec {
 #[makepad_relax_api::relax_api]
 pub fn hal_stream_encoder_open(width: u32, height: u32, fps: u32, kbps: u32, engine: u32, flags: u32, quality: u32, buffer_pictures: u32) -> u64 {
     let tuning = Tuning { quality, constant: flags & CBR != 0, buffer_pictures: buffer_pictures.max(1), sharp: flags & SHARP != 0 };
-    match StreamEncoder::open(width, height, fps, kbps, engine as usize, flags & FULL_CHROMA != 0, codec_of(flags), tuning) {
+    #[cfg(target_os = "linux")]
+    let opened = StreamEncoder::open(width, height, fps, kbps, engine as usize, flags & FULL_CHROMA != 0, codec_of(flags), tuning);
+    #[cfg(target_os = "android")]
+    let opened = if flags & FULL_CHROMA != 0 || engine != 0 {
+        Err("4:4:4 and tiled stream encoding are Linux's".to_string())
+    } else {
+        StreamEncoder::open(width, height, fps, kbps, codec_of(flags), tuning)
+    };
+    match opened {
         Ok(encoder) => {
             let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             crate::lock(&ENCODERS).get_or_insert_with(Default::default).insert(id, Arc::new(Mutex::new(Open { encoder, out: Vec::new() })));
@@ -149,6 +177,7 @@ fn encode(encoder: u64, f: impl FnOnce(&mut StreamEncoder) -> Result<Vec<u8>, St
 /// one rectangle of texels,
 /// once the sync_file `sync_fd` has signalled (taken over; -1 when the picture's GPU work is
 /// complete). The bitstream's length, -1 when it failed.
+#[cfg(target_os = "linux")]
 #[makepad_relax_api::relax_api]
 pub fn hal_stream_encoder_texture(encoder: u64, handle: u64, source_height: u32, x0: u32, y0: u32, sync_fd: i32, flags: u32) -> i64 {
     let sync = (sync_fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(sync_fd) });

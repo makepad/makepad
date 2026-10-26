@@ -5,12 +5,13 @@
 //! only, by fleet identity), Open at login (an installed macOS app) and Quit.
 //! The right click's menu has the switch and Quit. No window, no Dock icon (`menu_bar_app`).
 //!
-//! The host itself (capture, encode, the server) runs on its own thread (`crate::host_main`):
-//! the app tells it through `crate::HostControl` and reads its `Report` twice a second.
+//! The host itself (capture, encode, the server: `makepad_desk_link::host`) runs on its own
+//! thread (`crate::host_main`): the app tells it through `HostControl` and reads its `Report`
+//! twice a second.
 
 use crate::settings::Settings;
 use crate::view::{DeskHostAction, DeskHostView, ViewState};
-use crate::{Cmd, HostControl, HostState, Report};
+use makepad_desk_link::host::{Cmd, HostControl, HostState, Report, ViewerRow};
 use makepad_desk_link_panel::tray_glyph::{image, Glyph};
 use makepad_shell_kit::tray_app::{selftest_note, DropdownChange, LoginItem, TrayDropdown};
 use makepad_widgets::*;
@@ -85,7 +86,7 @@ fn login_item() -> Option<LoginItem> {
 }
 
 fn glyph_and_status(r: &Report) -> (Glyph, String) {
-    let watching: Vec<&makepad_desk_link_panel::ViewerRow> = r.viewers.iter().filter(|v| !v.paused).collect();
+    let watching: Vec<&ViewerRow> = r.viewers.iter().filter(|v| !v.paused).collect();
     match &r.state {
         HostState::Off => (Glyph::Off, "Off".to_string()),
         HostState::Waiting(why) => (Glyph::Off, format!("Waiting: {}", why.lines().next().unwrap_or(""))),
@@ -162,8 +163,8 @@ impl App {
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         // the host's thread: its desktop (capture, cursor, input) lives there
-        let (wake, wake_rx) = std::sync::mpsc::channel::<()>();
-        let ctl = Arc::new(HostControl { report: Default::default(), cmds: Default::default(), wake });
+        let (ctl, wake_rx) = HostControl::new();
+        let ctl = Arc::new(ctl);
         let ctl2 = ctl.clone();
         let thread = std::thread::Builder::new()
             .name("deskhost".into())

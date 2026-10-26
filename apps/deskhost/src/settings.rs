@@ -126,6 +126,21 @@ impl Settings {
         std::fs::write(&path, format!("{}\n", lines.join("\n"))).map_err(|e| format!("{}: {e}", path.display()))
     }
 
+    /// The settings as the host engine takes them.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub fn host(&self) -> makepad_desk_link::host::HostSettings {
+        makepad_desk_link::host::HostSettings {
+            enabled: self.enabled,
+            listen: self.listen_addr(),
+            fps: self.fps,
+            kbps: self.kbps,
+            key_every: self.key_every,
+            host_name: host_name(),
+            tls_name: format!("makepad desk host {}", host_name()),
+            source: Self::path().display().to_string(),
+        }
+    }
+
     pub fn listen_addr(&self) -> Result<SocketAddr, String> {
         let ip: IpAddr = self.host.parse().map_err(|_| format!("host {:?} is not an IP address", self.host))?;
         if !makepad_desk_link::server::bindable(ip) {

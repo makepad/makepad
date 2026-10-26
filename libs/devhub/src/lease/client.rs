@@ -34,6 +34,7 @@ pub const HELP: &str = "  lease <kind> [--node N|--needs k=v,..] [--lane L] [--p
   node <n> [role pool|suite|bench|user-wm|device] [set slots.build=3 disk_floor_gb=40 ...]
                                           the node's role and budgets (its lease.conf, kept on the node)
   disk <node> [--dry-run]                 the node's disk categories and reclaim
+  desk <node> [on|off]                    the Desk Link endpoint of a JIT host (its own render, app input)
   landed <lane> | clean <lane>            delete the lane's dirs on every node and its merged Mac worktree";
 
 const BEAT: Duration = Duration::from_secs(2);
@@ -660,6 +661,21 @@ fn node_conf(c: &Client, node: &str, what: &str) -> i32 {
     }
 }
 
+/// `desk <node> [on|off]`: the node's Desk Link endpoint switched (through the master's router),
+/// and what it does now. The viewers list it from the master's next caps round (10 s).
+fn desk(c: &Client, node: &str, what: &str) -> i32 {
+    match node_one(c, node, "desk", &format!("desk {what}")) {
+        Ok(v) => {
+            let d = v.get("desk_link").and_then(crate::embed::DeskLinkState::parse).unwrap_or_default();
+            let said = s(&v, "said");
+            let state = if !d.on { "off".to_string() } else if d.port > 0 { format!("on, port {}", d.port) } else { "on, not listening yet".to_string() };
+            println!("{node}: desk link {state}{}{}", if d.note.is_empty() { String::new() } else { format!(" ({})", d.note) }, if said.is_empty() || said == d.note { String::new() } else { format!("; {said}") });
+            0
+        }
+        Err(e) => fail(e),
+    }
+}
+
 fn disk(c: &Client, node: &str, dry: bool) -> i32 {
     match ask(c, Some(node), "disk", if dry { "disk dry" } else { "disk" }) {
         Ok(lines) => {
@@ -745,7 +761,7 @@ pub fn cli(args: &[&str]) -> Option<i32> {
         }
         return inspect(args.get(1)?, &args[2..]);
     }
-    if !matches!(word, "lease" | "run" | "get" | "release" | "queue" | "leases" | "nodes" | "node" | "disk" | "landed" | "clean" | "evict" | "unblock" | "override" | "blocked") {
+    if !matches!(word, "lease" | "run" | "get" | "release" | "queue" | "leases" | "nodes" | "node" | "disk" | "desk" | "landed" | "clean" | "evict" | "unblock" | "override" | "blocked") {
         return None;
     }
     match args {
@@ -832,6 +848,14 @@ pub fn cli(args: &[&str]) -> Option<i32> {
         ["node", node, "role", role] => node_conf(&c, node, &format!("set role={role}")),
         ["node", node, "set", kvs @ ..] if !kvs.is_empty() => node_conf(&c, node, &format!("set {}", kvs.join(" "))),
         ["disk", node, rest @ ..] => disk(&c, node, rest.contains(&"--dry-run")),
+        ["desk", node, rest @ ..] => match rest {
+            [] | ["state"] => desk(&c, node, "state"),
+            [v @ ("on" | "off")] => desk(&c, node, v),
+            _ => {
+                eprintln!("makepad devhub desk <node> [on|off]");
+                2
+            }
+        },
         ["landed" | "clean", lane] => landed(&c, lane),
         _ => {
             eprintln!("{HELP}");

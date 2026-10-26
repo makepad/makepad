@@ -17,6 +17,7 @@ mod resources;
 pub(crate) mod share;
 mod submit;
 pub mod surface;
+pub(crate) mod tap;
 #[cfg(target_os = "linux")]
 pub(crate) mod video_encode;
 

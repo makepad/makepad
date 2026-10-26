@@ -2988,6 +2988,9 @@ pub struct HostOpts {
     pub devhub_name: Option<String>,
     /// a debuggable APK (`--debuggable`: `adb shell run-as` reads the app's files, e.g. session logs)
     pub debuggable: bool,
+    /// the host's Desk Link endpoint starts switched on (`--desk-link=on|off`; on in a debuggable
+    /// APK): the host conf's `desk_link=`, switched later by devhub or `files/deskhost.conf`
+    pub desk_link: bool,
 }
 
 /// `rev=<repo> <sha>` for the host conf: each repo's HEAD, the base the device's devhub store
@@ -3208,6 +3211,7 @@ pub fn build_host(
     if let Some(name) = &host.devhub_name {
         conf.push_str(&format!("devhub_name={name}\n"));
     }
+    conf.push_str(if host.desk_link { "desk_link=on\n" } else { "desk_link=off\n" });
     for rev in host_store_revs(&cwd) {
         conf.push_str(&rev);
     }

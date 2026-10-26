@@ -13,6 +13,8 @@ mod android_fleet;
 #[cfg(target_os = "android")]
 mod devhub;
 #[cfg(target_os = "android")]
+mod deskhost;
+#[cfg(target_os = "android")]
 mod logcat;
 #[cfg(target_os = "android")]
 mod socket;

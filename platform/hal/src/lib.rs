@@ -53,8 +53,11 @@ pub mod gpu_limits;
 pub mod gpu_prof;
 pub mod gpu_pressure;
 pub mod h264_bits;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod stream_encode;
+pub mod stream_pack;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub mod frame_tap;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod framecap;
 #[cfg(not(target_arch = "wasm32"))]

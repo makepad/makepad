@@ -22,6 +22,7 @@ macro_rules! print {
 pub mod proto;
 pub mod conf;
 pub mod procinfo;
+pub mod embed;
 pub mod inbox;
 #[cfg(unix)]
 pub mod local;

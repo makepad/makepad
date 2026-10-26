@@ -310,7 +310,7 @@ fn android_help() -> &'static str {
   cargo makepad android [options] build-aab <cargo args>\n\
   cargo makepad android keystore-create <path> [keytool options]\n\
   cargo makepad android [options] run <cargo args>\n\
-  cargo makepad android [options] build-host|run-host [--privileged] [--devhub-name=<name>] [--debuggable] --app <package> [--font-set=Latin|International] [cargo flags]\n\
+  cargo makepad android [options] build-host|run-host [--privileged] [--devhub-name=<name>] [--debuggable] [--desk-link=on|off] --app <package> [--font-set=Latin|International] [cargo flags]\n\
   cargo makepad android [options] adb <adb args>\n\
   cargo makepad android [options] adb-tcp [port]\n\
 \n\
@@ -542,6 +542,7 @@ fn parse_host_args(args: &[String]) -> Result<compile::HostOpts, String> {
     let mut font_assets = Vec::new();
     let mut devhub_name = None;
     let mut debuggable = false;
+    let mut desk_link = None;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -558,6 +559,12 @@ fn parse_host_args(args: &[String]) -> Result<compile::HostOpts, String> {
             privileged = true;
         } else if a == "--debuggable" {
             debuggable = true;
+        } else if let Some(v) = a.strip_prefix("--desk-link=") {
+            desk_link = Some(match v {
+                "on" => true,
+                "off" => false,
+                _ => return Err(format!("--desk-link=on|off, got {v:?}")),
+            });
         } else if let Some(n) = a.strip_prefix("--devhub-name=") {
             devhub_name = Some(n.to_string());
         } else if let Some(f) = a.strip_prefix("--font-set=") {
@@ -573,7 +580,9 @@ fn parse_host_args(args: &[String]) -> Result<compile::HostOpts, String> {
     if apps.is_empty() {
         return Err("run-host needs --app <package> (repeat it for more apps)".to_string());
     }
-    Ok(compile::HostOpts { apps, env, font_set, privileged, font_assets, devhub_name, debuggable })
+    // the Desk Link endpoint is on in a debuggable APK unless asked otherwise
+    let desk_link = desk_link.unwrap_or(debuggable);
+    Ok(compile::HostOpts { apps, env, font_set, privileged, font_assets, devhub_name, debuggable, desk_link })
 }
 
 pub fn handle_android(mut args: &[String]) -> Result<(), String> {
