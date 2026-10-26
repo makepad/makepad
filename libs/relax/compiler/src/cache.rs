@@ -306,7 +306,9 @@ pub mod warm_count {
     pub const O1V_BUILT: usize = 42;
     pub const O1V_WRITTEN: usize = 43;
     pub const O1V_DROPPED: usize = 44;
-    pub static N: [AtomicU64; 45] = [const { AtomicU64::new(0) }; 45];
+    /// SPEC-V: bodies with no entry of their own that linked their twin's stored entry
+    pub const TWIN_ENTRY: usize = 45;
+    pub static N: [AtomicU64; 46] = [const { AtomicU64::new(0) }; 46];
     #[inline]
     pub fn add(k: usize, n: u64) {
         N[k].fetch_add(n, Relaxed);
@@ -336,6 +338,9 @@ pub fn warm_summary() -> String {
         why.push(format!("did not decode/link {}", k(g(LINK_FAIL))));
         why.push(format!("fn not storable {}", k(g(NO_KEY))));
         s.push_str(&format!(" ({})", why.join(", ")));
+    }
+    if g(TWIN_ENTRY) > 0 {
+        s.push_str(&format!("; {} bodies without an entry of their own ran their twin's stored code", k(g(TWIN_ENTRY))));
     }
     if g(IMG_PLACED) + g(IMG_STALE) + g(IMG_FAILED) > 0 {
         s.push_str(&format!("; startup image: {} slots placed, {} stale, {} failed, {} had code", k(g(IMG_PLACED)), k(g(IMG_STALE)), k(g(IMG_FAILED)), k(g(IMG_HAD_CODE))));
@@ -616,6 +621,9 @@ pub struct Cache {
     /// record_manifest ran this run (the mid-run write): the exit writes the manifest again only
     /// if `image_rewrite` was set since (an O2/O3 entry replaced code the image may hold)
     manifest_done: bool,
+    /// the slot count of the order this run's manifest was last made from: a longer one (the
+    /// session's later installs) is recorded again
+    manifest_len: usize,
     /// the loaded image's slots, and how many of them this run found stale (left lazy: a crate
     /// changed, an identity did not resolve) -- past 2% (as for the manifest) the next manifest
     /// carries a fresh image
@@ -851,6 +859,7 @@ impl Cache {
             image_ids: None,
             image_rewrite: true,
             manifest_done: false,
+            manifest_len: 0,
             image_slots: 0,
             image_stale: 0,
             rec_tier: HashMap::new(),
@@ -2914,6 +2923,7 @@ impl Cache {
         self.rec_tier = old.rec_tier.clone();
         self.pending_verdicts = old.pending_verdicts.clone();
         self.manifest_done = old.manifest_done;
+        self.manifest_len = old.manifest_len;
         self.collected_committed = true;
         self.stats = old.stats.clone();
     }
@@ -2987,7 +2997,7 @@ impl Cache {
             }
         }
         let _mem = crate::memstat::tag(crate::memstat::Tag::CacheStore);
-        if self.mode == Mode::ReadOnly || order.is_empty() || (self.manifest_done && !self.image_rewrite && self.stats.rewrite_why[1] as usize * 50 <= self.image_slots) {
+        if self.mode == Mode::ReadOnly || order.is_empty() || (self.manifest_done && order.len() <= self.manifest_len && !self.image_rewrite && self.stats.rewrite_why[1] as usize * 50 <= self.image_slots) {
             return true;
         }
         // at exit the slots' keys can no longer be made: after the mid-run manifest the exit
@@ -2997,7 +3007,7 @@ impl Cache {
         if self.manifest_done && crate::preempt::is_stopped() && !self.image_bad {
             return true;
         }
-        let Some(key) = self.manifest_key(root) else { self.manifest_done = true; return true };
+        let Some(key) = self.manifest_key(root) else { self.manifest_done = true; self.manifest_len = order.len(); return true };
         // what earlier spills of this run wrote: the image takes those entries too
         self.index_written();
         let mut list: Vec<(Vec<u8>, u128)> = Vec::with_capacity(order.len());
@@ -3025,7 +3035,7 @@ impl Cache {
         let image_current = !self.image_rewrite
             && (self.image_slots == 0 || ((self.image_stale + self.stats.rewrite_why[1] as usize) * 50 <= self.image_slots && self.image_slots * 50 >= self.manifest_present_cached * 49));
         if self.startup_manifest_valid() && new * 50 <= list.len() && image_current {
-            self.manifest_done = true;
+            self.manifest_done = true; self.manifest_len = order.len();
             return true;
         }
         if self.verbose {
@@ -3035,7 +3045,7 @@ impl Cache {
         let img = if self.mode != Mode::Verify && !self.image_bad {
             match self.build_image(u, &present_ids, stop) { Err(()) => return false, Ok(img) => img }
         } else { None };
-        self.manifest_done = true;
+        self.manifest_done = true; self.manifest_len = order.len();
         // at exit no key can be made any more (slot_key): slots no lookup or record keyed this
         // run fall out of the image. A rewrite then (O2/O3 code replaced startup code since the
         // mid-run write) must not replace the loaded image with one covering fewer slots: the
@@ -7204,6 +7214,36 @@ impl Linker {
                 r = self.link_entry(u, id, payload);
             }
         }
+        // SPEC-V: a body with no entry of its own whose unverified-mode twin has one (an earlier
+        // session ran the twin: its callers' code was lowered before their verdicts) runs the
+        // twin's stored code, as borrow_twin lends a twin's code within a session: the same body,
+        // built for unverified callers, sound for every caller. Verified code recorded since
+        // (a caller's O2/O3 rebuild) calls the base directly; without this its first call compiled
+        // the base on the program's thread, then the base's callees, one session deeper each time.
+        // It tiers up from here like any linked entry (its O3 build is recorded under its own key).
+        if !found && matches!(u.fns[id as usize].key, FnKey::Inst(..) | FnKey::Closure(..)) && u.fns[id as usize].build_err.is_none() {
+            if let Some((tk, _, _)) = self.cache().code_key_bytes(u, &FnKey::Plain(id)) {
+                let at = self.cache().index_at(tk);
+                let pack = at.map(|(p, _)| self.cache().stores[p as usize].clone());
+                if let Some((KIND_CODE, payload)) = pack.as_ref().and_then(|pk| pk.get_checked_at(at.map_or(0, |a| a.1) as usize, tk)).filter(|(_, p)| !p.is_empty()) {
+                    if self.cert_valid(u, payload) != Some(false) {
+                        if let Some(x) = self.link_entry(u, id, payload) {
+                            trace_keyed(u, id, "hit:twin", Some(tk));
+                            warm_count::add(warm_count::TWIN_ENTRY, 1);
+                            self.cache().stats.hits += 1;
+                            warm_count::add(warm_count::HIT, 1);
+                            if std::mem::take(&mut self.cache().last_base) {
+                                self.cache().base_linked.insert(id);
+                            }
+                            self.cache().linked.insert(id);
+                            self.cache().linked_key.insert(id, tk);
+                            self.cache().stats.link_ns += crate::jit::wall_ns() - t0;
+                            return Some(x);
+                        }
+                    }
+                }
+            }
+        }
         if !found {
             if relax_codegen::warm::enabled() {
                 let reason = self.cache().miss_reason(u, id, key0);
@@ -7374,6 +7414,16 @@ impl Linker {
         self.cache().last_callees = callees;
         self.cache().last_thunks = thunks;
         self.cache().last_data = data;
+        if !is_o3 {
+            // the slots this code took in run inside it: a replacement that calls one instead
+            // (an O3 build missing its body) has it built before its swap (jit prebuild_callees);
+            // O3 entries register theirs at install (cached_tier1)
+            for &c in &inl {
+                if c != id && (c as usize) < u.fns.len() && !u.fns[c as usize].history().inlined_into.contains(&id) {
+                    crate::zone_alloc::kept_with(|| u.fns[c as usize].history.get_or_insert_with(Default::default).inlined_into.push(id));
+                }
+            }
+        }
         self.cache().last_tier1 = if is_o3 { Some(inl) } else { None };
         self.cache().last_o2 = tier == TIER_O2;
         self.cache().last_base = tier == TIER_BASE;

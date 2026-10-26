@@ -92,7 +92,7 @@ pub struct Want {
 impl Want {
     /// Work the program waits for (bright and fast); else background tier-up (slower, dimmer).
     fn foreground(&self) -> bool {
-        self.ahead > 0 || self.lazy || self.block
+        self.ahead > 0 && !self.linking || self.lazy || self.block
     }
 
     /// The builds finished of those queued since the JIT got busy (None: no queue says).
@@ -304,7 +304,10 @@ pub fn summary(want: Option<Want>, alert: Option<Alert>) -> String {
     if w.block {
         parts.push("UI waiting on the JIT".to_string());
     }
-    if w.ahead > 0 {
+    if w.ahead > 0 && w.linking {
+        // the queue ahead is warm-cache links (a warm start's manifest): nothing is compiled
+        parts.push(format!("installing {} cached fns", w.ahead));
+    } else if w.ahead > 0 {
         parts.push(format!("compiling {} fns", w.ahead));
     } else if w.lazy || w.block {
         parts.push("compiling".to_string());
@@ -320,7 +323,7 @@ pub fn summary(want: Option<Want>, alert: Option<Alert>) -> String {
     }
     if parts.is_empty() {
         parts.push(if w.linking { "warm install" } else { "finishing" }.to_string());
-    } else if w.linking {
+    } else if w.linking && w.ahead == 0 {
         parts.push("warm install".to_string());
     }
     if let Some(p) = w.progress() {
@@ -432,7 +435,7 @@ mod tests {
         let w = Want { done: 30, pending: 70, ahead: 70, rate: 120.0, busy: Duration::from_millis(1800), ..Default::default() };
         assert_eq!(summary(Some(w), None), "compiling 70 fns · 30% · 120 fns/s · 1.8 s");
         let w = Want { done: 3, pending: 7, linking: true, ahead: 7, ..Default::default() };
-        assert_eq!(summary(Some(w), None), "compiling 7 fns · warm install · 30% · 0.0 s");
+        assert_eq!(summary(Some(w), None), "installing 7 cached fns · 30% · 0.0 s");
         let w = Want { settling: true, busy: Duration::from_secs(2), ..Default::default() };
         assert_eq!(summary(Some(w), None), "settle rebuild · 2.0 s");
         assert_eq!(summary(None, None), "settled");

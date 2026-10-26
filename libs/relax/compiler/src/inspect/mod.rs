@@ -989,6 +989,17 @@ fn cmd_jit(req: &Req, out: &mut Out) {
     let ms = (t0.elapsed().as_millis() as u64).max(1);
     out.measured("JIT compile activity", "postframe::activity (atomics + O2/O3 queue locks), two looks", &[]);
     out.line(&jit_line(&a, &b, ms));
+    // the session so far (cumulative): what was compiled -- first compiles the program waited for,
+    // first compiles ahead, O2 / verified O1 builds, O3 builds -- and what came from the disk cache
+    out.line(&format!(
+        "session: compiled {} first (program threads {}, ahead {}), O2 {}, O3 {}; warm links {}",
+        b.compiled,
+        crate::jit::demand_compiled(),
+        crate::jit::SPEC_FNS.load(std::sync::atomic::Ordering::Relaxed),
+        b.o2_done,
+        b.o3_done,
+        b.linked
+    ));
 }
 
 /// The `jit` answer from two looks `ms` apart.
@@ -999,7 +1010,9 @@ fn jit_line(a: &crate::postframe::Activity, b: &crate::postframe::Activity, ms: 
     let duty = d(a.ui_wait_ns, b.ui_wait_ns) as f64 / (ms as f64 * 1e6);
     let busy = built > 0 || b.running() || duty > 0.02;
     let background = b.background() && duty <= 0.02 && b.demand() == a.demand();
-    let mut parts = vec![if busy { if background { "busy (background)" } else { "busy" } } else { "idle" }.to_string()];
+    // only warm-cache links finished, nothing waited on the JIT: installing stored code ahead
+    let linking = built > 0 && d(a.finished() - a.linked, b.finished() - b.linked) == 0 && duty <= 0.02 && !b.ui_waiting && b.demand() == a.demand();
+    let mut parts = vec![if busy { if background { "busy (background)" } else if linking { "busy (warm install)" } else { "busy" } } else { "idle" }.to_string()];
     let current = b.current();
     let mut running = Vec::new();
     if !current.is_empty() {

@@ -2637,8 +2637,10 @@ struct ExitSummary {
 }
 static EXIT_SUMMARY: std::sync::OnceLock<ExitSummary> = std::sync::OnceLock::new();
 static RUN_PANIC: std::sync::OnceLock<jit::PanicInfo> = std::sync::OnceLock::new();
-/// The exit worker has not finished the cache write yet (finish_run waits for it).
-static EXIT_PERSIST: AtomicBool = AtomicBool::new(false);
+/// The exit worker's cache write: not begun (0), under way (1), done (2). finish_run waits for
+/// it to begin and to end: a worker not yet scheduled when a fixed wait ran out lost the whole
+/// write (the quit's last code: Sandbox's ~4,000 teardown fns, built again by every session).
+static EXIT_STAGE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 /// How long the exit waits for background compiles to finish (they are abandoned
 /// at their next safe point). Not getting it means no cache write at all.
 const EXIT_QUIESCE_MS: u64 = 200;
@@ -2655,7 +2657,7 @@ fn start_exit_summary() {
     let (request, receive) = std::sync::mpsc::sync_channel::<(&'static str, Option<i32>)>(1);
     let worker = std::thread::Builder::new().name("run-exit".into()).spawn(move || {
         let Ok((why, code)) = receive.recv() else { return };
-        EXIT_PERSIST.store(true, Ordering::SeqCst);
+        EXIT_STAGE.store(1, Ordering::SeqCst);
         exit_mark("start");
         remove_present_report();
         if let Some(code) = code { report("exit", &code.to_string()); }
@@ -2677,7 +2679,7 @@ fn start_exit_summary() {
         }
         exit_mark("errors");
         summary_inner(why);
-        EXIT_PERSIST.store(false, Ordering::SeqCst);
+        EXIT_STAGE.store(2, Ordering::SeqCst);
         if let Some(dcx) = RUN_DIAGNOSTICS.lock().unwrap().as_ref() { dcx.flush_delayed(); }
         exit_mark("summary tail");
         exit_report();
@@ -2704,13 +2706,14 @@ fn finish_run(why: &'static str, code: Option<i32>) {
         eprintln!("makepad-run: {}", l);
     }
     if exit.request.try_send((why, code)).is_err() { return; }
-    // 100 ms for the cleanup, counted from the end of the cache write; the write itself only
-    // has a hang guard (a store on a stalled disk must not keep the process forever)
+    // 100 ms for the cleanup, counted from the end of the cache write; the write (and the
+    // worker's start before it) only has a hang guard (a store on a stalled disk must not keep
+    // the process forever)
     let start = Instant::now();
     let mut deadline = start + std::time::Duration::from_millis(100);
     while !exit.worker.is_finished() {
         let now = Instant::now();
-        if EXIT_PERSIST.load(Ordering::SeqCst) && now.duration_since(start).as_secs() < 30 {
+        if EXIT_STAGE.load(Ordering::SeqCst) < 2 && now.duration_since(start).as_secs() < 30 {
             deadline = now + std::time::Duration::from_millis(100);
         }
         if now >= deadline { break; }
@@ -2830,6 +2833,9 @@ fn drop_program_memos() -> bool {
 static MID_COLLECTED_TRIED: AtomicBool = AtomicBool::new(false);
 /// A mid-run write recorded the startup manifest (its window had closed).
 static MID_MANIFEST_DONE: AtomicBool = AtomicBool::new(false);
+/// The manifest's slot count when a mid-run write last recorded it: the quit write records it
+/// again with the session's later installs
+static MID_MANIFEST_LEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Compile totals since boot, the startup list for the aot levels, and the JSON report.
 /// jit::wall_ns() when main was called (MAKEPAD_RUN_MAIN_COMPILE_LOG's time base)
@@ -3006,7 +3012,11 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
         // the startup manifest, once its window has closed (first present + 5 s after main):
         // what the exit recorded before, so a killed or force-quit app starts warm too; the exit
         // writes it again only if O2 code replaced startup code since (record_manifest)
-        if u.cache.is_some() && jit::FIRST_PRESENT.load(Ordering::Acquire) && jit::wall_ns() >= jit::ORDER_UNTIL_NS.load(Ordering::Relaxed) && !MID_MANIFEST_DONE.swap(true, Ordering::Relaxed) {
+        // (the quit write records it again when the session installed more since: the whole
+        // session's order, linked ahead by the next launch)
+        let again = jit::QUIT_SEEN.load(Ordering::Relaxed) && MID_MANIFEST_DONE.load(Ordering::Relaxed) && u.start_order.len() > MID_MANIFEST_LEN.load(Ordering::Relaxed);
+        if u.cache.is_some() && jit::FIRST_PRESENT.load(Ordering::Acquire) && jit::wall_ns() >= jit::ORDER_UNTIL_NS.load(Ordering::Relaxed) && (!MID_MANIFEST_DONE.swap(true, Ordering::Relaxed) || again) {
+            MID_MANIFEST_LEN.store(u.start_order.len(), Ordering::Relaxed);
             let (order, present) = jit::manifest_order(u.start_order.clone(), jit::ORDER_PRESENT_LEN.load(Ordering::Relaxed));
             let mut cache = u.cache.take();
             if let Some(c) = cache.as_mut() {
