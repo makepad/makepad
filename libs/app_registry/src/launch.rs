@@ -123,6 +123,19 @@ impl AppLaunch {
         Ok((launch, child))
     }
 
+    /// The `cargo build` of what a checkout launch of `app` under `runner` compiles (the app,
+    /// or the `makepad` tool for the JIT), with the launch's environment ([`crate::child_env`]
+    /// scrub, [`crate::cargo_env`]): a deploy that prebuilds with it leaves the launch's `cargo
+    /// run` nothing to compile. Any other environment (a script's `CARGO_INCREMENTAL=0`, its
+    /// `MAKEPAD=`) builds other artifacts, and every launch compiles again.
+    pub fn build_command(app: &'static AppEntry, runner: Runner, root: PathBuf) -> Result<Command, String> {
+        let launch = Self {
+            app, runner, root: Some(root), extra: Vec::new(), building: true, run: false, ran: false,
+            status: String::new(), progress: String::new(), diagnostic: String::new(), last_output: String::new(), closed_streams: 0,
+        };
+        launch.command()
+    }
+
     pub fn is_building(&self) -> bool {
         self.building
     }
@@ -407,5 +420,36 @@ mod tests {
         let (native, _) = started("terminal", Runner::Native, &root);
         assert!(native.iter().any(|a| a == "--stdin-loop"), "{native:?}");
         assert!(native.iter().any(|a| a == "makepad-app-terminal"));
+    }
+
+    /// A deploy's prebuild is the launch's own cargo command with `build` for `run` and the same
+    /// environment, so the launch finds every artifact fresh (a different CARGO_INCREMENTAL or
+    /// MAKEPAD is another profile/fingerprint: 165 recompiled 97 crates at a JIT launch).
+    #[test]
+    fn the_prebuild_is_the_launch_with_build_for_run() {
+        let root = crate::checkout_at_or_above(Path::new(env!("CARGO_MANIFEST_DIR"))).expect("tests run in a checkout");
+        for (id, runner) in [("sandbox", Runner::Jit), ("terminal", Runner::Native)] {
+            let entry = crate::find(id).unwrap();
+            let mut run = None;
+            let _ = AppLaunch::start(entry, runner, Some(root.clone()), Vec::new(), BuildPolicy::IfMissing, false, |cmd, _| {
+                run = Some(cmd);
+                Err("captured".into())
+            });
+            let run = run.unwrap();
+            let build = AppLaunch::build_command(entry, runner, root.clone()).unwrap();
+            let args = |c: &Command| c.get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>();
+            let envs = |c: &Command| {
+                let mut v: Vec<_> = c.get_envs().map(|(k, v)| (k.to_os_string(), v.map(|v| v.to_os_string()))).collect();
+                v.sort();
+                v
+            };
+            let (run_args, build_args) = (args(&run), args(&build));
+            let cut = run_args.iter().position(|a| a == "--").unwrap();
+            assert_eq!(run_args[0], "run");
+            assert_eq!(build_args[0], "build");
+            assert_eq!(run_args[1..cut], build_args[1..], "{id}");
+            assert_eq!(envs(&run), envs(&build), "{id}");
+            assert_eq!(run.get_current_dir(), build.get_current_dir());
+        }
     }
 }

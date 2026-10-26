@@ -4,7 +4,8 @@
 //! from Code's run panel, from a script -- asks it first: a WM speaking its hosted wire gives
 //! it a client id on the hub, and the app connects as that client exactly like an app the WM
 //! launched. Its window becomes a tile like any other; the process stays its launcher's (no
-//! child handle here), so the tile goes when the app's hub socket closes.
+//! child handle here), so the tile goes when the app's hub socket closes, when the same pid
+//! asks again, or when the pid is gone (`App::reap_exited`).
 use super::*;
 use makepad_widgets::makepad_platform::thread::ThreadOptions;
 use makepad_widgets::makepad_platform::makepad_hal::wm_socket::{self, Admission, WmSocket};
@@ -108,6 +109,16 @@ impl App {
                 log!("wm: {crate_name} (pid {pid}), launched as client {client}, asked for its window");
                 continue;
             }
+            // The same process asking again (a detached app reattaching after its hub connect
+            // failed): its earlier admission is void, and its tile with it.
+            let earlier: Vec<ClientId> = self.state_mut().clients.iter()
+                .filter(|(id, slot)| **id != client && slot.external == Some(pid))
+                .map(|(id, _)| *id)
+                .collect();
+            for id in earlier {
+                log!("wm: pid {pid} asked again; client {id} was its earlier admission");
+                self.remove_client(cx, id);
+            }
             let entry = makepad_app_registry::apps().iter().find(|a| a.package == crate_name);
             let (app, label) = entry.map_or((crate_name.clone(), crate_name.clone()), |e| (e.id.to_string(), e.label.to_string()));
             // The node's AI Hub app, started by this WM or an earlier one (hub_app): a service
@@ -116,7 +127,7 @@ impl App {
             #[cfg(not(target_arch = "wasm32"))]
             if app == clients::HUB_SERVICE_APP && hub_app::is_hub_pid(pid) {
                 log!("wm: {label} (pid {pid}) came to the WM by itself as this node's service; client {client}: no tile");
-                self.state_mut().clients.insert(client, clients::ClientSlot::adopted_service(client, &app));
+                self.state_mut().clients.insert(client, clients::ClientSlot::adopted_service(client, &app, pid));
                 let hub_port = self.state_mut().hub_port;
                 self.desk(cx)
                     .borrow_mut::<WmDesk>()
@@ -124,7 +135,7 @@ impl App {
                 continue;
             }
             log!("wm: {label} (pid {pid}) came to the WM by itself; client {client}");
-            let slot = clients::ClientSlot::adopted(client, &app);
+            let slot = clients::ClientSlot::adopted(client, &app, pid);
             let area = self.desk_area(cx);
             let state = self.state_mut();
             state.clients.insert(client, slot);

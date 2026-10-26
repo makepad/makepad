@@ -665,9 +665,11 @@ pub struct ClientSlot {
     pub closing: Option<f64>,
     /// The aichat child seated in the AI pane: not in the layout, no tile.
     pub pane: bool,
-    /// Came to the WM by itself through its socket (adopt.rs): its launcher owns the
-    /// process, and the tile ends when its hub socket closes.
-    pub external: bool,
+    /// Came to the WM by itself through its socket (adopt.rs): the pid that asked. Its
+    /// launcher owns the process; the tile ends when its hub socket closes, when that pid
+    /// asks again (its earlier admission is void) or when the pid is gone (`reap_exited`:
+    /// an app that never connected its hub, or died before, has no socket to close).
+    pub external: Option<u32>,
     /// One of an app's later windows (`client_windows.rs`): the app's client. No process
     /// of its own; its sender is the app's.
     pub parent: Option<ClientId>,
@@ -706,7 +708,7 @@ impl ClientSlot {
             linked_at: None,
             closing: None,
             pane: false,
-            external: false,
+            external: None,
             parent: None,
             service: false,
         }
@@ -727,18 +729,18 @@ impl ClientSlot {
 impl ClientSlot {
     /// The slot of an app the WM socket admitted: a window like a launched one, without a
     /// process handle (adopt.rs).
-    pub fn adopted(id: ClientId, app: &str) -> ClientSlot {
+    pub fn adopted(id: ClientId, app: &str, pid: u32) -> ClientSlot {
         let mut slot = ClientSlot::module(id, app, "");
         slot.ready = false;
-        slot.external = true;
+        slot.external = Some(pid);
         slot.status = "starting…".into();
         slot
     }
 
     /// The slot of a supervised service the WM socket admitted (`service`): the same client as
     /// an adopted app, without a tile.
-    pub fn adopted_service(id: ClientId, app: &str) -> ClientSlot {
-        let mut slot = ClientSlot::adopted(id, app);
+    pub fn adopted_service(id: ClientId, app: &str, pid: u32) -> ClientSlot {
+        let mut slot = ClientSlot::adopted(id, app, pid);
         slot.service = true;
         // Never the keyboard's target: its dropdown takes pointer input only.
         slot.takes_focus = false;
@@ -876,7 +878,7 @@ fn client_slot(pool: &TaskPool, id: ClientId, app: &AppDef, child: Child, warm: 
         linked_at: None,
         closing: None,
         pane: false,
-        external: false,
+        external: None,
         parent: None,
         service: false,
     }
@@ -936,7 +938,7 @@ fn spawn_for_client(
         return spawn_process(pool, spawner, id, client_log(id, true), cmd, bin, lines);
     }
     if runner == Runner::Jit {
-        return spawn_jit(pool, spawner, id, bin, cwd, cmd, lines);
+        return spawn_jit(pool, spawner, id, bin, cwd, cmd, kind, lines);
     }
     // The app, or `cargo run` of it (cargo's progress on the tile, then the app): the
     // app's environment either way.
@@ -951,9 +953,13 @@ fn spawn_for_client(
     #[cfg(target_os = "linux")]
     cmd.env(makepad_widgets::makepad_platform::hosted_relay::HOST_FILE_DIALOGS_ENV, "1");
     if let Some(cwd) = cwd {
-        // The terminal's Omarchy behavior: open where the focused one is.
+        // The terminal's Omarchy behavior: open where the focused one is. A `cargo run` stays in
+        // the checkout: cargo reads the workspace's .cargo/config.toml (its rustflags) from its
+        // working directory, and from elsewhere it builds the whole app again with other flags.
         cmd.arg("--cwd").arg(cwd);
-        cmd.current_dir(cwd);
+        if kind == LaunchKind::App {
+            cmd.current_dir(cwd);
+        }
     }
     if let Some(colors) = term_colors {
         cmd.env("MAKEPAD_TERMINAL_COLORS", colors);
@@ -999,10 +1005,13 @@ fn spawn_jit(
     bin: &str,
     cwd: Option<&PathBuf>,
     mut cmd: Command,
+    kind: LaunchKind,
     lines: Sender<ClientLine>,
 ) -> Result<Child, String> {
     cmd.env("MAKEPAD_WM_CAPTION_CONTENT", "1");
-    if let Some(cwd) = cwd {
+    // A `cargo run` of the tool stays in the checkout (cargo's config is read from its working
+    // directory); the built tool may start elsewhere.
+    if let (Some(cwd), LaunchKind::App) = (cwd, kind) {
         cmd.current_dir(cwd);
     }
     let settings = crate::theme::makepad_home().join("wm/jit.env");

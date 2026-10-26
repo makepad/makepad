@@ -51,9 +51,11 @@ mod dock_autohide;
 mod hub_link;
 #[cfg(not(target_arch = "wasm32"))]
 mod hub_app;
-/// The deploy's build of this node's AI Hub (the `makepad-wm-hub` binary).
+/// The deploy's prebuild of what the WM starts (the `makepad-wm-build` binary).
 #[cfg(not(target_arch = "wasm32"))]
-pub use hub_app::build_node_hub;
+mod deploy_build;
+#[cfg(not(target_arch = "wasm32"))]
+pub use deploy_build::build_launched;
 mod trays;
 mod dropdown;
 mod gpu_yield;
@@ -2406,6 +2408,13 @@ impl App {
         for (id, slot) in state.clients.iter_mut() {
             #[cfg(not(target_arch = "wasm32"))]
             if domain_clients.contains(id) { continue; }
+            // An app that came by itself and whose process is gone: it may never have
+            // connected its hub (a reattach whose connect failed), so no socket closes for it.
+            if slot.external.is_some_and(|pid| !makepad_app_host::launch::process_alive(pid)) {
+                log!("wm: {} (client {}, pid {}) is gone; removing its tile", slot.app, id, slot.external.unwrap_or(0));
+                dead.push(*id);
+                continue;
+            }
             // Closing a build must never launch the app on its way out.
             if slot.closing.is_some() || slot.launch.is_none() {
                 if slot.child.as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(Some(_))))
@@ -3212,7 +3221,7 @@ impl App {
                         if let Some(slot) = self.state_mut().clients.get_mut(&client) {
                             slot.sender = None;
                             slot.socket = None;
-                            adopted = slot.external;
+                            adopted = slot.external.is_some();
                         }
                         // An app that came by itself has no process here to reap: its
                         // socket closing is its end.

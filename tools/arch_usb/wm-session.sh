@@ -16,11 +16,14 @@ cd "$MAKEPAD_WM_ROOT"
 if test ! -x target/release/makepad-app-wm || test "${MAKEPAD_WM_BUILD:-0}" = 1; then
     cargo build --offline --release -p makepad-app-wm
 fi
-# The AI Hub app is built the way the WM runs it: `makepad-wm-hub build` is the WM's own start of
-# it (`cargo run --release -p makepad-app-aihub --features <features>`, hub_app.rs) with `build`,
-# from the same settings and this session's environment, so the WM's start compiles nothing.
+# The WM's own flags (which apps run under the JIT); the prebuild below reads the same ones.
+wm_flags=(--jit sandbox)
+# The AI Hub app and the JIT tool are built the way the WM starts them: `makepad-wm-build` runs
+# the WM's own start command of each (`cargo run --release -p makepad-app-aihub --features
+# <features>`, hub_app.rs; `cargo run --release -p makepad-run --bin makepad`) with `build`, in
+# the launcher's environment, so the WM's starts compile nothing.
 if test ! -x target/release/makepad-app-aihub || test "${MAKEPAD_WM_BUILD:-0}" = 1; then
-    cargo run --offline --release -p makepad-app-wm --bin makepad-wm-hub -- build
+    cargo run --offline --release -p makepad-app-wm --bin makepad-wm-build -- "${wm_flags[@]}" -- hub sandbox
 fi
 
 # The saved display arrangement (order, per-screen modes, render-on GPU):
@@ -43,4 +46,4 @@ if test ! -e "$jit_env"; then
     mkdir -p "$HOME/.makepad/wm" "$HOME/.makepad-run/tmp"
     printf 'MAKEPAD_RUN_VERBOSE=1\nTMPDIR=%s/.makepad-run/tmp\n' "$HOME" > "$jit_env"
 fi
-exec target/release/makepad-app-wm "-scale=${MAKEPAD_WM_SCALE:-1.3}" --jit sandbox "$@"
+exec target/release/makepad-app-wm "-scale=${MAKEPAD_WM_SCALE:-1.3}" "${wm_flags[@]}" "$@"

@@ -35,10 +35,11 @@ path = "src/lib.rs"
 name = "makepad-app-wm"
 path = "src/main.rs"
 
-# The deploy's build of the node's AI Hub: the WM's own start of it, as a build (hub_app.rs).
+# The deploy's prebuild of what the WM starts (the AI Hub, its apps, the JIT tool), each with the
+# WM's own start command as a build (deploy_build.rs).
 [[bin]]
-name = "makepad-wm-hub"
-path = "src/bin/makepad_wm_hub.rs"
+name = "makepad-wm-build"
+path = "src/bin/makepad_wm_build.rs"
 
 [features]
 default = ["tweaker"]

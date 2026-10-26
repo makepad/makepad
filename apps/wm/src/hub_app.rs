@@ -104,7 +104,7 @@ enum Verb {
     Build,
 }
 
-/// The deploy's build of this node's AI Hub (`makepad-wm-hub build`, run in the WM session's
+/// The deploy's build of this node's AI Hub (`makepad-wm-build -- hub`, run in the WM session's
 /// environment in the checkout the WM runs from): `cargo build` of the very command the WM's
 /// start runs, from the same settings (`ai-hub.conf`: features, the `env` lines, the CUDA
 /// toolkit installed here) and launcher environment, so the WM's `cargo run` of it after the
@@ -117,13 +117,13 @@ pub fn build_node_hub() -> std::process::ExitCode {
     let mut cmd = match app.cargo(Verb::Build) {
         Ok(cmd) => cmd,
         Err(e) => {
-            eprintln!("makepad-wm-hub: {e}");
+            eprintln!("makepad-wm-build: hub: {e}");
             return std::process::ExitCode::from(2);
         }
     };
     let set: Vec<String> = cmd.get_envs().filter(|(_, v)| v.is_some()).map(|(k, _)| k.to_string_lossy().into_owned()).collect();
     eprintln!(
-        "makepad-wm-hub: {} {} (features {:?}; sets {})",
+        "makepad-wm-build: hub: {} {} (features {:?}; sets {})",
         cmd.get_program().to_string_lossy(),
         cmd.get_args().map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" "),
         app.conf.features,
@@ -132,11 +132,11 @@ pub fn build_node_hub() -> std::process::ExitCode {
     match cmd.status() {
         Ok(status) if status.success() => std::process::ExitCode::SUCCESS,
         Ok(status) => {
-            eprintln!("makepad-wm-hub: build failed: {status}");
+            eprintln!("makepad-wm-build: hub: build failed: {status}");
             std::process::ExitCode::from(status.code().unwrap_or(1).clamp(1, 255) as u8)
         }
         Err(e) => {
-            eprintln!("makepad-wm-hub: cannot start cargo: {e}");
+            eprintln!("makepad-wm-build: hub: cannot start cargo: {e}");
             std::process::ExitCode::from(1)
         }
     }

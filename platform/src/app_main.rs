@@ -211,6 +211,12 @@ pub fn admitted_by_window_manager() -> Option<WmAdmission> {
 /// hosted path as the apps the WM launches. Otherwise the HAL picks Wayland, then X11.
 /// Under Relax the HAL shell does this for the whole `makepad run` process.
 pub fn discover_window_manager(crate_name: &'static str) {
+    // The name this process gives a WM that hosts it (also the HAL's own WM shell and its
+    // reattach to the next WM): its package, which the WM finds the app's label and icon by.
+    // Never the executable's file name: a rebuild replaces the binary under a running app and
+    // Linux then reads it as "<path> (deleted)".
+    #[cfg(all(target_os = "linux", not(relax)))]
+    makepad_hal::wm_socket::set_client_name(crate_name);
     #[cfg(all(target_os = "linux", not(relax)))]
     ADMITTED.get_or_init(|| {
         use makepad_hal::wm_socket::{self, Backend};

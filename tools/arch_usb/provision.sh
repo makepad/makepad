@@ -189,10 +189,10 @@ else
 fi
 # The WM starts the AI Hub app with `cargo run --release -p makepad-app-aihub --features <features>`
 # (apps/wm/src/hub_app.rs: features and the CUDA toolkit from ~/.makepad/wm/ai-hub.conf and its
-# defaults). `makepad-wm-hub build` is that very command with `build`, made by the same code, in the
+# defaults). `makepad-wm-build -- hub` is that very command with `build`, made by the same code, in the
 # WM session's environment (/etc/environment, written above): the WM's start compiles nothing.
 stage 'Building the AI Hub app (CUDA kernels) the way the WM runs it'
-runuser -u arch -- env HOME=/home/arch CARGO_NET_OFFLINE=true MAKEPAD_WM_ROOT=/home/arch/makepad PATH="$PATH" bash -c 'cd /home/arch/makepad && cargo run --offline --release -p makepad-app-wm --bin makepad-wm-hub -- build'
+runuser -u arch -- env HOME=/home/arch CARGO_NET_OFFLINE=true MAKEPAD_WM_ROOT=/home/arch/makepad PATH="$PATH" bash -c 'cd /home/arch/makepad && cargo run --offline --release -p makepad-app-wm --bin makepad-wm-build -- -- hub'
 sshd -t
 systemctl reload sshd
 touch "$state/complete"
