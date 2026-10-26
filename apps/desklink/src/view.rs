@@ -170,6 +170,7 @@ pub struct ShownPart {
     x0: u32,
     y0: u32,
     size: [u32; 2],
+    color: VideoColor,
     tex: PartTex,
 }
 
@@ -209,7 +210,7 @@ impl RemoteView {
                     }
                 }
             };
-            self.parts.push(ShownPart { x0: part.x0, y0: part.y0, size: [part.width, part.height], tex });
+            self.parts.push(ShownPart { x0: part.x0, y0: part.y0, size: [part.width, part.height], color: part.color, tex });
         }
         // a frame in flight may still sample the last few GPU pictures: the GPU is at most a
         // couple behind
@@ -306,8 +307,8 @@ impl Widget for RemoteView {
             let right = rect.pos.x + rect.size.x * (part.x0 + part.size[0]) as f64 / full_w;
             let [pw, ph] = part.size;
             match &part.tex {
-                PartTex::Gpu { luma, chroma, full_chroma, .. } => self.draw_nv12.set_planes(luma, chroma, pw, ph, VideoColor::BT709, *full_chroma),
-                PartTex::Cpu(t) => self.draw_nv12.set_nv12(t, pw, ph, VideoColor::BT709, None),
+                PartTex::Gpu { luma, chroma, full_chroma, .. } => self.draw_nv12.set_planes(luma, chroma, pw, ph, part.color, *full_chroma),
+                PartTex::Cpu(t) => self.draw_nv12.set_nv12(t, pw, ph, part.color, None),
             }
             // a draw call per part: each samples its own textures
             self.draw_nv12.new_draw_call(cx);

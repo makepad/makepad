@@ -4,7 +4,7 @@
 //! encoder half and the backend notes (`VTDecompressionSession` on macOS,
 //! an H.264 decoder MFT on Windows).
 
-use crate::VideoFileError;
+use crate::{VideoColor, VideoFileError};
 pub use crate::stream_encoder::StreamVideoCodec;
 
 /// One decoded frame: tightly packed NV12, stride == width (same layout as
@@ -18,6 +18,9 @@ pub struct DecodedFrame {
     pub nv12: Vec<u8>,
     pub pts_100ns: i64,
     pub gpu: Option<DecodedPicture>,
+    /// The picture's colour as its stream says (SPS VUI, as the decoder reports it), in the
+    /// range of the decoded samples: what a viewer draws it with.
+    pub color: VideoColor,
 }
 
 /// A plane of a biplanar 4:2:0 picture: luma (full size) or the interleaved chroma (half).
@@ -27,8 +30,8 @@ pub enum PicturePlane {
     Chroma,
 }
 
-/// A decoded picture in the decoder's own GPU memory, biplanar 4:2:0 (NV12 layout, BT.709
-/// limited range for live streams). `handle` names it to the platform's texture import
+/// A decoded picture in the decoder's own GPU memory, biplanar 4:2:0 (NV12 layout; its colour
+/// is the frame's `color`). `handle` names it to the platform's texture import
 /// (`Cx::import_picture_plane`; macOS: its global IOSurface id). The decoder does not reuse
 /// the picture while any clone of this is alive.
 #[derive(Clone)]
@@ -46,11 +49,10 @@ impl std::fmt::Debug for DecodedPicture {
 }
 
 impl DecodedFrame {
-    /// Convert to tightly packed RGB8. Live streams are BT.709 limited range
-    /// both ways (our encoder writes them so).
+    /// Convert to tightly packed RGB8 in the frame's colour.
     pub fn to_rgb8(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        crate::nv12::nv12_to_rgb8(&self.nv12, self.width, self.height, crate::VideoColor::BT709, &mut out);
+        crate::nv12::nv12_to_rgb8(&self.nv12, self.width, self.height, self.color, &mut out);
         out
     }
 }

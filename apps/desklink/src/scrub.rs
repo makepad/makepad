@@ -12,7 +12,7 @@
 use crate::conn::Part;
 use crate::history::Snapshot;
 use makepad_network::SignalToUI;
-use makepad_widgets::makepad_platform::video_file::{DecodedPicture, VideoStreamDecoder};
+use makepad_widgets::makepad_platform::video_file::{DecodedPicture, VideoColor, VideoStreamDecoder};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -27,6 +27,7 @@ pub struct DecPart {
     pub height: u32,
     pub gpu: Option<DecodedPicture>,
     pub nv12: Vec<u8>,
+    pub color: VideoColor,
 }
 
 pub struct Decoded {
@@ -39,7 +40,7 @@ pub struct Decoded {
 impl Decoded {
     /// The parts as the view takes them (GPU pictures shared, CPU NV12 copied).
     pub fn view_parts(&self) -> Vec<Part> {
-        self.parts.iter().map(|p| Part { x0: p.x0, y0: p.y0, width: p.width, height: p.height, nv12: p.nv12.clone(), gpu: p.gpu.clone() }).collect()
+        self.parts.iter().map(|p| Part { x0: p.x0, y0: p.y0, width: p.width, height: p.height, nv12: p.nv12.clone(), gpu: p.gpu.clone(), color: p.color }).collect()
     }
 
     fn bytes(&self) -> usize {
@@ -349,7 +350,7 @@ impl Engine {
             }
             let frames = self.decoders[s].as_mut().unwrap().0.push_packet(&p.data, p.frame as i64).map_err(|e| format!("frame {} stream {s}: {e:?}", p.frame))?;
             for f in frames {
-                parts.push(DecPart { x0: p.x0, y0: p.y0, width: f.width, height: f.height, gpu: f.gpu, nv12: f.nv12 });
+                parts.push(DecPart { x0: p.x0, y0: p.y0, width: f.width, height: f.height, gpu: f.gpu, nv12: f.nv12, color: f.color });
             }
         }
         if parts.len() < packets.len() || parts.is_empty() {

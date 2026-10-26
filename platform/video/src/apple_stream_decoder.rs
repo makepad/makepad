@@ -11,7 +11,7 @@
 use crate::annex_b;
 use crate::stream_decoder::{DecodedFrame, DecodedPicture};
 use crate::stream_encoder::StreamVideoCodec;
-use crate::VideoFileError;
+use crate::{VideoColor, VideoFileError};
 use makepad_apple_sys::*;
 use std::os::raw::c_void;
 use std::sync::Mutex;
@@ -42,6 +42,9 @@ struct DecoderShared {
     /// A picture the decoder reported as failed (its status): the caller hears it (and asks for a
     /// key frame) instead of decoding on from a damaged reference.
     failed: Option<OSStatus>,
+    /// The colour the stream's parameter sets declare (its SPS VUI): pictures without colour
+    /// attachments of their own are this.
+    stream_color: VideoColor,
 }
 
 #[link(name = "CoreVideo", kind = "framework")]
@@ -98,6 +101,7 @@ unsafe extern "C" fn decode_output_callback(
     let pts_100ns = cmtime_to_hns(presentation_time_stamp);
     let shared = &*(decompression_output_ref_con as *const Mutex<DecoderShared>);
     let Ok(mut guard) = shared.lock() else { return };
+    let color = crate::apple_decoder::buffer_color(image_buffer, guard.stream_color, width, height);
     if guard.gpu {
         let surface = CVPixelBufferGetIOSurface(image_buffer);
         if !surface.is_null() {
@@ -105,7 +109,7 @@ unsafe extern "C" fn decode_output_callback(
             let held = HeldPixelBuffer(CVPixelBufferRetain(image_buffer));
             let full_chroma = CVPixelBufferGetPixelFormatType(image_buffer) == PIXEL_444V;
             let gpu = Some(DecodedPicture { handle, full_chroma, _keep: std::sync::Arc::new(held) });
-            guard.frames.push(DecodedFrame { width, height, nv12: Vec::new(), pts_100ns, gpu });
+            guard.frames.push(DecodedFrame { width, height, nv12: Vec::new(), pts_100ns, gpu, color });
             return;
         }
     }
@@ -132,7 +136,7 @@ unsafe extern "C" fn decode_output_callback(
     }
     CVPixelBufferUnlockBaseAddress(image_buffer, 1);
     if let Ok(mut guard) = shared.lock() {
-        guard.frames.push(DecodedFrame { width, height, nv12, pts_100ns, gpu: None });
+        guard.frames.push(DecodedFrame { width, height, nv12, pts_100ns, gpu: None, color });
     }
 }
 
@@ -155,7 +159,7 @@ impl AppleStreamDecoder {
             session: std::ptr::null_mut(),
             format_desc: std::ptr::null_mut(),
             gpu,
-            shared: Box::new(Mutex::new(DecoderShared { gpu, frames: Vec::new(), failed: None })),
+            shared: Box::new(Mutex::new(DecoderShared { gpu, frames: Vec::new(), failed: None, stream_color: VideoColor::BT709 })),
             codec,
             sps: None,
             pps: None,
@@ -215,6 +219,11 @@ impl AppleStreamDecoder {
             ));
         }
         self.format_desc = format_desc;
+        let dims = CMVideoFormatDescriptionGetDimensions(format_desc);
+        let stream_color = crate::apple_decoder::format_color(format_desc, dims.width as u32, dims.height as u32);
+        if let Ok(mut guard) = self.shared.lock() {
+            guard.stream_color = stream_color;
+        }
 
         let callback_record = VTDecompressionOutputCallbackRecord {
             decompressionOutputCallback: Some(decode_output_callback),

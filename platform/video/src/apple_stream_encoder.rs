@@ -176,6 +176,16 @@ impl AppleStreamEncoder {
                 (options.bitrate_kbps as i64 * 1000).min(i32::MAX as i64) as i32,
             );
             set_i32_property(session, kVTCompressionPropertyKey_ExpectedFrameRate, options.fps as i32);
+            // The VUI says BT.709 (primaries, transfer, matrix) and the 420v source limited range, as
+            // the Linux and Windows hosts write it: viewers show exactly what the stream says.
+            let (p, t, m, _) = crate::VideoColor::BT709.h273();
+            for (key, value) in [
+                (kVTCompressionPropertyKey_ColorPrimaries, CVColorPrimariesGetStringForIntegerCodePoint(p as i32)),
+                (kVTCompressionPropertyKey_TransferFunction, CVTransferFunctionGetStringForIntegerCodePoint(t as i32)),
+                (kVTCompressionPropertyKey_YCbCrMatrix, CVYCbCrMatrixGetStringForIntegerCodePoint(m as i32)),
+            ] {
+                VTSessionSetProperty(session as *mut c_void, key, value as *const c_void);
+            }
             if matches!(options.codec, StreamVideoCodec::H264) {
                 VTSessionSetProperty(
                     session as *mut c_void,

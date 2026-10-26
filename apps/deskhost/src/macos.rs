@@ -34,6 +34,7 @@ extern "C" {
     fn CGPreflightScreenCaptureAccess() -> bool;
     fn CGRequestScreenCaptureAccess() -> bool;
     static kCGDisplayStreamYCbCrMatrix_ITU_R_709_2: CFStringRef;
+    static kCGColorSpaceSRGB: CFStringRef;
 }
 
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -328,6 +329,10 @@ impl Desktop for MacDesktop {
                 let () = msg_send![config, setHeight: height as usize];
                 let () = msg_send![config, setPixelFormat: PIXEL_420V];
                 let () = msg_send![config, setColorMatrix: kCGDisplayStreamYCbCrMatrix_ITU_R_709_2];
+                // sRGB samples (BT.709 primaries), what the stream says and every viewer shows. Unset, the
+                // capture keeps the display's own colour space (Display P3 or a wide monitor's profile), whose
+                // numbers shown as sRGB come out pale.
+                let () = msg_send![config, setColorSpaceName: kCGColorSpaceSRGB];
                 let () = msg_send![config, setShowsCursor: NO];
                 let () = msg_send![config, setQueueDepth: 4i64];
                 // at most `fps` frames a second (ScreenCaptureKit's own default is 60)

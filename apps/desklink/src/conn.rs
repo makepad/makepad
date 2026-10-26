@@ -10,7 +10,7 @@ use makepad_network::fleet::auth as fleet_auth;
 use makepad_desk_link::{self as proto, ClientMsg, Inbox, ScreenInfo, ServerMsg};
 use makepad_network::tls::KnownHosts;
 use makepad_network::{SignalToUI, SocketStream};
-use makepad_widgets::makepad_platform::video_file::{DecodedPicture, StreamVideoCodec, VideoStreamDecoder};
+use makepad_widgets::makepad_platform::video_file::{DecodedPicture, StreamVideoCodec, VideoColor, VideoStreamDecoder};
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -160,6 +160,8 @@ pub struct Part {
     pub height: u32,
     pub nv12: Vec<u8>,
     pub gpu: Option<DecodedPicture>,
+    /// Its colour as its stream says (drawn with exactly that).
+    pub color: VideoColor,
 }
 
 /// A decoded picture: all of its parts (its tiles, shown together), `width` x `height`.
@@ -946,7 +948,7 @@ fn decode_stream(s: usize, rx: Receiver<Packet>, latest: Arc<Mutex<Option<Pictur
         };
         let size = frames.first().map_or([0, 0], |f| [f.width, f.height]);
         for f in frames {
-            let part = Part { x0: packet.x0, y0: packet.y0, width: f.width, height: f.height, nv12: f.nv12, gpu: f.gpu };
+            let part = Part { x0: packet.x0, y0: packet.y0, width: f.width, height: f.height, nv12: f.nv12, gpu: f.gpu, color: f.color };
             let mut picture = Picture {
                 width: packet.x0 + part.width,
                 height: packet.y0 + part.height,
@@ -990,7 +992,7 @@ mod tests {
     use super::*;
 
     fn tile(frame: u32, s: usize) -> (Part, Picture) {
-        let part = Part { x0: s as u32 * 64, y0: 0, width: 64, height: 16, nv12: Vec::new(), gpu: None };
+        let part = Part { x0: s as u32 * 64, y0: 0, width: 64, height: 16, nv12: Vec::new(), gpu: None, color: VideoColor::BT709 };
         let picture = Picture { width: 0, height: 0, parts: Vec::new(), frame, built_ns: 0, encoded_ns: 0, sent_ns: 0, received_ns: 0, decoded_ns: 0, decode_ns: 0 };
         (part, picture)
     }
