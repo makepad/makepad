@@ -263,7 +263,7 @@ pub fn fleet_identity(tls_name: &str) -> Result<(TlsIdentity, Verifier, String),
     let me = id::Me::load(&dir).map_err(|e| format!("has no fleet identity ({e})"))?;
     let fleet = id::Fleet::load(&dir).map_err(|e| format!("has no fleet root ({e})"))?;
     let identity = me.tls_identity(tls_name).map_err(|e| format!("cannot make its TLS identity ({e})"))?;
-    let verifier = Verifier::new(fleet, identity.fingerprint);
+    let verifier = Verifier::new(fleet, identity.fingerprint, &me.cred);
     Ok((identity, verifier, me.cred.name.clone()))
 }
 

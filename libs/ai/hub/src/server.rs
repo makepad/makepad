@@ -258,9 +258,6 @@ pub struct ServiceShared {
     /// every request it authenticated ([`crate::front`]). None on a
     /// loopback-only node, whose callers are all machine-local.
     front_secret: Option<String>,
-    /// The LAN address the TLS front listens on: a request from it comes from this machine
-    /// (the hosting WM's control client reaches a LAN-only hub there). None on a loopback node.
-    front_ip: Option<std::net::IpAddr>,
     /// Which client submitted each job (cancel and leases are owner-only).
     job_owners: Mutex<HashMap<String, String>>,
     /// Random per-start id shared by /health and the discovery beacon.
@@ -432,7 +429,6 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
         gpu: GpuCache::new(),
         vram_usable: residency::UsableVram::new(startup_usable_mb),
         front_secret: fleet_mode.as_ref().map(|m| m.front_secret.clone()),
-        front_ip: fleet_mode.as_ref().map(|_| addr.ip()),
         job_owners: Mutex::new(HashMap::new()),
         node_id,
         node_key,
@@ -933,9 +929,10 @@ fn route_post_request(
         return unauthorized_response();
     };
     if headers.path == "/control/local-use" {
-        // Only the WM hosting this hub sets its mode and local use: a request
-        // from this machine. A fleet credential from elsewhere never does.
-        if !same_machine(shared, headers) {
+        // Only the WM hosting this hub sets its mode and local use: a caller
+        // proven to hold this machine's own key (or a loopback-only hub's
+        // caller). A fleet credential of another machine never does.
+        if !caller.this_machine {
             return error_json(403, "local-use is set by this machine's window manager only".to_string());
         }
         return control_local_use(shared, body);
@@ -957,30 +954,6 @@ pub fn control_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> Res
     let text = String::from_utf8_lossy(&response.body).to_string();
     let ok = response.header.split_whitespace().nth(1).is_some_and(|code| code.starts_with('2'));
     if ok { Ok(text) } else { Err(text) }
-}
-
-/// A request that comes from this machine: a loopback-only hub takes no other, and behind
-/// the TLS front the front's peer stamp (it strips a client's own) is loopback or the front's
-/// own LAN address (a connection from an address to itself never leaves the machine).
-fn same_machine(shared: &ServiceShared, headers: &HttpServerHeaders) -> bool {
-    if shared.front_secret.is_none() {
-        return true;
-    }
-    let peer = headers.lines.iter().find_map(|l| {
-        let (n, v) = l.trim_end().split_once(':')?;
-        n.trim().eq_ignore_ascii_case(makepad_network::fleet::front::HEADER_PEER).then(|| v.trim().parse::<std::net::IpAddr>().ok()).flatten()
-    });
-    peer.is_some_and(|ip| from_this_machine(ip, shared.front_ip, crate::discovery::network_addresses))
-}
-
-/// `peer` is this machine: loopback, the front's own address, or, for a front on the wildcard
-/// address (`--host 0.0.0.0`, which every interface reaches), any of this machine's interface
-/// addresses (a wildcard front never equals a peer: its WM's local-use was refused for good).
-fn from_this_machine(peer: std::net::IpAddr, front_ip: Option<std::net::IpAddr>, own: impl FnOnce() -> Vec<std::net::Ipv4Addr>) -> bool {
-    if peer.is_loopback() || Some(peer) == front_ip {
-        return true;
-    }
-    front_ip.is_some_and(|f| f.is_unspecified()) && own().into_iter().any(|a| std::net::IpAddr::V4(a) == peer)
 }
 
 /// `POST /control/local-use {"mode": "auto"|"ui-first"|"ai-first"|"unavailable", "use": "gaming"|""}`:
@@ -4303,7 +4276,6 @@ mod lifecycle_tests {
             gpu: GpuCache::new(),
             vram_usable: residency::UsableVram::new(None),
             front_secret: front_secret.map(str::to_string),
-            front_ip: front_secret.map(|_| std::net::IpAddr::from([10, 0, 0, 217])),
             job_owners: Mutex::new(HashMap::new()),
             node_id: 1,
             node_key: "f".repeat(32),
@@ -4325,22 +4297,8 @@ mod lifecycle_tests {
         })
     }
 
-    #[test]
-    fn a_wildcard_front_knows_this_machines_own_addresses() {
-        use std::net::{IpAddr, Ipv4Addr};
-        let own = || vec![Ipv4Addr::new(10, 0, 0, 100)];
-        let lan = Some(IpAddr::from([10, 0, 0, 100]));
-        let any = Some(IpAddr::from([0, 0, 0, 0]));
-        assert!(from_this_machine(IpAddr::from([127, 0, 0, 1]), any, own));
-        assert!(from_this_machine(IpAddr::from([10, 0, 0, 100]), lan, own));
-        assert!(from_this_machine(IpAddr::from([10, 0, 0, 100]), any, own), "the WM on a 0.0.0.0 hub's machine");
-        assert!(!from_this_machine(IpAddr::from([10, 0, 0, 165]), any, own), "another machine");
-        assert!(!from_this_machine(IpAddr::from([10, 0, 0, 165]), lan, own));
-        assert!(!from_this_machine(IpAddr::from([10, 0, 0, 100]), Some(IpAddr::from([10, 0, 0, 217])), own), "a LAN front: only its own address");
-    }
-
     /// `front`: (secret, client id) as the TLS front would stamp them (a
-    /// node credential: no admin).
+    /// node credential: no admin; client `wm` proved this machine's own key).
     fn request_headers(verb: &str, path: &str, front: Option<(&str, &str)>) -> HttpServerHeaders {
         let mut lines = vec![
             format!("{verb} {path} HTTP/1.1\r\n"),
@@ -4351,6 +4309,7 @@ mod lifecycle_tests {
             lines.push(format!("X-Makepad-Client: {client}\r\n"));
             lines.push("X-Makepad-Role: node\r\n".to_string());
             lines.push("X-Makepad-Admin: 0\r\n".to_string());
+            lines.push(format!("X-Makepad-This-Machine: {}\r\n", u8::from(client == "wm")));
         }
         HttpServerHeaders {
             addr: "127.0.0.1:1".parse().unwrap(),
@@ -4370,28 +4329,21 @@ mod lifecycle_tests {
     fn local_use_is_set_from_this_machine_only() {
         let shared = fixture_shared_with_secret(&[], Some("s3cret"));
         let body = br#"{"mode":"unavailable","use":""}"#;
-        // A fleet credential from another machine: the front stamps its address.
+        // A fleet credential of another machine, even stamped from this machine's address.
         let mut remote = request_headers("POST", "/control/local-use", Some(("s3cret", "peer-node")));
-        remote.lines.push("X-Makepad-Peer: 10.0.0.5\r\n".to_string());
+        remote.lines.push("X-Makepad-Peer: 127.0.0.1\r\n".to_string());
         assert!(route_post_request(&shared, &remote, body).header.starts_with("HTTP/1.1 403"));
-        // No peer stamp proves nothing.
-        let unstamped = request_headers("POST", "/control/local-use", Some(("s3cret", "peer-node")));
-        assert!(route_post_request(&shared, &unstamped, body).header.starts_with("HTTP/1.1 403"));
         assert!(shared.activity.allows_work(), "a refused request changes nothing");
         // Without the front's secret it is no caller at all.
-        let mut forged = request_headers("POST", "/control/local-use", Some(("guess", "wm")));
-        forged.lines.push("X-Makepad-Peer: 127.0.0.1\r\n".to_string());
+        let forged = request_headers("POST", "/control/local-use", Some(("guess", "wm")));
         assert!(route_post_request(&shared, &forged, body).header.starts_with("HTTP/1.1 401"));
-        // The hosting WM, over the front on loopback.
+        // The hosting WM (this machine's own credential), from its LAN address.
         let mut wm = request_headers("POST", "/control/local-use", Some(("s3cret", "wm")));
-        wm.lines.push("X-Makepad-Peer: 127.0.0.1\r\n".to_string());
+        wm.lines.push("X-Makepad-Peer: 10.0.0.217\r\n".to_string());
         assert!(route_post_request(&shared, &wm, br#"{"mode":"auto","use":"gaming"}"#).header.starts_with("HTTP/1.1 200"));
         assert_eq!(shared.activity.refusal().as_deref(), Some("local-use: gaming"));
         assert!(route_post_request(&shared, &wm, br#"{"mode":"nope"}"#).header.starts_with("HTTP/1.1 400"));
-        // The hosting WM over the front at the hub's own LAN address (a LAN-only hub): this machine.
-        let mut lan_wm = request_headers("POST", "/control/local-use", Some(("s3cret", "wm")));
-        lan_wm.lines.push("X-Makepad-Peer: 10.0.0.217\r\n".to_string());
-        assert!(route_post_request(&shared, &lan_wm, br#"{"use":""}"#).header.starts_with("HTTP/1.1 200"));
+        assert!(route_post_request(&shared, &wm, br#"{"use":""}"#).header.starts_with("HTTP/1.1 200"));
         assert!(!shared.activity.gaming(), "the game ended");
         assert_eq!(shared.activity.mode(), crate::activity::ComputeMode::Automatic, "only `use` changed: the mode stayed");
     }
@@ -4506,9 +4458,9 @@ mod lifecycle_tests {
     #[test]
     fn paired_phones_fetch_blobs_without_a_peer_ticket_nodes_still_need_one() {
         let shared = fixture_shared_serving(&[], Some("front-secret"), true);
-        let phone = makepad_network::fleet::front::Caller { client_id: "phone".into(), role: makepad_network::fleet::id::Role::Paired, admin: false, app: None };
-        let lan = makepad_network::fleet::front::Caller { client_id: "rik".into(), role: makepad_network::fleet::id::Role::Device, admin: true, app: None };
-        let node = makepad_network::fleet::front::Caller { client_id: "box".into(), role: makepad_network::fleet::id::Role::Node, admin: false, app: None };
+        let phone = makepad_network::fleet::front::Caller { client_id: "phone".into(), role: makepad_network::fleet::id::Role::Paired, admin: false, this_machine: false, app: None };
+        let lan = makepad_network::fleet::front::Caller { client_id: "rik".into(), role: makepad_network::fleet::id::Role::Device, admin: true, this_machine: false, app: None };
+        let node = makepad_network::fleet::front::Caller { client_id: "box".into(), role: makepad_network::fleet::id::Role::Node, admin: false, this_machine: false, app: None };
         // The paired phone passes the gate and reaches the digest allow-list
         // (nothing verified in this fixture): 404, not 401/403.
         assert!(blob_status(&shared, &phone).contains("404"), "{}", blob_status(&shared, &phone));
@@ -4530,9 +4482,9 @@ mod lifecycle_tests {
     fn paired_phones_read_only_their_own_jobs() {
         let shared = fixture_shared(&[]);
         shared.job_owners.lock().unwrap().insert("job-7".into(), "phone".into());
-        let phone = makepad_network::fleet::front::Caller { client_id: "phone".into(), role: makepad_network::fleet::id::Role::Paired, admin: false, app: None };
-        let other = makepad_network::fleet::front::Caller { client_id: "tablet".into(), role: makepad_network::fleet::id::Role::Paired, admin: false, app: None };
-        let lan = makepad_network::fleet::front::Caller { client_id: "rik".into(), role: makepad_network::fleet::id::Role::Device, admin: true, app: None };
+        let phone = makepad_network::fleet::front::Caller { client_id: "phone".into(), role: makepad_network::fleet::id::Role::Paired, admin: false, this_machine: false, app: None };
+        let other = makepad_network::fleet::front::Caller { client_id: "tablet".into(), role: makepad_network::fleet::id::Role::Paired, admin: false, this_machine: false, app: None };
+        let lan = makepad_network::fleet::front::Caller { client_id: "rik".into(), role: makepad_network::fleet::id::Role::Device, admin: true, this_machine: false, app: None };
         for path in ["/job/job-7", "/artifact/job-7-0", "/realtime/job-7"] {
             assert!(may_read(&shared, &phone, path), "{path}");
             assert!(!may_read(&shared, &other, path), "{path}");
@@ -4545,8 +4497,8 @@ mod lifecycle_tests {
     #[test]
     fn leases_and_cancel_belong_to_their_client() {
         let shared = fixture_shared(&[]);
-        let alice = makepad_network::fleet::front::Caller { client_id: "alice".into(), role: makepad_network::fleet::id::Role::Node, admin: false, app: None };
-        let mallory = makepad_network::fleet::front::Caller { client_id: "mallory".into(), role: makepad_network::fleet::id::Role::Node, admin: false, app: None };
+        let alice = makepad_network::fleet::front::Caller { client_id: "alice".into(), role: makepad_network::fleet::id::Role::Node, admin: false, this_machine: false, app: None };
+        let mallory = makepad_network::fleet::front::Caller { client_id: "mallory".into(), role: makepad_network::fleet::id::Role::Node, admin: false, this_machine: false, app: None };
         let origin = crate::lease::Origin { node_key: scoped_origin(&alice, "origin-a"), epoch: 1 };
         shared.leases.lock().unwrap().register("job-1", origin, crate::jobs::now_ms());
         shared.job_owners.lock().unwrap().insert("job-1".into(), "alice".into());

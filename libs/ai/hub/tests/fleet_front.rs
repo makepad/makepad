@@ -40,11 +40,12 @@ fn machine(root: &Root, name: &str, role: Role, from: Option<IpAddr>) -> Me {
     Me::new(key, cred).unwrap()
 }
 
-/// A front for `inner`, its certificate made from a node credential of `root`.
-fn front(root: &Root, fleet: &Fleet, name: &str, inner: SocketAddr) -> SocketAddr {
+/// A front for `inner`, its certificate made from a node credential of `root`;
+/// returns its address and the machine it runs on.
+fn front(root: &Root, fleet: &Fleet, name: &str, inner: SocketAddr) -> (SocketAddr, Me) {
     let server = machine(root, name, Role::Node, None);
     let identity: TlsIdentity = server.tls_identity(&format!("test {name}")).unwrap();
-    let verifier = Arc::new(Verifier::new(fleet.clone(), identity.fingerprint));
+    let verifier = Arc::new(Verifier::new(fleet.clone(), identity.fingerprint, &server.cred));
     let probe = TcpListener::bind("127.0.0.1:0").unwrap();
     let listen = probe.local_addr().unwrap();
     drop(probe);
@@ -62,7 +63,7 @@ fn front(root: &Root, fleet: &Fleet, name: &str, inner: SocketAddr) -> SocketAdd
     })
     .unwrap();
     std::thread::sleep(Duration::from_millis(100));
-    listen
+    (listen, server)
 }
 
 /// A stand-in node HTTP server: answers every request with the identity
@@ -131,7 +132,7 @@ fn get_with(listen: SocketAddr, path: &str, authorization: impl Fn(&[u8]) -> Str
 #[test]
 fn front_end_to_end() {
     let fx = fixture();
-    let listen = front(&fx.root, &fx.fleet, "test-node", start_inner());
+    let (listen, this_node) = front(&fx.root, &fx.fleet, "test-node", start_inner());
 
     // Not yet a fleet endpoint: the client does not speak fleet TLS to it.
     let url = format!("https://{listen}/jobs");
@@ -169,6 +170,18 @@ fn front_end_to_end() {
     assert!(body.contains("X-Makepad-Role: node"), "{body}");
     assert_eq!(get_as(&node, listen, "/kernel").unwrap().0, 200);
     assert_eq!(get_as(&node, listen, "/control").unwrap().0, 403);
+    assert_eq!(get_as(&node, listen, "/control/watch?since=0").unwrap().0, 403);
+    // This machine's own WM (the hub's own credential): its machine-local
+    // control (the panel's picture and watch, local use, yield, models), no
+    // admin settings or panel pages.
+    let (status, body) = get_as(&this_node, listen, "/control").unwrap();
+    assert_eq!(status, 200);
+    assert!(body.contains("X-Makepad-This-Machine: 1") && body.contains("X-Makepad-Admin: 0"), "{body}");
+    assert_eq!(get_as(&this_node, listen, "/control/watch?since=0").unwrap().0, 200);
+    assert_eq!(get_as(&this_node, listen, "/llm/context").unwrap().0, 403);
+    assert_eq!(get_as(&this_node, listen, "/index.html").unwrap().0, 403);
+    // Another node's stamp never says this machine.
+    assert!(get_as(&node, listen, "/job/job-1").unwrap().1.contains("X-Makepad-This-Machine: 0"));
     // A paired phone: its job routes (the hub checks ownership), nothing else.
     let phone = machine(&fx.root, "phone", Role::Paired, None);
     assert_eq!(get_as(&phone, listen, "/job/job-1").unwrap().0, 200);
@@ -210,7 +223,7 @@ fn clients_refuse_a_server_of_another_fleet() {
     fixture();
     let other = Root::generate().unwrap();
     let other_fleet = Fleet::new(other.point(), Default::default());
-    let listen = front(&other, &other_fleet, "impostor", start_inner());
+    let (listen, _) = front(&other, &other_fleet, "impostor", start_inner());
     let err = id::connect("127.0.0.1", &listen.port().to_string()).err().expect("a foreign server is refused");
     assert!(err.to_string().contains("not a fleet server"), "{err}");
     mark_fleet_endpoint(&listen.to_string());
@@ -248,7 +261,7 @@ fn websocket_through_the_front() {
             }
         }
     });
-    let listen = front(&fx.root, &fx.fleet, "ws-node", inner);
+    let (listen, _) = front(&fx.root, &fx.fleet, "ws-node", inner);
     mark_fleet_endpoint(&listen.to_string());
 
     let (wtx, wrx) = mpsc::channel();

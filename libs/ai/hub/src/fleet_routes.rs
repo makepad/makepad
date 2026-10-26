@@ -7,6 +7,10 @@
 //! - a fleet machine (a node, or the Mac's credential from elsewhere) reaches
 //!   what fleet job routing needs: the job API (the Claude service included,
 //!   while the user has it on), kernels, model blobs and inventories;
+//! - this machine's own credential (the WM hosting the hub, proven by the
+//!   hub's own key) also reaches the machine-local control: the panel's
+//!   picture and watch, local use, GPU yield and model load/unload. Admin
+//!   settings (`/llm/context`, the panel pages) stay with the admin;
 //! - a paired phone reaches its own jobs and the on-device model files.
 
 use makepad_network::fleet::id::{Peer, Role};
@@ -18,6 +22,15 @@ fn job_route(method: &str, path: &str) -> bool {
         ("GET", "/health") | ("GET", "/models") | ("GET", "/voices") | ("POST", "/generate") | ("POST", "/realtime") | ("POST", "/bye")
     ) || (method == "GET" && (path.starts_with("/job/") || path.starts_with("/artifact/") || path.starts_with("/realtime/")))
         || (method == "POST" && path.starts_with("/job/") && (path.ends_with("/cancel") || path.ends_with("/keepalive")))
+}
+
+/// What the WM hosting this hub needs of it: the control picture (`GET /control`, its
+/// watch), local use, GPU memory back for the UI, and loading or unloading a model.
+fn machine_control_route(method: &str, path: &str) -> bool {
+    matches!(
+        (method, path),
+        ("GET", "/control") | ("GET", "/control/watch") | ("POST", "/control/local-use") | ("POST", "/control/yield") | ("POST", "/control/model")
+    )
 }
 
 fn blob_route(method: &str, path: &str) -> bool {
@@ -34,13 +47,14 @@ pub fn route_allowed(peer: &Peer, edge: bool, method: &str, path: &str) -> bool 
     if peer.admin() {
         return true;
     }
+    if peer.this_machine() && machine_control_route(method, path) {
+        return true;
+    }
     match peer.role {
         Role::Node | Role::Device => {
             job_route(method, path)
                 || blob_route(method, path)
                 || (method == "GET" && matches!(path, "/v1/model_inventory" | "/jobs" | "/loras"))
-                // the hosting WM on the same machine (the hub checks it is the same machine)
-                || path == "/control/local-use"
                 || path == "/kernel"
                 || path.starts_with("/kernel/")
         }
@@ -54,7 +68,7 @@ mod tests {
     use std::net::IpAddr;
 
     fn peer(role: Role, addr: &str, from: Option<&str>) -> Peer {
-        Peer { name: "x".into(), role, addr: addr.parse().unwrap(), from: from.map(|f| f.parse::<IpAddr>().unwrap()), point: [4; 65] }
+        Peer { name: "x".into(), role, addr: addr.parse().unwrap(), from: from.map(|f| f.parse::<IpAddr>().unwrap()), point: [4; 65], this_machine: false }
     }
 
     #[test]
@@ -78,6 +92,20 @@ mod tests {
             assert!(route_allowed(who, false, "GET", "/v1/model_blob/00"));
             assert!(route_allowed(who, false, "GET", "/v1/model_inventory"));
             assert!(!route_allowed(who, false, "POST", "/v1/model_blob/00"));
+        }
+        // The hub's own machine (its WM): machine-local control, not admin settings or pages.
+        let own = Peer { this_machine: true, ..node.clone() };
+        for (m, p) in [("GET", "/control"), ("GET", "/control/watch?since=3"), ("POST", "/control/local-use"), ("POST", "/control/yield"), ("POST", "/control/model")] {
+            assert!(route_allowed(&own, false, m, p), "{m} {p}");
+            assert!(!route_allowed(&own, true, m, p), "edge {m} {p}");
+        }
+        for (m, p) in [("POST", "/llm/context"), ("GET", "/llm/context"), ("GET", "/index.html"), ("POST", "/control")] {
+            assert!(!route_allowed(&own, false, m, p), "{m} {p}");
+        }
+        assert!(route_allowed(&own, false, "POST", "/generate"));
+        // Local use is this machine's only: another node or the Mac away is refused.
+        for other in [&node, &mac_elsewhere, &phone] {
+            assert!(!route_allowed(other, false, "POST", "/control/local-use"));
         }
         // Phones: their jobs and model files.
         assert!(route_allowed(&phone, false, "POST", "/generate"));

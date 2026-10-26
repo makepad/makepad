@@ -353,6 +353,10 @@ pub struct Peer {
     /// The credential's bound admin address.
     pub from: Option<IpAddr>,
     pub point: [u8; 65],
+    /// This machine's own credential: the peer proved it holds the server's
+    /// own `id.key` (set by [`Verifier::check`]), so it is another process of
+    /// the same machine, e.g. a WM talking to the AI hub it hosts.
+    pub this_machine: bool,
 }
 
 impl Peer {
@@ -371,9 +375,14 @@ impl Peer {
         self.role == Role::Node
     }
 
+    /// Another process of this machine, proven by its key (set by [`Verifier::check`]).
+    pub fn this_machine(&self) -> bool {
+        self.this_machine
+    }
+
     /// A process on this same machine (no credential checked).
     pub fn local() -> Peer {
-        Peer { name: "local".into(), role: Role::Device, addr: IpAddr::from([127, 0, 0, 1]), from: Some(IpAddr::from([127, 0, 0, 1])), point: [0; 65] }
+        Peer { name: "local".into(), role: Role::Device, addr: IpAddr::from([127, 0, 0, 1]), from: Some(IpAddr::from([127, 0, 0, 1])), point: [0; 65], this_machine: true }
     }
 }
 
@@ -386,6 +395,9 @@ pub enum Need {
     Machine,
     /// A node credential.
     Node,
+    /// This machine's own credential: another process of the machine the
+    /// service runs on (its own WM), never another machine, admin or not.
+    ThisMachine,
 }
 
 /// The one policy check: `require(&peer, Need::Admin)?`.
@@ -394,6 +406,7 @@ pub fn require(peer: &Peer, need: Need) -> Result<(), String> {
         Need::Admin => peer.admin(),
         Need::Machine => peer.machine(),
         Need::Node => peer.node(),
+        Need::ThisMachine => peer.this_machine(),
     };
     if ok {
         return Ok(());
@@ -403,6 +416,7 @@ pub fn require(peer: &Peer, need: Need) -> Result<(), String> {
         Need::Admin => format!("{} ({}) is not the admin credential", peer.name, peer.role.as_str()),
         Need::Machine => format!("{} ({}) is not a fleet machine", peer.name, peer.role.as_str()),
         Need::Node => format!("{} ({}) is not a node credential", peer.name, peer.role.as_str()),
+        Need::ThisMachine => format!("{} ({}) is not this machine", peer.name, peer.role.as_str()),
     })
 }
 
@@ -456,7 +470,7 @@ impl Fleet {
         if time.abs_diff(now) > PROOF_WINDOW {
             return Err(Rejection::Stale);
         }
-        Ok(Peer { name: cred.name, role: cred.role, addr: normalize(addr), from: cred.from, point: cred.point })
+        Ok(Peer { name: cred.name, role: cred.role, addr: normalize(addr), from: cred.from, point: cred.point, this_machine: false })
     }
 
     /// A server's leaf certificate (DER), seen by a client connecting to
@@ -469,7 +483,7 @@ impl Fleet {
         if cred.point != point {
             return Err(Rejection::WrongKey);
         }
-        Ok(Peer { name: cred.name, role: cred.role, addr: normalize(addr), from: cred.from, point: cred.point })
+        Ok(Peer { name: cred.name, role: cred.role, addr: normalize(addr), from: cred.from, point: cred.point, this_machine: false })
     }
 
     /// Checks a signed announcement ([`Me::announce`]) received from
@@ -483,7 +497,7 @@ impl Fleet {
         if time.abs_diff(now) > PROOF_WINDOW {
             return Err(Rejection::Stale);
         }
-        Ok((Peer { name: cred.name, role: cred.role, addr: normalize(addr), from: cred.from, point: cred.point }, service, payload))
+        Ok((Peer { name: cred.name, role: cred.role, addr: normalize(addr), from: cred.from, point: cred.point, this_machine: false }, service, payload))
     }
 }
 
@@ -696,15 +710,22 @@ pub fn is_fleet_endpoint(host_port: &str) -> bool {
 pub struct Verifier {
     fleet: Fleet,
     fingerprint: [u8; 32],
+    /// The server's own credential name and key: a client proving the same
+    /// is this machine.
+    own: (String, [u8; 65]),
 }
 
 impl Verifier {
-    pub fn new(fleet: Fleet, fingerprint: [u8; 32]) -> Verifier {
-        Verifier { fleet, fingerprint }
+    /// Checks clients of a server whose certificate has `fingerprint` and
+    /// whose own credential is `own`.
+    pub fn new(fleet: Fleet, fingerprint: [u8; 32], own: &Credential) -> Verifier {
+        Verifier { fleet, fingerprint, own: (own.name.clone(), own.point) }
     }
 
     pub fn check(&self, authorization: &str, addr: IpAddr, now: u64) -> Result<Peer, Rejection> {
-        self.fleet.check_proof(authorization, &self.fingerprint, addr, now)
+        let mut peer = self.fleet.check_proof(authorization, &self.fingerprint, addr, now)?;
+        peer.this_machine = peer.name == self.own.0 && peer.point == self.own.1;
+        Ok(peer)
     }
 }
 
@@ -715,7 +736,7 @@ pub fn server_identity(common_name: &str) -> Result<(tls::TlsIdentity, Verifier)
     let me = me().ok_or_else(why_no_identity)?;
     let fleet = fleet().ok_or_else(|| format!("no fleet root in {}", dir().display()))?;
     let identity = me.tls_identity(common_name).map_err(|e| format!("TLS identity: {e}"))?;
-    let verifier = Verifier::new(fleet.clone(), identity.fingerprint);
+    let verifier = Verifier::new(fleet.clone(), identity.fingerprint, &me.cred);
     Ok((identity, verifier))
 }
 
@@ -783,6 +804,34 @@ mod tests {
         assert_eq!(fleet.check_proof("Bearer x", &fp, mac_ip, now), Err(Rejection::Malformed));
         // A credential for another key does not load as this machine.
         assert!(Me::new(generate_key().unwrap(), node.cred.clone()).is_err());
+    }
+
+    #[test]
+    fn a_server_knows_its_own_machine_by_key_not_name_or_address() {
+        let root = Root::generate().unwrap();
+        let fleet = Fleet::new(root.point(), Default::default());
+        let fp = [9u8; 32];
+        let now = now_secs();
+        let n165 = machine(&root, "n165", Role::Node, None);
+        let verifier = Verifier::new(fleet.clone(), fp, &n165.cred);
+        let ip: IpAddr = "10.0.0.165".parse().unwrap();
+        // The hub's own WM: the same credential, from any address.
+        let wm = verifier.check(&n165.authorization(&fp), ip, now).unwrap();
+        assert!(wm.this_machine() && require(&wm, Need::ThisMachine).is_ok() && !wm.admin());
+        // Another node, even from this machine's address, is not this machine.
+        let n166 = machine(&root, "n166", Role::Node, None);
+        let other = verifier.check(&n166.authorization(&fp), ip, now).unwrap();
+        assert!(!other.this_machine() && require(&other, Need::ThisMachine).unwrap_err().contains("not this machine"));
+        // A second key credentialed under the same name is not this machine either.
+        let twin = machine(&root, "n165", Role::Node, None);
+        assert!(!verifier.check(&twin.authorization(&fp), ip, now).unwrap().this_machine());
+        // The admin Mac is admin, not this machine.
+        let mac_ip: IpAddr = "10.0.0.222".parse().unwrap();
+        let mac = machine(&root, "rik-mac", Role::Device, Some(mac_ip));
+        let admin = verifier.check(&mac.authorization(&fp), mac_ip, now).unwrap();
+        assert!(admin.admin() && !admin.this_machine());
+        // Fleet-level checks never claim it.
+        assert!(!fleet.check_proof(&n165.authorization(&fp), &fp, ip, now).unwrap().this_machine());
     }
 
     #[test]

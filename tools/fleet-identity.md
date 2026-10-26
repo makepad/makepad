@@ -44,6 +44,11 @@ the fleet extension). The tool is `fleet-id`
   - `Need::Machine`: a node, or the Mac's credential from another address:
     what node-to-node traffic needs (AI hub job routing, kernels, model
     blobs and inventories, relaxhub clustering, store sync).
+  - `Need::ThisMachine`: the service's own credential (same name and key
+    as its certificate's), i.e. another process of the same machine. The
+    AI hub gives it the machine-local control its WM needs (`GET /control`
+    and its watch, `/control/local-use`, `/control/yield`, `/control/model`);
+    never admin settings. Proven by the key, never by address.
   - Paired phones reach their own jobs and the on-device model files.
 - **Announcements** (AI hub beacons, Sandbox room ads, relaxhub discovery)
   are signed by the sender's key with its credential attached

@@ -27,6 +27,7 @@ pub const HEADER_CLIENT: &str = "X-Makepad-Client";
 pub const HEADER_ROLE: &str = "X-Makepad-Role";
 pub const HEADER_PEER: &str = "X-Makepad-Peer";
 pub const HEADER_ADMIN: &str = "X-Makepad-Admin";
+pub const HEADER_THIS_MACHINE: &str = "X-Makepad-This-Machine";
 
 const MAX_HEAD: usize = 16 * 1024;
 const HEAD_DEADLINE: Duration = Duration::from_secs(15);
@@ -324,10 +325,11 @@ impl ParsedHead {
             out.push_str("\r\n");
         }
         out.push_str(&format!(
-            "{HEADER_FRONT}: {secret}\r\n{HEADER_CLIENT}: {}\r\n{HEADER_ROLE}: {}\r\n{HEADER_ADMIN}: {}\r\n{HEADER_PEER}: {}\r\n\r\n",
+            "{HEADER_FRONT}: {secret}\r\n{HEADER_CLIENT}: {}\r\n{HEADER_ROLE}: {}\r\n{HEADER_ADMIN}: {}\r\n{HEADER_THIS_MACHINE}: {}\r\n{HEADER_PEER}: {}\r\n\r\n",
             peer.name,
             peer.role.as_str(),
             u8::from(peer.admin()),
+            u8::from(peer.this_machine()),
             peer.addr
         ));
         out.into_bytes()
@@ -467,6 +469,8 @@ pub struct Caller {
     /// The admin Mac's credential on a connection from its bound address
     /// ([`Peer::admin`]); a machine-local caller is admin too.
     pub admin: bool,
+    /// Another process of this machine, proven by its key ([`Peer::this_machine`]).
+    pub this_machine: bool,
     /// The calling app's name (`X-Hub-App` header), for the control panel.
     pub app: Option<String>,
 }
@@ -474,7 +478,7 @@ pub struct Caller {
 impl Caller {
     /// A machine-local (loopback-only node) or in-process caller.
     pub fn local() -> Self {
-        Caller { client_id: "local".into(), role: Role::Device, admin: true, app: None }
+        Caller { client_id: "local".into(), role: Role::Device, admin: true, this_machine: true, app: None }
     }
 }
 
@@ -489,7 +493,13 @@ pub fn caller_from_headers(lines: &[String], front_secret: &str) -> Option<Calle
     if !crate::tls::constant_time_eq(secret.as_bytes(), front_secret.as_bytes()) {
         return None;
     }
-    Some(Caller { client_id: get(HEADER_CLIENT)?, role: Role::parse(&get(HEADER_ROLE)?)?, admin: get(HEADER_ADMIN)? == "1", app: None })
+    Some(Caller {
+        client_id: get(HEADER_CLIENT)?,
+        role: Role::parse(&get(HEADER_ROLE)?)?,
+        admin: get(HEADER_ADMIN)? == "1",
+        this_machine: get(HEADER_THIS_MACHINE)? == "1",
+        app: None,
+    })
 }
 
 /// The real client address behind a front, for the inner server's per-IP
@@ -521,7 +531,7 @@ mod tests {
         assert_eq!(p.path, "/generate");
         assert_eq!(p.authorization.as_deref(), Some("MKID mkid1.a.node.9.-.00.00.1.ff"));
         let mac: IpAddr = "10.0.0.222".parse().unwrap();
-        let peer = Peer { name: "rik-mac".into(), role: Role::Device, addr: mac, from: Some(mac), point: [4; 65] };
+        let peer = Peer { name: "rik-mac".into(), role: Role::Device, addr: mac, from: Some(mac), point: [4; 65], this_machine: false };
         let out = String::from_utf8(p.rewrite("s3cret", &["Authorization: Bearer inner".to_string()], &peer)).unwrap();
         assert!(!out.contains("MKID"));
         assert!(out.contains("Authorization: Bearer inner\r\n"));
@@ -529,11 +539,19 @@ mod tests {
         assert!(out.contains("X-Makepad-Client: rik-mac\r\n"));
         assert!(out.ends_with("\r\n\r\n"));
         let lines: Vec<String> = out.split("\r\n").map(String::from).collect();
-        assert_eq!(caller_from_headers(&lines, "s3cret"), Some(Caller { client_id: "rik-mac".into(), role: Role::Device, admin: true, app: None }));
+        assert_eq!(caller_from_headers(&lines, "s3cret"), Some(Caller { client_id: "rik-mac".into(), role: Role::Device, admin: true, this_machine: false, app: None }));
         assert_eq!(caller_from_headers(&lines, "other"), None);
         // The same credential from elsewhere is not admin behind the front either.
         let away = Peer { addr: "10.0.0.9".parse().unwrap(), ..peer };
         let lines: Vec<String> = String::from_utf8(p.rewrite("s3cret", &[], &away)).unwrap().split("\r\n").map(String::from).collect();
         assert_eq!(caller_from_headers(&lines, "s3cret").map(|c| c.admin), Some(false));
+        // A client cannot claim to be this machine: its own header is stripped, the front's stamp says.
+        let spoof = b"GET /control HTTP/1.1\r\nX-Makepad-This-Machine: 1\r\n\r\n";
+        let node = Peer { name: "n166".into(), role: Role::Node, addr: "10.0.0.166".parse().unwrap(), from: None, point: [5; 65], this_machine: false };
+        let lines: Vec<String> = String::from_utf8(parse_head(spoof).unwrap().rewrite("s3cret", &[], &node)).unwrap().split("\r\n").map(String::from).collect();
+        assert_eq!(caller_from_headers(&lines, "s3cret").map(|c| c.this_machine), Some(false));
+        let own = Peer { this_machine: true, ..node };
+        let lines: Vec<String> = String::from_utf8(parse_head(spoof).unwrap().rewrite("s3cret", &[], &own)).unwrap().split("\r\n").map(String::from).collect();
+        assert_eq!(caller_from_headers(&lines, "s3cret").map(|c| (c.this_machine, c.admin)), Some((true, false)));
     }
 }
