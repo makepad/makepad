@@ -165,7 +165,9 @@ pub fn root_of(repo: &Path) -> PathBuf {
 
 /// The lane worktrees of `repo` (under its `wt.noindex`), measured.
 pub fn infos(repo: &Path) -> Result<Vec<Info>, String> {
+    // git prints resolved paths (macOS: /var -> /private/var), so compare resolved ones
     let root = root_of(repo);
+    let root = std::fs::canonicalize(&root).unwrap_or(root);
     let cwds = live_cwds();
     let list = parse_worktrees(&git(Some(repo), None, &["worktree", "list", "--porcelain"])?);
     let mut out = Vec::new();

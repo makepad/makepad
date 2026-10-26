@@ -1079,9 +1079,9 @@ mod tests {
         let r = x.handle("lease-run", &format!("lease-run L1 . {}", b64(&["/usr/bin/env"])));
         let (env, _) = log_until_exit(&x, "L1", field(&r[0], "n").and_then(|v| super::super::num(&v)).unwrap() as u32);
         assert!(env.contains("FOO=bar") && env.contains("SANDBOX_MUTE=1") && env.contains(&format!("TMPDIR={}", tmp.display())));
-        let r = x.handle("lease-run", &format!("L1 . {}", b64(&["/bin/false"])));
+        let r = x.handle("lease-run", &format!("L1 . {}", b64(&["false"])));
         assert_eq!(log_until_exit(&x, "L1", field(&r[0], "n").and_then(|v| super::super::num(&v)).unwrap() as u32).1, 1);
-        assert!(x.handle("lease-run", &format!("L1 ../x {}", b64(&["/bin/true"])))[0].contains("err"));
+        assert!(x.handle("lease-run", &format!("L1 ../x {}", b64(&["true"])))[0].contains("err"));
 
         // a sleeping child (and its own child) is stopped on end
         let r = x.handle("lease-run", &format!("L1 . {}", b64(&["/bin/sleep", "300"])));
