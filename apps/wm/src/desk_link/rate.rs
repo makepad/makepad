@@ -9,8 +9,11 @@
 //!   bound at the fastest tuning), the picture rate stays. It steps back once
 //!   it has run well clear of the budget for a while (twice as long after every step back that
 //!   failed).
-//! - Clean: the rate creeps back up, to the ceiling (the settings'
-//!   `max_mbps` when set, the viewers' caps; none by default).
+//! - Clean: the rate creeps back up while pictures flow: freely up to the start rate (a stream
+//!   that went down for the link and then sent little would stay down for good), above it only
+//!   to [`PROVEN`] times what got through that second, so the bound comes from measurement (no
+//!   fixed ceiling by default; the settings' `max_mbps` and the viewers' caps stay opt-in). A
+//!   still desktop (or no viewer: no seconds at all) holds the rate.
 //!
 //! - Decode-bound (a watching viewer's decode of a picture, its slowest stream's, took most of a
 //!   picture's time): the size streams in more H.265 bands, enough that each band's decode fits
@@ -18,8 +21,8 @@
 //!   that second is its decoder's, not the link's). A step that did not cut the decode time
 //!   (a decoder that runs the bands one after another) is the last.
 //!
-//! The rate starts at [`START_KBPS`] (or the ceiling, if lower). A fixed `kbps` setting turns
-//! all of this off.
+//! A session starts at the last rate a viewer left with (its link, measured), else at
+//! [`START_KBPS`] (or the ceiling, if lower). A fixed `kbps` setting turns all of this off.
 
 use makepad_desk_link::limit;
 
@@ -32,8 +35,14 @@ const FLOOR_KBPS: u32 = 20_000;
 const CONGESTED_MS: f64 = 60.0;
 /// Link-bound: the share of what got through the rate goes to.
 const LINK_SHARE: f64 = 0.85;
-/// Clean seconds before the rate creeps up.
+/// Clean seconds (pictures flowing) before the rate creeps up.
 const CREEP_AFTER: u32 = 3;
+/// Above the start rate the creep goes at most to this times what got through in the second.
+const PROVEN: f64 = 1.25;
+/// The viewers whose last rate is remembered.
+const REMEMBER: usize = 16;
+/// A rate line again when the rate rose by this since the last one said (a creep is many steps).
+const NOTE_RISE: f64 = 1.25;
 /// The first wait (clean seconds) before a size steps back to less encoder work; doubles per
 /// failure.
 const HALF_WAIT: u32 = 30;
@@ -127,6 +136,10 @@ pub struct RateControl {
     bands: Vec<Bands>,
     /// Seconds still to skip after the bands changed (the viewer's stats describe the old ones).
     settle: u32,
+    /// The rate each viewer last left with (newest last).
+    known: Vec<(String, u32)>,
+    /// The rate and limit the last rate line said.
+    noted: Option<(u32, u8)>,
 }
 
 impl RateControl {
@@ -146,6 +159,39 @@ impl RateControl {
         } else {
             self.limit
         }
+    }
+
+    /// A session starts (the first watching viewer, `who`): from the rate `who` last left with,
+    /// else from [`START_KBPS`]; what the last session measured is not this viewer's link.
+    pub fn begin(&mut self, who: &str) {
+        self.kbps = self.known.iter().rev().find(|k| k.0 == who).map_or(0, |k| k.1);
+        self.limit = limit::START;
+        self.clean = 0;
+    }
+
+    /// `who` leaves: the rate now is the last good one for its next session.
+    pub fn remember(&mut self, who: &str) {
+        if self.kbps == 0 {
+            return;
+        }
+        self.known.retain(|k| k.0 != who);
+        if self.known.len() >= REMEMBER {
+            self.known.remove(0);
+        }
+        self.known.push((who.to_string(), self.kbps));
+    }
+
+    /// Whether a rate line is due for `kbps` held by `limit`: a new limit, a drop, or a rise of
+    /// [`NOTE_RISE`] since the last line (a creep is not a line a second).
+    pub fn note_due(&mut self, kbps: u32, limit: u8) -> bool {
+        let due = match self.noted {
+            None => true,
+            Some((k, l)) => l != limit || kbps < k || kbps as f64 >= k as f64 * NOTE_RISE,
+        };
+        if due {
+            self.noted = Some((kbps, limit));
+        }
+        due
     }
 
     /// `size` starts from the top again (the viewer changed its choices).
@@ -262,15 +308,23 @@ impl RateControl {
                 }
             }
         } else {
-            self.clean += 1;
             if self.limit == limit::LINK || self.limit == limit::ENCODER || self.limit == limit::START {
                 self.limit = limit::CLEAN;
             }
-            // the rate is the encoder's average target: a desktop that needs less sends less
-            // anyway, so it creeps whether used or not (a stream that went down for the link
-            // and then sent little stayed down for good)
-            if self.clean >= CREEP_AFTER && kbps < ceiling {
-                kbps = (kbps + (kbps / 16).max(2_000)).min(ceiling);
+            // only seconds with pictures say anything about the link: a still desktop (frames 0)
+            // holds the rate (it crept all night to 1 Tbit/s once)
+            if moving && s.sent_kbps > 0 {
+                self.clean += 1;
+            }
+            // up to the start rate whatever was used (a desktop that needs less sends less
+            // anyway, and a stream that went down for the link and then sent little would stay
+            // down for good); above it only to what the link proved it carries
+            if self.clean >= CREEP_AFTER && moving && s.sent_kbps > 0 {
+                let proven = (s.sent_kbps as f64 * PROVEN).min(u32::MAX as f64) as u32;
+                let bound = proven.max(START_KBPS).min(ceiling);
+                if kbps < bound {
+                    kbps = (kbps + (kbps / 16).max(2_000)).min(bound);
+                }
             }
             // a step taken for the encoder's sake, now well clear of the budget: back in time
             // (a failure right after doubles the next wait: `clean` marks the step back)
@@ -459,6 +513,82 @@ mod tests {
         assert!(!r.second(&s(40), 400_000), "nothing more to give up");
         assert_eq!(r.effort([7680, 4320], effort::FAST), effort::FAST);
         assert_eq!(r.limit(400_000), limit::ENCODER);
+    }
+
+    #[test]
+    fn no_pictures_hold_the_rate() {
+        // the 203 journal: frames 0 all night, the rate crept to 1 Tbit/s
+        let mut r = RateControl::default();
+        let none = Second { pictures: 0, sent_kbps: 0, ..second(0.0, 0, 0.0, 0, true) };
+        for _ in 0..10_000 {
+            r.second(&none, u32::MAX);
+        }
+        assert_eq!(r.kbps(u32::MAX), START_KBPS);
+        // a link-lowered rate holds too while nothing moves
+        r.second(&second(120.0, 0, 5.0, 100_000, true), u32::MAX);
+        let low = r.kbps(u32::MAX);
+        for _ in 0..100 {
+            r.second(&none, u32::MAX);
+        }
+        assert_eq!(r.kbps(u32::MAX), low);
+    }
+
+    #[test]
+    fn uncapped_the_creep_is_bounded_by_what_got_through() {
+        let mut r = RateControl::default();
+        // a desktop that needs 100 Mbit/s: the target stays at the start rate
+        for _ in 0..1000 {
+            r.second(&second(0.0, 0, 5.0, 100_000, true), u32::MAX);
+        }
+        assert_eq!(r.kbps(u32::MAX), START_KBPS);
+        // one that uses all of it and gets 300 through: up to 1.25x that, never further
+        for _ in 0..1000 {
+            r.second(&second(0.0, 0, 5.0, 300_000, true), u32::MAX);
+        }
+        assert_eq!(r.kbps(u32::MAX), 375_000);
+        // each step is a sixteenth at most (and only while it is used)
+        let mut r = RateControl::default();
+        for _ in 0..CREEP_AFTER {
+            r.second(&second(0.0, 0, 5.0, 1_000_000, true), u32::MAX);
+        }
+        assert_eq!(r.kbps(u32::MAX), START_KBPS + START_KBPS / 16);
+        // a set ceiling still holds
+        for _ in 0..1000 {
+            r.second(&second(0.0, 0, 5.0, 1_000_000, true), 400_000);
+        }
+        assert_eq!((r.kbps(400_000), r.limit(400_000)), (400_000, limit::CAP));
+    }
+
+    #[test]
+    fn a_session_starts_from_the_viewers_last_rate_or_the_start() {
+        let mut r = RateControl::default();
+        r.begin("mac@10.0.0.2");
+        for _ in 0..1000 {
+            r.second(&second(0.0, 0, 5.0, 300_000, true), u32::MAX);
+        }
+        r.remember("mac@10.0.0.2");
+        // another viewer: not what this one's link carried
+        r.begin("phone@10.0.0.9");
+        assert_eq!((r.kbps(u32::MAX), r.limit(u32::MAX)), (START_KBPS, limit::START));
+        r.second(&second(120.0, 0, 5.0, 200_000, true), u32::MAX);
+        r.remember("phone@10.0.0.9");
+        // each comes back at its own
+        r.begin("mac@10.0.0.2");
+        assert_eq!(r.kbps(u32::MAX), 375_000);
+        r.begin("phone@10.0.0.9");
+        assert_eq!(r.kbps(u32::MAX), 170_000, "85% of what its link carried");
+    }
+
+    #[test]
+    fn a_rate_line_on_change_not_every_creep() {
+        let mut r = RateControl::default();
+        assert!(r.note_due(250_000, limit::CLEAN));
+        assert!(!r.note_due(265_625, limit::CLEAN), "one creep step");
+        assert!(!r.note_due(300_000, limit::CLEAN));
+        assert!(r.note_due(312_500, limit::CLEAN), "a quarter up since the last line");
+        assert!(r.note_due(300_000, limit::LINK), "the link");
+        assert!(r.note_due(290_000, limit::LINK), "every drop");
+        assert!(r.note_due(290_000, limit::CAP), "a new limit");
     }
 
     #[test]

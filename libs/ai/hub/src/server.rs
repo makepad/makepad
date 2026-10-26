@@ -983,7 +983,17 @@ fn same_machine(shared: &ServiceShared, headers: &HttpServerHeaders) -> bool {
         let (n, v) = l.trim_end().split_once(':')?;
         n.trim().eq_ignore_ascii_case(makepad_network::fleet::front::HEADER_PEER).then(|| v.trim().parse::<std::net::IpAddr>().ok()).flatten()
     });
-    peer.is_some_and(|ip| ip.is_loopback() || Some(ip) == shared.front_ip)
+    peer.is_some_and(|ip| from_this_machine(ip, shared.front_ip, crate::discovery::network_addresses))
+}
+
+/// `peer` is this machine: loopback, the front's own address, or, for a front on the wildcard
+/// address (`--host 0.0.0.0`, which every interface reaches), any of this machine's interface
+/// addresses (a wildcard front never equals a peer: its WM's local-use was refused for good).
+fn from_this_machine(peer: std::net::IpAddr, front_ip: Option<std::net::IpAddr>, own: impl FnOnce() -> Vec<std::net::Ipv4Addr>) -> bool {
+    if peer.is_loopback() || Some(peer) == front_ip {
+        return true;
+    }
+    front_ip.is_some_and(|f| f.is_unspecified()) && own().into_iter().any(|a| std::net::IpAddr::V4(a) == peer)
 }
 
 /// `POST /control/local-use {"mode": "auto"|"ui-first"|"ai-first"|"unavailable", "use": "gaming"|""}`:
@@ -4325,6 +4335,20 @@ mod lifecycle_tests {
             backends: Mutex::new(HashMap::new()),
             stopped: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    #[test]
+    fn a_wildcard_front_knows_this_machines_own_addresses() {
+        use std::net::{IpAddr, Ipv4Addr};
+        let own = || vec![Ipv4Addr::new(10, 0, 0, 100)];
+        let lan = Some(IpAddr::from([10, 0, 0, 100]));
+        let any = Some(IpAddr::from([0, 0, 0, 0]));
+        assert!(from_this_machine(IpAddr::from([127, 0, 0, 1]), any, own));
+        assert!(from_this_machine(IpAddr::from([10, 0, 0, 100]), lan, own));
+        assert!(from_this_machine(IpAddr::from([10, 0, 0, 100]), any, own), "the WM on a 0.0.0.0 hub's machine");
+        assert!(!from_this_machine(IpAddr::from([10, 0, 0, 165]), any, own), "another machine");
+        assert!(!from_this_machine(IpAddr::from([10, 0, 0, 165]), lan, own));
+        assert!(!from_this_machine(IpAddr::from([10, 0, 0, 100]), Some(IpAddr::from([10, 0, 0, 217])), own), "a LAN front: only its own address");
     }
 
     /// `front`: (secret, client id) as the TLS front would stamp them.

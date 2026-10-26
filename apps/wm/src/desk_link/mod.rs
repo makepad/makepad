@@ -199,6 +199,8 @@ mod native {
         encode_stats: Arc<EncodeStats>,
         tl_frames: u64,
         tl_captured: u64,
+        /// The last second had nothing (no frames, captures, pictures): its line was said once.
+        tl_idle: bool,
         tl_congested_at: Option<f64>,
         tl_congested_s: f64,
         /// The active viewer's window as last handed out (`take_viewer_window`).
@@ -633,7 +635,7 @@ mod native {
                     self.update_capture(cx);
                 }
                 let now = self.rate.kbps(ceiling);
-                if now != was {
+                if now != was && self.rate.note_due(now, self.rate.limit(ceiling)) {
                     super::note(&format!("desk link: rate {} -> {} Mbit/s ({})", was / 1000, now / 1000, super::limit_name(self.rate.limit(ceiling))));
                 }
                 self.tell_rate(cx);
@@ -650,6 +652,12 @@ mod native {
                 ),
                 _ => String::new(),
             };
+            // a still desktop: one line, not one a second
+            let idle = self.tl_frames == 0 && self.tl_captured == 0 && encoded == 0 && sent == 0;
+            let said_idle = std::mem::replace(&mut self.tl_idle, idle);
+            if idle && said_idle {
+                return;
+            }
             super::note(&format!(
                 "desk link 1s: frames {} · captured {} (held {held}, behind {behind}, encoder {held_encoder}) · congested {congested_ms:.0} ms · encoded {encoded} (refined {refined}, max {:.1} ms, tile {tile_ms:.1} ms) · sent {sent} ({:.0} Mbit/s, write max {:.1} ms) · backlog {backlog} · rate {} · {rate}{viewer}",
                 std::mem::take(&mut self.tl_frames),
@@ -881,6 +889,12 @@ mod native {
                         let stream = screens.get(self.screen).map(Self::stream_size_of).unwrap_or([0, 0]);
                         super::note(&format!("desk link: {client} ({name}) from {peer} watches screen {}{}", self.screen, if paused { " (paused)" } else { "" }));
                         self.session_seq += 1;
+                        // the first watching viewer starts a session: from the rate it last left
+                        // with, else the start rate (not what the last session crept to)
+                        let ip = peer.rsplit_once(':').map_or(peer.as_str(), |(ip, _)| ip).trim_matches(|c| c == '[' || c == ']').to_string();
+                        if !paused && !self.watching() {
+                            self.rate.begin(&format!("{name}@{ip}"));
+                        }
                         let welcome = ServerMsg::Welcome {
                             version: proto::VERSION,
                             session,
@@ -893,8 +907,6 @@ mod native {
                         };
                         let _ = out.send(Out::Msg(welcome.encode()));
                         let _ = out.send(Out::Msg(self.rate_msg(cx).encode()));
-                        // the address without its port
-                        let ip = peer.rsplit_once(':').map_or(peer.as_str(), |(ip, _)| ip).trim_matches(|c| c == '[' || c == ']').to_string();
                         self.viewers.push(Viewer { session, name, peer: ip, full_chroma: caps & proto::caps::FULL_CHROMA != 0, refresh_hz: 0, since: std::time::Instant::now(), out, backlog, paused: Arc::new(AtomicBool::new(paused)), shown: None, window: None, active_at: std::time::Instant::now(), input: false, view_only: caps & proto::caps::VIEW_ONLY != 0, hevc: caps & proto::caps::HEVC != 0, prefs: Prefs::default() });
                         self.generation = self.generation.wrapping_add(1);
                         self.sync_subscribers();
@@ -910,6 +922,9 @@ mod native {
                                 self.generation = self.generation.wrapping_add(1);
                             }
                             Control::Resume => {
+                                if !self.watching() {
+                                    self.rate.begin(&format!("{}@{}", self.viewers[i].name, self.viewers[i].peer));
+                                }
                                 self.viewers[i].paused.store(false, Ordering::Release);
                                 self.generation = self.generation.wrapping_add(1);
                                 self.cursor = None;
@@ -968,6 +983,9 @@ mod native {
                     ToUi::Closed { session, reason } => {
                         if let Some(i) = self.viewers.iter().position(|v| v.session == session) {
                             let v = self.viewers.remove(i);
+                            if !v.paused.load(Ordering::Acquire) {
+                                self.rate.remember(&format!("{}@{}", v.name, v.peer));
+                            }
                             super::note(&format!("desk link: {} left ({reason})", v.name));
                             // the bands its decoder may have asked for go with it
                             self.rate.forget_decode();

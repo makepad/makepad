@@ -337,6 +337,9 @@ pub enum HubCommand {
 struct Shared {
     admission: Option<Admission>,
     report: Option<String>,
+    /// The last failure logged: a command that keeps failing the same way (a refused
+    /// local-use, re-sent every poll) is one line, not one every 3 s.
+    failed: Option<String>,
 }
 
 /// A makepad WM node's control client of its hub (the AI Hub app the WM starts). One worker
@@ -385,7 +388,10 @@ fn run_command(t: &mut makepad_ai_hub::providers::qwen::HttpFleetTransport, base
     let answer = match t.post_json(&url, &body) {
         Ok(v) => v,
         Err(err) => {
-            makepad_widgets::log!("wm: hub command failed: {err}");
+            let line = err.to_string();
+            if shared.lock().map_or(true, |mut s| s.failed.replace(line.clone()).as_deref() != Some(line.as_str())) {
+                makepad_widgets::log!("wm: hub command failed: {line} (said once until it changes)");
+            }
             if matches!(cmd, HubCommand::Yield { .. }) {
                 if let Ok(mut s) = shared.lock() {
                     s.report = Some(format!("the AI hub did not take the yield: {err}"));
@@ -394,6 +400,9 @@ fn run_command(t: &mut makepad_ai_hub::providers::qwen::HttpFleetTransport, base
             return false;
         }
     };
+    if let Ok(mut s) = shared.lock() {
+        s.failed = None;
+    }
     if !matches!(cmd, HubCommand::Yield { .. }) {
         return true;
     }
