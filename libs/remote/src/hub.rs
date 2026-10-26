@@ -53,7 +53,7 @@ struct HostLink {
 }
 
 impl HostLink {
-    fn new(host: Host) -> HostLink {
+    fn new(host: Host, fleet: Option<&FleetDialer>) -> HostLink {
         let client = match &host.via {
             Via::Ssh { ssh, relax, env } => {
                 // the remote shell splits the command: every env pair is one single-quoted word
@@ -65,6 +65,10 @@ impl HostLink {
                 Some(Client::new(Target::Command(argv), "hub"))
             }
             Via::Dial { .. } => None,
+            Via::Fleet { addr } => fleet.map(|f| {
+                let (f, addr) = (f.clone(), addr.clone());
+                Client::new(Target::Dialer(Arc::new(move || f(&addr))), "hub")
+            }),
         };
         HostLink { host, client, dialed: Mutex::new(None) }
     }
@@ -78,6 +82,15 @@ impl HostLink {
 
     /// The live connection to the relay, dialling (ssh) or waiting for the device (dial).
     fn conn(&self, wait: Duration) -> Result<Conn, Error> {
+        if let (Via::Fleet { addr }, None) = (&self.host.via, &self.client) {
+            return Err(Error::LinkLost(format!("host `{}` ({addr}) is a fleet hub and this hub has no fleet dialer", self.host.name)));
+        }
+        if let (Via::Fleet { addr }, Some(c)) = (&self.host.via, &self.client) {
+            return c.conn().map_err(|e| match e {
+                Error::LinkLost(w) => Error::LinkLost(format!("cannot reach fleet hub `{}` at {addr}: {w}", self.host.name)),
+                e => e,
+            });
+        }
         if let Some(c) = &self.client {
             return c.conn().map_err(|e| match e {
                 Error::LinkLost(w) => Error::LinkLost(format!("cannot reach host `{}` over ssh (BatchMode, 5 s connect timeout; needs a key that works without a prompt; see {}): {w}", self.host.name, log_path().display())),
@@ -107,9 +120,14 @@ struct Inner {
     clients: Mutex<Vec<Conn>>,
     /// where the registry is re-read from when a request names a host the hub does not know yet
     source: Mutex<Option<Source>>,
+    /// how `via = "fleet"` hosts are dialled (the owner's transport and authentication)
+    fleet: Mutex<Option<FleetDialer>>,
 }
 
 pub type Source = Arc<dyn Fn() -> Hosts + Send + Sync>;
+
+/// Dials a `via = "fleet"` host's address: an authenticated carrier.
+pub type FleetDialer = Arc<dyn Fn(&str) -> io::Result<crate::carrier::Carrier> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct Hub(Arc<Inner>);
@@ -124,7 +142,7 @@ pub fn parse_target(t: &str) -> (&str, Option<String>) {
 
 impl Hub {
     pub fn new(hosts: &Hosts) -> Hub {
-        let hub = Hub(Arc::new(Inner { links: Mutex::new(Vec::new()), clients: Mutex::new(Vec::new()), source: Mutex::new(None) }));
+        let hub = Hub(Arc::new(Inner { links: Mutex::new(Vec::new()), clients: Mutex::new(Vec::new()), source: Mutex::new(None), fleet: Mutex::new(None) }));
         hub.sync(hosts);
         hub
     }
@@ -147,12 +165,18 @@ impl Hub {
         self.0.links.lock().unwrap().clone()
     }
 
+    /// Sets how `via = "fleet"` hosts are dialled (before they are added): `addr` -> carrier.
+    pub fn set_fleet(&self, dial: FleetDialer) {
+        *self.0.fleet.lock().unwrap() = Some(dial);
+    }
+
     /// Adds the registry's hosts that have no link yet (hosts paired while the hub runs).
     pub fn sync(&self, hosts: &Hosts) {
+        let fleet = self.0.fleet.lock().unwrap().clone();
         let mut links = self.0.links.lock().unwrap();
         for h in &hosts.hosts {
             if !links.iter().any(|l| l.host.name == h.name) {
-                links.push(Arc::new(HostLink::new(h.clone())));
+                links.push(Arc::new(HostLink::new(h.clone(), fleet.as_ref())));
             }
         }
     }
@@ -230,11 +254,11 @@ impl Hub {
             .into_iter()
             .map(|l| {
                 std::thread::spawn(move || {
-                    let target = match &l.host.via {
-                        Via::Ssh { ssh, .. } => format!(",\"ssh\":{}", json_str(ssh)),
-                        Via::Dial { .. } => String::new(),
+                    let (via, target) = match &l.host.via {
+                        Via::Ssh { ssh, .. } => ("ssh", format!(",\"ssh\":{}", json_str(ssh))),
+                        Via::Dial { .. } => ("dial", String::new()),
+                        Via::Fleet { addr } => ("fleet", format!(",\"addr\":{}", json_str(addr))),
                     };
-                    let via = if l.client.is_some() { "ssh" } else { "dial" };
                     let head = format!("{{\"host\":{},\"via\":\"{via}\"{target}", json_str(&l.host.name));
                     match l.conn(Duration::ZERO) {
                         Ok(c) => {

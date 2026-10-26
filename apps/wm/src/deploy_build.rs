@@ -1,12 +1,12 @@
 //! `makepad-wm-build`: the deploy's prebuild of what this WM starts by itself. Every package is
 //! built with the very `cargo` command its launch runs, `build` in place of `run`: an app or the
 //! JIT tool (`makepad run`) through `AppLaunch::build_command` (the launcher's environment), the
-//! node's AI Hub through `hub_app::build_node_hub`. Which runner an app gets comes from the WM's
+//! node's AI Hub and devhub through `hub_app::build_node_hub` / `build_node_devhub`. Which runner an app gets comes from the WM's
 //! own flags (`--jit <id>`, `--module <id>`) and `~/.makepad/wm/apps.splash`, read the way the
 //! WM reads them. The WM's launches then compile nothing.
 //!
 //! Run it in the checkout the WM runs from, in the WM session's environment:
-//! `makepad-wm-build [--jit <id>]... -- hub aichat terminal sandbox ...`
+//! `makepad-wm-build [--jit <id>]... -- hub devhub aichat terminal sandbox ...`
 
 use crate::apps::AppRegistry;
 use crate::build::WmBuild;
@@ -16,7 +16,7 @@ use std::process::ExitCode;
 /// The WM flags before `--`, the packages to build after it.
 pub fn build_launched(args: &[String]) -> ExitCode {
     let Some(split) = args.iter().position(|a| a == "--") else {
-        eprintln!("usage: makepad-wm-build [WM flags: --jit <id> --module <id>] -- <hub | app id>...");
+        eprintln!("usage: makepad-wm-build [WM flags: --jit <id> --module <id>] -- <hub | devhub | app id>...");
         return ExitCode::from(2);
     };
     let (flags, ids) = (&args[..split], &args[split + 1..]);
@@ -32,6 +32,10 @@ pub fn build_launched(args: &[String]) -> ExitCode {
     for id in ids {
         if id == "hub" {
             failed |= crate::hub_app::build_node_hub() != ExitCode::SUCCESS;
+            continue;
+        }
+        if id == "devhub" {
+            failed |= crate::hub_app::build_node_devhub() != ExitCode::SUCCESS;
             continue;
         }
         let Some(entry) = registry::find(id) else {

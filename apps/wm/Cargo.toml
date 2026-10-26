@@ -63,6 +63,7 @@ makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false }
 # The shell's drawing kit and the AI hub control panel (shared with the AI Hub app).
 makepad-shell-kit = { path = "../../libs/shell_kit" }
 makepad-ai-hub-panel = { path = "../../libs/ai/hub_panel" }
+makepad-devhub = { path = "../../libs/devhub" }
 makepad-desk-link-panel = { path = "../../libs/desk_link_panel" }
 # In-process hosting (aicontrol §3): the module contract and the palette
 # applied into each instance's isolate. Which modules a build links is the

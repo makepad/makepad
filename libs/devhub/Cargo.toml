@@ -1,0 +1,21 @@
+[package]
+name = "makepad-devhub"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "devhub: observes every JIT on the LAN (events, explorer, full remote inspect for the master), one app with master and node roles"
+
+[dependencies]
+makepad-network = { path = "../../platform/network" }
+makepad-remote = { workspace = true }
+makepad-strict-json = { workspace = true }
+makepad-core-util = { path = "../core_util" }
+# sync: launches and prebuilds use the WM's own launch commands and environment
+makepad-app-registry = { path = "../app_registry", optional = true }
+
+[features]
+# the checkout applier (desktop nodes: git, prebuild, launches, the master CLI); a JIT host with no
+# checkout (tools/run/android_host) builds without it and installs its source store instead
+default = ["checkout"]
+checkout = ["dep:makepad-app-registry"]

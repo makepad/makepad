@@ -16,10 +16,10 @@
 //!
 //! Clients connect with [`crate::SocketStream::connect_capture`], which runs
 //! the OS client stack without CA validation and returns the server
-//! certificate's SHA-256; [`KnownHosts`] records it ssh-style (first
-//! contact), warns loudly when it changes, and continues. What protects use
-//! of a server is the client credential, which is bound to the fingerprint
-//! actually seen. TLS 1.2 is the floor everywhere;
+//! certificate (DER). Fleet clients check it against the fleet root
+//! (`crate::fleet::id`); the remote tunnel pins it ssh-style with
+//! [`KnownHosts`] (first contact, warns loudly on a change). TLS 1.2 is the
+//! floor everywhere;
 //! TLS 1.3 is used where both stacks have it (OpenSSL, Schannel on recent
 //! Windows). SecureTransport stops at TLS 1.2, with ECDHE-ECDSA AEAD suites
 //! only.
@@ -193,34 +193,15 @@ impl KnownHosts {
     }
 }
 
-/// Endpoints of a self-signed TLS service this process talks to (AI fleet
-/// nodes learned from discovery): their known-hosts file and the
-/// `Authorization` value for a given server fingerprint (a proof bound to
-/// that certificate, so it is useless to anyone but that server).
-pub struct FleetClient {
-    pub known_hosts: KnownHosts,
-    pub authorization: fn(&[u8; 32]) -> Option<String>,
-}
-
 fn fleet_endpoints() -> &'static std::sync::RwLock<std::collections::HashSet<String>> {
     static ENDPOINTS: std::sync::OnceLock<std::sync::RwLock<std::collections::HashSet<String>>> =
         std::sync::OnceLock::new();
     ENDPOINTS.get_or_init(Default::default)
 }
 
-static FLEET_CLIENT: std::sync::OnceLock<FleetClient> = std::sync::OnceLock::new();
-
-/// Installs this process's fleet client (once).
-pub fn set_fleet_client(client: FleetClient) {
-    let _ = FLEET_CLIENT.set(client);
-}
-
-pub fn fleet_client() -> Option<&'static FleetClient> {
-    FLEET_CLIENT.get()
-}
-
 /// Marks `host:port` as a fleet endpoint: HTTP and websocket clients reach
-/// it over self-signed TLS with the fleet authorization.
+/// it through `crate::fleet::id::connect` (the server's fleet certificate
+/// checked, this machine's proof sent).
 pub fn mark_fleet_endpoint(host_port: &str) {
     fleet_endpoints().write().unwrap().insert(host_port.to_ascii_lowercase());
 }
@@ -229,19 +210,19 @@ pub fn is_fleet_endpoint(host_port: &str) -> bool {
     fleet_endpoints().read().unwrap().contains(&host_port.to_ascii_lowercase())
 }
 
-/// Connects to a fleet endpoint: TLS, the certificate checked against (and
-/// recorded in) the fleet known-hosts file, and the `Authorization` value
-/// bound to the certificate actually presented.
-pub fn connect_fleet(host: &str, port: &str) -> io::Result<(crate::SocketStream, Option<String>)> {
-    let client = fleet_client().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no fleet client configured"))?;
-    let (stream, fp) = crate::SocketStream::connect_capture(host.trim_start_matches('[').trim_end_matches(']'), port)?;
-    client.known_hosts.observe(&format!("{host}:{port}"), &fp);
-    Ok((stream, (client.authorization)(&fp)))
-}
-
 /// A fresh P-256 key (X9.63) from the OS.
 pub fn generate_p256() -> io::Result<[u8; X963_KEY_LEN]> {
     platform::generate_p256()
+}
+
+/// Raw P-256 ECDH shared secret (the 32-byte big-endian x coordinate), using the OS.
+/// `key` is an X9.63 private key; `peer_point` must be an uncompressed P-256
+/// point (65 bytes, 0x04 || X || Y) on the curve. No KDF is applied.
+pub fn ecdh_p256(key: &[u8; X963_KEY_LEN], peer_point: &[u8]) -> io::Result<[u8; 32]> {
+    if peer_point.len() != 65 || peer_point[0] != 0x04 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "expected an uncompressed P-256 point"));
+    }
+    platform::ecdh_p256(key, peer_point)
 }
 
 /// DER ECDSA-SHA256 signature by an X9.63 P-256 key, made by the OS.
@@ -361,6 +342,19 @@ pub mod x509 {
     /// The TBSCertificate: v3, issuer = subject = CN, valid 2025..2099, an
     /// end-entity TLS server key (CA false, digitalSignature, serverAuth).
     pub fn tbs_certificate(serial: &[u8; 16], common_name: &str, point: &[u8]) -> Vec<u8> {
+        tbs_certificate_with(serial, common_name, point, None)
+    }
+
+    /// The fleet identity extension (non-critical, private OID 2.25.<uuid>):
+    /// an OCTET STRING holding the machine's fleet credential text
+    /// (`crate::fleet::id`). TLS stacks ignore it; fleet clients read it.
+    pub const OID_FLEET_IDENTITY: &[u8] = &[
+        0x06, 0x14, 0x69, 0x81, 0xDA, 0xEB, 0xB4, 0xD9, 0x85, 0xD6, 0xB3, 0xB1, 0xCA, 0xE5, 0xBA, 0x8B, 0xAD, 0x96, 0xA3,
+        0x95, 0xDC, 0x74,
+    ];
+
+    /// [`tbs_certificate`] with an optional fleet identity extension.
+    pub fn tbs_certificate_with(serial: &[u8; 16], common_name: &str, point: &[u8], fleet_identity: Option<&[u8]>) -> Vec<u8> {
         let mut serial = *serial;
         serial[0] &= 0x7F; // positive
         serial[0] |= 0x01; // and never zero-led
@@ -373,7 +367,12 @@ pub mod x509 {
         let basic = seq(&[OID_BASIC_CONSTRAINTS, &critical, &tlv(0x04, &seq(&[]))]);
         let key_usage = seq(&[OID_KEY_USAGE, &critical, &tlv(0x04, &[0x03, 0x02, 0x07, 0x80])]);
         let eku = seq(&[OID_EXT_KEY_USAGE, &tlv(0x04, &seq(&[OID_SERVER_AUTH]))]);
-        let extensions = tlv(0xA3, &seq(&[&basic, &key_usage, &eku]));
+        let fleet = fleet_identity.map(|text| seq(&[OID_FLEET_IDENTITY, &tlv(0x04, text)]));
+        let mut exts: Vec<&[u8]> = vec![&basic, &key_usage, &eku];
+        if let Some(fleet) = &fleet {
+            exts.push(fleet);
+        }
+        let extensions = tlv(0xA3, &seq(&exts));
         seq(&[
             &version,
             &uint(&serial),
@@ -395,6 +394,67 @@ pub mod x509 {
     pub fn ecdsa_sig_from_raw(raw: &[u8]) -> Vec<u8> {
         let (r, s) = raw.split_at(raw.len() / 2);
         seq(&[&uint(r), &uint(s)])
+    }
+
+    /// One DER TLV: (tag, content, rest). Definite lengths up to 4 bytes.
+    pub fn read_tlv(buf: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+        let (&tag, rest) = buf.split_first()?;
+        let (&first, mut rest) = rest.split_first()?;
+        let len = if first < 0x80 {
+            first as usize
+        } else {
+            let n = (first & 0x7F) as usize;
+            if n == 0 || n > 4 || rest.len() < n {
+                return None;
+            }
+            let len = rest[..n].iter().fold(0usize, |acc, b| (acc << 8) | *b as usize);
+            rest = &rest[n..];
+            len
+        };
+        if rest.len() < len {
+            return None;
+        }
+        Some((tag, &rest[..len], &rest[len..]))
+    }
+
+    /// What a fleet client needs from a server's leaf certificate: its
+    /// P-256 public point (from the SubjectPublicKeyInfo, parsed by
+    /// position, never searched for) and the fleet identity extension's
+    /// content, when there is one.
+    pub fn leaf_point_and_fleet_identity(der: &[u8]) -> Option<([u8; 65], Option<Vec<u8>>)> {
+        let (0x30, cert, _) = read_tlv(der)? else { return None };
+        let (0x30, tbs, _) = read_tlv(cert)? else { return None };
+        let mut fields = Vec::new();
+        let mut rest = tbs;
+        while !rest.is_empty() {
+            let (tag, content, next) = read_tlv(rest)?;
+            fields.push((tag, content));
+            rest = next;
+        }
+        // version [0], serial, signature alg, issuer, validity, subject, spki, ...
+        let skip = usize::from(fields.first()?.0 == 0xA0);
+        let (0x30, spki) = *fields.get(skip + 5)? else { return None };
+        let (0x30, _alg, after) = read_tlv(spki)? else { return None };
+        let (0x03, bits, _) = read_tlv(after)? else { return None };
+        if bits.len() != 66 || bits[0] != 0 || bits[1] != 0x04 {
+            return None;
+        }
+        let mut point = [0u8; 65];
+        point.copy_from_slice(&bits[1..]);
+        let mut fleet = None;
+        if let Some((_, exts)) = fields.iter().find(|(tag, _)| *tag == 0xA3) {
+            let (0x30, mut list, _) = read_tlv(exts)? else { return None };
+            while !list.is_empty() {
+                let (_, ext, next) = read_tlv(list)?;
+                list = next;
+                if let Some(value) = ext.strip_prefix(OID_FLEET_IDENTITY) {
+                    if let Some((0x04, text, _)) = read_tlv(value) {
+                        fleet = Some(text.to_vec());
+                    }
+                }
+            }
+        }
+        Some((point, fleet))
     }
 
     /// RFC 5915 ECPrivateKey for a P-256 key (for OpenSSL).
@@ -457,12 +517,27 @@ impl TlsIdentity {
         Ok(Self { key, cert_der, fingerprint, dir: dir.to_path_buf() })
     }
 
+    /// A certificate made in memory for `key` (self-signed, a fresh serial),
+    /// carrying `fleet_identity` in the fleet extension: a fleet machine's
+    /// TLS identity is its fleet key ([`crate::fleet::id`]), so the
+    /// handshake itself proves the machine's credential. `dir` is unused
+    /// state (an empty path).
+    pub fn in_memory(key: [u8; X963_KEY_LEN], common_name: &str, fleet_identity: Option<&[u8]>) -> io::Result<Self> {
+        let mut serial = [0u8; 16];
+        os_random(&mut serial)?;
+        let tbs = x509::tbs_certificate_with(&serial, common_name, &key[..65], fleet_identity);
+        let signature = platform::sign_p256_sha256(&key, &tbs)?;
+        let cert_der = x509::certificate(&tbs, &signature);
+        let fingerprint = fingerprint(&cert_der);
+        Ok(Self { key, cert_der, fingerprint, dir: PathBuf::new() })
+    }
+
     pub fn fingerprint_hex(&self) -> String {
         to_hex(&self.fingerprint)
     }
 }
 
-fn key_from_bytes(bytes: &[u8]) -> io::Result<[u8; X963_KEY_LEN]> {
+pub fn key_from_bytes(bytes: &[u8]) -> io::Result<[u8; X963_KEY_LEN]> {
     if bytes.len() != X963_KEY_LEN || bytes[0] != 0x04 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "TLS key file is not a P-256 X9.63 key"));
     }
@@ -630,6 +705,9 @@ mod platform {
     pub fn generate_p256() -> io::Result<[u8; 97]> {
         Err(unsupported())
     }
+    pub fn ecdh_p256(_key: &[u8; 97], _peer_point: &[u8]) -> io::Result<[u8; 32]> {
+        Err(unsupported())
+    }
     pub fn sign_p256_sha256(_key: &[u8; 97], _msg: &[u8]) -> io::Result<Vec<u8>> {
         Err(unsupported())
     }
@@ -765,6 +843,47 @@ mod server_tests {
         assert_eq!(x509::ecdsa_sig_from_raw(&raw), sig);
     }
 
+    #[test]
+    fn ecdh_agreement_and_invalid_points() {
+        let a = generate_p256().unwrap();
+        let b = generate_p256().unwrap();
+        let c = generate_p256().unwrap();
+        let shared = ecdh_p256(&a, &b[..65]).unwrap();
+        assert_eq!(shared, ecdh_p256(&b, &a[..65]).unwrap());
+        assert_ne!(shared, ecdh_p256(&a, &c[..65]).unwrap());
+        assert!(ecdh_p256(&a, &[]).is_err());
+        assert!(ecdh_p256(&a, &b[..64]).is_err());
+        assert!(ecdh_p256(&a, &b[..66]).is_err());
+        let mut bad = b[..65].to_vec();
+        bad[0] = 0x02;
+        assert!(ecdh_p256(&a, &bad).is_err());
+        // Correct encoding, but (0, 0) is not on P-256.
+        bad.fill(0);
+        bad[0] = 0x04;
+        assert!(ecdh_p256(&a, &bad).is_err());
+    }
+
+    #[test]
+    fn ecdh_fixed_vector() {
+        // Generated with Python cryptography on Linux (SECP256R1, ECDH).
+        // Private scalars: 0x123456789abcdef and 0xfedcba987654321.
+        let a: [u8; X963_KEY_LEN] = from_hex(concat!(
+            "043988322ab9f52c7f11d5d1aa92a2ac0b00275bcad8e934682257323fda6724828",
+            "55b7389f116c19c0014311c3d57dc02001e3a0ec8bd90c797732034aacd9918",
+            "0000000000000000000000000000000000000000000000000123456789abcdef",
+        )).unwrap();
+        let b: [u8; X963_KEY_LEN] = from_hex(concat!(
+            "0453c5a47b0f3273d7333320d3dc363b241a99928781b9d8827d9660a01dcdf9e9",
+            "8024c87efd5c1388f0a6c3d274467f4824d89218ce12550c298f6a9b393efe20",
+            "0000000000000000000000000000000000000000000000000fedcba987654321",
+        )).unwrap();
+        let expected: [u8; 32] = from_hex(
+            "af63d94b658133fdfcf48a473d136e30e075bc1eb943a38f55c7a445367ffe5a",
+        ).unwrap();
+        assert_eq!(ecdh_p256(&a, &b[..65]).unwrap(), expected);
+        assert_eq!(ecdh_p256(&b, &a[..65]).unwrap(), expected);
+    }
+
     /// A server that writes with a short send timeout to a client that reads slowly, retrying
     /// each `WouldBlock`/`TimedOut` as Desk Link's `write_all` does: every byte arrives once, in
     /// order (Windows: a send that ran into SO_SNDTIMEO had sent part of a record that was then
@@ -830,6 +949,7 @@ mod server_tests {
         let dir = temp_dir("server");
         let identity = TlsIdentity::load_or_create(&dir, "makepad tunnel test").unwrap();
         let pin = identity.fingerprint;
+        let certificate = identity.cert_der.clone();
         let server = TlsServer::new(identity).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port().to_string();
@@ -855,7 +975,8 @@ mod server_tests {
             outcomes
         });
         let (mut client, seen) = crate::SocketStream::connect_capture("127.0.0.1", &port).unwrap();
-        assert_eq!(seen, pin, "the captured fingerprint is the server certificate's");
+        assert_eq!(seen, certificate, "the captured DER is the server leaf certificate");
+        assert_eq!(fingerprint(&seen), pin, "the captured fingerprint is the server certificate's");
         client.write_all(b"hello").unwrap();
         let mut echo = [0u8; 5];
         client.read_exact(&mut echo).unwrap();
@@ -865,7 +986,8 @@ mod server_tests {
         assert!(big.iter().all(|b| *b == 0x42));
 
         let (mut second, again) = crate::SocketStream::connect_capture("127.0.0.1", &port).unwrap();
-        assert_eq!(again, pin);
+        assert_eq!(again, certificate);
+        assert_eq!(fingerprint(&again), pin);
         second.shutdown();
         let outcomes = handle.join().unwrap();
         assert!(outcomes[0]);

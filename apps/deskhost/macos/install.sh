@@ -1,14 +1,14 @@
 #!/bin/bash
 # Desk Host on a macOS desktop, all in one, run as the desktop's user in its login session:
-#   apps/deskhost/macos/install.sh [--bin <built host>] [--peers 10.0.0.222] [--host <LAN address>] [--port 8790] [--fps 120]
-#   apps/deskhost/macos/install.sh --settings-only --peers <list>   (only sets the keys and restarts the running host)
+#   apps/deskhost/macos/install.sh [--bin <built host>] [--host <LAN address>] [--port 8790] [--fps 120]
+#   apps/deskhost/macos/install.sh --settings-only [--host ..] [--port ..] [--fps ..]   (only sets the keys and restarts the running host)
 # 1. builds the host (cargo --release, unless --bin names a build) and puts it at ~/.makepad/deskhost/bin/deskhost;
 # 2. "Desk Host.app" (bundle id nl.makepad.deskhost, in /Applications, else ~/Applications) is a small launcher
 #    (macos/launcher.c) that starts that host as its child. macOS keeps the Screen Recording and Accessibility
 #    grants for the app's code identity; the launcher is built once per Mac and never touched again, so the
 #    grants survive every host update (a child asks with its parent's grants). An app made anew (--new-app, or a
 #    deleted app) needs the grants again;
-# 3. writes ~/.makepad/deskhost.conf when there is none, or sets the keys given (--peers/--host/--port/--fps);
+# 3. writes ~/.makepad/deskhost.conf when there is none, or sets the keys given (--host/--port/--fps);
 # 4. (re)loads the LaunchAgent nl.makepad.deskhost: started at login, restarted when it dies.
 # It never asks for a grant: the user gives them in System Settings > Privacy & Security (Screen & System
 # Audio Recording, Accessibility: "Desk Host"). The host says which one is missing in ~/.makepad/deskhost.status,
@@ -21,11 +21,10 @@ ID=nl.makepad.deskhost
 HOSTBIN=$HOME/.makepad/deskhost/bin/deskhost
 AGENT=$HOME/Library/LaunchAgents/$ID.plist
 CONF=$HOME/.makepad/deskhost.conf
-bin=; peers=; host=; port=; fps=; only=0; new_app=0
+bin=; host=; port=; fps=; only=0; new_app=0
 while [ $# -gt 0 ]; do
   case $1 in
     --bin) bin=$2; shift 2;;
-    --peers) peers=$2; shift 2;;
     --host) host=$2; shift 2;;
     --port) port=$2; shift 2;;
     --fps) fps=$2; shift 2;;
@@ -37,7 +36,7 @@ done
 fail() { echo "DESKHOST-INSTALL-FAILED: $*"; exit 1; }
 
 set_keys() {
-  for kv in "allow_peers=$peers" "host=$host" "port=$port" "fps=$fps"; do
+  for kv in "host=$host" "port=$port" "fps=$fps"; do
     k=${kv%%=*}; v=${kv#*=}
     [ -n "$v" ] || continue
     if grep -q "^$k *=" "$CONF"; then
@@ -104,13 +103,12 @@ fi
 codesign --verify "$APP" || fail "codesign verify"
 echo "app identity: $(codesign -d -r- "$APP" 2>&1 | sed -n "s/^# designated => //p")"
 
-# 3. settings (the fleet key itself is installed apart, never by this script)
+# 3. settings (the fleet identity itself is installed apart, never by this script: tools/fleet-identity.md)
 mkdir -p "$HOME/.makepad"
 if [ ! -s "$CONF" ]; then
   cat > "$CONF" <<EOF
 # Desk Host (written by apps/deskhost/macos/install.sh); keys in apps/deskhost/src/settings.rs
 enabled = on
-allow_peers = ${peers:-10.0.0.222}
 host = ${host:-0.0.0.0}
 port = ${port:-8790}
 fps = ${fps:-120}
@@ -119,7 +117,8 @@ EOF
 else
   set_keys
 fi
-[ -s "$HOME/.makepad/weights/fleet/fleet.key" ] || echo "note: no fleet key in ~/.makepad/weights/fleet yet: the host waits for it (checks every 10 s)"
+fleet=${MAKEPAD_FLEET_DIR:-$HOME/.makepad/fleet}
+[ -s "$fleet/id.key" ] && [ -s "$fleet/id.cred" ] && [ -s "$fleet/root.pub" ] || echo "note: no fleet identity (id.key, id.cred, root.pub) in $fleet yet: the host waits for it (checks every 10 s)"
 
 # 4. (re)load the agent: the same plist restarts the running host; a new one is loaded anew
 # (bootout returns before launchd has let go of the job: wait for that, a bootstrap at once fails)

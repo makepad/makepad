@@ -255,6 +255,10 @@ fn run(raw_args: Vec<Vec<u8>>) {
         Some("inspect") => std::process::exit(relax_compiler::inspect::client::main(&args[2..])),
         // the remote hub: `hub [--listen <addr>]`, `remote-relay [--dial ..]`, `remote add|pair|list`
         Some("hub") => std::process::exit(remote::hub(&args[2..])),
+        // `devhub` (or `observe`) `stream|ls|inspect|reply|inbox|hubs`: the local devhub (every JIT
+        // on the LAN from the master)
+        #[cfg(unix)]
+        Some("devhub" | "observe") => std::process::exit(makepad_devhub::cli::main(&args[2..])),
         Some("remote-relay") => std::process::exit(remote::relay(&args[2..])),
         Some("remote") => std::process::exit(remote::remote(&args[2..])),
         // `pack-src [--target <triple>] <out.store> <package>...`: the source archive `run --src` runs from

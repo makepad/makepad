@@ -1,8 +1,8 @@
 //! Desk Host as a tray app. The icon (a screen: faint when off, outlined while it serves,
 //! filled while someone watches) sits in the macOS menu bar / the Windows notification area;
 //! its tooltip says the same in words. A click opens the dropdown (`view::DeskHostView`, the AI
-//! Hub's look): the serving switch, the viewers with their stream, the allowed peers (read-only:
-//! `allow_peers` in `~/.makepad/deskhost.conf`), Open at login (an installed macOS app) and Quit.
+//! Hub's look): the serving switch, the viewers with their stream, who may watch (the admin Mac
+//! only, by fleet identity), Open at login (an installed macOS app) and Quit.
 //! The right click's menu has the switch and Quit. No window, no Dock icon (`menu_bar_app`).
 //!
 //! The host itself (capture, encode, the server) runs on its own thread (`crate::host_main`):

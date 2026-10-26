@@ -1,6 +1,6 @@
 //! The TLS front is native-only; on the web only the caller type exists.
 
-use super::auth::Role;
+use super::id::Role;
 
 /// The front's peer stamp header (see front.rs); a web build only reads it.
 pub const HEADER_PEER: &str = "X-Makepad-Peer";
@@ -9,13 +9,14 @@ pub const HEADER_PEER: &str = "X-Makepad-Peer";
 pub struct Caller {
     pub client_id: String,
     pub role: Role,
+    pub admin: bool,
     /// The calling app's name (`X-Hub-App` header), for the control panel.
     pub app: Option<String>,
 }
 
 impl Caller {
     pub fn local() -> Self {
-        Caller { client_id: "local".into(), role: Role::Lan, app: None }
+        Caller { client_id: "local".into(), role: Role::Device, admin: true, app: None }
     }
 }
 

@@ -2,7 +2,7 @@
 //! blocking calls for a worker thread, and the fleet's kernel nodes.
 //!
 //! A fleet URL (`https://host:port`, from the LAN beacon or
-//! [`makepad_network::fleet::auth::mark_fleet_endpoint`]) goes through the fleet TLS
+//! [`makepad_network::fleet::id::mark_fleet_endpoint`]) goes through the fleet TLS
 //! front with this process's credential; a loopback URL (`http://`) is a
 //! machine-local node.
 
@@ -162,8 +162,8 @@ fn open_link(base_url: &str) -> Result<(Link, Vec<u8>), String> {
         return Err(format!("{host_port}: fleet TLS links are native-only"));
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let (s, auth) = makepad_network::tls::connect_fleet(&url.host, &url.port.to_string()).map_err(|e| format!("{host_port}: {e}"))?;
-            (Link::Tls(s), auth)
+            let (s, _server, auth) = makepad_network::fleet::id::connect(&url.host, &url.port.to_string()).map_err(|e| format!("{host_port}: {e}"))?;
+            (Link::Tls(s), Some(auth))
         }
     } else {
         let addr = std::net::ToSocketAddrs::to_socket_addrs(&host_port).map_err(|e| e.to_string())?.next().ok_or("no address")?;
@@ -423,7 +423,7 @@ pub fn kernel_nodes() -> Vec<(KernelNode, KernelInfoJson)> {
             if host_port.starts_with("http://") {
                 urls.push(host_port.to_string());
             } else {
-                makepad_network::fleet::auth::mark_fleet_endpoint(host_port);
+                makepad_network::fleet::id::mark_fleet_endpoint(host_port);
                 urls.push(format!("https://{host_port}"));
             }
         }

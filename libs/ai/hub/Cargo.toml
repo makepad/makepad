@@ -236,10 +236,6 @@ required-features = ["kernel"]
 name = "kernel_compute"
 required-features = ["kernel"]
 
-[[bin]]
-name = "ai-fleet"
-path = "src/bin/ai_fleet.rs"
-
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 makepad-ai-cuda = { path = "../cuda", optional = true }
 

@@ -101,8 +101,8 @@ fn run() -> Result<(), AssetAiError> {
             "--machine" => {
                 machine = true;
             }
-            // Prints (creating on first use) what the fleet authority
-            // endorses: this node's key and TLS certificate fingerprint.
+            // Prints this node's key (made on first use), its fleet
+            // credential name and its TLS certificate fingerprint.
             "--fleet-identity" => {
                 fleet_identity = true;
             }
@@ -133,8 +133,8 @@ fn run() -> Result<(), AssetAiError> {
     }
     if fleet_identity {
         let dir = cache_dir.clone().unwrap_or_else(default_cache_dir);
-        let (node_key, fingerprint) = makepad_ai_hub::server::fleet_identity(&dir)?;
-        println!("node_key={node_key}\ntls_sha256={fingerprint}");
+        let (node_key, name, fingerprint) = makepad_ai_hub::server::fleet_identity(&dir)?;
+        println!("node_key={node_key}\nfleet_name={name}\ntls_sha256={fingerprint}");
         return Ok(());
     }
 

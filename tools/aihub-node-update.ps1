@@ -40,20 +40,45 @@ if ($service -and $service.Status -eq 'Running') {
 $dir = Split-Path $exe
 if ($launcher -and (-not (Test-Path $launcher) -or (Split-Path $launcher) -ne $dir)) { throw 'launcher is outside the AIHub installation directory' }
 # The node serves only TLS: query /health pinned to the node's own
-# certificate, proving its own node credential (the node role may read
-# /health). jobs_pending counts queued and running jobs.
+# certificate (made from its fleet key, so its public key is this machine's),
+# proving the machine's own fleet credential (tools/fleet-identity.md; the
+# node role may read /health). jobs_pending counts queued and running jobs.
 if ($service) {
     $cfgArgs = @(Get-Content $cfg | Where-Object { $_ -like 'arg=*' } | ForEach-Object { $_ -replace '^arg=', '' })
     $cacheDir = $cfgArgs[[array]::IndexOf($cfgArgs, '--cache-dir') + 1]
 } else {
     $cacheDir = [regex]::Match($old.CommandLine, '--cache-dir\s+("([^"]+)"|(\S+))').Groups | Where-Object { $_.Success } | Select-Object -Last 1 -ExpandProperty Value
 }
-$fleetDir = Join-Path $cacheDir 'fleet'
-$credential = (Get-Content (Join-Path $fleetDir 'node.credential') -ErrorAction Stop | Select-Object -First 1).Trim()
-$parts = $credential.Split('.')
-if ($parts.Count -ne 5 -or $parts[0] -ne 'mkc2') { throw 'node.credential is not an mkc2 credential' }
-$secret = [byte[]]::new($parts[4].Length / 2)
-for ($i = 0; $i -lt $secret.Length; $i++) { $secret[$i] = [Convert]::ToByte($parts[4].Substring(2 * $i, 2), 16) }
+# The node's fleet identity: MAKEPAD_FLEET_DIR from the service config, else
+# the node process owner's %USERPROFILE%\.makepad\fleet.
+$fleetDir = $null
+if ($service) {
+    $fleetDir = (Get-Content $cfg | Where-Object { $_ -like 'env=MAKEPAD_FLEET_DIR=*' } | Select-Object -First 1) -replace '^env=MAKEPAD_FLEET_DIR=', ''
+}
+if (-not $fleetDir) {
+    $ownerSid = (Invoke-CimMethod -InputObject (Get-CimInstance Win32_Process -Filter "ProcessId=$oldPid") -MethodName GetOwnerSid).Sid
+    $profileDir = (Get-CimInstance Win32_UserProfile -Filter "SID='$ownerSid'").LocalPath
+    $fleetDir = Join-Path $profileDir '.makepad\fleet'
+}
+function ConvertFrom-Hex([string]$hex) {
+    $out = [byte[]]::new($hex.Length / 2)
+    for ($i = 0; $i -lt $out.Length; $i++) { $out[$i] = [Convert]::ToByte($hex.Substring(2 * $i, 2), 16) }
+    $out
+}
+$credential = (Get-Content (Join-Path $fleetDir 'id.cred') -ErrorAction Stop | Select-Object -First 1).Trim()
+if (-not $credential.StartsWith('mkid1.')) { throw 'id.cred is not a fleet credential' }
+# id.key: X9.63 hex, 04 || X || Y || d
+$key = ConvertFrom-Hex (Get-Content (Join-Path $fleetDir 'id.key') -ErrorAction Stop | Select-Object -First 1).Trim()
+if ($key.Length -ne 97 -or $key[0] -ne 4) { throw 'id.key is not a P-256 key' }
+$ownPoint = [byte[]]$key[0..64]
+$ecParams = [System.Security.Cryptography.ECParameters]::new()
+$ecParams.Curve = [System.Security.Cryptography.ECCurve+NamedCurves]::nistP256
+$q = [System.Security.Cryptography.ECPoint]::new()
+$q.X = [byte[]]$key[1..32]
+$q.Y = [byte[]]$key[33..64]
+$ecParams.Q = $q
+$ecParams.D = [byte[]]$key[65..96]
+$signer = [System.Security.Cryptography.ECDsa]::Create($ecParams)
 if (-not ('FleetPin' -as [type])) {
     Add-Type -TypeDefinition @'
 using System.Net;
@@ -77,15 +102,29 @@ public static class FleetPin {
 }
 '@
 }
-# The certificate is read on every call: a node may make a new one when it
-# starts. The proof is HMAC-SHA256 under the credential's secret over
-# "mkfleet2 proof|<certificate fingerprint>".
+# The node's certificate is fetched on every call (a TLS handshake and no
+# request: the front does not count it as a failed credential), since a node
+# makes a new one each start; it must carry this machine's own key. The proof
+# is ECDSA P-256 (id.key, SHA-256, r||s hex) over
+# "mkid1 proof|<certificate sha256 hex>|<unix time>".
+function Get-NodeFingerprint {
+    $tcp = [System.Net.Sockets.TcpClient]::new('127.0.0.1', $Port)
+    try {
+        $ssl = [System.Net.Security.SslStream]::new($tcp.GetStream(), $false, [System.Net.Security.RemoteCertificateValidationCallback]{ $true })
+        $ssl.AuthenticateAsClient('makepad-node', $null, [System.Security.Authentication.SslProtocols]::Tls12, $false)
+        $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($ssl.RemoteCertificate)
+        $ssl.Dispose()
+    } finally { $tcp.Close() }
+    if ([Convert]::ToBase64String($cert.GetPublicKey()) -ne [Convert]::ToBase64String($ownPoint)) { throw 'the node on this port does not hold this machine''s fleet key' }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    -join ($sha.ComputeHash($cert.RawData) | ForEach-Object { $_.ToString('x2') })
+}
 function Get-Health([int]$timeout) {
-    $pin = (Get-Content (Join-Path $fleetDir 'tls\tls-fingerprint.txt') -ErrorAction Stop | Select-Object -First 1).Trim().ToLowerInvariant()
+    $pin = Get-NodeFingerprint
     [FleetPin]::Install($pin)
-    $hmac = [System.Security.Cryptography.HMACSHA256]::new($secret)
-    $proof = -join ($hmac.ComputeHash([Text.Encoding]::ASCII.GetBytes("mkfleet2 proof|$pin")) | ForEach-Object { $_.ToString('x2') })
-    $authorization = "MKC2 $($parts[1]).$($parts[2]).$($parts[3]).$proof"
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $sig = $signer.SignData([Text.Encoding]::ASCII.GetBytes("mkid1 proof|$pin|$now"), [System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    $authorization = "MKID $credential.$now." + (-join ($sig | ForEach-Object { $_.ToString('x2') }))
     Invoke-RestMethod "https://127.0.0.1:$Port/health" -Headers @{ Authorization = $authorization } -TimeoutSec $timeout
 }
 $before = Get-Health 5

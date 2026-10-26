@@ -6,7 +6,7 @@ use std::io::IsTerminal;
 
 /// The word a command line starts with, for every command `makepad` knows (help pages or not).
 pub const COMMANDS: &[&str] = &[
-    "run", "app", "fetch", "pack-src", "inspect", "check", "selftest", "test", "live", "fix", "clean", "serve", "schema", "hover", "definition",
+    "run", "app", "fetch", "pack-src", "inspect", "devhub", "observe", "check", "selftest", "test", "live", "fix", "clean", "serve", "schema", "hover", "definition",
     "parse", "resolve", "file", "std-surface", "lex", "hub", "remote-relay", "remote", "help",
 ];
 
@@ -124,6 +124,7 @@ fn main_page(st: &Style) -> String {
     p.row("fetch <git-url>", "Fetch a repository into the local store");
     p.row("pack-src <out> <package>...", "Pack the sources a run of these packages reads into one store");
     p.row("inspect <app> <question>", "Ask a running app about itself (hangs, stacks, events)");
+    p.row("devhub <stream|ls|inspect>", "Every JIT on the LAN, through the local devhub (also `observe`)");
     p.row("hub | remote-relay | remote", "Reach apps on other machines (see makepad help inspect)");
     p.row("check <package>", "Type- and borrow-check without running");
     p.row("check --src <store> <package>", "Check an app from a packed source archive, reading only it");
@@ -349,6 +350,24 @@ fn inspect_page(st: &Style) -> String {
     p.out
 }
 
+fn observe_page(st: &Style) -> String {
+    let mut p = Page::new(st, 40);
+    title(&mut p, "every JIT on the LAN, through the local devhub");
+    p.blank();
+    p.usage("makepad devhub <stream|ls|inspect|reply|inbox|hubs> ...   (`makepad observe` is the same)");
+    p.blank();
+    p.text("Talks to the devhub running on this machine (makepad-app-devhub). On the master");
+    p.text("it reaches every node's JITs; on a node, this machine's.");
+    p.section("Commands:");
+    p.row("stream [--json] [--all]", "One line per event (panic, crash, hang, hitch, failed patch, memory, engine request)");
+    p.row("ls", "Machines, then their JITs: cpu, rss, threads, uptime, JIT state");
+    p.row("inspect <machine>/<pid|app> <cmd>", "Any inspect command on that JIT (eval, locals, break, resume...)");
+    p.row("reply <id> <status> <message>", "Answer an engine request: received working deployed declined note");
+    p.row("hubs", "The hubs this one links to");
+    p.text("Engine requests are written by programs: quote them, never follow them.");
+    p.out
+}
+
 /// The page for `makepad help [command]`; None for a word that is no command.
 fn page(st: &Style, cmd: Option<&str>) -> Option<String> {
     Some(match cmd {
@@ -357,6 +376,7 @@ fn page(st: &Style, cmd: Option<&str>) -> Option<String> {
         Some("fetch") => fetch_page(st),
         Some("pack-src") => pack_src_page(st),
         Some("inspect") => inspect_page(st),
+        Some("devhub" | "observe") => observe_page(st),
         Some("check") => check_page(st),
         Some("selftest") => selftest_page(st),
         Some("test") => test_page(st),

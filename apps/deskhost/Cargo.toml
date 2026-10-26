@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 makepad-desk-link = { path = "../../libs/desk_link", features = ["server"] }
+makepad-network = { path = "../../platform/network" }
 makepad-platform-video = { path = "../../platform/video" }
 makepad-key-code = { path = "../../platform/key_code" }
 makepad-widgets = { path = "../../widgets", default-features = false }

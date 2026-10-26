@@ -155,6 +155,11 @@
     "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": ["localai"], "mobile": false
   },
   {
+    "id": "devhub", "label": "devhub", "package": "makepad-app-devhub",
+    "dir": "apps/devhub", "bin": "makepad-app-devhub", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false
+  },
+  {
     "id": "image", "label": "Image Viewer", "package": "makepad-app-image",
     "dir": "apps/image", "bin": "makepad-app-image", "manifest": null, "args": [],
     "policy": "always_new", "menu_visible": false, "wm_launchable": true, "features": [], "mobile": false

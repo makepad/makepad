@@ -46,7 +46,7 @@ impl AndroidSocketStream for Stream {
         if n < 0 { Err(other("socket stream write failed")) } else { Ok(n as usize) }
     }
     fn flush(&mut self) -> io::Result<()> { Ok(()) }
-    fn peer_fingerprint(&self) -> Option<[u8; 32]> { socket::peer_fingerprint(self.id)?.try_into().ok() }
+    fn peer_certificate(&self) -> Option<Vec<u8>> { socket::peer_certificate(self.id) }
     fn shutdown(&mut self) { if !self.closed { socket::close(self.id); self.closed = true; } }
 }
 

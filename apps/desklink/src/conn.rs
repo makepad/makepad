@@ -6,10 +6,8 @@
 //! for it, and its pings keep the side panel's latency live. Showing it again is a `Resume`,
 //! answered by a key frame: one round trip and one encode, no TLS handshake.
 
-use makepad_network::fleet::auth as fleet_auth;
 use makepad_desk_link::{self as proto, ClientMsg, Inbox, ScreenInfo, ServerMsg};
-use makepad_network::tls::KnownHosts;
-use makepad_network::{SignalToUI, SocketStream};
+use makepad_network::SignalToUI;
 use makepad_widgets::makepad_platform::video_file::{DecodedPicture, StreamVideoCodec, VideoColor, VideoStreamDecoder};
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -144,6 +142,8 @@ pub struct Shared {
     /// How the desktop streams now (its `Rate`).
     pub stream_rate: Option<StreamRate>,
     pub warning: Option<String>,
+    /// The desktop's fleet credential name, proven by its certificate (`fleet::id::connect`).
+    pub machine: Option<String>,
     /// Over the last second: the longest time the network thread did not read (ms; a stall
     /// here fills the desktop's socket and holds its pictures back), and the most pictures
     /// waiting for the decoder (decoding slower than they arrive).
@@ -231,9 +231,7 @@ impl Drop for Connection {
 
 impl Connection {
     /// Opens (and keeps reopening) the connection; `paused` until [`Connection::show`].
-    /// `discovered`: a `known_nodes` machine that may have no desktop: while it is offline it
-    /// is retried rarely (backing off to 10 minutes) instead of every 30 s.
-    pub fn open(name: String, host: String, port: u16, paused: bool, discovered: bool, signal: SignalToUI) -> Connection {
+    pub fn open(name: String, host: String, port: u16, paused: bool, signal: SignalToUI) -> Connection {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let latest = Arc::new(Mutex::new(None));
         let history = Arc::new(Mutex::new(History::default()));
@@ -241,7 +239,7 @@ impl Connection {
         let paused = Arc::new(AtomicBool::new(paused));
         let stop = Arc::new(AtomicBool::new(false));
         let reconnect = Arc::new(AtomicBool::new(false));
-        let max_backoff = Duration::from_secs(if discovered { 600 } else { 30 });
+        let max_backoff = Duration::from_secs(30);
         let view = Arc::new(ViewWindow::default());
         let net = Net { host: host.clone(), port, shared: shared.clone(), latest: latest.clone(), history: history.clone(), view: view.clone(), rx, paused: paused.clone(), stop: stop.clone(), reconnect: reconnect.clone(), signal, cmd: tx.clone(), max_backoff };
         let thread = match std::thread::Builder::new().name(format!("desklink-net-{host}")).spawn(move || net.run()) {
@@ -367,27 +365,14 @@ impl Net {
     }
 
     fn session(&self) -> Result<String, String> {
-        let credential = fleet_auth::own_credential()
-            .ok_or_else(|| format!("no fleet credential ({})", fleet_auth::client_dir().join(fleet_auth::CLIENT_CREDENTIAL).display()))?;
-        let port = self.port.to_string();
-        let (mut stream, fingerprint) = SocketStream::connect_capture(&self.host, &port).map_err(|e| format!("connect: {e}"))?;
-        // ssh-style pin of the desktop's certificate, loud when it changes
-        let known = KnownHosts::new(fleet_auth::client_dir().join(fleet_auth::KNOWN_NODES));
-        if let Some(previous) = known.observe(&format!("{}:{}", self.host, self.port), &fingerprint) {
-            let text = format!(
-                "the certificate of {}:{} CHANGED (was {}, now {})",
-                self.host,
-                self.port,
-                makepad_network::tls::to_hex(&previous),
-                makepad_network::tls::to_hex(&fingerprint)
-            );
-            eprintln!("desklink: WARNING {text}");
-            self.shared.lock().unwrap().warning = Some(text);
-        }
+        // the desktop proves itself with its fleet certificate (checked against the fleet root);
+        // the hello carries this machine's proof bound to that certificate
+        let (mut stream, server, authorization) = makepad_network::fleet::id::connect(&self.host, &self.port.to_string()).map_err(|e| format!("connect: {e}"))?;
+        self.shared.lock().unwrap().machine = Some(server.name);
         let hello = ClientMsg::Hello {
             version: proto::VERSION,
             name: format!("desklink {}", std::env::var("USER").unwrap_or_default()),
-            authorization: credential.authorization(&fingerprint),
+            authorization,
             screen: -1,
             paused: self.paused.load(Ordering::Acquire),
             caps: decoder_caps(),

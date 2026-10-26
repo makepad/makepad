@@ -8,30 +8,29 @@ relays, no NAT traversal, no discovery service. The one implementation of the fo
 ## Transport and security
 
 - TCP, default port **8790**, wrapped in TLS on each OS's own TLS stack (`makepad_network::tls`).
-- The desktop presents a self-signed certificate (`~/.makepad/wm/desk-link/tls`). The viewer
-  pins it ssh-style in `~/.makepad/ai-hub/known_nodes` (`host:port`). A changed certificate is
-  reported loudly and the connection goes on: the fleet proof below is what protects the desktop.
+- The desktop presents a certificate made from its fleet key (`~/.makepad/fleet/id.key`) that
+  carries its fleet credential (tools/fleet-identity.md). The viewer checks it against the fleet
+  root (`root.pub`): signature, key match, expiry, revocation. Nothing is pinned; a desktop that
+  is not a machine of this fleet is refused before the viewer sends anything.
 - The desktop serves only when **all** of these hold. Otherwise nothing listens:
-  - its settings enable it (`~/.makepad/wm/desk-link.conf`, `enabled = on`);
+  - its settings enable it (`~/.makepad/wm/desk-link.conf` or `~/.makepad/deskhost.conf`,
+    `enabled = on`);
   - the bind address is loopback, a private LAN address or `0.0.0.0`;
-  - its fleet key (`fleet.key`, the AI hub's `<cache>/fleet`) loads.
-- **Peer allowlist.** Each server serves only the addresses in its `allow_peers` setting (the
-  viewer machines). The list is required: an empty or missing list means the server does not
-  start, so it never runs open to the whole LAN on a credential alone.
-  - Anything else is closed before TLS, and the address is checked again after authentication.
-    The peer must also be a LAN address (loopback, RFC 1918, link-local, IPv6 ULA).
+  - its fleet identity (`id.key`, `id.cred`, `root.pub` in `~/.makepad/fleet`) loads. A Desk
+    Host waits for it, checking every 10 s.
+- **Before TLS.** A peer that is not a LAN address (loopback, RFC 1918, link-local, IPv6 ULA) is
+  closed unread.
   - Refusals are logged with the address only, at most once a minute per address.
   - Five failed credentials within a minute ban the address for 15 minutes. Sessions are capped
     at 8, with at most 4 per address.
-  - IP pinning assumes the viewer machines have a DHCP reservation, so their address does not
-    change.
-- **Authentication.** The viewer's first message carries a fleet proof:
-  `MKC2 <id>.<role>.<expiry>.<HMAC-SHA256(secret, "mkfleet2 proof|" + certificate sha256 hex)>`.
-  - The secret comes from the viewer's credential (`~/.makepad/ai-hub/client.credential`).
-  - The proof is bound to the certificate the desktop presented, so a proof captured by anything
-    else is useless.
-  - The desktop requires role `lan`, an unexpired credential, and an id not on its `revoked` list.
-  - Anything else is answered `Refused` and closed.
+- **Authentication.** The viewer's first message carries its fleet proof:
+  `MKID <credential>.<unix time>.<ECDSA-P256(id.key, "mkid1 proof|" + certificate sha256 hex + "|" + time)>`.
+  - The proof is bound to the certificate the desktop presented and to the time (5 minutes),
+    so a proof captured by anything else is useless. No secret crosses the wire.
+  - The desktop checks the credential against its fleet root (signed, unexpired, not revoked)
+    and requires the **admin**: the admin Mac's `device` credential, on a connection from the
+    address bound into that credential.
+  - Anything else is answered `Refused` with the reason and closed.
 
 ## Framing
 

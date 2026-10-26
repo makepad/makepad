@@ -1,19 +1,20 @@
 //! The fleet: credentials, the TLS front and the LAN bind rule, shared by
 //! every service a fleet machine exposes (the AI hub, the asset store's sync
-//! listener). Operator guide: tools/aihub-fleet.md.
+//! listener). Operator guide: tools/fleet-identity.md.
 //!
-//! - [`auth`]: the fleet key, `mkc2` credentials and certificate-bound MKC2
-//!   proofs; this process as a fleet client (`known_nodes` pinning).
+//! - [`id`]: fleet identity: per-machine keys and root-signed credentials,
+//!   certificate-bound proofs, rights ([`id::require`]), signed
+//!   announcements, revocation; this process as a fleet client.
 //! - [`front`]: the TLS front, the only listener a service exposes off
 //!   loopback: it authenticates every request, applies the service's route
 //!   policy, and proxies to the service's loopback HTTP server.
 //! - [`lan`]: which addresses a fleet listener may bind (private LAN only).
 
 #[cfg(not(target_arch = "wasm32"))]
-pub mod auth;
+pub mod id;
 #[cfg(target_arch = "wasm32")]
-#[path = "auth_portable.rs"]
-pub mod auth;
+#[path = "id_portable.rs"]
+pub mod id;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod front;
 #[cfg(target_arch = "wasm32")]

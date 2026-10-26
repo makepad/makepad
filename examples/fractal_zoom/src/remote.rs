@@ -16,7 +16,7 @@
 //!
 //! Nodes: `MAKEPAD_AI_KERNEL_NODES` (`host:port,...` fleet endpoints) and
 //! the fleet beacon (`MAKEPAD_AI_FLEET`), with this machine's fleet
-//! credential (`~/.makepad/ai-hub/client.credential`). The set is looked at
+//! identity (`~/.makepad/fleet`: tools/fleet-identity.md). The set is looked at
 //! again every few seconds; a node that appears joins, one that fails drops
 //! its tiles back as lost and is retried after a pause.
 
@@ -48,7 +48,7 @@ fn probe_nodes() -> (Vec<(KernelNode, KernelInfoJson)>, Vec<NodeStatus>) {
                 if host_port.starts_with("http://") {
                     urls.push(host_port.to_string());
                 } else {
-                    fleet::auth::mark_fleet_endpoint(host_port);
+                    fleet::id::mark_fleet_endpoint(host_port);
                     urls.push(format!("https://{host_port}"));
                 }
             }
@@ -63,10 +63,10 @@ fn probe_nodes() -> (Vec<(KernelNode, KernelInfoJson)>, Vec<NodeStatus>) {
     if urls.is_empty() {
         return (Vec::new(), status);
     }
-    if fleet::auth::own_credential().is_none() {
+    if fleet::id::me().is_none() {
         status.push(NodeStatus {
-            addr: fleet::auth::client_dir().join(fleet::auth::CLIENT_CREDENTIAL).display().to_string(),
-            state: "no fleet credential: every node will refuse".into(),
+            addr: fleet::id::dir().display().to_string(),
+            state: format!("{}: every node will refuse", fleet::id::why_no_identity()),
         });
     }
     let probes: Vec<_> = urls
@@ -102,9 +102,9 @@ fn classify(err: &str) -> String {
     let why = if cfg!(target_os = "macos") && e.contains("os error 65") {
         "blocked: allow Local Network for this app (System Settings > Privacy & Security > Local Network)"
     } else if e.contains(": 401") || e.contains(": 403") || e.contains("unauthor") || e.contains("forbidden") {
-        "auth refused (credential not from this fleet's key, expired or revoked)"
-    } else if e.contains("certificate") || e.contains("fingerprint") || e.contains("known") {
-        "TLS: the node's certificate does not match known_nodes"
+        "auth refused (credential not of this fleet, expired, revoked, or not allowed kernels)"
+    } else if e.contains("not a fleet server") || e.contains("certificate") {
+        "TLS: the node's certificate is not of this fleet"
     } else if e.contains("refused") || e.contains("timed out") || e.contains("timeout") || e.contains("unreachable") || e.contains("no route") || e.contains("connect") {
         "unreachable"
     } else if e.contains(": 404") {

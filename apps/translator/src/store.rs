@@ -26,7 +26,8 @@ pub struct Saved {
     pub traditional: bool,
     pub pinyin: bool,
     pub glossary: String,
-    /// The credential a pairing invitation handed this device.
+    /// The credential a pairing invitation handed this device (public; its key and the fleet
+    /// root are installed in the fleet dir, `pair::Invite::install`).
     pub credential: String,
     /// Kokoro voice ids per language (empty: the default).
     /// Optional so a file saved before voices existed still loads.

@@ -243,10 +243,10 @@ impl SecureTransportStream {
     }
 
     /// Client handshake without CA validation (self-signed servers): the
-    /// server's leaf certificate SHA-256 is taken at the server-auth break
-    /// and returned, for the caller's known-hosts record. TLS 1.2+,
+    /// server's leaf certificate DER is taken at the server-auth break
+    /// and returned, for the caller to authenticate. TLS 1.2+,
     /// ECDHE-ECDSA AEAD suites only.
-    pub(crate) fn connect_capture(tcp_stream: TcpStream) -> io::Result<(Self, [u8; 32])> {
+    pub(crate) fn connect_capture(tcp_stream: TcpStream) -> io::Result<(Self, Vec<u8>)> {
         // A peer that never answers (not a TLS server) must not hang us.
         tcp_stream.set_read_timeout(Some(Duration::from_secs(20)))?;
         let mut tcp_stream = Box::new(tcp_stream);
@@ -254,7 +254,7 @@ impl SecureTransportStream {
         if ssl_context.is_null() {
             return Err(io_other("SSLCreateContext returned null"));
         }
-        let result = (|| -> io::Result<[u8; 32]> {
+        let result = (|| -> io::Result<Vec<u8>> {
             Self::configure(ssl_context, &mut tcp_stream)?;
             check_ssl_status("SSLSetSessionOption(BreakOnServerAuth)", unsafe {
                 SSLSetSessionOption(ssl_context, kSSLSessionOptionBreakOnServerAuth, true)
@@ -268,7 +268,7 @@ impl SecureTransportStream {
                     }
                     s if s == errSSLServerAuthCompleted => {
                         let leaf = peer_leaf_der(ssl_context)?;
-                        seen = Some(crate::digest::sha256_hash(&leaf));
+                        seen = Some(leaf);
                     }
                     ERR_SSL_WOULD_BLOCK => {
                         return Err(io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timed out"))
@@ -277,8 +277,8 @@ impl SecureTransportStream {
                 }
             }
         })();
-        let fingerprint = match result {
-            Ok(fp) => fp,
+        let der = match result {
+            Ok(der) => der,
             Err(err) => {
                 unsafe {
                     let _ = SSLClose(ssl_context);
@@ -288,7 +288,7 @@ impl SecureTransportStream {
             }
         };
         tcp_stream.set_read_timeout(None)?;
-        Ok((Self { tcp_stream, ssl_context, is_closed: false }, fingerprint))
+        Ok((Self { tcp_stream, ssl_context, is_closed: false }, der))
     }
 
     /// Server handshake with an in-memory identity.
@@ -473,11 +473,11 @@ impl SocketStream {
         }
     }
 
-    pub fn connect_capture(host: &str, port: &str) -> io::Result<(Self, [u8; 32])> {
+    pub fn connect_capture(host: &str, port: &str) -> io::Result<(Self, Vec<u8>)> {
         let tcp_stream = connect_lan(host, port)?;
         let _ = tcp_stream.set_nodelay(true);
-        let (stream, fp) = SecureTransportStream::connect_capture(tcp_stream)?;
-        Ok((SocketStream::Tls(stream), fp))
+        let (stream, der) = SecureTransportStream::connect_capture(tcp_stream)?;
+        Ok((SocketStream::Tls(stream), der))
     }
 
     pub fn into_tls(self, host: &str, ignore_ssl_cert: bool) -> io::Result<Self> {

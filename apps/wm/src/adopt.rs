@@ -125,7 +125,7 @@ impl App {
             // with a tray and a dropdown (dropdown.rs), no tile. Its run view takes the GPU
             // descriptor channel; nothing lays it out.
             #[cfg(not(target_arch = "wasm32"))]
-            if app == clients::HUB_SERVICE_APP && hub_app::is_hub_pid(pid) {
+            if (app == clients::HUB_SERVICE_APP && hub_app::is_hub_pid(pid)) || (app == clients::DEVHUB_SERVICE_APP && hub_app::is_service_pid(&hub_app::DEVHUB, pid)) {
                 log!("wm: {label} (pid {pid}) came to the WM by itself as this node's service; client {client}: no tile");
                 self.state_mut().clients.insert(client, clients::ClientSlot::adopted_service(client, &app, pid));
                 let hub_port = self.state_mut().hub_port;

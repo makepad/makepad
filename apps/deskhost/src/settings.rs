@@ -3,8 +3,6 @@
 //!
 //! ```text
 //! enabled = on            # off (the default): nothing listens, the host exits
-//! allow_peers = 10.0.0.222  # the viewer machines' addresses, comma separated; required: empty
-//!                         # or missing serves nobody (IP pinning: give them a DHCP reservation)
 //! host = 0.0.0.0          # loopback, a private LAN address of this machine, or 0.0.0.0
 //! port = 8790
 //! kbps = 0                # 0: by picture size
@@ -12,8 +10,11 @@
 //!                         # and the watching viewers' displays
 //! key_every = 2           # seconds between scheduled key frames while pictures flow (0: only
 //!                         # on a new viewer, a request or a lost picture)
-//! fleet_dir =             # fleet.key + revoked; default: ~/.makepad/weights/fleet (the AI hub's)
 //! ```
+//!
+//! It serves only with this machine's fleet identity (`id.key`, `id.cred`, `root.pub` in
+//! `~/.makepad/fleet`, `%USERPROFILE%\.makepad\fleet` on Windows; tools/fleet-identity.md),
+//! and only to the admin (the Mac's device credential from its bound address).
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -26,14 +27,11 @@ pub struct Settings {
     pub kbps: u32,
     pub fps: u32,
     pub key_every: u32,
-    pub fleet_dir: Option<PathBuf>,
-    /// The only peers served (`allow_peers`).
-    pub allow_peers: Vec<IpAddr>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { enabled: false, host: "0.0.0.0".into(), port: makepad_desk_link::DEFAULT_PORT, kbps: 0, fps: 120, key_every: 2, fleet_dir: None, allow_peers: Vec::new() }
+        Settings { enabled: false, host: "0.0.0.0".into(), port: makepad_desk_link::DEFAULT_PORT, kbps: 0, fps: 120, key_every: 2 }
     }
 }
 
@@ -91,20 +89,6 @@ impl Settings {
                 "kbps" => value.parse().map(|k| s.kbps = k).is_ok(),
                 "fps" => value.parse::<u32>().ok().filter(|f| (1..=240).contains(f)).map(|f| s.fps = f).is_some(),
                 "key_every" => value.parse().map(|k| s.key_every = k).is_ok(),
-                "allow_peers" => {
-                    let mut ok = true;
-                    s.allow_peers = value
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|v| !v.is_empty())
-                        .filter_map(|v| v.parse::<IpAddr>().map_err(|_| ok = false).ok())
-                        .collect();
-                    ok
-                }
-                "fleet_dir" => {
-                    s.fleet_dir = Some(PathBuf::from(value)).filter(|_| !value.is_empty());
-                    true
-                }
                 _ => false,
             };
             if !ok {
@@ -149,10 +133,6 @@ impl Settings {
         }
         Ok(SocketAddr::new(ip, self.port))
     }
-
-    pub fn fleet_dir(&self) -> PathBuf {
-        self.fleet_dir.clone().unwrap_or_else(|| home().join("weights").join("fleet"))
-    }
 }
 
 #[cfg(test)]
@@ -162,10 +142,9 @@ mod tests {
     #[test]
     fn off_unless_enabled_and_lan_only() {
         assert!(!Settings::parse("").enabled);
-        let s = Settings::parse("enabled = on\nhost = 10.0.0.230\nfps = 0\nallow_peers = 10.0.0.222");
+        let s = Settings::parse("enabled = on\nhost = 10.0.0.230\nfps = 0");
         assert!(s.enabled && s.fps == 120 && s.key_every == 2 && s.listen_addr().is_ok());
         assert_eq!(Settings::parse("key_every = 0").key_every, 0);
-        assert_eq!(s.allow_peers, vec!["10.0.0.222".parse::<IpAddr>().unwrap()]);
         assert!(Settings::parse("host = 1.1.1.1").listen_addr().is_err());
     }
 
@@ -174,14 +153,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("deskhost-conf-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("deskhost.conf");
-        std::fs::write(&path, "# mine\nenabled = on   # yes\nallow_peers = 10.0.0.222\n").unwrap();
+        std::fs::write(&path, "# mine\nenabled = on   # yes\nfps = 60\n").unwrap();
         std::env::set_var("MAKEPAD_DESKHOST_CONF", &path);
         Settings::set_enabled(false).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(text, "# mine\nenabled = off\nallow_peers = 10.0.0.222\n");
+        assert_eq!(text, "# mine\nenabled = off\nfps = 60\n");
         assert!(!Settings::load().enabled);
         Settings::set_enabled(true).unwrap();
-        assert!(Settings::load().enabled && Settings::load().allow_peers.len() == 1);
+        assert!(Settings::load().enabled && Settings::load().fps == 60);
         std::env::remove_var("MAKEPAD_DESKHOST_CONF");
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);

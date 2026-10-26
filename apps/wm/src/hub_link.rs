@@ -79,7 +79,7 @@ impl HubLink {
             if !conf.model.is_empty() {
                 crate::host::set_child_env("MAKEPAD_AI_MODEL", std::ffi::OsStr::new(&conf.model));
             }
-            Made::Link(Link { hub: FleetHub::start(base), app: crate::hub_app::HubApp::new(path, conf) })
+            Made::Link(Link { hub: FleetHub::start(base), app: crate::hub_app::HubApp::new(&crate::hub_app::AI_HUB, path, conf) })
         }
         #[cfg(target_arch = "wasm32")]
         {

@@ -13,7 +13,7 @@
 //! failures throttled per address (5 in 10 min → 15 min ban), an audit line
 //! per refusal, and idle connections closed after 10 min.
 
-use super::auth::{now_secs, Role, Verifier};
+use super::id::{now_secs, Peer, Role, Verifier};
 use crate::tls::{TlsServer, TlsStream};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -26,6 +26,7 @@ pub const HEADER_FRONT: &str = "X-Makepad-Front";
 pub const HEADER_CLIENT: &str = "X-Makepad-Client";
 pub const HEADER_ROLE: &str = "X-Makepad-Role";
 pub const HEADER_PEER: &str = "X-Makepad-Peer";
+pub const HEADER_ADMIN: &str = "X-Makepad-Admin";
 
 const MAX_HEAD: usize = 16 * 1024;
 const HEAD_DEADLINE: Duration = Duration::from_secs(15);
@@ -40,8 +41,9 @@ const FAILURE_WINDOW: Duration = Duration::from_secs(10 * 60);
 const BAN: Duration = Duration::from_secs(15 * 60);
 
 /// Who may reach which route of the service behind a front:
-/// `(role, method, path)`; the path may carry a query.
-pub type RoutePolicy = Arc<dyn Fn(Role, &str, &str) -> bool + Send + Sync>;
+/// `(peer, method, path)`; the path may carry a query. Admin routes check
+/// [`Peer::admin`] (the admin Mac's credential from its bound address).
+pub type RoutePolicy = Arc<dyn Fn(&Peer, &str, &str) -> bool + Send + Sync>;
 
 /// Which of the service's loopback servers serves a path (a service may
 /// split its routes over several planes).
@@ -315,13 +317,19 @@ pub fn parse_head(head: &[u8]) -> Option<ParsedHead> {
 }
 
 impl ParsedHead {
-    pub fn rewrite(&self, secret: &str, extra: &[String], client: &str, role: Role, peer: IpAddr) -> Vec<u8> {
+    pub fn rewrite(&self, secret: &str, extra: &[String], peer: &Peer) -> Vec<u8> {
         let mut out = String::new();
         for line in self.lines.iter().chain(extra) {
             out.push_str(line);
             out.push_str("\r\n");
         }
-        out.push_str(&format!("{HEADER_FRONT}: {secret}\r\n{HEADER_CLIENT}: {client}\r\n{HEADER_ROLE}: {}\r\n{HEADER_PEER}: {peer}\r\n\r\n", role.as_str()));
+        out.push_str(&format!(
+            "{HEADER_FRONT}: {secret}\r\n{HEADER_CLIENT}: {}\r\n{HEADER_ROLE}: {}\r\n{HEADER_ADMIN}: {}\r\n{HEADER_PEER}: {}\r\n\r\n",
+            peer.name,
+            peer.role.as_str(),
+            u8::from(peer.admin()),
+            peer.addr
+        ));
         out.into_bytes()
     }
 }
@@ -341,7 +349,7 @@ fn serve(config: &FrontConfig, tcp: TcpStream, peer: SocketAddr) -> Result<(), R
         // credential guess.
         Ok(1) if first[0].is_ascii_uppercase() => {
             let mut tcp = tcp;
-            let body = "{\"error\":\"this service speaks https only (see tools/aihub-fleet.md)\"}";
+            let body = "{\"error\":\"this service speaks https only (see tools/fleet-identity.md)\"}";
             let _ = write!(
                 tcp,
                 "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -364,26 +372,27 @@ fn serve(config: &FrontConfig, tcp: TcpStream, peer: SocketAddr) -> Result<(), R
         respond(&mut tls, 401, "a fleet credential is required");
         return Err(Refusal::Auth("no credential".into()));
     };
-    let cred = match config.verifier.verify(authorization, now_secs()) {
+    let cred = match config.verifier.check(authorization, peer.ip(), now_secs()) {
         Ok(c) => c,
         Err(e) => {
             respond(&mut tls, 401, "credential refused");
             // Who it claims to be (the id and role are not secret; the proof
             // is never logged), so a refusal names its client.
-            let claimed = authorization.trim().strip_prefix("MKC2 ").map(|v| v.split('.').take(2).collect::<Vec<_>>().join(".")).unwrap_or_default();
+            let claimed = authorization.trim().strip_prefix("MKID ").map(|v| v.split('.').skip(1).take(2).collect::<Vec<_>>().join(".")).unwrap_or_default();
             let claimed: String = claimed.chars().filter(|c| c.is_ascii_graphic()).take(80).collect();
             return Err(Refusal::Auth(format!("{e} (claims {claimed:?}, {} {})", parsed.method, parsed.path.chars().take(80).collect::<String>())));
         }
     };
-    if !(config.policy)(cred.role, &parsed.method, &parsed.path) {
+    if !(config.policy)(&cred, &parsed.method, &parsed.path) {
         respond(&mut tls, 403, "not allowed for this credential");
-        return Err(Refusal::Other(format!("{} {} {} refused for role {}", cred.client_id, parsed.method, parsed.path, cred.role.as_str())));
+        let admin = if cred.admin() { " (admin)" } else { "" };
+        return Err(Refusal::Other(format!("{} {} {} refused for role {}{admin}", cred.name, parsed.method, parsed.path, cred.role.as_str())));
     }
     let mut inner = TcpStream::connect_timeout(&(config.inner)(&parsed.path), Duration::from_secs(5))
         .map_err(|e| Refusal::Other(format!("inner connect: {e}")))?;
     let _ = inner.set_nodelay(true);
     inner
-        .write_all(&parsed.rewrite(&config.front_secret, &config.inner_headers, &cred.client_id, cred.role, normalize(peer.ip())))
+        .write_all(&parsed.rewrite(&config.front_secret, &config.inner_headers, &cred))
         .and_then(|_| inner.write_all(&rest))
         .map_err(|e| Refusal::Other(format!("inner write: {e}")))?;
     pump(&mut tls, &mut inner);
@@ -455,6 +464,9 @@ fn pump(tls: &mut TlsStream, inner: &mut TcpStream) {
 pub struct Caller {
     pub client_id: String,
     pub role: Role,
+    /// The admin Mac's credential on a connection from its bound address
+    /// ([`Peer::admin`]); a machine-local caller is admin too.
+    pub admin: bool,
     /// The calling app's name (`X-Hub-App` header), for the control panel.
     pub app: Option<String>,
 }
@@ -462,7 +474,7 @@ pub struct Caller {
 impl Caller {
     /// A machine-local (loopback-only node) or in-process caller.
     pub fn local() -> Self {
-        Caller { client_id: "local".into(), role: Role::Lan, app: None }
+        Caller { client_id: "local".into(), role: Role::Device, admin: true, app: None }
     }
 }
 
@@ -477,7 +489,7 @@ pub fn caller_from_headers(lines: &[String], front_secret: &str) -> Option<Calle
     if !crate::tls::constant_time_eq(secret.as_bytes(), front_secret.as_bytes()) {
         return None;
     }
-    Some(Caller { client_id: get(HEADER_CLIENT)?, role: Role::parse(&get(HEADER_ROLE)?)?, app: None })
+    Some(Caller { client_id: get(HEADER_CLIENT)?, role: Role::parse(&get(HEADER_ROLE)?)?, admin: get(HEADER_ADMIN)? == "1", app: None })
 }
 
 /// The real client address behind a front, for the inner server's per-IP
@@ -503,19 +515,25 @@ mod tests {
 
     #[test]
     fn head_rewrite_strips_credentials_and_spoofed_identity() {
-        let head = b"POST /generate HTTP/1.1\r\nHost: x\r\nAuthorization: MKC2 a.lan.9.ff\r\nX-Makepad-Client: admin\r\nx-makepad-front: guess\r\nContent-Length: 2\r\n\r\n";
+        let head = b"POST /generate HTTP/1.1\r\nHost: x\r\nAuthorization: MKID mkid1.a.node.9.-.00.00.1.ff\r\nX-Makepad-Client: admin\r\nx-makepad-admin: 1\r\nx-makepad-front: guess\r\nContent-Length: 2\r\n\r\n";
         let p = parse_head(head).unwrap();
         assert_eq!(p.method, "POST");
         assert_eq!(p.path, "/generate");
-        assert_eq!(p.authorization.as_deref(), Some("MKC2 a.lan.9.ff"));
-        let out = String::from_utf8(p.rewrite("s3cret", &["Authorization: Bearer inner".to_string()], "rik-mac", Role::Lan, "10.0.0.5".parse().unwrap())).unwrap();
-        assert!(!out.contains("MKC2"));
+        assert_eq!(p.authorization.as_deref(), Some("MKID mkid1.a.node.9.-.00.00.1.ff"));
+        let mac: IpAddr = "10.0.0.222".parse().unwrap();
+        let peer = Peer { name: "rik-mac".into(), role: Role::Device, addr: mac, from: Some(mac), point: [4; 65] };
+        let out = String::from_utf8(p.rewrite("s3cret", &["Authorization: Bearer inner".to_string()], &peer)).unwrap();
+        assert!(!out.contains("MKID"));
         assert!(out.contains("Authorization: Bearer inner\r\n"));
-        assert!(!out.contains("guess") && !out.contains("admin"));
+        assert!(!out.contains("guess") && !out.contains("admin\r\n"));
         assert!(out.contains("X-Makepad-Client: rik-mac\r\n"));
         assert!(out.ends_with("\r\n\r\n"));
         let lines: Vec<String> = out.split("\r\n").map(String::from).collect();
-        assert_eq!(caller_from_headers(&lines, "s3cret"), Some(Caller { client_id: "rik-mac".into(), role: Role::Lan, app: None }));
+        assert_eq!(caller_from_headers(&lines, "s3cret"), Some(Caller { client_id: "rik-mac".into(), role: Role::Device, admin: true, app: None }));
         assert_eq!(caller_from_headers(&lines, "other"), None);
+        // The same credential from elsewhere is not admin behind the front either.
+        let away = Peer { addr: "10.0.0.9".parse().unwrap(), ..peer };
+        let lines: Vec<String> = String::from_utf8(p.rewrite("s3cret", &[], &away)).unwrap().split("\r\n").map(String::from).collect();
+        assert_eq!(caller_from_headers(&lines, "s3cret").map(|c| c.admin), Some(false));
     }
 }

@@ -15,7 +15,6 @@ import argparse
 import array
 import base64
 import hashlib
-import hmac
 import json
 import pathlib
 import random
@@ -105,43 +104,143 @@ def song(rng):
     return lyrics, caption, voice, style
 
 
-HUB = pathlib.Path(os.path.expanduser("~/.makepad/ai-hub"))
+# --- fleet identity (tools/fleet-identity.md), standard library only ---------
+# The node's TLS certificate carries its fleet credential: it is checked against
+# the fleet root (root.pub) before anything is sent; the request carries this
+# machine's ECDSA P-256 proof bound to that certificate and the time.
+
+FLEET = pathlib.Path(os.environ.get("MAKEPAD_FLEET_DIR") or pathlib.Path(os.environ.get("MAKEPAD_HOME") or os.path.expanduser("~/.makepad")) / "fleet")
+
+_P = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF
+_A = _P - 3
+_N = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+_G = (0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296,
+      0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5)
+
+
+def _add(p, q):
+    if p is None:
+        return q
+    if q is None:
+        return p
+    if p[0] == q[0] and (p[1] + q[1]) % _P == 0:
+        return None
+    if p == q:
+        m = (3 * p[0] * p[0] + _A) * pow(2 * p[1], -1, _P)
+    else:
+        m = (q[1] - p[1]) * pow(q[0] - p[0], -1, _P)
+    x = (m * m - p[0] - q[0]) % _P
+    return (x, (m * (p[0] - x) - p[1]) % _P)
+
+
+def _mul(k, p):
+    out = None
+    while k:
+        if k & 1:
+            out = _add(out, p)
+        p = _add(p, p)
+        k >>= 1
+    return out
+
+
+def _point(raw):
+    if len(raw) != 65 or raw[0] != 4:
+        raise RuntimeError("not an uncompressed P-256 point")
+    return (int.from_bytes(raw[1:33], "big"), int.from_bytes(raw[33:], "big"))
+
+
+def _sign(d, msg):
+    e = int.from_bytes(hashlib.sha256(msg).digest(), "big")
+    while True:
+        k = int.from_bytes(os.urandom(32), "big") % _N
+        if not k:
+            continue
+        r = _mul(k, _G)[0] % _N
+        s = pow(k, -1, _N) * (e + r * d) % _N
+        if r and s:
+            return r.to_bytes(32, "big") + s.to_bytes(32, "big")
+
+
+def _verify(point, msg, sig):
+    r, s = int.from_bytes(sig[:32], "big"), int.from_bytes(sig[32:], "big")
+    if not (0 < r < _N and 0 < s < _N):
+        return False
+    e = int.from_bytes(hashlib.sha256(msg).digest(), "big")
+    w = pow(s, -1, _N)
+    q = _add(_mul(e * w % _N, _G), _mul(r * w % _N, _point(point)))
+    return q is not None and q[0] % _N == r
+
+
+def _tlv(buf):
+    tag, first = buf[0], buf[1]
+    if first < 0x80:
+        length, head = first, 2
+    else:
+        n = first & 0x7F
+        length, head = int.from_bytes(buf[2:2 + n], "big"), 2 + n
+    return tag, buf[head:head + length], buf[head + length:]
+
+
+# the fleet identity extension's OID (DER, as platform/network/src/tls.rs writes it)
+_OID_FLEET = bytes([0x06, 0x14, 0x69, 0x81, 0xDA, 0xEB, 0xB4, 0xD9, 0x85, 0xD6, 0xB3, 0xB1, 0xCA, 0xE5,
+                    0xBA, 0x8B, 0xAD, 0x96, 0xA3, 0x95, 0xDC, 0x74])
+
+
+def _leaf_point_and_credential(der):
+    _, cert, _ = _tlv(der)
+    _, tbs, _ = _tlv(cert)
+    fields = []
+    while tbs:
+        tag, content, tbs = _tlv(tbs)
+        fields.append((tag, content))
+    skip = 1 if fields[0][0] == 0xA0 else 0
+    _, _alg, after = _tlv(fields[skip + 5][1])
+    _, bits, _ = _tlv(after)
+    point, credential = bits[1:], None
+    for tag, content in fields:
+        if tag == 0xA3:
+            _, exts, _ = _tlv(content)
+            while exts:
+                _, ext, exts = _tlv(exts)
+                if ext.startswith(_OID_FLEET):
+                    _, text, _ = _tlv(ext[len(_OID_FLEET):])
+                    credential = text.decode()
+    return point, credential
+
+
+def check_server(der):
+    """The node's certificate carries a credential of this fleet for its key."""
+    point, text = _leaf_point_and_credential(der)
+    if text is None:
+        raise RuntimeError("not a fleet server: its certificate carries no fleet credential")
+    tag, name, role, expiry, frm, cred_point, sig = text.strip().split(".")
+    root = bytes.fromhex((FLEET / "root.pub").read_text().strip())
+    signed = f"{tag} cred|{name}|{role}|{expiry}|{frm}|{cred_point}".encode()
+    revoked = (FLEET / "revoked").read_text().split() if (FLEET / "revoked").exists() else []
+    if tag != "mkid1" or not _verify(root, signed, bytes.fromhex(sig)):
+        raise RuntimeError("not a fleet server: not a credential of this fleet")
+    if name in revoked or int(expiry) <= time.time():
+        raise RuntimeError(f"not a fleet server: {name} is revoked or expired")
+    if bytes.fromhex(cred_point) != point:
+        raise RuntimeError("not a fleet server: the certificate key is not the credential's")
+    return name
 
 
 def fleet_authorization(fingerprint_hex):
-    """MKC2 proof for a node presenting this certificate (tools/aihub-fleet.md):
-    the credential itself (client.credential) never leaves this machine."""
-    tag, ident, role, expiry, secret = (HUB / "client.credential").read_text().strip().split(".")
-    if tag != "mkc2":
-        raise RuntimeError("client.credential is not an mkc2 fleet credential")
-    proof = hmac.new(bytes.fromhex(secret), ("mkfleet2 proof|" + fingerprint_hex).encode(), hashlib.sha256).hexdigest()
-    return f"MKC2 {ident}.{role}.{expiry}.{proof}"
-
-
-def known_node(host_port, fingerprint_hex):
-    """ssh-style known nodes (~/.makepad/ai-hub/known_nodes, shared with the
-    Rust clients): record on first contact; a changed certificate is warned
-    about loudly, logged, recorded, and the request goes on."""
-    path = HUB / "known_nodes"
-    lines = path.read_text().splitlines() if path.exists() else []
-    old = next((l.split()[1] for l in lines if l.split()[:1] == [host_port]), None)
-    if old == fingerprint_hex:
-        return
-    if old is not None:
-        print(f"@@@ WARNING: THE TLS CERTIFICATE OF {host_port} HAS CHANGED\n@@@ was {old}\n@@@ now {fingerprint_hex}", file=sys.stderr, flush=True)
-        with open(HUB / "known_nodes.log", "a") as log:
-            log.write(f"{int(time.time())} {host_port} changed {old} -> {fingerprint_hex}\n")
-    lines = [l for l in lines if l.split()[:1] != [host_port]] + [f"{host_port} {fingerprint_hex}"]
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text("\n".join(lines) + "\n")
-    tmp.replace(path)
+    """This machine's proof for a node presenting this certificate: no secret
+    leaves the machine (id.key signs, id.cred names it)."""
+    key = bytes.fromhex((FLEET / "id.key").read_text().strip())
+    credential = (FLEET / "id.cred").read_text().strip()
+    now = int(time.time())
+    sig = _sign(int.from_bytes(key[65:], "big"), f"mkid1 proof|{fingerprint_hex}|{now}".encode())
+    return f"MKID {credential}.{now}.{sig.hex()}"
 
 
 def fetch(base, path, body=None, timeout=15):
     """One request to a node. https://host:port is a fleet node: TLS whose
-    certificate is checked against (and recorded in) known_nodes, then the
-    credential proof bound to that certificate. http://host:port is only for
-    a node not yet on the fleet TLS (sent no credential)."""
+    certificate is checked against the fleet root, then this machine's proof
+    bound to that certificate. http://host:port is only for a node's loopback
+    service (sent no credential)."""
     u = urllib.parse.urlsplit(base)
     data = None if body is None else json.dumps(body).encode()
     headers = {"Content-Type": "application/json"}
@@ -152,9 +251,9 @@ def fetch(base, path, body=None, timeout=15):
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         conn = http.client.HTTPSConnection(u.hostname, u.port, context=ctx, timeout=timeout)
         conn.connect()
-        fingerprint = hashlib.sha256(conn.sock.getpeercert(binary_form=True)).hexdigest()
-        known_node(f"{u.hostname}:{u.port}", fingerprint)
-        headers["Authorization"] = fleet_authorization(fingerprint)
+        der = conn.sock.getpeercert(binary_form=True)
+        check_server(der)
+        headers["Authorization"] = fleet_authorization(hashlib.sha256(der).hexdigest())
     else:
         conn = http.client.HTTPConnection(u.hostname, u.port, timeout=timeout)
     try:

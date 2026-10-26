@@ -138,10 +138,10 @@ impl SocketStream {
     }
 
     /// TLS on Schannel without chain validation (self-signed server); returns
-    /// the server certificate's SHA-256. Synchronous Schannel rather than
+    /// the server leaf certificate DER. Synchronous Schannel rather than
     /// WinRT: a WinRT socket cannot safely issue a second blocking operation
     /// on the same thread.
-    pub fn connect_capture(host: &str, port: &str) -> io::Result<(Self, [u8; 32])> {
+    pub fn connect_capture(host: &str, port: &str) -> io::Result<(Self, Vec<u8>)> {
         use std::net::ToSocketAddrs;
         let port: u16 = port.parse().map_err(|_| io_other("bad port"))?;
         let mut last = None;
@@ -150,9 +150,9 @@ impl SocketStream {
                 Ok(tcp) => {
                     let _ = tcp.set_nodelay(true);
                     tcp.set_read_timeout(Some(Duration::from_secs(20)))?;
-                    let (stream, fp) = crate::tls::platform::connect_capture(tcp, host)?;
+                    let (stream, der) = crate::tls::platform::connect_capture(tcp, host)?;
                     stream.tcp().set_read_timeout(None)?;
-                    return Ok((Self { socket: None, reader: None, writer: None, schannel: Some(stream) }, fp));
+                    return Ok((Self { socket: None, reader: None, writer: None, schannel: Some(stream) }, der));
                 }
                 Err(e) => last = Some(e),
             }

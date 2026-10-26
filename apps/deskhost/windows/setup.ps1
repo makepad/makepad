@@ -1,6 +1,6 @@
-# Desk Host setup, all in one: installs the built host, writes its settings (served only to the
-# listed viewer addresses), registers the at-logon task in this user's session, the console task
-# and the inbound firewall rule, then starts it. Asks for elevation itself (one UAC prompt).
+# Desk Host setup, all in one: installs the built host, writes its settings (it serves only the
+# fleet admin), registers the at-logon task in this user's session, the console task and the
+# inbound firewall rule (the listed viewer addresses only), then starts it. Asks for elevation itself (one UAC prompt).
 #   powershell -ep bypass -f setup.ps1 [-Exe <built exe>] [-Peers 10.0.0.222] [-Port 8790]
 #   -SettingsOnly: rewrites deskhost.conf (and the firewall rule's peers) and restarts the host
 # Undo: Unregister-ScheduledTask -TaskName "Makepad Desk Host"; Unregister-ScheduledTask -TaskName "Makepad Desk Host console"
@@ -47,20 +47,21 @@ if (-not $SettingsOnly) {
     Copy-Item -Force $Exe $installed
 }
 
-# 2. settings: this machine's LAN address, the viewers' addresses only
+# 2. settings: this machine's LAN address
 $home_ = Join-Path $ForProfile ".makepad"
 New-Item -ItemType Directory -Force -Path $home_ | Out-Null
 $ip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -like "10.*" -or $_.IPAddress -like "192.168.*" -or $_.IPAddress -like "172.*" } | Where-Object { $_.PrefixOrigin -ne "WellKnown" } | Select-Object -First 1).IPAddress
 if (-not $ip) { throw "no private LAN address on this machine" }
-$fleet = Join-Path $home_ "weights\fleet"
-if (-not (Test-Path (Join-Path $fleet "fleet.key"))) { Write-Warning "no fleet key in $fleet yet: the host will not serve until fleet.key is there" }
+$fleet = Join-Path $home_ "fleet"
+if (-not ((Test-Path (Join-Path $fleet "id.key")) -and (Test-Path (Join-Path $fleet "id.cred")) -and (Test-Path (Join-Path $fleet "root.pub")))) {
+    Write-Warning "no fleet identity (id.key, id.cred, root.pub) in $fleet yet: the host waits for it (tools/fleet-identity.md)"
+}
 @(
     "# Desk Host (written by setup.ps1)",
     "enabled = on",
     "host = $ip",
     "port = $Port",
-    "fps = $Fps",
-    "allow_peers = $($Peers -join ', ')"
+    "fps = $Fps"
 ) | Set-Content -Encoding ascii (Join-Path $home_ "deskhost.conf")
 
 if (-not $SettingsOnly) {
@@ -91,7 +92,8 @@ if (-not $SettingsOnly) {
     $svc.GetFolder("\").RegisterTaskDefinition($consoleTask, $def, 6, "SYSTEM", $null, 5, $sddl) | Out-Null
 }
 
-# 5. inbound TCP from the viewers only (any network profile: the rule names the peers)
+# 5. inbound TCP from the viewers only (any network profile: the rule names the peers; an OS
+#    firewall in front of the host's own admin-only check)
 Remove-NetFirewallRule -DisplayName "Makepad Desk Host" -ErrorAction SilentlyContinue
 New-NetFirewallRule -DisplayName "Makepad Desk Host" -Direction Inbound -Action Allow -Protocol TCP `
     -LocalPort $Port -RemoteAddress $Peers -Program $installed -Profile Any | Out-Null

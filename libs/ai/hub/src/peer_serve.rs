@@ -321,7 +321,7 @@ pub fn route_blob(
         ));
     }
 
-    // -- a paired device (fleet credential checked by the front) fetches
+    // -- a paired phone (fleet credential checked by the front) fetches
     // the on-device model files: no node-to-node ticket, the same
     // allow-list, range and concurrency rules below --
     let peer = &shared.peer;
@@ -332,7 +332,7 @@ pub fn route_blob(
             "peer-cache serving is disabled on this node".to_string(),
         ));
     }
-    if caller.role != makepad_network::fleet::auth::Role::Device {
+    if caller.role != makepad_network::fleet::id::Role::Paired {
         // -- fail closed without a secret --
         let Some(secret) = peer.secret.as_ref().filter(|_| peer.serve) else {
             return respond(error_response(

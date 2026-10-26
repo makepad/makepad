@@ -49,6 +49,7 @@ mod desk_link;
 mod dock_layout;
 mod dock_autohide;
 mod hub_link;
+mod devhub_link;
 #[cfg(not(target_arch = "wasm32"))]
 mod hub_app;
 /// The deploy's prebuild of what the WM starts (the `makepad-wm-build` binary).
@@ -63,6 +64,7 @@ mod local_use;
 mod scroll_gesture;
 use scroll_gesture::Gesture as ScrollGesture;
 use hub_link::HubLink;
+use devhub_link::DevhubLink;
 use trays::WmTrays;
 use dropdown::Dropdowns;
 use makepad_ai_hub_panel::hub_control;
@@ -597,6 +599,8 @@ pub struct App {
     /// This node's AI hub: the AI Hub app the WM starts, and what the WM tells it.
     #[rust]
     hub_link: HubLink,
+    #[rust]
+    devhub_link: DevhubLink,
     /// The apps' tray icons in the bar's tray area (`trays`).
     #[rust]
     trays: WmTrays,
@@ -1041,6 +1045,13 @@ impl App {
         if app_id == clients::HUB_SERVICE_APP {
             let processes = self.processes();
             if self.hub_link.start_from_launcher(processes, host::now()) {
+                return;
+            }
+        }
+        // devhub too: a supervised service, started again after its Quit, never a window
+        if app_id == clients::DEVHUB_SERVICE_APP {
+            let processes = self.processes();
+            if self.devhub_link.start_from_launcher(processes, host::now()) {
                 return;
             }
         }
@@ -4243,9 +4254,10 @@ impl App {
         let processes = self.processes();
         let pool = cx.task_pool();
         self.hub_link.tick(processes, host::now(), &pool);
+        self.devhub_link.tick(processes, host::now());
         // Off (its Quit): the bar keeps a dim slot to start it again, until its own tray is back.
         let off = self.hub_link.is_off(processes);
-        let hub_tray = self.state.as_ref().is_some_and(|s| s.clients.iter().any(|(id, c)| c.service && self.trays.has_tray(*id as u64)));
+        let hub_tray = self.state.as_ref().is_some_and(|s| s.clients.iter().any(|(id, c)| c.service && c.app == clients::HUB_SERVICE_APP && self.trays.has_tray(*id as u64)));
         if self.trays.set_hub_off(cx, off, hub_tray) {
             self.trays_changed(cx);
         }
@@ -7017,6 +7029,7 @@ impl App {
             // The node's AI Hub app keeps running for the next WM (hub_app; Windows: it ends).
             let pool = cx.task_pool();
             self.hub_link.shutdown(&pool);
+            self.devhub_link.shutdown(&pool);
             if self.state.is_some() {
                 self.kill_warm_previews(cx);
                 self.kill_pane_child(cx);

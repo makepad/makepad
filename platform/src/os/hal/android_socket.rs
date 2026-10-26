@@ -80,9 +80,20 @@ impl AndroidSocketStream for Stream {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
-    fn peer_fingerprint(&self) -> Option<[u8; 32]> {
-        let mut fp = [0u8; 32];
-        (makepad_hal::hal_socket_fingerprint(self.id, &mut fp) == 32).then_some(fp)
+    fn peer_certificate(&self) -> Option<Vec<u8>> {
+        let mut der = Vec::new();
+        loop {
+            let len = makepad_hal::hal_socket_certificate(self.id, &mut der);
+            if len <= 0 {
+                return None;
+            }
+            let len = len as usize;
+            if len <= der.len() {
+                der.truncate(len);
+                return Some(der);
+            }
+            der.resize(len, 0);
+        }
     }
     fn shutdown(&mut self) {
         if !self.closed {

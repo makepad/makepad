@@ -181,6 +181,7 @@ pub fn remote(args: &[String]) -> i32 {
                     match h.via {
                         Via::Ssh { ssh, relax, .. } => println!("{} ssh {ssh} {relax}", h.name),
                         Via::Dial { .. } => println!("{} dial", h.name),
+                        Via::Fleet { addr } => println!("{} fleet {addr}", h.name),
                     }
                 }
                 Ok(())

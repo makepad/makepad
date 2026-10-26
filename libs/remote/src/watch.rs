@@ -31,7 +31,7 @@ pub fn service(ring: Arc<Ring>) -> Factory {
 /// (a host counts its watchers with them).
 pub fn service_with(ring: Arc<Ring>, opened: fn(), closed: fn()) -> Factory {
     Arc::new(move |conn, open| {
-        let from = open.args.split_whitespace().find_map(|a| a.strip_prefix("from=")?.parse::<u64>().ok()).or_else(|| conn.resume().and_then(|r| r.seqs.iter().find(|s| s.0 == "watch").map(|s| s.1)));
+        let from = open.args.split_whitespace().find_map(|a| a.strip_prefix("from=")?.parse::<u64>().ok()).or_else(|| conn.resume().and_then(|r| r.seqs.iter().find(|s| s.0 == open.service).map(|s| s.1)));
         let cur = match from {
             Some(seq) => ring.after(Kind::Watch, seq),
             None => ring.live(Kind::Watch),

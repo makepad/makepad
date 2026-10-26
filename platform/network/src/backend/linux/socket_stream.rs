@@ -401,8 +401,8 @@ impl SocketStream {
     }
 
     /// TLS 1.2+ without CA validation (self-signed servers); returns the
-    /// server certificate's SHA-256 for the caller's known-hosts record.
-    pub fn connect_capture(host: &str, port: &str) -> io::Result<(Self, [u8; 32])> {
+    /// server leaf certificate DER for the caller's known-hosts record.
+    pub fn connect_capture(host: &str, port: &str) -> io::Result<(Self, Vec<u8>)> {
         let tcp_stream = connect_lan(host, port)?;
         let _ = tcp_stream.set_nodelay(true);
         let _ = tcp_stream.set_read_timeout(Some(Duration::from_secs(5)));
@@ -413,10 +413,10 @@ impl SocketStream {
             if unsafe { SSL_version(stream.ssl) } < 0x0303 {
                 return Err(io_other("server negotiated a TLS version below 1.2"));
             }
-            Ok(crate::digest::sha256_hash(&stream.peer_leaf_der()?))
+            stream.peer_leaf_der()
         })();
         match result {
-            Ok(fp) => Ok((SocketStream::Tls(stream), fp)),
+            Ok(der) => Ok((SocketStream::Tls(stream), der)),
             Err(err) => {
                 stream.shutdown();
                 Err(err)

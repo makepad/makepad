@@ -23,6 +23,8 @@ pub enum Via {
     Ssh { ssh: String, relax: String, env: Vec<(String, String)> },
     /// dials in; `key` and `fingerprint` are hex
     Dial { key: String, fingerprint: String },
+    /// a devhub node at `addr` (`host:port`), dialled with this hub's fleet credential
+    Fleet { addr: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,8 +130,10 @@ impl Hosts {
                     key: text("key").ok_or_else(|| format!("host `{name}`: via = \"dial\" needs key = \"<hex>\""))?,
                     fingerprint: text("fingerprint").unwrap_or_default(),
                 },
-                Some(other) => return Err(format!("host `{name}`: via must be \"ssh\" or \"dial\", not `{other}`")),
-                None => return Err(format!("host `{name}`: missing via = \"ssh\" | \"dial\"")),
+                Some("fleet") if t.contains_key("env") => return Err(format!("host `{name}`: env applies to via = \"ssh\" hosts")),
+                Some("fleet") => Via::Fleet { addr: text("addr").ok_or_else(|| format!("host `{name}`: via = \"fleet\" needs addr = \"host:port\""))? },
+                Some(other) => return Err(format!("host `{name}`: via must be \"ssh\", \"dial\" or \"fleet\", not `{other}`")),
+                None => return Err(format!("host `{name}`: missing via = \"ssh\" | \"dial\" | \"fleet\"")),
             };
             out.hosts.push(Host { name: name.clone(), via });
         }
@@ -157,6 +161,7 @@ impl Hosts {
                         s.push_str(&format!("fingerprint = {}\n", quote(fingerprint)));
                     }
                 }
+                Via::Fleet { addr } => s.push_str(&format!("via = \"fleet\"\naddr = {}\n", quote(addr))),
             }
         }
         s
@@ -188,7 +193,7 @@ impl Hosts {
             .iter()
             .filter_map(|h| match &h.via {
                 Via::Dial { key, .. } => makepad_network::tunnel::Psk::from_hex(key),
-                Via::Ssh { .. } => None,
+                Via::Ssh { .. } | Via::Fleet { .. } => None,
             })
             .collect()
     }

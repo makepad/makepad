@@ -14,4 +14,4 @@ $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoi
 Register-ScheduledTask -TaskName "Makepad Desk Host" -Action $action -Trigger $trigger `
     -Principal $principal -Settings $settings -Force | Out-Null
 Write-Host "registered 'Makepad Desk Host' for $user (starts at the next logon; Start-ScheduledTask to start now)"
-Write-Host "it serves only with %USERPROFILE%\.makepad\deskhost.conf: enabled = on, allow_peers = <viewer IPs>"
+Write-Host "it serves only with %USERPROFILE%\.makepad\deskhost.conf: enabled = on, and the fleet identity in %USERPROFILE%\.makepad\fleet"

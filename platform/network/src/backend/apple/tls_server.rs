@@ -22,6 +22,14 @@ extern "C" {
     static kSecAttrKeyClassPrivate: CFStringRef;
     static kSecAttrKeySizeInBits: CFStringRef;
     static kSecKeyAlgorithmECDSASignatureMessageX962SHA256: CFStringRef;
+    static kSecKeyAlgorithmECDHKeyExchangeStandard: CFStringRef;
+    fn SecKeyCopyKeyExchangeResult(
+        key: SecKeyRef,
+        algorithm: CFStringRef,
+        peer: SecKeyRef,
+        parameters: *const c_void,
+        error: *mut CFErrorRef,
+    ) -> *const c_void;
     fn SecKeyCreateRandomKey(parameters: *const c_void, error: *mut CFErrorRef) -> SecKeyRef;
     fn SecKeyCopyExternalRepresentation(key: SecKeyRef, error: *mut CFErrorRef) -> *const c_void;
     static kSecAttrKeyClassPublic: CFStringRef;
@@ -137,6 +145,34 @@ pub fn generate_p256() -> io::Result<[u8; 97]> {
         bytes
             .try_into()
             .map_err(|_| io_other("unexpected P-256 key representation"))
+    }
+}
+
+pub fn ecdh_p256(key: &[u8; 97], peer_point: &[u8]) -> io::Result<[u8; 32]> {
+    let key = load_key(key)?;
+    unsafe {
+        let data = CFDataCreate(ptr::null(), peer_point.as_ptr(), peer_point.len() as isize);
+        let attrs = ec_attributes_class(Some(kSecAttrKeyClassPublic));
+        let mut error: CFErrorRef = ptr::null();
+        let peer = SecKeyCreateWithData(data, attrs, &mut error);
+        CFRelease(data);
+        CFRelease(attrs);
+        release_error(error);
+        if peer.is_null() {
+            return Err(io_other("SecKeyCreateWithData rejected the P-256 peer point"));
+        }
+        let peer = Key(peer);
+        let parameters = CFDictionaryCreate(ptr::null(), ptr::null(), ptr::null(), 0, ptr::null(), ptr::null());
+        let mut error: CFErrorRef = ptr::null();
+        let result = SecKeyCopyKeyExchangeResult(key.0, kSecKeyAlgorithmECDHKeyExchangeStandard, peer.0, parameters, &mut error);
+        CFRelease(parameters);
+        release_error(error);
+        if result.is_null() {
+            return Err(io_other("SecKeyCopyKeyExchangeResult failed"));
+        }
+        let bytes = cf_data_bytes(result);
+        CFRelease(result);
+        bytes.try_into().map_err(|_| io_other("unexpected P-256 shared secret length"))
     }
 }
 

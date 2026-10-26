@@ -497,9 +497,9 @@ impl App {
             let h = c.history.lock().unwrap();
             format!("history {:.1} s · {} packets · {:.0} MB", h.span_ns() as f64 / 1e9, h.len(), h.bytes() as f64 / (1 << 20) as f64)
         };
-        let (state, welcome, cursor, offset, fps, mbps, warning, stream_fps, read_gap_ms, decode_queue, stream_rate) = {
+        let (state, welcome, cursor, offset, fps, mbps, warning, stream_fps, read_gap_ms, decode_queue, stream_rate, machine) = {
             let s = c.shared.lock().unwrap();
-            (s.state.clone().unwrap_or(State::Connecting), s.welcome.clone(), s.cursor, s.offset_ns, s.fps, s.mbps, s.warning.clone(), s.stream_fps, s.read_gap_ms, s.decode_queue, s.stream_rate.clone())
+            (s.state.clone().unwrap_or(State::Connecting), s.welcome.clone(), s.cursor, s.offset_ns, s.fps, s.mbps, s.warning.clone(), s.stream_fps, s.read_gap_ms, s.decode_queue, s.stream_rate.clone(), s.machine.clone())
         };
         let (host, port, name) = (c.host.clone(), c.port, c.name.clone());
         let details = self.details;
@@ -547,7 +547,9 @@ impl App {
         if details {
             if let Some(w) = &welcome {
                 let screen = w.screens.get(w.screen as usize).map(|s| s.name.clone()).unwrap_or_default();
-                lines.push(format!("{} · {screen} {}x{}{}", w.server, w.stream[0], w.stream[1], if w.input { String::new() } else { format!(" · {}", w.input_note) }));
+                // the desktop's own name, and the fleet machine its certificate proved
+                let machine = machine.as_ref().map(|m| format!(" (fleet: {m})")).unwrap_or_default();
+                lines.push(format!("{}{machine} · {screen} {}x{}{}", w.server, w.stream[0], w.stream[1], if w.input { String::new() } else { format!(" · {}", w.input_note) }));
                 // how the picture is shown: the window in device pixels, the scale (whole: each
                 // remote pixel a whole block, nothing resampled)
                 lines.push(format!("window {}x{} px{} · scale {:.4}{}", v.window_px[0], v.window_px[1], if v.fullscreen { " (fullscreen)" } else { "" }, view.scale, if view.whole { " whole-pixel" } else { " resampled" }));

@@ -31,6 +31,20 @@ fn scratch(name: &str) -> std::path::PathBuf {
     dir
 }
 
+/// A fleet node needs this machine's fleet identity: a test root, a node
+/// credential issued by it (process-global; this binary installs it once).
+fn install_identity() {
+    use makepad_network::fleet::id::{self, generate_key, now_secs, point_of, Fleet, Me, Role, Root};
+    static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        let root = Root::generate().unwrap();
+        let key = generate_key().unwrap();
+        let cred = root.issue("stop-test", Role::Node, now_secs() + 3600, None, &point_of(&key)).unwrap();
+        id::install_fleet(Fleet::new(root.point(), Default::default()));
+        id::install_local(Me::new(key, cred).unwrap());
+    });
+}
+
 #[test]
 fn a_stopped_service_closes_its_ports_and_starts_again() {
     // Loopback node.
@@ -50,9 +64,7 @@ fn a_stopped_service_closes_its_ports_and_starts_again() {
         return;
     };
     let dir = scratch("stop-fleet");
-    let fleet = dir.join("fleet");
-    std::fs::create_dir_all(&fleet).unwrap();
-    makepad_network::fleet::auth::FleetKey::generate().unwrap().save(&fleet.join(makepad_network::fleet::auth::FLEET_KEY)).unwrap();
+    install_identity();
     let handle = start_service(config(&dir, &ip.to_string(), 0)).unwrap();
     let addr = handle.addr;
     assert!(!addr.ip().is_loopback());

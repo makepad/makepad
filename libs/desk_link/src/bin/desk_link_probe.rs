@@ -20,9 +20,7 @@
 //! whatever the bands): it reports that as `Stats.decode_us` once a second, as a viewer does,
 //! so the desktop's decode-aware bands can be checked without a slow decoder.
 
-use makepad_network::fleet::auth as fleet_auth;
 use makepad_desk_link::{self as proto, ClientMsg, Inbox, ServerMsg};
-use makepad_network::SocketStream;
 use std::io::Read;
 use std::time::{Duration, Instant};
 
@@ -111,10 +109,9 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
     let mut check = Check::default();
     let (mut last_keyreq, mut keyreqs) = (Instant::now(), 0u32);
     let keyreq = opts.keyreq;
-    let credential = fleet_auth::own_credential().ok_or("no fleet credential")?;
-    let (mut stream, fp) = SocketStream::connect_capture(host, port).map_err(|e| format!("connect: {e}"))?;
-    println!("probe: certificate {}", makepad_network::tls::to_hex(&fp));
-    let hello = ClientMsg::Hello { version: proto::VERSION, name: "probe".into(), authorization: credential.authorization(&fp), screen: -1, paused, caps: opts.caps };
+    let (mut stream, server, authorization) = makepad_network::fleet::id::connect(host, port).map_err(|e| format!("connect: {e}"))?;
+    println!("probe: desktop {} ({})", server.name, server.role.as_str());
+    let hello = ClientMsg::Hello { version: proto::VERSION, name: "probe".into(), authorization, screen: -1, paused, caps: opts.caps };
     proto::write_all(&mut stream, &hello.encode()).map_err(|e| e.to_string())?;
     stream.set_read_timeout(Some(Duration::from_millis(1))).map_err(|e| e.to_string())?;
     stream.set_write_timeout(Some(Duration::from_millis(5))).map_err(|e| e.to_string())?;

@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn the_hub_off_slot_is_last_and_goes_when_the_hub_has_a_tray() {
-        let mut t = WmTrays::default();
+        let t = WmTrays::default();
         // no GL context in a unit test: the slot's presence is what is tested via the flag path
         assert!(!t.is_hub_off(0));
         assert!(t.bar().is_empty());

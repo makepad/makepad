@@ -1408,14 +1408,19 @@ pub fn hal_socket_timeout(id: i64, read: u32, ms: i32) {
     backend::android::socket::set_timeout(id, read != 0, ms)
 }
 
-/// Writes the SHA-256 of the server certificate (once handshaken) into `out` (32 bytes). Returns 32,
-/// or -1 when there is none.
+/// Copies the server's leaf certificate DER into `out` when it fits. Returns the required
+/// byte length (call with an empty buffer to query it), or -1 when there is no certificate.
 #[cfg(target_os = "android")]
 #[relax_api]
-pub fn hal_socket_fingerprint(id: i64, out: &mut [u8]) -> i64 {
-    match backend::android::socket::peer_fingerprint(id) {
-        Some(fp) if fp.len() == 32 && out.len() >= 32 => { out[..32].copy_from_slice(&fp); 32 }
-        _ => -1,
+pub fn hal_socket_certificate(id: i64, out: &mut [u8]) -> i64 {
+    match backend::android::socket::peer_certificate(id) {
+        Some(der) => {
+            if out.len() >= der.len() {
+                out[..der.len()].copy_from_slice(&der);
+            }
+            der.len() as i64
+        }
+        None => -1,
     }
 }
 

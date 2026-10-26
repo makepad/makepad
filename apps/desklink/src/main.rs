@@ -235,17 +235,15 @@ pub(crate) fn short_name(name: &str, host: &str) -> String {
     }
 }
 
-/// The desktops to list: `--connect` ones and saved hosts (the bool: found by discovery rather
-/// than named; retried rarely while offline).
-fn hosts() -> Vec<(String, String, u16, bool)> {
-    let mut out: Vec<(String, String, u16, bool)> = Vec::new();
-    let mut put = |name: String, spec: &str, discovered: bool| {
+/// The desktops to list: `--connect` ones and saved hosts.
+fn hosts() -> Vec<(String, String, u16)> {
+    let mut out: Vec<(String, String, u16)> = Vec::new();
+    let mut add = |name: String, spec: &str| {
         let (host, port) = port_of(spec);
-        if !host.is_empty() && !out.iter().any(|(_, h, p, _)| *h == host && *p == port) {
-            out.push((short_name(&name, &host), host, port, discovered));
+        if !host.is_empty() && !out.iter().any(|(_, h, p)| *h == host && *p == port) {
+            out.push((short_name(&name, &host), host, port));
         }
     };
-    let mut add = |name: String, spec: &str| put(name, spec, false);
     let args: Vec<String> = std::env::args().collect();
     for w in args.windows(2) {
         if w[0] == "--connect" {
@@ -800,9 +798,9 @@ impl MatchEvent for App {
             self.conns.push(Connection::play_dump(path, gpu, still, self.signal.clone()));
         }
         self.measure_refresh(cx);
-        for (name, host, port, discovered) in hosts() {
+        for (name, host, port) in hosts() {
             let paused = !self.conns.is_empty();
-            self.conns.push(Connection::open(name, host, port, paused, discovered, self.signal.clone()));
+            self.conns.push(Connection::open(name, host, port, paused, self.signal.clone()));
         }
         // the first window opens every desktop known at the start, the first one shown
         for i in 0..self.conns.len() {

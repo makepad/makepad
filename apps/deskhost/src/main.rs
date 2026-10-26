@@ -4,10 +4,11 @@
 //!
 //! It runs in the user's session (a LaunchAgent / an at-logon task) as a tray app (`app`): a
 //! menu-bar / notification-area icon says whether it serves and who watches, and its dropdown
-//! (`view`) switches serving on and off, lists the viewers with their stream and the allowed
-//! peers, and quits. It serves only while `~/.makepad/deskhost.conf` says `enabled = on` (the
-//! switch writes that key; the other keys as the window manager's `desk-link.conf`). Everything network-facing is the shared server of `libs/desk_link`
-//! (LAN-only bind and peers, TLS, fleet credentials of role `lan`).
+//! (`view`) switches serving on and off, lists the viewers with their stream, and quits. It
+//! serves only while `~/.makepad/deskhost.conf` says `enabled = on` (the switch writes that key;
+//! the other keys as the window manager's `desk-link.conf`). Everything network-facing is the
+//! shared server of `libs/desk_link` (LAN-only bind, the fleet certificate, admin-only viewing:
+//! tools/fleet-identity.md).
 //!
 //! The screen comes from the OS's capture service as GPU frames, only when it changed (frames
 //! carry their own damage); each goes to the platform's hardware encoder
@@ -144,8 +145,6 @@ pub struct Report {
     /// `host:port` it listens on (while serving).
     pub addr: String,
     pub viewers: Vec<makepad_desk_link_panel::ViewerRow>,
-    /// The settings' `allow_peers`.
-    pub allow_peers: Vec<String>,
     /// The OS grants it is missing (macOS), empty when it has them.
     pub grants: String,
 }
@@ -228,7 +227,7 @@ fn main() {
     let mut desktop = windows::WinDesktop::new();
     if args.iter().any(|a| a == "--check") {
         println!("settings {}: {settings:?}", Settings::path().display());
-        println!("{}: listen {:?}, fleet key in {}", settings::host_name(), settings.listen_addr(), settings.fleet_dir().display());
+        println!("{}: listen {:?}, fleet identity in {}", settings::host_name(), settings.listen_addr(), makepad_network::fleet::id::dir().display());
         #[cfg(target_os = "macos")]
         println!("{}", desktop.permissions(false));
         return;
@@ -259,7 +258,6 @@ pub fn host_main(desktop: &mut dyn Desktop, ctl: &HostControl, wake_rx: &Receive
     let mut status = Status::default();
     loop {
         let settings = Settings::load();
-        ctl.update(|r| r.allow_peers = settings.allow_peers.iter().map(|p| p.to_string()).collect());
         if take_quit(ctl) {
             return;
         }
@@ -297,7 +295,7 @@ fn take_quit_or_settings(ctl: &HostControl) -> bool {
     quit
 }
 
-/// The server, once it can listen: until then (no fleet key installed yet, a conf being
+/// The server, once it can listen: until then (no fleet identity installed yet, a conf being
 /// edited) it says why and tries again every 10 s, reading the settings anew each time.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn start(desktop: &mut dyn Desktop, status: &mut Status, ctl: &HostControl, wake_rx: &Receiver<()>) -> Option<(Settings, Server)> {
@@ -311,10 +309,7 @@ fn start(desktop: &mut dyn Desktop, status: &mut Status, ctl: &HostControl, wake
         let started = settings.listen_addr().and_then(|addr| {
             let config = ServerConfig {
                 addr,
-                allow_peers: settings.allow_peers.clone(),
-                tls_dir: settings::home().join("deskhost/tls"),
                 tls_name: format!("makepad desk host {}", settings::host_name()),
-                fleet_dir: settings.fleet_dir(),
                 log: Arc::new(|t: &str| log(t)),
                 clock: clock_ns,
                 input: desktop.input(),
@@ -325,7 +320,7 @@ fn start(desktop: &mut dyn Desktop, status: &mut Status, ctl: &HostControl, wake
         });
         match started {
             Ok(server) => {
-                log(&format!("listens on {} for {:?} (certificate {})", server.addr, settings.allow_peers, server.fingerprint));
+                log(&format!("listens on {} as {} (the fleet admin only)", server.addr, server.name));
                 status.set(Some(format!("listens on {}", server.addr)), Some(desktop.grants()));
                 ctl.update(|r| {
                     r.state = HostState::Serving;

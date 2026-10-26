@@ -62,6 +62,7 @@ workspace.members = [
     "apps/flow",
     "apps/ai-hub",
     "apps/aihub",
+    "apps/devhub",
     "apps/mixer",
     "apps/storybook",
     # The tiled-RTS map generator, shared by the importer and the sandbox.
@@ -256,6 +257,7 @@ workspace.members = [
     "tools/map_tiles",
     "tools/map_bake",
     "libs/remote",
+    "libs/devhub",
     "libs/stack",
     "tools/service_host",
     "tools/agents",

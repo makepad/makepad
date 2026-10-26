@@ -449,10 +449,10 @@ fn worker(base: String, shared: std::sync::Arc<std::sync::Mutex<Shared>>, rx: st
     // hub starts with no game).
     let mut local: Option<HubCommand> = None;
     let mut local_sent = false;
-    // The same client identity the other apps use: the credential in
-    // MAKEPAD_AI_HUB_CREDENTIAL or ~/.makepad/ai-hub/client.credential, the
-    // node's certificate recorded in ~/.makepad/ai-hub/known_nodes.
-    makepad_network::fleet::auth::mark_fleet_endpoint(base.trim_start_matches("https://").trim_start_matches("http://"));
+    // The same client identity the other apps use: this machine's fleet
+    // credential (~/.makepad/fleet/id.cred + id.key); the node's certificate
+    // is checked against the fleet root (tools/fleet-identity.md).
+    makepad_network::fleet::id::mark_fleet_endpoint(base.trim_start_matches("https://").trim_start_matches("http://"));
     let mut t = HttpFleetTransport;
     loop {
         while let Ok(cmd) = rx.try_recv() {

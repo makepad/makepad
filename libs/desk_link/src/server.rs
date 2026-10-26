@@ -3,24 +3,26 @@
 //! the macOS/Windows desk host); each gives its own input injection ([`Input`]).
 //!
 //! Security, in the order a connection meets it:
-//! 1. nothing listens but on a LAN address, and only with a loadable fleet key
-//!    (`Server::start` refuses otherwise, the AI hub's way; the owner's settings decide whether
-//!    to start it at all);
-//! 2. a peer that is not on the LAN (loopback, RFC 1918, link-local, ULA), or not in the
-//!    server's `allow_peers` (the viewer machines' addresses: required, an empty list serves
-//!    nobody), is closed unread; a peer whose credential fails again and again is banned a while;
-//! 3. TLS with the desktop's own identity (its `tls_dir`, pinned by viewers);
-//! 4. the viewer's first message carries a fleet proof bound to that certificate: role `lan`,
-//!    not expired, not revoked, or the connection is refused and closed.
+//! 1. nothing listens but on a LAN address, and only with this machine's fleet identity
+//!    (`id.key`, `id.cred`, `root.pub` in `fleet::id::dir()`; `Server::start` refuses
+//!    otherwise, the AI hub's way; the owner's settings decide whether to start it at all);
+//! 2. a peer that is not on the LAN (loopback, RFC 1918, link-local, ULA) is closed unread; so
+//!    is a peer whose credential failed again and again (banned a while) and one past the
+//!    session caps;
+//! 3. TLS with the desktop's fleet certificate (made from its `id.key`, carrying its
+//!    credential): viewers check it against the fleet root, nothing is pinned;
+//! 4. the viewer's first message carries a fleet proof bound to that certificate (signed by
+//!    the root, not expired, not revoked, fresh), and the viewer must be the admin
+//!    (`fleet::id::Need::Admin`: the admin Mac's device credential, connecting from the address
+//!    bound into it), or the connection is refused with the reason and closed.
 //!
 //! One thread per session owns its TLS stream (TLS contexts are not safe for concurrent read
 //! and write): it reads with a 1 ms timeout and writes what the UI queued in between. Input is
 //! injected right there (`inject`), never through the UI thread.
 
 use crate::{self as proto, ClientMsg, GamepadState, Inbox, ServerMsg};
-use makepad_network::fleet::auth::{now_secs, Role, Verifier};
+use makepad_network::fleet::id::{self, now_secs, Need, Verifier};
 use std::net::IpAddr;
-use std::path::PathBuf;
 use makepad_network::tls::{TlsIdentity, TlsServer, TlsStream};
 use std::io::Read;
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -69,14 +71,9 @@ pub type Log = Arc<dyn Fn(&str) + Send + Sync>;
 
 pub struct ServerConfig {
     pub addr: SocketAddr,
-    /// The only peer addresses served (the viewers' machines; IP pinning assumes a DHCP
-    /// reservation for them). Empty: the server does not start.
-    pub allow_peers: Vec<IpAddr>,
-    /// The TLS identity's directory (made on first start) and its certificate's name.
-    pub tls_dir: PathBuf,
+    /// The certificate's common name (the certificate itself is made from this machine's
+    /// fleet key and carries its credential: [`fleet_identity`]).
     pub tls_name: String,
-    /// `fleet.key` and `revoked` (the AI hub's fleet directory).
-    pub fleet_dir: PathBuf,
     pub log: Log,
     /// The desktop's clock (ns): `Pong`, `Video.sent_ns` (and the owner's `built_ns`).
     pub clock: fn() -> u64,
@@ -148,7 +145,8 @@ pub struct SendStats {
 
 pub struct Server {
     pub addr: SocketAddr,
-    pub fingerprint: String,
+    /// This machine's fleet credential name (what viewers see it as).
+    pub name: String,
     stop: Arc<AtomicBool>,
     pub rx: Receiver<ToUi>,
     pub geometry: Arc<Mutex<Geometry>>,
@@ -175,7 +173,6 @@ fn normalize(ip: IpAddr) -> IpAddr {
 
 /// Who may connect, who failed, and the rejection log's rate limit.
 struct Guard {
-    allow: Vec<IpAddr>,
     failures: Mutex<std::collections::HashMap<IpAddr, (Vec<Instant>, Option<Instant>)>>,
     /// Per refused address: when it was last logged and how many refusals since.
     logged: Mutex<std::collections::HashMap<IpAddr, (Instant, u32)>>,
@@ -184,11 +181,6 @@ struct Guard {
 }
 
 impl Guard {
-    fn allowed(&self, ip: IpAddr) -> bool {
-        let ip = normalize(ip);
-        lan_address(ip) && self.allow.contains(&ip)
-    }
-
     /// A refused connection, logged at most once a minute per address (address only).
     fn refused(&self, ip: IpAddr, why: &str) {
         let ip = normalize(ip);
@@ -262,25 +254,33 @@ impl Drop for Server {
     }
 }
 
+/// This machine's fleet identity as a server: its TLS identity (certificate `tls_name`, made
+/// from `id.key`, carrying `id.cred`) and the check of viewer proofs against its fleet
+/// (`root.pub`, `revoked`), read from [`id::dir`] now (not the process's cached
+/// [`id::me`]: a desktop waiting for its identity sees it once installed).
+pub fn fleet_identity(tls_name: &str) -> Result<(TlsIdentity, Verifier, String), String> {
+    let dir = id::dir();
+    let me = id::Me::load(&dir).map_err(|e| format!("has no fleet identity ({e})"))?;
+    let fleet = id::Fleet::load(&dir).map_err(|e| format!("has no fleet root ({e})"))?;
+    let identity = me.tls_identity(tls_name).map_err(|e| format!("cannot make its TLS identity ({e})"))?;
+    let verifier = Verifier::new(fleet, identity.fingerprint);
+    Ok((identity, verifier, me.cred.name.clone()))
+}
+
 fn refuse(addr: &str, why: String) -> String {
-    format!("desk link: listens on {addr} but {why}; a network-reachable desktop serves only to fleet credentials (tools/aihub-fleet.md)")
+    format!("desk link: listens on {addr} but {why}; a network-reachable desktop serves only to fleet credentials (tools/fleet-identity.md)")
 }
 
 impl Server {
-    /// Starts listening, or says why it does not: not a LAN address, no TLS identity, no fleet
-    /// key. `wake` makes the owner's UI thread look at `rx`.
+    /// Starts listening, or says why it does not: not a LAN address, no fleet identity
+    /// ([`fleet_identity`]). `wake` makes the owner's UI thread look at `rx`.
     pub fn start(config: ServerConfig, wake: Arc<dyn Fn() + Send + Sync>) -> Result<Server, String> {
         let addr = config.addr;
-        if config.allow_peers.is_empty() {
-            return Err("desk link: no allow_peers (the viewer machines' addresses): it serves nobody, so it does not listen".into());
-        }
         if !bindable(addr.ip()) {
             return Err(format!("desk link: {} is not a LAN address (loopback, 10/8, 172.16/12, 192.168/16, link-local, fc00::/7)", addr.ip()));
         }
         let text = addr.to_string();
-        let identity = TlsIdentity::load_or_create(&config.tls_dir, &config.tls_name).map_err(|e| refuse(&text, format!("cannot make or load its TLS identity ({e})")))?;
-        let verifier = Verifier::load(&config.fleet_dir, identity.fingerprint).map_err(|e| refuse(&text, format!("has no fleet key ({e})")))?;
-        let fingerprint = identity.fingerprint_hex();
+        let (identity, verifier, name) = fleet_identity(&config.tls_name).map_err(|why| refuse(&text, why))?;
         let tls = Arc::new(TlsServer::new(identity).map_err(|e| format!("desk link: TLS server: {e}"))?);
         let listener = TcpListener::bind(addr).map_err(|e| format!("desk link: bind {addr}: {e}"))?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
@@ -293,13 +293,12 @@ impl Server {
         let (stop2, geometry2, note2, sent2) = (stop.clone(), geometry.clone(), input_note.clone(), sent.clone());
         let (log, clock, input) = (config.log.clone(), config.clock, config.input.clone());
         let guard = Arc::new(Guard {
-            allow: config.allow_peers.iter().copied().map(normalize).collect(),
             failures: Default::default(),
             logged: Default::default(),
             sessions: Default::default(),
             log: config.log.clone(),
         });
-        log(&format!("desk link: serves {:?} only", guard.allow));
+        log(&format!("desk link: serves the fleet admin only, as {name}"));
         std::thread::Builder::new()
             .name("desk-link-listen".into())
             .spawn(move || {
@@ -308,9 +307,9 @@ impl Server {
                 while !stop2.load(Ordering::Acquire) {
                     match listener.accept() {
                         Ok((tcp, peer)) => {
-                            // before TLS: an address not allowed, or banned, is dropped unread
-                            if !guard.allowed(peer.ip()) {
-                                guard.refused(peer.ip(), "not in allow_peers");
+                            // before TLS: an address off the LAN, or banned, is dropped unread
+                            if !lan_address(peer.ip()) {
+                                guard.refused(peer.ip(), "not a LAN address");
                                 continue;
                             }
                             if guard.banned(peer.ip()) {
@@ -354,7 +353,7 @@ impl Server {
                 }
             })
             .map_err(|e| e.to_string())?;
-        Ok(Server { addr, fingerprint, stop, rx, geometry, input_note, sent })
+        Ok(Server { addr, name, stop, rx, geometry, input_note, sent })
     }
 }
 
@@ -443,8 +442,8 @@ impl SessionCtx {
         if version != proto::VERSION {
             return refuse(&mut stream, format!("protocol version {version}; this desktop speaks {}", proto::VERSION));
         }
-        let identity = match self.verifier.verify(&authorization, now_secs()) {
-            Ok(identity) => identity,
+        let peer = match self.verifier.check(&authorization, self.peer.ip(), now_secs()) {
+            Ok(peer) => peer,
             Err(e) => {
                 if self.guard.fail(self.peer.ip()) {
                     (self.log)(&format!("desk link: {} banned for {} s after failed credentials", normalize(self.peer.ip()), BAN.as_secs()));
@@ -452,12 +451,9 @@ impl SessionCtx {
                 return refuse(&mut stream, format!("fleet credential: {e}"));
             }
         };
-        // after authentication the address is checked once more (the same rule as before TLS)
-        if !self.guard.allowed(self.peer.ip()) {
-            return refuse(&mut stream, "not an allowed address".into());
-        }
-        if identity.role != Role::Lan {
-            return refuse(&mut stream, format!("credential role {} may not view a desktop", identity.role.as_str()));
+        // viewing a desktop is an admin right: the admin Mac's credential from its own address
+        if let Err(why) = id::require(&peer, Need::Admin) {
+            return refuse(&mut stream, format!("may not view this desktop: {why}"));
         }
         // input as real local devices, for this session's life
         let mut injector = match (self.input)() {
@@ -477,7 +473,7 @@ impl SessionCtx {
         self.send_ui(ToUi::Opened {
             session: self.session,
             peer: self.peer.to_string(),
-            client: identity.client_id.clone(),
+            client: peer.name.clone(),
             name,
             screen,
             caps,

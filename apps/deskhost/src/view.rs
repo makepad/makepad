@@ -163,10 +163,9 @@ impl DeskHostView {
         }
 
         // who may connect (read-only)
-        rest = self.section(cx, rest, "Allowed peers");
-        let peers = if r.allow_peers.is_empty() { "None: it serves nobody".to_string() } else { r.allow_peers.join(", ") };
-        rest = self.caption(cx, rest, &peers, 1.0);
-        rest = self.caption(cx, rest, "allow_peers in ~/.makepad/deskhost.conf; viewers also need a fleet credential", 1.4);
+        rest = self.section(cx, rest, "Who may watch");
+        rest = self.caption(cx, rest, "The admin Mac only: its fleet device credential, from its bound address", 1.0);
+        rest = self.caption(cx, rest, "tools/fleet-identity.md; this machine needs its own fleet identity to serve", 1.4);
 
         // grants it misses (macOS)
         if !r.grants.is_empty() && r.grants.contains("MISSING") {

@@ -43,6 +43,9 @@ impl From<io::Error> for Error {
     }
 }
 
+/// Makes a fresh carrier for a [`Target::Dialer`] client (authenticated, before the HELLO).
+pub type Dialer = dyn Fn() -> io::Result<Carrier> + Send + Sync;
+
 /// Where a client dials.
 #[derive(Clone)]
 pub enum Target {
@@ -54,6 +57,8 @@ pub enum Target {
     /// `host:port` and the credentials of the pairing
     #[cfg(not(target_arch = "wasm32"))]
     Tcp(String, Arc<makepad_network::tunnel::ClientCredentials>),
+    /// a carrier made by the caller (its own transport and authentication); called on every dial
+    Dialer(Arc<Dialer>),
     /// a command whose stdin/stdout speak makepad-remote (`ssh host makepad remote-relay`)
     Command(Vec<String>),
     /// an endpoint behind a hub (`<host>:<app|pid>`): every channel is the hub's `route` to it
@@ -136,6 +141,7 @@ impl Client {
             }
             #[cfg(not(target_arch = "wasm32"))]
             Target::Tcp(addr, creds) => Ok((carrier::tcp::dial(addr, creds)?, None)),
+            Target::Dialer(dial) => Ok((dial()?, None)),
             Target::Routed(..) => Err(io::Error::new(io::ErrorKind::Unsupported, "a routed client opens its channels through the hub")),
             Target::Command(argv) => {
                 let (first, rest) = argv.split_first().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty command"))?;

@@ -1,27 +1,27 @@
-//! Fleet credentials on the web: a browser serves nothing and reaches no
-//! fleet node directly (see auth.rs for the native model).
+//! Fleet identity on the web: a browser serves nothing and reaches no fleet
+//! machine directly (see id.rs for the native model).
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Role {
-    Lan,
-    Node,
     Device,
+    Node,
+    Paired,
 }
 
 impl Role {
     pub fn as_str(self) -> &'static str {
         match self {
-            Role::Lan => "lan",
-            Role::Node => "node",
             Role::Device => "device",
+            Role::Node => "node",
+            Role::Paired => "paired",
         }
     }
 
     pub fn parse(text: &str) -> Option<Role> {
         match text {
-            "lan" => Some(Role::Lan),
-            "node" => Some(Role::Node),
             "device" => Some(Role::Device),
+            "node" => Some(Role::Node),
+            "paired" => Some(Role::Paired),
             _ => None,
         }
     }

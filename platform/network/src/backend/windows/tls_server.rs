@@ -221,6 +221,17 @@ extern "system" {
         flags: u32,
     ) -> i32;
     fn BCryptDestroyKey(key: *mut c_void) -> i32;
+    fn BCryptSecretAgreement(private_key: *mut c_void, public_key: *mut c_void, secret: *mut *mut c_void, flags: u32) -> i32;
+    fn BCryptDeriveKey(
+        secret: *mut c_void,
+        kdf: *const u16,
+        parameters: *mut c_void,
+        out: *mut u8,
+        out_len: u32,
+        result: *mut u32,
+        flags: u32,
+    ) -> i32;
+    fn BCryptDestroySecret(secret: *mut c_void) -> i32;
     fn BCryptVerifySignature(
         key: *mut c_void,
         padding: *mut c_void,
@@ -279,6 +290,8 @@ const CERT_KEY_PROV_INFO_PROP_ID: u32 = 2;
 const NCRYPTBUFFER_PKCS_KEY_NAME: u32 = 45;
 const NCRYPT_OVERWRITE_KEY_FLAG: u32 = 0x80;
 const ECDSA_PRIVATE_P256_MAGIC: u32 = 0x3253_4345;
+const ECDH_PRIVATE_P256_MAGIC: u32 = 0x324b_4345;
+const ECDH_PUBLIC_P256_MAGIC: u32 = 0x314b_4345;
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
@@ -342,6 +355,56 @@ pub fn generate_p256() -> io::Result<[u8; 97]> {
     let mut out = [0u8; 97];
     out[0] = 0x04;
     out[1..].copy_from_slice(&blob[8..]);
+    Ok(out)
+}
+
+pub fn ecdh_p256(key: &[u8; 97], peer_point: &[u8]) -> io::Result<[u8; 32]> {
+    let mut alg = null_mut();
+    let st = unsafe { BCryptOpenAlgorithmProvider(&mut alg, wide("ECDH_P256").as_ptr(), null(), 0) };
+    if st != 0 {
+        return Err(status_error("BCryptOpenAlgorithmProvider(ECDH_P256)", st));
+    }
+    let alg = Alg(alg);
+    let mut blob = ecc_private_blob(key);
+    blob[..4].copy_from_slice(&ECDH_PRIVATE_P256_MAGIC.to_le_bytes());
+    let mut private = null_mut();
+    let st = unsafe {
+        BCryptImportKeyPair(alg.0, null_mut(), wide("ECCPRIVATEBLOB").as_ptr(), &mut private, blob.as_ptr(), blob.len() as u32, 0)
+    };
+    if st != 0 {
+        return Err(status_error("BCryptImportKeyPair(ECDH private)", st));
+    }
+    let private = BKey(private);
+    let mut blob = Vec::with_capacity(8 + 64);
+    blob.extend_from_slice(&ECDH_PUBLIC_P256_MAGIC.to_le_bytes());
+    blob.extend_from_slice(&32u32.to_le_bytes());
+    blob.extend_from_slice(&peer_point[1..65]);
+    let mut peer = null_mut();
+    // With flags = 0, CNG validates the imported public point.
+    let st = unsafe {
+        BCryptImportKeyPair(alg.0, null_mut(), wide("ECCPUBLICBLOB").as_ptr(), &mut peer, blob.as_ptr(), blob.len() as u32, 0)
+    };
+    if st != 0 {
+        return Err(status_error("BCryptImportKeyPair(ECDH peer)", st));
+    }
+    let peer = BKey(peer);
+    let mut secret = null_mut();
+    let st = unsafe { BCryptSecretAgreement(private.0, peer.0, &mut secret, 0) };
+    if st != 0 {
+        return Err(status_error("BCryptSecretAgreement", st));
+    }
+    let mut out = [0u8; 32];
+    let mut len = 0u32;
+    let st = unsafe {
+        // BCRYPT_KDF_RAW_SECRET (TRUNCATE) returns the raw secret little-endian.
+        let st = BCryptDeriveKey(secret, wide("TRUNCATE").as_ptr(), null_mut(), out.as_mut_ptr(), 32, &mut len, 0);
+        BCryptDestroySecret(secret);
+        st
+    };
+    if st != 0 || len != 32 {
+        return Err(status_error("BCryptDeriveKey(RAW_SECRET)", st));
+    }
+    out.reverse();
     Ok(out)
 }
 
@@ -829,8 +892,8 @@ struct CertContext {
 }
 
 /// Client handshake on Schannel without chain validation (self-signed
-/// servers); returns the server certificate's SHA-256 with the stream.
-pub fn connect_capture(mut tcp: TcpStream, host: &str) -> io::Result<(ServerStream, [u8; 32])> {
+/// servers); returns the server leaf certificate DER with the stream.
+pub fn connect_capture(mut tcp: TcpStream, host: &str) -> io::Result<(ServerStream, Vec<u8>)> {
     let cred = client_credentials()?;
     let target = wide(host);
     // The stream owns cred and ctx from here; its Drop frees them.
@@ -928,12 +991,11 @@ pub fn connect_capture(mut tcp: TcpStream, host: &str) -> io::Result<(ServerStre
         std::slice::from_raw_parts(c.encoded, c.encoded_len as usize).to_vec()
     };
     unsafe { CertFreeCertificateContext(cert) };
-    let got = crate::digest::sha256_hash(&der);
     let st = unsafe { QueryContextAttributesW(&mut stream.ctx, SECPKG_ATTR_STREAM_SIZES, &mut stream.sizes as *mut _ as *mut c_void) };
     if st != SEC_E_OK {
         return Err(status_error("QueryContextAttributes(STREAM_SIZES)", st));
     }
-    Ok((stream, got))
+    Ok((stream, der))
 }
 
 impl Read for ServerStream {

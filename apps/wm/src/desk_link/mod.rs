@@ -260,10 +260,7 @@ mod native {
                 let host = std::fs::read_to_string("/etc/hostname").map(|h| h.trim().to_string()).unwrap_or_default();
                 let config = settings.listen_addr().map(|addr| ServerConfig {
                     addr,
-                    allow_peers: settings.allow_peers.clone(),
-                    tls_dir: crate::theme::makepad_home().join("wm/desk-link/tls"),
                     tls_name: format!("makepad desk link {host}"),
-                    fleet_dir: settings.fleet_dir(),
                     log: Arc::new(|t: &str| super::note(t)),
                     clock: makepad_hal::clock_ns,
                     input: Arc::new(|| -> Result<Box<dyn Input>, String> {
@@ -275,7 +272,7 @@ mod native {
                 });
                 match config.and_then(|c| Server::start(c, Arc::new(move || signal.set()))) {
                     Ok(server) => {
-                        super::note(&format!("desk link listens on {} (certificate {})", server.addr, server.fingerprint));
+                        super::note(&format!("desk link listens on {} as {}", server.addr, server.name));
                         self.server = Some(server);
                     }
                     Err(e) => super::note(&e),

@@ -152,7 +152,9 @@ fn io_loop<S: Read + Write>(mut s: S, pipe: Arc<Pipe>, close: impl FnOnce(&mut S
     close(&mut s);
 }
 
-fn carrier<S: Read + Write + Send + 'static>(s: S, hooks: crate::conn::Hooks, close: impl FnOnce(&mut S) + Send + 'static) -> Carrier {
+/// Wraps an authenticated stream (TLS done, any pre-HELLO exchange done) as a carrier: one I/O
+/// thread owns it (see the module doc). Set short read/write timeouts on it first.
+pub fn carrier<S: Read + Write + Send + 'static>(s: S, hooks: crate::conn::Hooks, close: impl FnOnce(&mut S) + Send + 'static) -> Carrier {
     let pipe = Arc::new(Pipe::default());
     let p = pipe.clone();
     let _ = std::thread::Builder::new().name("makepad-remote-io".into()).spawn(move || {

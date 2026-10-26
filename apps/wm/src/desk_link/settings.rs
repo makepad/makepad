@@ -3,8 +3,6 @@
 //!
 //! ```text
 //! enabled = on            # off (the default): the WM opens no socket at all
-//! allow_peers = 10.0.0.222  # the viewer machines' addresses, comma separated; required: empty
-//!                         # or missing serves nobody (IP pinning: give them a DHCP reservation)
 //! host = 0.0.0.0          # an address of this machine: loopback, a private LAN address or 0.0.0.0
 //! port = 8790
 //! screen = primary        # the screen a viewer that names none gets: primary or a connector name
@@ -20,13 +18,14 @@
 //!                         # the engines in turn: the most pictures per second) or off
 //! tiles = auto            # tiles: the cut of each picture, auto (every engine the same share,
 //!                         # within the encoder's size and the decoder's rate) or CxR (e.g. 2x2)
-//! fleet_dir =             # where fleet.key / revoked are; default: the AI hub's <cache_dir>/fleet
 //! dump =                  # <file>[,<pictures>]: a check of the encoder without the network: the
 //!                         # first pictures (default 600) go to an Annex-B file (no socket opens)
 //! ```
 //!
-//! Whatever the host, nothing listens without a loadable fleet key: every session is TLS with
-//! a fleet credential (role `lan`), loopback included.
+//! Whatever the host, nothing listens without this machine's fleet identity (`id.key`,
+//! `id.cred`, `root.pub` in `~/.makepad/fleet`; tools/fleet-identity.md): every session is TLS
+//! with the desktop's fleet certificate, and only the admin (the Mac's device credential from
+//! its bound address) may view, loopback included.
 
 use std::net::IpAddr;
 #[cfg(not(target_arch = "wasm32"))]
@@ -61,9 +60,6 @@ pub struct DeskLinkSettings {
     /// `codec = auto` (the default: H.265 where the GPU and every watching viewer take it) or
     /// `h264` (never H.265).
     pub hevc: bool,
-    pub fleet_dir: Option<PathBuf>,
-    /// The only peers served (`allow_peers`).
-    pub allow_peers: Vec<IpAddr>,
     pub dump: Option<String>,
 }
 
@@ -88,8 +84,6 @@ impl Default for DeskLinkSettings {
             tiles: None,
             full_chroma: true,
             hevc: true,
-            fleet_dir: None,
-            allow_peers: Vec::new(),
             dump: None,
         }
     }
@@ -163,20 +157,6 @@ impl DeskLinkSettings {
                         _ => false,
                     },
                 },
-                "allow_peers" => {
-                    let mut ok = true;
-                    s.allow_peers = value
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|v| !v.is_empty())
-                        .filter_map(|v| v.parse::<IpAddr>().map_err(|_| ok = false).ok())
-                        .collect();
-                    ok
-                }
-                "fleet_dir" => {
-                    s.fleet_dir = Some(PathBuf::from(value)).filter(|_| !value.is_empty());
-                    true
-                }
                 "dump" => {
                     s.dump = Some(value.to_string()).filter(|_| !value.is_empty());
                     true
@@ -200,17 +180,6 @@ impl DeskLinkSettings {
         }
         Ok(SocketAddr::new(ip, self.port))
     }
-
-    /// The fleet key's directory: `fleet_dir`, else the AI hub's (its settings' cache_dir, else
-    /// `~/.makepad/weights`) `fleet`.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn fleet_dir(&self) -> PathBuf {
-        if let Some(dir) = &self.fleet_dir {
-            return dir.clone();
-        }
-        let (_, hub) = crate::hub_app::load_conf();
-        hub.cache_dir.map(PathBuf::from).unwrap_or_else(|| crate::theme::makepad_home().join("weights")).join("fleet")
-    }
 }
 
 #[cfg(test)]
@@ -231,9 +200,6 @@ mod tests {
         let s = DeskLinkSettings::parse("enabled = on\nhost = 10.0.0.166\nport = 9000\nkbps = 30000 # LAN\nfps = 999");
         assert!(s.enabled);
         assert_eq!((s.host.as_str(), s.port, s.kbps, s.fps), ("10.0.0.166", 9000, 30000, 120));
-        assert!(s.allow_peers.is_empty());
-        let s = DeskLinkSettings::parse("allow_peers = 10.0.0.222, 10.0.0.230");
-        assert_eq!(s.allow_peers, vec!["10.0.0.222".parse::<IpAddr>().unwrap(), "10.0.0.230".parse().unwrap()]);
     }
 
     #[test]

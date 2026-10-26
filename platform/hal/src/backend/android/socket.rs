@@ -55,10 +55,10 @@ pub fn set_timeout(id: i64, read: bool, ms: i32) {
     });
 }
 
-/// SHA-256 of the server certificate, once handshaken.
-pub fn peer_fingerprint(id: i64) -> Option<Vec<u8>> {
+/// DER of the server's leaf certificate, once handshaken.
+pub fn peer_certificate(id: i64) -> Option<Vec<u8>> {
     call(|env, act| unsafe {
-        let m = method(env, act, c"socketStreamPeerFingerprint", c"(J)[B");
+        let m = method(env, act, c"socketStreamPeerCertificate", c"(J)[B");
         if m.is_null() { return None; }
         let arr = ((**env).CallObjectMethodA.unwrap())(env, act, m, [jvalue { j: id }].as_ptr());
         if arr.is_null() { clear(env); return None; }

@@ -133,7 +133,7 @@ pub struct ScreenInfo {
 /// Viewer -> server.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ClientMsg {
-    /// First message. `authorization` is the fleet proof (`MKC2 ...`) bound to the server's
+    /// First message. `authorization` is the fleet proof (`MKID ...`) bound to the server's
     /// certificate; `screen` < 0 asks for the server's default screen; `paused` opens the
     /// session without video (a background session of the viewer's list).
     /// `caps`: what the viewer's decoder takes (`caps::*`).
@@ -654,7 +654,7 @@ mod tests {
 
     #[test]
     fn client_messages_round_trip() {
-        round_client(ClientMsg::Hello { version: VERSION, name: "viewer".into(), authorization: "MKC2 a.lan.9.ff".into(), screen: -1, paused: true, caps: caps::FULL_CHROMA });
+        round_client(ClientMsg::Hello { version: VERSION, name: "viewer".into(), authorization: "MKID mkid1.a.device.9.-.04.ff.1.ff".into(), screen: -1, paused: true, caps: caps::FULL_CHROMA });
         round_client(ClientMsg::Pause);
         round_client(ClientMsg::Resume);
         round_client(ClientMsg::SelectScreen { index: 2 });
