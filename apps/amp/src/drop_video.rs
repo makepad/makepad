@@ -164,8 +164,9 @@ pub fn aac_ready(rate: u32, channels: u16, pcm: &[f32]) -> Result<(u32, u16, Vec
 }
 
 /// The movie: the song's lyric video (or title card) over its sound, ending with the sound. The
-/// frames come from [`lyric_video::frames`]; after each frame the sound up to the next whole
-/// second goes in, so the writer interleaves the two tracks (a frame comes at least once a second).
+/// frames come from [`lyric_video::frames`] (one per tick, constant rate); after each frame the
+/// sound up to the next whole second goes in, so the writer interleaves the two tracks. The file
+/// is laid out index-first ("fast start").
 pub fn write_video(dest: &Path, rate: u32, channels: u16, pcm: &[i16], song: &Song, kit: &Kit) -> Result<Made, String> {
     let per_second = rate as usize * channels as usize;
     let options = VideoFileEncoderOptions {
@@ -174,8 +175,8 @@ pub fn write_video(dest: &Path, rate: u32, channels: u16, pcm: &[i16], song: &So
         height: HEIGHT,
         fps_num: FPS as u32,
         fps_den: 1,
-        video_bitrate_bps: 1_200_000,
-        audio: Some(PcmAudioTrackOptions { sample_rate: rate, channels, aac_bitrate_bps: if channels == 1 { 128_000 } else { 192_000 } }),
+        video_bitrate_bps: 250_000,
+        audio: Some(PcmAudioTrackOptions { sample_rate: rate, channels, aac_bitrate_bps: if channels == 1 { 96_000 } else { 128_000 } }),
         keyframe_only: false,
         color: lyric_video::COLOR,
     };
@@ -222,6 +223,8 @@ pub fn write_video(dest: &Path, rate: u32, channels: u16, pcm: &[i16], song: &So
         encoder.push_audio_i16(&pcm[pushed..]).map_err(|e| format!("audio: {e}"))?;
     }
     encoder.finish().map_err(|e| format!("finishing the video: {e}"))?;
+    // the index first: messaging apps read it before the media
+    crate::faststart::faststart(dest)?;
     made.encode_ms += ms(push);
     Ok(made)
 }

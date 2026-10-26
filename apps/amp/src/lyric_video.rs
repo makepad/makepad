@@ -8,10 +8,10 @@
 //! Drawn on the CPU with the UI's own text stack (`makepad-font-core`: the same font tables,
 //! shaping and glyph outlines the app's text uses; the coverage rasteriser of `makepad-draw`)
 //! straight into the encoder's NV12 planes, on the drag's producer thread: no GPU, no UI thread.
-//! A frame is drawn only when what it shows changes (a line comes in, a word is sung): the
-//! movie is variable-rate, a line change crossfades over a few frames at [`FPS`], and a held
-//! picture is repeated once a second (the writer interleaves sound and picture per second), which
-//! the H.264 encoder turns into near-empty frames.
+//! A frame is drawn only when what it shows changes (a line comes in, a word is sung); a line
+//! change crossfades over a few frames. The movie is constant-rate at [`FPS`] (what messaging apps
+//! expect): a held picture is pushed again each tick, which the H.264 encoder turns into
+//! near-empty frames.
 
 use crate::lyrics::{TimedLyrics, Timing, Word};
 use makepad_font_core::font::{Font, FontId};
@@ -23,12 +23,15 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
-/// The picture is square: chat apps show a square video large in the conversation.
-pub const SIZE: u32 = 1080;
-/// The movie's time base (frames a second where the picture moves).
-pub const FPS: i64 = 30;
-/// Bumped when the look changes, so cached videos are made again.
-pub const STYLE_VERSION: u32 = 1;
+/// The picture is square: chat apps show a square video large in the conversation. 720 px keeps
+/// a constant-rate movie quick to encode and small to send (chat apps scale it down anyway).
+pub const SIZE: u32 = 720;
+/// The movie's frame rate, constant: lyric lines change slowly, and each frame costs the encoder
+/// ~1.3 ms (10 fps: a 3.5 min song in ~3 s; 30 fps took 9 s).
+pub const FPS: i64 = 10;
+/// Bumped when the look or the file layout changes, so cached videos are made again (2: constant
+/// rate + fast start; 3: 10 fps).
+pub const STYLE_VERSION: u32 = 3;
 /// The colour space of the frames.
 pub const COLOR: VideoColor = VideoColor::BT709;
 
@@ -39,7 +42,7 @@ const HOLD: f64 = 1.6;
 /// After the last line, this long (s) before the title card returns.
 const OUTRO: f64 = 2.5;
 /// A line change crossfades over this many frames.
-const FADE_FRAMES: i64 = 8;
+const FADE_FRAMES: i64 = 3;
 
 // ---------------------------------------------------------------------------
 // What is drawn
@@ -559,7 +562,9 @@ fn background(look: &Look) -> Vec<u8> {
 // The painter
 // ---------------------------------------------------------------------------
 
-const MARGIN: f32 = 88.0;
+const MARGIN: f32 = 88.0 * K;
+/// The layout is drawn for 1080 px and scaled to [`SIZE`].
+const K: f32 = SIZE as f32 / 1080.0;
 
 /// A line's laid-out text, made the first time it shows.
 struct LineArt {
@@ -624,23 +629,23 @@ impl<'a> Painter<'a> {
     fn paint_title(&mut self, out: &mut [u8]) {
         let max_w = SIZE as f32 - 2.0 * MARGIN;
         if self.title_card.is_none() {
-            let title = layout(&self.bold, &words_of(&self.caps(&self.song.title)), 104.0, 60.0, max_w, 0.0, 1.12);
-            let artist = layout(&self.regular, &words_of(self.song.artist.as_deref().unwrap_or("")), 44.0, 30.0, max_w, 0.0, 1.3);
+            let title = layout(&self.bold, &words_of(&self.caps(&self.song.title)), 104.0 * K, 60.0 * K, max_w, 0.0, 1.12);
+            let artist = layout(&self.regular, &words_of(self.song.artist.as_deref().unwrap_or("")), 44.0 * K, 30.0 * K, max_w, 0.0, 1.3);
             self.title_card = Some((title, artist));
         }
         let (title, artist) = self.title_card.as_ref().unwrap();
-        let rule_gap = 40.0;
-        let block = 8.0 + rule_gap + title.height() + 22.0 + artist.height();
+        let rule_gap = 40.0 * K;
+        let block = 8.0 * K + rule_gap + title.height() + 22.0 * K + artist.height();
         let top = (SIZE as f32 - block) * 0.46;
         let accent = ink(self.look.accent, 1.0);
-        fill_rect(out, MARGIN as i32, top as i32, 132, 8, accent);
-        let mut y = top + 8.0 + rule_gap;
+        fill_rect(out, MARGIN as i32, top as i32, (132.0 * K) as i32, (8.0 * K) as i32, accent);
+        let mut y = top + 8.0 * K + rule_gap;
         let text = ink(self.look.text, 1.0);
         for row in &title.rows {
             blit(out, &row.mask, (MARGIN - PAD) as i32, (y + title.line_h * 0.82 - row.mask.ascent) as i32, f32::INFINITY, text, text);
             y += title.line_h;
         }
-        y += 22.0;
+        y += 22.0 * K;
         let muted = ink(self.look.muted, 1.0);
         for row in &artist.rows {
             blit(out, &row.mask, (MARGIN - PAD) as i32, (y + artist.line_h * 0.8 - row.mask.ascent) as i32, f32::INFINITY, muted, muted);
@@ -650,15 +655,15 @@ impl<'a> Painter<'a> {
 
     fn paint_header(&mut self, out: &mut [u8]) {
         if self.header.is_none() {
-            let max_w = SIZE as f32 - 2.0 * MARGIN - 24.0;
-            let title = layout(&self.bold, &words_of(&self.caps(&self.song.title)), 30.0, 22.0, max_w * 0.62, 0.0, 1.2);
-            let artist = layout(&self.regular, &words_of(self.song.artist.as_deref().unwrap_or("")), 28.0, 20.0, max_w * 0.36, 0.0, 1.2);
+            let max_w = SIZE as f32 - 2.0 * MARGIN - 24.0 * K;
+            let title = layout(&self.bold, &words_of(&self.caps(&self.song.title)), 30.0 * K, 22.0 * K, max_w * 0.62, 0.0, 1.2);
+            let artist = layout(&self.regular, &words_of(self.song.artist.as_deref().unwrap_or("")), 28.0 * K, 20.0 * K, max_w * 0.36, 0.0, 1.2);
             self.header = Some((title, artist));
         }
         let (title, artist) = self.header.as_ref().unwrap();
-        let base = 96.0;
-        fill_rect(out, MARGIN as i32, (base - 24.0) as i32, 6, 30, ink(self.look.accent, 1.0));
-        let x = MARGIN + 22.0;
+        let base = 96.0 * K;
+        fill_rect(out, MARGIN as i32, (base - 24.0 * K) as i32, (6.0 * K).max(3.0) as i32, (30.0 * K) as i32, ink(self.look.accent, 1.0));
+        let x = MARGIN + 22.0 * K;
         let text = ink(self.look.text, 0.9);
         let mut right = x;
         if let Some(row) = title.rows.first() {
@@ -667,7 +672,7 @@ impl<'a> Painter<'a> {
         }
         let muted = ink(self.look.muted, 0.9);
         if let Some(row) = artist.rows.first() {
-            blit(out, &row.mask, (right + 20.0 - PAD) as i32, (base - row.mask.ascent) as i32, f32::INFINITY, muted, muted);
+            blit(out, &row.mask, (right + 20.0 * K - PAD) as i32, (base - row.mask.ascent) as i32, f32::INFINITY, muted, muted);
         }
     }
 
@@ -676,11 +681,11 @@ impl<'a> Painter<'a> {
             let max_w = SIZE as f32 - 2.0 * MARGIN;
             let l = &self.lines[line];
             let words: Vec<(String, bool)> = l.words.iter().map(|w| (w.text.clone(), w.space)).collect();
-            let main = layout(&self.bold, &words, 76.0, 46.0, max_w, 0.0, 1.18);
-            let translation = (!l.translation.trim().is_empty()).then(|| layout(&self.italic, &words_of(l.translation), 42.0, 30.0, max_w, 0.0, 1.25));
-            let next = layout(&self.regular, &words, 40.0, 28.0, max_w, 0.0, 1.25);
+            let main = layout(&self.bold, &words, 76.0 * K, 46.0 * K, max_w, 0.0, 1.18);
+            let translation = (!l.translation.trim().is_empty()).then(|| layout(&self.italic, &words_of(l.translation), 42.0 * K, 30.0 * K, max_w, 0.0, 1.25));
+            let next = layout(&self.regular, &words, 40.0 * K, 28.0 * K, max_w, 0.0, 1.25);
             let section = (!l.section.trim().is_empty())
-                .then(|| layout(&self.bold, &words_of(&l.section.to_uppercase()), 24.0, 18.0, max_w, 0.2, 1.2));
+                .then(|| layout(&self.bold, &words_of(&l.section.to_uppercase()), 24.0 * K, 18.0 * K, max_w, 0.2, 1.2));
             self.art.insert(line, LineArt { main, translation, next, section });
         }
         &self.art[&line]
@@ -697,11 +702,11 @@ impl<'a> Painter<'a> {
         self.art(line);
         let art = &self.art[&line];
         let next_art = next.map(|n| &self.art[&n]);
-        let section_h = art.section.as_ref().map_or(0.0, |s| s.height() + 26.0);
-        let trans_h = art.translation.as_ref().map_or(0.0, |t| 18.0 + t.height());
+        let section_h = art.section.as_ref().map_or(0.0, |s| s.height() + 26.0 * K);
+        let trans_h = art.translation.as_ref().map_or(0.0, |t| 18.0 * K + t.height());
         // the main line keeps its place: the block centres on the line and its translation
         let core = art.main.height() + trans_h;
-        let mut y = (SIZE as f32 * 0.52 - core * 0.5 - section_h).max(150.0);
+        let mut y = (SIZE as f32 * 0.52 - core * 0.5 - section_h).max(150.0 * K);
         let centre = SIZE as f32 * 0.5;
         if let Some(section) = &art.section {
             let label = ink(look.muted, 0.9);
@@ -709,7 +714,7 @@ impl<'a> Painter<'a> {
                 blit(out, &row.mask, (centre - row.width * 0.5 - PAD) as i32, (y + section.line_h * 0.8 - row.mask.ascent) as i32, f32::INFINITY, label, label);
                 y += section.line_h;
             }
-            y += 26.0;
+            y += 26.0 * K;
         }
         let (lit_ink, unlit_ink) = match lit {
             Some(_) => (ink(look.accent, 1.0), ink(look.text, 1.0)),
@@ -727,7 +732,7 @@ impl<'a> Painter<'a> {
             y += art.main.line_h;
         }
         if let Some(t) = &art.translation {
-            y += 18.0;
+            y += 18.0 * K;
             let muted = ink(look.muted, if lit_ink.a < 1.0 { 0.4 } else { 1.0 });
             for row in &t.rows {
                 blit(out, &row.mask, (centre - row.width * 0.5 - PAD) as i32, (y + t.line_h * 0.8 - row.mask.ascent) as i32, f32::INFINITY, muted, muted);
@@ -735,10 +740,10 @@ impl<'a> Painter<'a> {
             }
         }
         if let Some(n) = next_art {
-            y += 64.0;
+            y += 64.0 * K;
             let dim = ink(mix(look.text, look.background, 0.25), 0.36);
             for row in &n.next.rows {
-                if y > SIZE as f32 - 40.0 {
+                if y > SIZE as f32 - 40.0 * K {
                     break;
                 }
                 blit(out, &row.mask, (centre - row.width * 0.5 - PAD) as i32, (y + n.next.line_h * 0.8 - row.mask.ascent) as i32, f32::INFINITY, dim, dim);
@@ -760,7 +765,7 @@ pub fn fades(from: Scene, to: Scene) -> bool {
 
 /// The frames of the movie: (tick, how to make the picture), ending with the last tick before
 /// `end_tick`. Scenes are drawn when they start; a fade blends the shown picture into the new one
-/// over [`FADE_FRAMES`]; a held picture repeats once a second.
+/// over [`FADE_FRAMES`]; a held picture repeats every tick (constant rate).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Frame {
     /// Draw the scene of this key of the timeline and show it.
@@ -793,15 +798,9 @@ pub fn frames(keys: &[(i64, Scene)], end_tick: i64) -> Vec<(i64, Frame)> {
             out.push((t, Frame::Scene(k)));
             t += 1;
         }
-        // held: once a second, and the last tick so the picture lasts as long as the sound
-        let mut last = t - 1;
-        while last + FPS < until {
-            last += FPS;
-            out.push((last, Frame::Repeat));
-        }
-        if until == end_tick && last < end_tick - 1 {
-            out.push((end_tick - 1, Frame::Repeat));
-        }
+        // held: the same picture every tick. Messaging apps expect a constant frame rate (a
+        // variable-rate movie stalled WhatsApp's upload); repeats encode to near-empty frames.
+        out.extend((t..until).map(|t| (t, Frame::Repeat)));
     }
     out
 }

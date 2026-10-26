@@ -31,6 +31,7 @@ mod audio;
 mod cache;
 mod drag_out;
 mod drop_video;
+mod faststart;
 mod lyric_video;
 mod columns;
 mod connection;

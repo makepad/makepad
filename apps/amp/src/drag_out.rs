@@ -447,13 +447,18 @@ mod tests {
             std::fs::remove_dir_all(&dir).unwrap();
             return;
         }
-        let shots = frames_at(&dest, &[0.5, 1.8, 2.7, 4.2, 9.3, 11.2]);
+        let bytes = std::fs::read(&dest).unwrap();
+        let moov = bytes.windows(4).position(|w| w == b"moov").unwrap();
+        let mdat = bytes.windows(4).position(|w| w == b"mdat").unwrap();
+        assert!(moov < mdat, "fast start: the index before the media");
+        assert_eq!(made.frames as i64, (secs as f64 * crate::lyric_video::FPS as f64).ceil() as i64, "a frame every tick");
+                let shots = frames_at(&dest, &[0.5, 1.8, 2.7, 4.2, 9.3, 11.2]);
         let [title, coming, two_lit, all_lit, gap, chorus] = [0, 1, 2, 3, 4, 5].map(|i| &shots[i].1);
-        assert!(accent_px(coming) < 1000, "nothing lit before it is sung (the header's mark only): {}", accent_px(coming));
-        assert!(accent_px(two_lit) > accent_px(coming) + 1500, "two words lit: {}", accent_px(two_lit));
-        assert!(accent_px(all_lit) > accent_px(two_lit) + 1000, "{} vs {}", accent_px(all_lit), accent_px(two_lit));
+        assert!(accent_px(coming) < 450, "nothing lit before it is sung (the header's mark only): {}", accent_px(coming));
+        assert!(accent_px(two_lit) > accent_px(coming) + 700, "two words lit: {}", accent_px(two_lit));
+        assert!(accent_px(all_lit) > accent_px(two_lit) + 450, "{} vs {}", accent_px(all_lit), accent_px(two_lit));
         let differ = |a: &[u8], b: &[u8]| a.iter().zip(b).filter(|(x, y)| x.abs_diff(**y) > 40).count();
-        assert!(differ(title, coming) > 10_000 && differ(gap, chorus) > 10_000);
+        assert!(differ(title, coming) > 4_000 && differ(gap, chorus) > 4_000);
         let again = drop_video::write_song_video(&src, &dir.join("again.mp4"), "Alea Iacta Lux Est", &kit).unwrap();
         assert!(again.cached, "{again:?}");
         assert_eq!(std::fs::read(&dest).unwrap(), std::fs::read(dir.join("again.mp4")).unwrap());
