@@ -630,6 +630,16 @@ fn site_rule(options: &relax_session::Options, callee: &Func, id: u32, nargs: us
     if single && lim.lto && attrs & ATTR_COLD == 0 {
         return Some(RULE_SINGLE);
     }
+    // A cross-crate body referenced once (this site) is not duplicated by inlining: its out-of-line
+    // copy goes dead. ATTR_XCRATE stands for the code size rustc's crate boundary (lto = "off")
+    // keeps out of each caller, which a single site does not pay, so it decides as a same-crate
+    // body: the O3 implicit #[inline] the snapshot took off comes back (rust_tokenize: State::next,
+    // 96 insts, called only from the bench loop, stayed a call and cost +11% instructions, +20% cycles)
+    let attrs = if attrs & ATTR_XCRATE != 0 && single && !lim.lto && !opt_off(options, "-xcrate-single") {
+        (attrs & !ATTR_XCRATE) | ATTR_HINT
+    } else {
+        attrs
+    };
     if attrs & ATTR_XCRATE != 0 && !lim.lto {
         let (n, leaf, _) = callee_shape(callee, id);
         if n <= nargs + nrets + 2 && callee.blocks.len() <= 2 {
@@ -6317,6 +6327,23 @@ mod inline_priority_tests {
         c.block();
         c.blocks[1].term = Term::Ret(vec![]);
         assert_eq!(rule(&c, 6, TOP_DOWN_DEPTH_LIMIT + 1), None);
+    }
+
+    #[test]
+    fn xcrate_body_referenced_once_decides_as_same_crate() {
+        // rust_tokenize: State::next (another crate, no #[inline], not a leaf, 96 insts) called only
+        // from the bench loop: a call per token while a same-crate body inlines by the O3 hint
+        let options = &relax_session::Options::default();
+        let mut c = callee(96);
+        c.blocks[0].insts.push(Inst::Call(Callee::Fn(3), vec![], vec![]));
+        c.blocks[0].pos.push(0);
+        let lim = InlineLimits::tier1();
+        let rule = |single| site_rule(options, &c, 1, 0, 0, ATTR_XCRATE, true, true, false, single, 0, 0, &lim);
+        assert_eq!(rule(false), None);
+        assert!(rule(true).is_some());
+        // the same body under the A/B switch stays a call
+        let off = &{ let mut o = relax_session::Options::default(); o.opt.push("-xcrate-single".into()); o };
+        assert_eq!(site_rule(off, &c, 1, 0, 0, ATTR_XCRATE, true, true, false, true, 0, 0, &lim), None);
     }
 
     #[test]
