@@ -2627,6 +2627,8 @@ extern "C" fn at_exit() {
         verbose!("makepad-run quit: {} lazy compiles after the quit request, {:.0} ms",
             jit::QUIT_COMPILES[0].load(Ordering::Relaxed), jit::QUIT_COMPILES[1].load(Ordering::Relaxed) as f64 / 1e6);
     }
+    // (here, not in the run summary: every exit passes this point)
+    verbose!("makepad-run: {}", jit::o2_drop_census());
     finish_run("exit", EXIT_SUMMARY.get().and_then(|exit| exit.code.get().copied()));
 }
 
