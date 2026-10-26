@@ -9,7 +9,9 @@
 #    Info.plist (nl.makepad.desklink, a regular app: no LSUIElement), icon.icns made from
 #    apps/desklink/resources/icon_1024.png (rendered from icon.svg by tools/app_icons/render.sh)
 #    with the system's sips + iconutil,
-# 3. ad-hoc signs it with the stable identifier nl.makepad.desklink,
+# 3. signs it (tools/macos/sign-app.sh) as nl.makepad.desklink with the local identity "makepad local
+#    signing" when this Mac has it (made once by tools/macos/make-signing-identity.sh; the same code
+#    identity every build, so macOS privacy answers stay), else ad-hoc; MAKEPAD_SIGN_IDENTITY overrides,
 # 4. stops the installed copy (by the pid it recorded in ~/.makepad/desklink/app.pid, and only
 #    when that pid really runs the installed executable), replaces ~/Applications/Desk Link.app,
 # 5. prints how to start it.
@@ -85,9 +87,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 plutil -lint "$APP/Contents/Info.plist" > /dev/null
 
-# ad-hoc, with an identifier that does not change between builds
-codesign -s - --identifier "$ID" --force "$APP"
-codesign --verify --strict "$APP"
+# the stable local identity when present (tools/macos/make-signing-identity.sh), else ad-hoc
+bash "$REPO/tools/macos/sign-app.sh" "$APP" "$ID"
 
 # stop the installed copy: its recorded pid, and only if that pid runs the installed executable
 PIDFILE="${MAKEPAD_HOME:-$HOME/.makepad}/desklink/app.pid"

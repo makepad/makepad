@@ -7,13 +7,16 @@
 # 2. assembles "AI Hub.app" under target/aihub-install/: Contents/MacOS/makepad-app-aihub,
 #    Info.plist (nl.makepad.aihub, LSUIElement: a menu-bar app, no Dock icon, no menu bar),
 #    icon.icns made from apps/aihub/resources/icon_1024.png with the system's sips + iconutil,
-# 3. ad-hoc signs it with the stable identifier nl.makepad.aihub,
+# 3. signs it (tools/macos/sign-app.sh) as nl.makepad.aihub with the local identity "makepad local
+#    signing" when this Mac has it (made once by tools/macos/make-signing-identity.sh; the same code
+#    identity every build, so macOS privacy answers stay), else ad-hoc; MAKEPAD_SIGN_IDENTITY overrides,
 # 4. stops the installed copy (by the pid it recorded in ~/.makepad/ai-hub/app.pid, and only
 #    when that pid really runs the installed executable), replaces ~/Applications/AI Hub.app,
 # 5. prints how to start it.
 #
 # The AI Hub reads the Claude login from the keychain like the headless hub always did; macOS
-# may ask once to allow it for this new program (click "Always Allow").
+# may ask once to allow it (click "Always Allow"); with the local signing identity that answer
+# holds across reinstalls.
 set -eu
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 APPS="$HOME/Applications"
@@ -80,9 +83,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# ad-hoc, with an identifier that does not change between builds
-codesign -s - --identifier "$ID" --force "$APP"
-codesign --verify --strict "$APP"
+# the stable local identity when present (tools/macos/make-signing-identity.sh), else ad-hoc
+bash "$REPO/tools/macos/sign-app.sh" "$APP" "$ID"
 
 # stop the installed copy: its recorded pid, and only if that pid runs the installed executable
 PIDFILE="${MAKEPAD_HOME:-$HOME/.makepad}/ai-hub/app.pid"

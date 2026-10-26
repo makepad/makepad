@@ -8,15 +8,17 @@
 # 2. assembles "devhub.app" under target/devhub-install/: Contents/MacOS/makepad-app-devhub,
 #    Info.plist (nl.makepad.devhub, LSUIElement: a menu-bar app, no Dock icon, no menu bar),
 #    icon.icns made from apps/devhub/resources/icon_1024.png with the system's sips + iconutil,
-# 3. ad-hoc signs it with the stable identifier nl.makepad.devhub,
+# 3. signs it (tools/macos/sign-app.sh) as nl.makepad.devhub with the local identity "makepad local
+#    signing" when this Mac has it (made once by tools/macos/make-signing-identity.sh; the same code
+#    identity every build, so macOS privacy answers stay), else ad-hoc; MAKEPAD_SIGN_IDENTITY overrides,
 # 4. writes the master's node list ~/.makepad/devhub/nodes.conf when there is none (an existing
 #    one is never touched): pool nodes dev=on, the user's WMs dev=off,
 # 5. stops the installed copy (by the pid it recorded in ~/.makepad/devhub/app.pid, and only
 #    when that pid really runs the installed executable), replaces ~/Applications/devhub.app,
 # 6. prints how to start it.
 #
-# The master dials the node hubs (TCP to 10.0.0.x). macOS asks once per installed build:
-# "devhub would like to find devices on your local network" -> Allow (see the note printed at the end).
+# The master dials the node hubs (TCP to 10.0.0.x). macOS asks "devhub would like to find devices on
+# your local network" -> Allow: once when signed with the local identity, after every install when ad-hoc.
 set -eu
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 APPS="$HOME/Applications"
@@ -87,9 +89,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 plutil -lint "$APP/Contents/Info.plist" > /dev/null
 
-# ad-hoc, with an identifier that does not change between builds
-codesign -s - --identifier "$ID" --force "$APP"
-codesign --verify --strict "$APP"
+# the stable local identity when present (tools/macos/make-signing-identity.sh), else ad-hoc
+bash "$REPO/tools/macos/sign-app.sh" "$APP" "$ID"
 
 # the master's node list (its seeds and each node's dev switch); never overwrites the user's
 if [ ! -f "$HOME_DIR/nodes.conf" ]; then
@@ -139,5 +140,5 @@ echo "installed $DEST (version $VERSION)"
 echo "start it:  open ~/Applications/devhub.app"
 echo "its icon (an eye with three nodes) appears in the menu bar; click it for the inbox and the explorer."
 echo "Open at login is a switch in the panel."
-echo "macOS asks once for this build: \"devhub\" would like to find devices on your local network -> Allow."
+echo "macOS asks once: \"devhub\" would like to find devices on your local network -> Allow."
 echo "(it dials the node hubs in $HOME_DIR/nodes.conf; System Settings > Privacy & Security > Local Network lists it)"
