@@ -138,3 +138,152 @@ fn vinsert_from_memory_builds_the_lanes() {
         }
     }
 }
+
+/// fn(src, dst): vector i = lanes src[4i .. 4i + 4] (a VSplat of lane 0 + 3 VInserts for even i,
+/// four VInserts in shuffled order for odd i), stored to dst[4i ..]; vector N is built from
+/// non-consecutive lanes and must stay a chain.
+fn lane_chain_func() -> Func {
+    let mut f = Func::new("lane_chain".into(), 0);
+    let (ps, pd) = (f.vreg(Cls::I), f.vreg(Cls::I));
+    f.params = vec![ps, pd];
+    f.block();
+    let mut insts = Vec::new();
+    for i in 0..=N {
+        let off = |j: usize| if i == N { (4 * (2 * j)) as i32 } else { (16 * i + 4 * j) as i32 };
+        let mut v;
+        let order: [u8; 4] = if i % 2 == 1 { [2, 0, 3, 1] } else { [0, 1, 2, 3] };
+        let x0 = f.vreg(Cls::F32);
+        insts.push(Inst::Load(Mem::F32, x0, ps, off(order[0] as usize)));
+        v = f.vreg(Cls::V128);
+        if i % 2 == 1 {
+            let z = f.vreg(Cls::V128);
+            insts.push(Inst::VConst(z, 0));
+            insts.push(Inst::VInsert(v, z, order[0], x0));
+        } else {
+            insts.push(Inst::VSplat(v, x0));
+        }
+        for &j in &order[1..] {
+            let x = f.vreg(Cls::F32);
+            insts.push(Inst::Load(Mem::F32, x, ps, off(j as usize)));
+            let v2 = f.vreg(Cls::V128);
+            insts.push(Inst::VInsert(v2, v, j, x));
+            v = v2;
+        }
+        insts.push(Inst::VStore(pd, 16 * i as i32, v));
+    }
+    f.blocks[0].pos = vec![0; insts.len()];
+    f.blocks[0].insts = insts;
+    f.blocks[0].term = Term::Ret(vec![]);
+    f.verify().unwrap();
+    f
+}
+
+#[test]
+fn consecutive_lane_loads_become_one_vector_load() {
+    let mut f = lane_chain_func();
+    assert!(relax_backend::passes::combine_lane_loads(&mut f));
+    relax_backend::passes::dce(&mut f);
+    f.verify().unwrap();
+    let ins = || f.blocks.iter().flat_map(|b| b.insts.iter());
+    assert_eq!(ins().filter(|i| matches!(i, Inst::VLoad(..))).count(), N, "{}", f.dump());
+    // only the non-consecutive vector keeps its chain
+    assert_eq!(ins().filter(|i| matches!(i, Inst::VInsert(..))).count(), 3, "{}", f.dump());
+}
+
+#[cfg(all(target_arch = "x86_64", unix))]
+#[test]
+fn combined_lane_loads_compute_the_same_bits() {
+    use relax_backend::exec::Code;
+    type Entry = extern "sysv64" fn(*const u8, *mut u8);
+    let mut o = relax_session::Options::default();
+    o.cpu = relax_backend::x64::detect_cpu(&o);
+    let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
+    let src: Vec<f32> = (0..4 * N + 8).map(|k| (k as f32 - 7.5) * 1.25).collect();
+    let mut outs = Vec::new();
+    for fold in [false, true] {
+        let mut f = lane_chain_func();
+        if fold {
+            assert!(relax_backend::passes::combine_lane_loads(&mut f));
+            relax_backend::passes::dce(&mut f);
+        }
+        let c = relax_backend::x64::compile(&o, &f, &env).unwrap();
+        let code = Code::new(&c.code).unwrap();
+        let run: Entry = unsafe { std::mem::transmute(code.ptr()) };
+        let mut dst = vec![0u32; 4 * (N + 1)];
+        run(src.as_ptr() as *const u8, dst.as_mut_ptr() as *mut u8);
+        outs.push(dst);
+    }
+    assert_eq!(outs[0], outs[1]);
+    for i in 0..N {
+        for j in 0..4 {
+            assert_eq!(outs[1][4 * i + j], src[4 * i + j].to_bits());
+        }
+    }
+}
+
+/// fn(src, dst): three Vec3 moves src -> dst: loads first then stores (in order, then with the
+/// stores reversed), and one interleaved load/store/load/store move that must stay as it is (its
+/// store may write what the next load reads).
+fn word_copy_func() -> Func {
+    let mut f = Func::new("word_copy".into(), 0);
+    let (ps, pd) = (f.vreg(Cls::I), f.vreg(Cls::I));
+    f.params = vec![ps, pd];
+    f.block();
+    let mut insts = Vec::new();
+    for v in 0..2 {
+        let xs: Vec<VReg> = (0..3).map(|_| f.vreg(Cls::F32)).collect();
+        for (j, x) in xs.iter().enumerate() {
+            insts.push(Inst::Load(Mem::F32, *x, ps, (12 * v + 4 * j) as i32));
+        }
+        let order: [usize; 3] = if v == 0 { [0, 1, 2] } else { [2, 1, 0] };
+        for j in order {
+            insts.push(Inst::Store(Mem::F32, pd, (12 * v + 4 * j) as i32, xs[j]));
+        }
+    }
+    for j in 0..3 {
+        let x = f.vreg(Cls::F32);
+        insts.push(Inst::Load(Mem::F32, x, ps, 24 + 4 * j));
+        insts.push(Inst::Store(Mem::F32, pd, 24 + 4 * j, x));
+    }
+    f.blocks[0].pos = vec![0; insts.len()];
+    f.blocks[0].insts = insts;
+    f.blocks[0].term = Term::Ret(vec![]);
+    f.verify().unwrap();
+    f
+}
+
+#[test]
+fn word_copies_pair_into_eight_byte_moves() {
+    let mut f = word_copy_func();
+    assert!(relax_backend::passes::pair_word_copies(&mut f));
+    relax_backend::passes::dce(&mut f);
+    f.verify().unwrap();
+    let ins = || f.blocks.iter().flat_map(|b| b.insts.iter());
+    assert_eq!(ins().filter(|i| matches!(i, Inst::Load(Mem::Int(8, _), ..))).count(), 2, "{}", f.dump());
+    assert_eq!(ins().filter(|i| matches!(i, Inst::Store(Mem::Int(8, _), ..))).count(), 2, "{}", f.dump());
+    assert_eq!(ins().filter(|i| matches!(i, Inst::Load(Mem::F32, ..))).count(), 2 + 3, "{}", f.dump());
+}
+
+#[cfg(all(target_arch = "x86_64", unix))]
+#[test]
+fn paired_word_copies_move_the_same_bytes() {
+    use relax_backend::exec::Code;
+    type Entry = extern "sysv64" fn(*const u8, *mut u8);
+    let mut o = relax_session::Options::default();
+    o.cpu = relax_backend::x64::detect_cpu(&o);
+    let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
+    let src: Vec<u32> = (0..9).map(|k| 0x3f80_0000 + k * 0x1234_5).collect();
+    for pair in [false, true] {
+        let mut f = word_copy_func();
+        if pair {
+            assert!(relax_backend::passes::pair_word_copies(&mut f));
+            relax_backend::passes::dce(&mut f);
+        }
+        let c = relax_backend::x64::compile(&o, &f, &env).unwrap();
+        let code = Code::new(&c.code).unwrap();
+        let run: Entry = unsafe { std::mem::transmute(code.ptr()) };
+        let mut dst = vec![0u32; 9];
+        run(src.as_ptr() as *const u8, dst.as_mut_ptr() as *mut u8);
+        assert_eq!(dst, src, "pair {}", pair);
+    }
+}

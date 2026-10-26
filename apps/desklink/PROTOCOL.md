@@ -64,7 +64,7 @@ Fixed-size fields are little-endian. `str` and `bytes` are `u32 LE length` + byt
 | 14 | Gamepad | `slot u8, buttons u32, left_x i16, left_y i16, right_x i16, right_y i16, left_trigger u8, right_trigger u8` |
 | 15 | GamepadGone | `slot u8` |
 | 20 | Ping | `client_ns u64` (the viewer's clock) |
-| 21 | Stats | `frame u32, decode_us u32, present_us u32` |
+| 21 | Stats | `frame u32, decode_us u32, present_us u32`: about once a second; `frame` the last picture shown and `present_us` its decode-end to on screen; `decode_us` a picture's decode (its slowest stream's), the mean over the pictures since the last `Stats` (version 7 viewers before this rule sent the last picture's) |
 | 22 | Clipboard | `text str` (the desktop's clipboard takes it) |
 | 24 | Encoding | `chroma u8, codec u8, preset u8, mbps u16, fps u16`: how this viewer wants the stream encoded, 0 = auto each. `chroma` 1 4:4:4, 2 4:2:0; `codec` 1 H.264, 2 H.265; `preset` 1 sharp (the encoder's best pictures per bit), 2 fast (its fastest encode); `mbps` the most the stream may take (all tiles; 0 = no cap of its own: the desktop streams at most the lowest cap of its watching viewers); `fps` pictures a second (0 = its display's refresh). Sent after the Hello and on every change. The active viewer's choices decide the stream (the watching viewer that sent input last, view-only viewers last); the decoders of every watching viewer (`Hello.caps`) and the desktop's settings bound them. |
 
@@ -123,16 +123,24 @@ example, no `/dev/uinput` access); `input_note` says why.
   second, at the same picture rate: sharp in as few streams as the size allows, then a stream per
   encode engine (bands encoded at once), then the fast preset, and 4:2:0 last, only after three
   seconds still behind at fast and only when the active viewer's chroma is auto. It steps back
-  after a while well clear of the picture's time. `Rate` tells the viewers each change.
+  after a while well clear of the picture's time. When a watching viewer's decode of a picture
+  (`Stats.decode_us`) takes 90% of a picture's time or more, the size streams in more H.265
+  bands (enough for each to decode in 70% of it, at most twice as many a step and 8 in all; the
+  viewer decodes the bands at once), and the rate stays: that second's backlog is the decoder's.
+  A step that does not cut the decode time by a fifth goes back and is the last. The bands stay
+  until a viewer leaves. `Rate` tells the viewers each change.
 - **Backpressure.** The desktop never drops an encoded picture: the next one references it. While
   a watching viewer has more than 2 pictures unsent, it makes none. The newest picture goes out
   once the viewer has caught up.
 
 ## Streams (tiles and interleaving)
 
-**H.265** is one stream as large as the encoder takes (NVIDIA: 8192 wide; no seams, one decoder),
-or, when one engine cannot keep up (the effort steps above), one band per encode engine, encoded
-at once. Bands carry `parts`, `x0`, `y0` as tiles do.
+**H.265** is one stream as large as the encoder takes (NVIDIA: 8192 wide; no seams, one decoder)
+while one hardware decoder keeps up: at most 1.3 Gpixel a second per stream (an Apple M4 decodes
+7680x2160 4:4:4 in 7.9 ms alone, in two bands at once in 6.7 ms). Larger is cut into bands from the first picture (7680x2160 at 120:
+two bands; 7680x4320 at 120: four), more when a viewer's measured decode asks (above), and when
+one engine cannot keep up (the effort steps above) at least one band per encode engine, encoded
+at once. Bands are whole macroblock rows, at least 64 rows, and carry `parts`, `x0`, `y0` as tiles do.
 
 A desktop whose GPU has several hardware encode engines encodes one H.264 stream per engine;
 each stream is a stream of its own (its own SPS and PPS, its own decoder on the viewer):

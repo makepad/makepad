@@ -49,7 +49,23 @@ impl Cache {
         // own verdict is clean. Later warm launches then never run the cold launch's twins (the race's
         // draw path: draw_view .. set_uniform), at no link cost (twin_link_target for the lazy path).
         let twinlink = !relax_backend::stats::opt_off(&u.prog.session.options, "-twinlink");
-        let in_image: std::collections::HashSet<Vec<u8>> = if twinlink { chosen.iter().filter_map(|(id, _, _)| self.slot_bytes_known(*id)).collect() } else { Default::default() };
+        let mut in_image: std::collections::HashSet<Vec<u8>> = if twinlink { chosen.iter().filter_map(|(id, _, _)| self.slot_bytes_known(*id)).collect() } else { Default::default() };
+        // ... or when the base has a code entry outside the image (stored, or written this run):
+        // the next run's first call links it lazily, as it would the twin's. A hot twin's base
+        // never ran (nothing called it: the callers are this image's), so it is never among the
+        // slots before the first present; twin_base_build gives it the entry in the background.
+        // Without this every warm launch ran the race's draw twins and built them at O3 again.
+        if twinlink {
+            for t in 0..u.fns.len() {
+                let crate::jit::FnKey::Plain(b) = u.fns[t].key else { continue };
+                if (b as usize) >= u.fns.len() || matches!(u.verdict_state(b), crate::jit::Verdict::Failed(_)) { continue; }
+                let Some(k) = self.slot_key(u, b) else { continue };
+                if self.entry_tier(k).is_none() && !pend.contains_key(&k) { continue; }
+                if let Some(bytes) = self.slot_bytes_known(b) {
+                    in_image.insert(bytes);
+                }
+            }
+        }
         let mut tab = ImageTables::default();
         let mut slots = E::default();
         let mut blob: Vec<u8> = Vec::new();

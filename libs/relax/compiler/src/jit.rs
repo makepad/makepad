@@ -6546,13 +6546,18 @@ impl Unit {
     /// ran the race's draw path (draw_view .. set_uniform, find_appendable_drawcall) as twins built at
     /// O3 again in the background each launch (x64 live warm draw +10% over --check-first).
     /// MAKEPAD_RUN_OPT=-twinlink keeps the twins (A/B).
-    pub(crate) fn twin_link_target(&self, caller: u32, target: u32) -> u32 {
+    /// `stored`: whether the base (no code yet) has a stored code entry: its first call links that
+    /// entry, as the twin's would (a base that never ran anywhere would compile on the program
+    /// thread instead: the twin it is). The bases of hot twins get that entry in the background
+    /// (twin_base_build), so the next launch's callers call them.
+    pub(crate) fn twin_link_target(&self, caller: u32, target: u32, stored: impl FnOnce(u32) -> bool) -> u32 {
         let n = self.fns.len();
         if target as usize >= n || caller as usize >= n { return target }
         let FnKey::Plain(base) = self.fns[target as usize].key else { return target };
         let body = match self.fns[caller as usize].key { FnKey::Plain(b) => b, _ => caller };
-        // (a base without code would compile on the program thread at its first call: the twin it is)
-        if (base as usize) < self.fns.len() && self.fns[base as usize].compiled && self.verdict_clean(body) && !matches!(self.verdict_state(base), Verdict::Failed(_))
+        if (base as usize) < self.fns.len() && self.verdict_clean(body) && !matches!(self.verdict_state(base), Verdict::Failed(_))
+            && self.fns[base as usize].build_err.is_none()
+            && (self.fns[base as usize].compiled || stored(base))
             && !relax_backend::stats::opt_off(&self.prog.session.options, "-twinlink") {
             TWIN_RETARGETS.fetch_add(1, Ordering::Relaxed);
             base
@@ -14416,6 +14421,32 @@ pub(crate) static TWIN_RETARGETS: AtomicU64 = AtomicU64::new(0);
 /// callees built ahead of a replacement's install (inspect stats)
 pub(crate) static SPECV_PREBUILT: AtomicU64 = AtomicU64::new(0);
 
+/// SPEC-V: bases of hot twins given their own build (twin_base_build)
+pub(crate) static TWIN_BASE_BUILDS: AtomicU64 = AtomicU64::new(0);
+
+/// SPEC-V: twin `t` reached O3 and its base has no code: the base gets its own (verified) build in
+/// the background, so it has a code entry. A hot twin whose base never ran is called by linked code
+/// (startup image, cache entries lowered before the caller's verdict) that no relowering here
+/// reaches; with the base's entry the next launch's image and links send those calls to the base
+/// (build_image, twin_link_target) instead of running the twin and building it at O3 again (twins
+/// are never cached). Owner thread.
+unsafe fn twin_base_build(up: *mut Unit, t: u32) {
+    let u = &*up;
+    let FnKey::Plain(b) = u.fns[t as usize].key else { return };
+    if (b as usize) >= u.fns.len() || relax_backend::stats::opt_off(&u.prog.session.options, "-twinlink") {
+        return;
+    }
+    let f = &u.fns[b as usize];
+    if f.compiled || f.build_err.is_some() || !matches!(f.key, FnKey::Inst(..) | FnKey::Closure(..)) || matches!(u.verdict_state(b), Verdict::Failed(_)) {
+        return;
+    }
+    TWIN_BASE_BUILDS.fetch_add(1, Ordering::Relaxed);
+    if specv_trace() {
+        eprintln!("specv @{:.3} #{} {}: base of hot twin #{} built in the background", wall_ns() as f64 / 1e9, b, short_name(&u.fns[b as usize].name), t);
+    }
+    o2_base(up, b);
+}
+
 /// SPEC-V: whether uncompiled slot `c` ran inside twin code without code of its own: its twin was
 /// lowered (an O3 inline candidate of twin code) but has no standalone code to lend (borrow_twin).
 fn ran_in_twin_code(u: &Unit, c: u32) -> bool {
@@ -17649,6 +17680,7 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                         u.retier(c);
                     }
                     relower_twin_callers(up, &tc);
+                    twin_base_build(up, id);
                 }
                 o3_owner(5, tt);
                 u.stats.code_bytes += code.len() as u64;

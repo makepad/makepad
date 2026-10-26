@@ -1,4 +1,4 @@
-//! desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--codec auto|h264|hevc] [--chroma auto|444|420] [--preset auto|sharp|fast] [--mbps N] [--fps N] [--h264only] [--stall MS,EVERY_MS] [--window WxH[@SCALE] [--drive]] [--hz N] [--dump DIR] [--420] [--keyreq MS]: a headless Desk Link viewer for
+//! desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--codec auto|h264|hevc] [--chroma auto|444|420] [--preset auto|sharp|fast] [--mbps N] [--fps N] [--h264only] [--stall MS,EVERY_MS] [--window WxH[@SCALE] [--drive]] [--hz N] [--dump DIR] [--420] [--keyreq MS] [--decode MS[,serial]]: a headless Desk Link viewer for
 //! checks. It connects with this machine's fleet credential, prints the Welcome, counts the
 //! pictures and bytes, pings once a second (RTT), and with `--input` moves the desktop's pointer
 //! between two points twice a second, timing each move until the desktop's own Cursor message
@@ -14,6 +14,11 @@
 //! key frame, every key frame carries SPS, PPS and an IDR slice in band, and the `key` flag says
 //! exactly whether a picture has an IDR. `--keyreq MS` asks for a key frame every MS ms and
 //! counts the answers.
+//!
+//! `--decode MS` stands in for a viewer whose decoder takes MS ms for a whole picture, decoding
+//! the bands at once (a band's share each: MS / parts; `MS,serial`: one after another, MS
+//! whatever the bands): it reports that as `Stats.decode_us` once a second, as a viewer does,
+//! so the desktop's decode-aware bands can be checked without a slow decoder.
 
 use makepad_network::fleet::auth as fleet_auth;
 use makepad_desk_link::{self as proto, ClientMsg, Inbox, ServerMsg};
@@ -24,7 +29,7 @@ use std::time::{Duration, Instant};
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let Some(target) = args.get(1).filter(|a| !a.starts_with("--")) else {
-        eprintln!("usage: desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--codec auto|h264|hevc] [--chroma auto|444|420] [--preset auto|sharp|fast] [--mbps N] [--fps N] [--h264only] [--stall MS,EVERY_MS] [--window WxH[@SCALE] [--drive]] [--hz N] [--dump DIR] [--420] [--keyreq MS]");
+        eprintln!("usage: desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--codec auto|h264|hevc] [--chroma auto|444|420] [--preset auto|sharp|fast] [--mbps N] [--fps N] [--h264only] [--stall MS,EVERY_MS] [--window WxH[@SCALE] [--drive]] [--hz N] [--dump DIR] [--420] [--keyreq MS] [--decode MS[,serial]]");
         std::process::exit(2);
     };
     let secs: u64 = args.windows(2).find(|w| w[0] == "--secs").and_then(|w| w[1].parse().ok()).unwrap_or(10);
@@ -68,7 +73,11 @@ fn main() {
     // view-only unless --drive: a probe never resizes a followed desktop someone is using
     let caps = if args.iter().any(|a| a == "--drive") { caps } else { caps | proto::caps::VIEW_ONLY };
     let keyreq: Option<u64> = args.windows(2).find(|w| w[0] == "--keyreq").and_then(|w| w[1].parse().ok());
-    let opts = Opts { window, hz, dump, caps, keyreq };
+    let decode: Option<(f64, bool)> = args.windows(2).find(|w| w[0] == "--decode").and_then(|w| {
+        let (ms, serial) = w[1].split_once(',').map_or((w[1].as_str(), false), |(a, b)| (a, b == "serial"));
+        Some((ms.parse().ok()?, serial))
+    });
+    let opts = Opts { window, hz, dump, caps, keyreq, decode };
     let (host, port) = match target.rsplit_once(':') {
         Some((h, p)) if p.parse::<u16>().is_ok() => (h.to_string(), p.to_string()),
         _ => (target.clone(), proto::DEFAULT_PORT.to_string()),
@@ -85,6 +94,7 @@ struct Opts {
     dump: Option<std::path::PathBuf>,
     caps: u32,
     keyreq: Option<u64>,
+    decode: Option<(f64, bool)>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -113,6 +123,8 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
     let mut buf = vec![0u8; 1 << 20];
     let (mut pictures, mut bytes, mut keys) = (0u64, 0u64, 0u64);
     let mut last_ping = Instant::now() - Duration::from_secs(5);
+    // the last picture's frame and its parts (`--decode`'s Stats)
+    let mut last_frame: Option<(u32, u8)> = None;
     let mut rtts: Vec<f64> = Vec::new();
     let mut welcomed = false;
     // --input: the point the pointer was sent to and when
@@ -158,6 +170,10 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
             last_ping = Instant::now();
             let ns = epoch.elapsed().as_nanos() as u64;
             proto::write_all(&mut stream, &ClientMsg::Ping { client_ns: ns }.encode()).map_err(|e| e.to_string())?;
+            if let (Some((ms, serial)), Some((frame, parts))) = (opts.decode, last_frame) {
+                let decode_ms = if serial { ms } else { ms / parts.max(1) as f64 };
+                proto::write_all(&mut stream, &ClientMsg::Stats { frame, decode_us: (decode_ms * 1000.0) as u32, present_us: 0 }.encode()).map_err(|e| e.to_string())?;
+            }
         }
         if input && welcomed && Instant::now() >= next_move {
             next_move = Instant::now() + Duration::from_millis(500);
@@ -203,6 +219,7 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
                 ),
                 ServerMsg::Video { key, data, stream, parts, built_ns, encoded_ns, frame, x0, y0, codec, .. } => {
                     let i = stream as usize;
+                    last_frame = Some((frame, parts));
                     if per_stream.len() <= i {
                         per_stream.resize(i + 1, (0, 0));
                         dumps.resize_with(i + 1, || None);

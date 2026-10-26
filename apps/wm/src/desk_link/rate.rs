@@ -12,6 +12,12 @@
 //! - Clean: the rate creeps back up, to the ceiling (the settings'
 //!   `max_mbps` when set, the viewers' caps; none by default).
 //!
+//! - Decode-bound (a watching viewer's decode of a picture, its slowest stream's, took most of a
+//!   picture's time): the size streams in more H.265 bands, enough that each band's decode fits
+//!   (the viewer decodes the bands at once, a thread each); the rate stays (the viewer's backlog
+//!   that second is its decoder's, not the link's). A step that did not cut the decode time
+//!   (a decoder that runs the bands one after another) is the last.
+//!
 //! The rate starts at [`START_KBPS`] (or the ceiling, if lower). A fixed `kbps` setting turns
 //! all of this off.
 
@@ -51,6 +57,16 @@ pub mod effort {
     pub const HALF: u8 = 3;
 }
 
+/// A viewer's decode of a picture over this share of the picture's time: decode-bound. A
+/// stream's decoder takes one picture at a time, so it keeps up until its decode nears the
+/// picture's whole time (Apple M4: 8K wide in two bands decodes in 6.7 ms, 81% at 120, and
+/// keeps 120).
+const DECODE_BOUND: f64 = 0.9;
+/// More bands aim the decode of a picture at this share of its time.
+const DECODE_AIM: f64 = 0.7;
+/// The most bands decode asks for.
+pub const MAX_BANDS: u32 = 8;
+
 /// What one second of streaming saw.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Second {
@@ -70,6 +86,23 @@ pub struct Second {
     /// The most effort this stream may take ([`effort`]: the viewer's choices bound it, e.g. a
     /// forced 4:4:4 stops at `FAST`).
     pub max_effort: u8,
+    /// The slowest watching viewer's decode of a picture (ms, its slowest stream's; 0: none said).
+    pub decode_ms: f64,
+    /// The streams a picture is encoded in now (H.265 bands; 0: decode is no matter here, e.g.
+    /// H.264 tiles, which the decoder's level already sizes).
+    pub streams: u32,
+}
+
+/// The bands a size streams in for the viewers' decoders, and the decode that asked for them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Bands {
+    size: [u32; 2],
+    bands: u32,
+    /// The decode (ms) with the streams before this step.
+    decode_ms: f64,
+    streams: u32,
+    /// More bands did not help: no further step.
+    last: bool,
 }
 
 /// A size's step of [`effort`] (sizes never encoder-bound are at `SHARP` and not listed).
@@ -91,6 +124,9 @@ pub struct RateControl {
     limit: u8,
     clean: u32,
     steps: Vec<Step>,
+    bands: Vec<Bands>,
+    /// Seconds still to skip after the bands changed (the viewer's stats describe the old ones).
+    settle: u32,
 }
 
 impl RateControl {
@@ -117,6 +153,51 @@ impl RateControl {
         self.steps.retain(|h| h.size != size);
     }
 
+    /// The bands the viewers' decode asked for go (a viewer left: maybe the slow one).
+    pub fn forget_decode(&mut self) {
+        self.bands.clear();
+    }
+
+    /// The fewest H.265 bands the viewers' measured decode asks of `size` (1: no ask), and the
+    /// decode (ms) that asked.
+    pub fn decode_bands(&self, size: [u32; 2]) -> (u32, f64) {
+        self.bands.iter().find(|b| b.size == size).map_or((1, 0.0), |b| (b.bands, b.decode_ms))
+    }
+
+    /// A viewer's decode was behind: `size` (now in `s.streams` streams) takes enough bands for
+    /// each to decode in [`DECODE_AIM`] of the picture's time. True when the bands changed.
+    fn decode_step(&mut self, s: &Second, budget_ms: f64) -> bool {
+        let at = self.bands.iter().position(|b| b.size == s.size);
+        if let Some(b) = at.map(|i| self.bands[i]) {
+            if b.last {
+                return false;
+            }
+            // more bands that did not cut the decode by a fifth: they decode one after another;
+            // back to the bands before (fewer seams), and no further step
+            if s.streams > b.streams && s.decode_ms > b.decode_ms * 0.8 {
+                let back = &mut self.bands[at.unwrap()];
+                back.last = true;
+                back.bands = b.streams;
+                self.settle = 2;
+                return true;
+            }
+        }
+        // enough bands for each to decode in DECODE_AIM of the picture's time, at most twice as
+        // many a step (a decoder that runs them one after another shows after one step)
+        let streams = s.streams.max(1);
+        let want = ((streams as f64 * s.decode_ms / (budget_ms * DECODE_AIM)).ceil() as u32).clamp(streams + 1, streams * 2).min(MAX_BANDS);
+        if want <= streams {
+            return false;
+        }
+        let b = Bands { size: s.size, bands: want, decode_ms: s.decode_ms, streams, last: false };
+        match at {
+            Some(i) => self.bands[i] = b,
+            None => self.bands.push(b),
+        }
+        self.settle = 2;
+        true
+    }
+
     /// The [`effort`] step `size` streams at (`max`: the most it may take).
     pub fn effort(&self, size: [u32; 2], max: u8) -> u8 {
         self.steps.iter().find(|h| h.size == size).map_or(effort::SHARP, |h| h.level).min(max)
@@ -129,8 +210,16 @@ impl RateControl {
         let mut kbps = self.kbps(ceiling);
         let moving = s.pictures * 4 >= s.fps as u64;
         let encoder_bound = moving && s.held_encoder >= (s.fps as u64 / 20).max(2) && s.tile_ms >= budget_ms * 0.8;
+        let decode_bound = moving && s.streams > 0 && s.decode_ms >= budget_ms * DECODE_BOUND;
         let mut changed = false;
-        if s.congested_ms >= CONGESTED_MS {
+        if self.settle > 0 {
+            // the bands just changed: what the viewers said was of the old ones
+            self.settle -= 1;
+        } else if decode_bound {
+            // the viewer's backlog is its decoder's: more bands, not less rate
+            self.clean = 0;
+            changed = self.decode_step(s, budget_ms);
+        } else if s.congested_ms >= CONGESTED_MS {
             // what got through is what the link carries: the rate goes to most of that. Under
             // half the rate got through: a stall (a viewer that stopped reading), not a measure
             // of the link: down by a quarter. More than the rate got through: bursts, a little.
@@ -211,7 +300,52 @@ mod tests {
     use super::*;
 
     fn second(congested_ms: f64, held_encoder: u64, tile_ms: f64, sent_kbps: u64, _full_chroma: bool) -> Second {
-        Second { fps: 120, pictures: 110, congested_ms, held_encoder, tile_ms, sent_kbps, size: [7680, 2160], max_effort: effort::HALF }
+        Second { fps: 120, pictures: 110, congested_ms, held_encoder, tile_ms, sent_kbps, size: [7680, 2160], max_effort: effort::HALF, decode_ms: 0.0, streams: 2 }
+    }
+
+    #[test]
+    fn a_viewer_behind_on_decode_gets_more_bands_not_less_rate() {
+        let mut r = RateControl::default();
+        let size = [7680, 2160];
+        let s = |decode_ms: f64, streams: u32| Second { decode_ms, streams, congested_ms: 400.0, ..second(400.0, 0, 5.0, 100_000, true) };
+        // one stream that takes 12 ms of an 8.3 ms picture: 12 / 5.8 ms (70%) -> 3, twice at most: 2
+        assert!(r.second(&s(12.0, 1), 400_000));
+        assert_eq!(r.decode_bands(size), (2, 12.0));
+        assert_eq!(r.kbps(400_000), START_KBPS, "the viewer's backlog was its decoder's");
+        // the next two seconds describe the old bands: nothing decided
+        assert!(!r.second(&s(12.0, 1), 400_000));
+        assert!(!r.second(&s(12.0, 1), 400_000));
+        assert_eq!(r.decode_bands(size), (2, 12.0));
+        // two bands still behind (a slower decoder): more
+        assert!(r.second(&s(8.0, 2), 400_000));
+        assert_eq!(r.decode_bands(size).0, 3);
+        r.second(&s(8.0, 2), 400_000);
+        r.second(&s(8.0, 2), 400_000);
+        // three that decode no faster: they run one after another: back to two, no further step
+        assert!(r.second(&s(7.8, 3), 400_000));
+        assert_eq!(r.decode_bands(size).0, 2);
+        for _ in 0..5 {
+            assert!(!r.second(&s(8.0, 2), 400_000));
+        }
+        assert_eq!(r.decode_bands(size).0, 2);
+        // a far slower one: twice the bands a step at most
+        let mut r = RateControl::default();
+        assert!(r.second(&s(30.0, 2), 400_000));
+        assert_eq!(r.decode_bands(size).0, 4);
+        // a decode within the picture's time decides nothing about bands (the M4's two 8K bands)
+        let mut r = RateControl::default();
+        assert!(!r.second(&Second { decode_ms: 6.7, streams: 2, ..second(0.0, 0, 5.0, 100_000, true) }, 400_000));
+        assert_eq!(r.decode_bands(size), (1, 0.0));
+        // no word from the viewer, or H.264 tiles: nothing either
+        assert!(!r.second(&Second { decode_ms: 20.0, streams: 0, ..second(0.0, 0, 5.0, 100_000, true) }, 400_000));
+        assert_eq!(r.decode_bands(size), (1, 0.0));
+        // a viewer left: from the top
+        r.decode_step(&Second { decode_ms: 9.6, streams: 1, ..second(0.0, 0, 5.0, 100_000, true) }, 1000.0 / 120.0);
+        assert_eq!(r.decode_bands(size).0, 2);
+        r.forget(size);
+        assert_eq!(r.decode_bands(size).0, 2, "the viewer's choices change no decoder");
+        r.forget_decode();
+        assert_eq!(r.decode_bands(size), (1, 0.0));
     }
 
     #[test]
@@ -319,7 +453,7 @@ mod tests {
     #[test]
     fn a_forced_444_stops_at_fast() {
         let mut r = RateControl::default();
-        let s = |held| Second { fps: 120, pictures: 110, congested_ms: 0.0, held_encoder: held, tile_ms: 9.0, sent_kbps: 1, size: [7680, 4320], max_effort: effort::FAST };
+        let s = |held| Second { fps: 120, pictures: 110, congested_ms: 0.0, held_encoder: held, tile_ms: 9.0, sent_kbps: 1, size: [7680, 4320], max_effort: effort::FAST, decode_ms: 0.0, streams: 2 };
         assert!(r.second(&s(40), 400_000));
         assert!(r.second(&s(40), 400_000));
         assert!(!r.second(&s(40), 400_000), "nothing more to give up");
@@ -330,7 +464,7 @@ mod tests {
     #[test]
     fn a_still_desktop_decides_nothing() {
         let mut r = RateControl::default();
-        let still = Second { fps: 120, pictures: 3, congested_ms: 0.0, held_encoder: 9, tile_ms: 20.0, sent_kbps: 2_000, size: [7680, 2160], max_effort: effort::HALF };
+        let still = Second { fps: 120, pictures: 3, congested_ms: 0.0, held_encoder: 9, tile_ms: 20.0, sent_kbps: 2_000, size: [7680, 2160], max_effort: effort::HALF, decode_ms: 0.0, streams: 2 };
         assert!(!r.second(&still, 400_000));
         assert_eq!(r.effort([7680, 2160], effort::HALF), effort::SHARP);
     }

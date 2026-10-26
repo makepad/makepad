@@ -161,7 +161,9 @@ pub enum ClientMsg {
     Gamepad { slot: u8, state: GamepadState },
     GamepadGone { slot: u8 },
     Ping { client_ns: u64 },
-    /// How the last shown picture fared: decode time and decode-end -> on screen.
+    /// How the last shown picture fared: decode-end -> on screen, its `frame`; and the decode
+    /// time of a picture (its slowest stream's), the mean since the last `Stats` (the desktop
+    /// cuts H.265 into more bands when it nears a picture's time).
     Stats { frame: u32, decode_us: u32, present_us: u32 },
     Clipboard { text: String },
     /// How this viewer wants the stream encoded ([`pref`]; 0 = auto each): `chroma`, `codec`,

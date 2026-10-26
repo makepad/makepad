@@ -494,6 +494,17 @@ mod native {
                 pref::FAST => false,
                 _ => step < effort::FAST,
             };
+            if hevc {
+                // bands for the viewers' decoders: the size's own rule, or what a viewer's
+                // measured decode asked for
+                let rule = TilePlan::decode_bands(size, self.fps);
+                let (asked, ms) = self.rate.decode_bands(size);
+                if asked > rule {
+                    why.push(format!("{asked} bands: a viewer took {ms:.1} ms to decode a picture"));
+                } else if rule > 1 {
+                    why.push(format!("{rule} bands: {}x{} at {} is past one decoder", size[0], size[1], self.fps));
+                }
+            }
             match step {
                 effort::SPREAD if hevc => why.push("a stream per engine: one was behind".into()),
                 effort::FAST if p.preset == pref::AUTO => why.push("fast: the encoder was behind at sharp".into()),
@@ -588,22 +599,37 @@ mod native {
             };
             let backlog = self.viewers.iter().map(|v| v.backlog.load(Ordering::Acquire)).max().unwrap_or(0);
             // the viewer furthest behind (pictures sent that it has not shown yet, from its Stats)
-            let viewer = self.viewers.iter_mut().filter_map(|v| v.shown.take()).max_by_key(|s| s.0).map_or(String::new(), |(behind, decode, present)| format!(" · viewer behind {behind} (decode {:.1} ms, present {:.1} ms)", decode as f64 / 1000.0, present as f64 / 1000.0));
+            let shown: Vec<(u32, u32, u32)> = self.viewers.iter_mut().filter(|v| !v.paused.load(Ordering::Acquire)).filter_map(|v| v.shown.take()).collect();
+            let viewer = shown.iter().max_by_key(|s| s.0).map_or(String::new(), |(behind, decode, present)| format!(" · viewer behind {behind} (decode {:.1} ms, present {:.1} ms)", *decode as f64 / 1000.0, *present as f64 / 1000.0));
+            // the slowest decoder of the watching viewers (its slowest stream's, per picture)
+            let decode_ms = shown.iter().map(|s| s.1).max().unwrap_or(0) as f64 / 1000.0;
             let congested_ms = std::mem::take(&mut self.tl_congested_s) * 1000.0;
             // the adaptive rate decides on this second (a fixed `kbps` setting: nothing to decide)
             if let (Some(want), true) = (cx.global::<CaptureState>().want, self.settings.as_ref().is_some_and(|s| s.kbps == 0)) {
                 let max_effort = self.max_effort(want.stream);
-                let second = super::rate::Second { fps: self.fps, pictures: encoded, congested_ms, held_encoder, tile_ms, sent_kbps: bytes * 8 / 1000, size: want.stream, max_effort };
+                // H.265 bands answer to the viewers' decode (H.264 tiles are sized by the level)
+                let banded = want.hevc && self.settings.as_ref().is_none_or(|s| s.split == super::settings::Split::Tiles && s.tiles.is_none());
+                let streams = if banded { want.plan.tiles() } else { 0 };
+                let second = super::rate::Second { fps: self.fps, pictures: encoded, congested_ms, held_encoder, tile_ms, sent_kbps: bytes * 8 / 1000, size: want.stream, max_effort, decode_ms, streams };
+                let bands_were = self.rate.decode_bands(want.stream).0;
                 let ceiling = self.rate_ceiling(want.stream, want.full_chroma);
                 let was = self.rate.kbps(ceiling);
                 if self.rate.second(&second, ceiling) {
                     let step = self.rate.effort(want.stream, max_effort);
-                    super::note(&format!(
-                        "desk link: {}x{} at effort {} ({}; slowest tile {tile_ms:.1} ms of {:.1}, {held_encoder} frames waited for the encoder)",
-                        want.stream[0], want.stream[1], step,
-                        ["sharp, fewest streams", "sharp, a stream per engine", "fast, a stream per engine", "fast, 4:2:0"][step.min(3) as usize],
-                        1000.0 / self.fps.max(1) as f64
-                    ));
+                    let bands = self.rate.decode_bands(want.stream).0;
+                    if bands != bands_were {
+                        super::note(&format!(
+                            "desk link: {}x{} in at least {bands} bands (a viewer took {decode_ms:.1} ms of {:.1} to decode a picture of {streams} streams)",
+                            want.stream[0], want.stream[1], 1000.0 / self.fps.max(1) as f64
+                        ));
+                    } else {
+                        super::note(&format!(
+                            "desk link: {}x{} at effort {} ({}; slowest tile {tile_ms:.1} ms of {:.1}, {held_encoder} frames waited for the encoder)",
+                            want.stream[0], want.stream[1], step,
+                            ["sharp, fewest streams", "sharp, a stream per engine", "fast, a stream per engine", "fast, 4:2:0"][step.min(3) as usize],
+                            1000.0 / self.fps.max(1) as f64
+                        ));
+                    }
                     self.update_capture(cx);
                 }
                 let now = self.rate.kbps(ceiling);
@@ -661,10 +687,10 @@ mod native {
                     let codec = if c.hevc { StreamVideoCodec::Hevc } else { StreamVideoCodec::H264 };
                     let max = VideoStreamEncoder::max_size(codec, c.full_chroma);
                     let split = self.settings.as_ref().map_or(super::settings::Split::Tiles, |s| s.split);
-                    let auto = TilePlan::new(stream, fps, split, VideoStreamEncoder::engines(), max, c.hevc, c.spread);
+                    let auto = TilePlan::new(stream, fps, split, VideoStreamEncoder::engines(), max, c.hevc, c.spread, self.rate.decode_bands(stream).0);
                     // a `tiles = CxR` setting, never fewer than the encoder's size needs
                     let plan = match self.settings.as_ref().and_then(|s| s.tiles).filter(|_| split == super::settings::Split::Tiles) {
-                        Some((cols, r)) => TilePlan { cols: cols.max(TilePlan::new(stream, fps, super::settings::Split::Off, 1, max, c.hevc, false).cols), rows: r },
+                        Some((cols, r)) => TilePlan { cols: cols.max(TilePlan::new(stream, fps, super::settings::Split::Off, 1, max, c.hevc, false, 1).cols), rows: r },
                         None => auto,
                     };
                     Some(Want { screen_px: [s.x, s.y, s.width, s.height], stream, full_chroma: c.full_chroma, plan, hevc: c.hevc, sharp: c.sharp })
@@ -943,6 +969,8 @@ mod native {
                         if let Some(i) = self.viewers.iter().position(|v| v.session == session) {
                             let v = self.viewers.remove(i);
                             super::note(&format!("desk link: {} left ({reason})", v.name));
+                            // the bands its decoder may have asked for go with it
+                            self.rate.forget_decode();
                             self.generation = self.generation.wrapping_add(1);
                         }
                         self.sync_subscribers();

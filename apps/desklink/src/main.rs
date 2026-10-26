@@ -143,6 +143,11 @@ pub struct App {
     /// Present times waiting for their report: (frame, decode_us, present_us).
     #[rust]
     last_stats: Option<(u32, u32, u32)>,
+    /// Decode times (ms, a picture's slowest stream) of the pictures taken since the last
+    /// `Stats`, summed, and how many: `Stats` reports their mean (the desktop sizes its bands by
+    /// it).
+    #[rust]
+    decode_sum: (f64, u32),
     /// The paused history (None: live).
     #[rust]
     scrub: Option<Scrub>,
@@ -423,6 +428,8 @@ impl App {
             l.encode = (p.encoded_ns as f64 - p.built_ns as f64) / 1e6;
             l.network = (p.received_ns as i64 - local(p.sent_ns)) as f64 / 1e6;
             l.decode = p.decode_ns as f64 / 1e6;
+            self.decode_sum.0 += l.decode;
+            self.decode_sum.1 += 1;
             view.set_picture(cx, p.width, p.height, p.parts, p.frame, p.decoded_ns);
         }
         if let Some(d) = self.scrub.as_ref().and_then(Scrub::take_ready) {
@@ -1284,7 +1291,9 @@ impl AppMain for App {
             let dropped = self.current().map_or(0, |c| std::mem::take(&mut c.shared.lock().unwrap().dropped));
             self.shown_rate = (std::mem::take(&mut self.shown), dropped);
             self.refresh(cx);
-            if let (Some((frame, decode_us, present_us)), Some(c)) = (self.last_stats.take(), self.current()) {
+            let (sum, n) = std::mem::take(&mut self.decode_sum);
+            if let (Some((frame, last_us, present_us)), Some(c)) = (self.last_stats.take(), self.current()) {
+                let decode_us = if n == 0 { last_us } else { (sum * 1000.0 / n as f64) as u32 };
                 c.send(ClientMsg::Stats { frame, decode_us, present_us });
             }
             if self.stats_log {
