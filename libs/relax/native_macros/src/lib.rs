@@ -78,3 +78,6 @@ mod tests {
         assert_eq!(got, want.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect::<Vec<_>>());
     }
 }
+
+// This crate's source stamp (build.rs, libs/relax/self_stamp.rs): relax-compiler folds it into the codegen identity.
+include!(concat!(env!("OUT_DIR"), "/src_stamp.rs"));

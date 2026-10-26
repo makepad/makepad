@@ -98,3 +98,6 @@ pub(crate) fn unique_test_suffix() -> String {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     format!("{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 }
+
+// This crate's source stamp (build.rs, libs/relax/self_stamp.rs): relax-compiler folds it into the codegen identity.
+include!(concat!(env!("OUT_DIR"), "/src_stamp.rs"));

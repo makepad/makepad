@@ -9,8 +9,9 @@
 //! rebuild keeps the running app and says why; the next such change builds again.
 //!
 //! One rebuild at a time; a change during it builds once more after it. The new binary is the
-//! one cargo leaves at the loader's own path, so its build id (the hash of its bytes) keys every
-//! cache it uses: nothing of the old binary's code carries over.
+//! one cargo leaves at the loader's own path. Its codegen identity (codegen_id.rs) keys every cache
+//! it uses: a rebuild that changed what generates code starts from no stored code; one that changed
+//! only the rest of the binary (devhub, platform glue) keeps every stored build.
 use relax_session::sync::Mutex;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -203,7 +204,7 @@ fn build_loop() {
             continue;
         }
         let Some(loader) = loader() else { return fail("the makepad binary's path is unknown".into()) };
-        // the new binary starts at all (its own build id and provenance)
+        // the new binary starts at all (its own codegen identity and provenance)
         match std::process::Command::new(&loader).arg("--version").stdin(std::process::Stdio::null()).output() {
             Ok(o) if o.status.success() => {}
             Ok(o) => return fail(format!("the rebuilt makepad does not start ({}): {}; the app runs the previous code", o.status, String::from_utf8_lossy(&o.stderr).trim())),

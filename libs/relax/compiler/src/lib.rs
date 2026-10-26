@@ -128,6 +128,7 @@ pub mod syms;
 pub mod wasm_export;
 pub mod pack;
 pub mod store;
+pub mod codegen_id;
 pub mod kernel_store;
 pub mod cache;
 pub mod clean;

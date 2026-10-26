@@ -1,10 +1,10 @@
 //! Compiled compute kernels in the Relax disk store: one more entry type (KIND_KERNEL) in a
-//! store file of the cache folder (`kernels-<16 hex>.rcs`, the hex = the loader build id, target
+//! store file of the cache folder (`kernels-<16 hex>.rcs`, the hex = the codegen identity, the compute crate's source identity, target
 //! and the entry format), so the store's commit protocol (a torn or partial append reads as
 //! absent), its generations, its prune and its cap apply unchanged. The key is the kernel
 //! program's identity (makepad_script_compute::kcache::key: the AIR, the back end, the
-//! optimiser switches and CPU features); the build id is in the file name, so another
-//! `makepad` build never opens this build's code. `makepad run` installs `get` / `put` into the
+//! optimiser switches and CPU features); the identities are in the file name, so a build with
+//! another kernel compiler never opens this build's code. `makepad run` installs `get` / `put` into the
 //! compute crate (tools/run). A load is lazy: a kernel's entry is read when that kernel is built.
 //!
 //! Offered entries are queued and appended in batches (a store append rewrites the small index
@@ -34,15 +34,26 @@ struct State {
 
 static STATE: Mutex<State> = Mutex::new(State { open: None, pending: Vec::new(), bytes: 0, oldest: None });
 
+/// The kernel compiler's identity: the source identity of the compute crate this binary was built
+/// with (the loader sets it with the hook: tools/run). The kernels' code comes from that crate, not
+/// from Relax's own code generator, so it keys the store next to the codegen identity.
+static KERNEL_COMPILER: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+pub fn set_kernel_compiler(id: u64) {
+    let _ = KERNEL_COMPILER.set(id);
+}
+
 fn enabled() -> bool {
-    !matches!(std::env::var("MAKEPAD_RUN_CACHE").ok().as_deref(), Some("off") | Some("0"))
+    KERNEL_COMPILER.get().is_some()
+        && !matches!(std::env::var("MAKEPAD_RUN_CACHE").ok().as_deref(), Some("off") | Some("0"))
         && !matches!(std::env::var("MAKEPAD_RUN_KERNEL_CACHE").ok().as_deref(), Some("off") | Some("0"))
 }
 
 fn path() -> PathBuf {
     let mut h = crate::sip::Sip128::new();
     h.str("kernel-store");
-    h.u128(crate::stable::build_id());
+    h.u128(crate::codegen_id::id());
+    h.u64(*KERNEL_COMPILER.get().expect("kernel compiler identity"));
     h.str(&format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS));
     h.u32(FORMAT);
     crate::dirs::relax_dir().join("cache").join(format!("kernels-{:016x}.rcs", h.finish128() as u64))

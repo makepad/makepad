@@ -226,15 +226,15 @@ pub unsafe extern "system" fn Java_dev_makepad_run_RunActivity_boot(
 }
 
 /// The compile cache persists: a fresh process boots warm from it, and an APK update keeps it
-/// (Relax keys its stored builds by the loader's build id and recompiles only sources that
-/// changed). It is deleted only for another host library (another loader build id: none of its
-/// code could be used) or when the window manager's settings ("Clear JIT cache") leave a
+/// (Relax keys its stored builds by its codegen identity, relax_compiler::codegen_id, and
+/// recompiles only sources that changed). It is deleted only for a host library with another code
+/// generator (another codegen identity: none of its code could be used) or when the window manager's settings ("Clear JIT cache") leave a
 /// `clear-cache` file in the home folder. The old cache is renamed away at once and deleted on a
 /// thread of its own, so the boot does not wait for the delete.
 /// Answers whether the packed sources changed (another archive than the last process's).
 fn freshen_cache(home: &std::path::Path, offset: u64, len: u64) -> bool {
     let stamp_file = home.join("build.stamp");
-    let stamp = format!("{:032x}", relax_compiler::stable::build_id());
+    let stamp = format!("{:032x}", relax_compiler::codegen_id::id());
     let pack_file = home.join("pack.stamp");
     let pack = format!("{offset} {len}");
     let other_pack = std::fs::read_to_string(&pack_file).map_or(true, |s| s != pack);
@@ -248,7 +248,7 @@ fn freshen_cache(home: &std::path::Path, offset: u64, len: u64) -> bool {
         if std::fs::rename(&target, &trash).is_err() {
             let _ = std::fs::remove_dir_all(&target);
         }
-        logcat::log(&format!("compile cache cleared at process start ({})", if asked { "cleared in settings" } else { "another JIT build" }));
+        logcat::log(&format!("compile cache cleared at process start ({})", if asked { "cleared in settings" } else { "another code generator" }));
         boot::set_note("cold start \u{b7} cache cleared");
     }
     let _ = std::fs::remove_file(&cleared);

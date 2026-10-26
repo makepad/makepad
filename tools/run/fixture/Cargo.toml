@@ -35,6 +35,11 @@ path = "src/guard.rs"
 name = "relax-unwind-probe"
 path = "src/unwind_probe.rs"
 
+# a native panic in a lazy compile reaches the program as a panic of the call (compile_panic.sh)
+[[bin]]
+name = "relax-compile-panic"
+path = "src/compile_panic.rs"
+
 # the program's own stderr while the session transcript cannot be written (stderr_full.sh)
 [[bin]]
 name = "relax-stderr-flood"

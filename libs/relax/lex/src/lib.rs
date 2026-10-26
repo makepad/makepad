@@ -32,3 +32,6 @@ pub mod lexer;
 pub mod packed;
 pub mod tokens;
 pub mod validate;
+
+// This crate's source stamp (build.rs, libs/relax/self_stamp.rs): relax-compiler folds it into the codegen identity.
+include!(concat!(env!("OUT_DIR"), "/src_stamp.rs"));

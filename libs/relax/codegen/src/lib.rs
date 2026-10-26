@@ -39,3 +39,6 @@ pub mod opt;
 pub mod ranges;
 pub mod version;
 pub mod web32;
+
+// This crate's source stamp (build.rs, libs/relax/self_stamp.rs): relax-compiler folds it into the codegen identity.
+include!(concat!(env!("OUT_DIR"), "/src_stamp.rs"));

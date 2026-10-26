@@ -1115,19 +1115,19 @@ mod imp {
     }
 
     rt_fn! {
-        fn rt_memcpy(d: *mut u8, s: *const u8, n: usize) -> *mut u8 {
+        leaf fn rt_memcpy(d: *mut u8, s: *const u8, n: usize) -> *mut u8 {
             unsafe { std::ptr::copy_nonoverlapping(s, d, n) };
             d
         }
     }
     rt_fn! {
-        fn rt_memmove(d: *mut u8, s: *const u8, n: usize) -> *mut u8 {
+        leaf fn rt_memmove(d: *mut u8, s: *const u8, n: usize) -> *mut u8 {
             unsafe { std::ptr::copy(s, d, n) };
             d
         }
     }
     rt_fn! {
-        fn rt_memset(d: *mut u8, c: i32, n: usize) -> *mut u8 {
+        leaf fn rt_memset(d: *mut u8, c: i32, n: usize) -> *mut u8 {
             unsafe { std::ptr::write_bytes(d, c as u8, n) };
             d
         }

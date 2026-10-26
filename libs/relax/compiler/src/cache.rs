@@ -537,7 +537,7 @@ pub struct Cache {
     /// crate identity hash -> crate index
     crate_by_ident: HashMap<u128, u32>,
     crate_ident: Vec<u128>,
-    /// build id + codegen configuration
+    /// codegen identity (codegen_id.rs) + codegen configuration
     cfg: u128,
     pending: Vec<(u32, NewEntry)>,
     /// payload bytes in `pending` (spill_take: written out during the run past a threshold)
@@ -778,7 +778,7 @@ impl Cache {
         cfgh.str("relax-cache-cfg");
         cfgh.u32(ENTRY_VERSION);
         cfgh.u32(STORE_FORMAT);
-        cfgh.u128(crate::stable::build_id());
+        cfgh.u128(crate::codegen_id::id());
         let o = &u.opt;
         for b in [o.inline, o.inline_all, o.fold, o.cse, o.sroa, o.licm, o.imm, o.layout] {
             cfgh.u8(b as u8);
@@ -3434,7 +3434,7 @@ const IN_USE_BY_OTHERS: std::time::Duration = std::time::Duration::from_secs(10 
 /// itself opened; a delete that fails (open elsewhere, on Windows) is retried by the next
 /// start. Then other Relax builds' stores go, unless a process of that build is running right
 /// now (store::retire_build: every running process holds its build's live lock): store names
-/// hash the build id, so no other build ever reads them. Then, while `<root>/cache` holds more
+/// hash the codegen identity (codegen_id.rs), so no other build ever reads them. Then, while `<root>/cache` holds more
 /// than the cap (MAKEPAD_RUN_CACHE_MAX megabytes, else twice what this run uses (its live
 /// stores), at least CAP_FLOOR_MB), whole store files go, least recently used first (a run
 /// stamps the files it uses; other crate versions' files are never stamped again) -- never one
@@ -4090,7 +4090,7 @@ fn skip_nounwind_and_cert(d: &mut D) -> Option<(usize, usize)> {
 }
 
 // Shared with pre-parse discovery: keep the filename's build/target/fingerprint formula in
-// one place. Front metadata has its own versioned key in addition to the build id.
+// one place. Front metadata has its own versioned key in addition to the codegen identity.
 fn front_store_name(options: &crate::options::Options, name: &str, fp: u128) -> String {
     front_store_name_with(crate::crate_image::parse_options(options), name, fp)
 }
@@ -4098,7 +4098,7 @@ fn front_store_name(options: &crate::options::Options, name: &str, fp: u128) -> 
 fn front_store_name_with(parse_options: u128, name: &str, fp: u128) -> String {
     let mut h = Sip128::new();
     h.str("store");
-    h.u128(crate::stable::build_id());
+    h.u128(crate::codegen_id::id());
     h.str(&format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS));
     h.u128(fp);
     // parser policy changes the trees (and their ids) under the same sources
@@ -4111,7 +4111,7 @@ fn front_store_name_with(parse_options: u128, name: &str, fp: u128) -> String {
 fn code_store_name(options: &crate::options::Options, name: &str, iface: u128) -> String {
     let mut h = Sip128::new();
     h.str("code-store");
-    h.u128(crate::stable::build_id());
+    h.u128(crate::codegen_id::id());
     h.str(&format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS));
     h.u128(iface);
     h.u8(crate::parser::lazy_auto() as u8);
@@ -4131,7 +4131,7 @@ fn front_crate_key(name: &str, root: &str) -> u128 {
 fn front_graph_key(identity: u128) -> u128 {
     let mut h = Sip128::new();
     h.str("front-graph");
-    h.u128(crate::stable::build_id());
+    h.u128(crate::codegen_id::id());
     h.str(std::env::consts::ARCH); h.str(std::env::consts::OS);
     h.u128(identity);
     h.finish128()

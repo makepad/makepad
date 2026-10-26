@@ -90,6 +90,7 @@ pub fn set_boot_environment(environment: BootEnvironment) {
 
 /// The compute crate's compiled kernels go to the Relax disk store (relax_compiler::kernel_store).
 fn install_kernel_store() {
+    relax_compiler::kernel_store::set_kernel_compiler(src("makepad_script_compute"));
     makepad_script_compute::kcache::install(makepad_script_compute::kcache::Hook {
         get: relax_compiler::kernel_store::get,
         put: relax_compiler::kernel_store::put,

@@ -11,7 +11,7 @@ autotests = false
 
 # files outside this crate its build reads (makepad-source-slice ships them in a slice or source archive)
 [package.metadata.commercial]
-include = ["../build_stamp.rs", "std"]
+include = ["../build_stamp.rs", "../self_stamp.rs", "std"]
 
 [lib]
 name = "relax_compiler"
@@ -27,6 +27,9 @@ relax-codegen = { workspace = true }
 relax-types = { workspace = true }
 relax-front = { workspace = true }
 relax-session = { workspace = true }
+# direct so the codegen identity (build.rs, src/codegen_id.rs) names their source stamps
+relax-base = { workspace = true }
+relax-lex = { workspace = true }
 makepad-remote = { workspace = true }
 makepad-strict-json = { workspace = true }
 makepad-gpu-trace = { workspace = true }

@@ -1,11 +1,11 @@
 //! Disk cache store files (plans/relax-cache.md): ONE file per crate version under
-//! `<target>/relax/cache/<crate>-<16 hex>.rcs` (dirs.rs) (the hex: Relax build id, target and the crate's
+//! `<target>/relax/cache/<crate>-<16 hex>.rcs` (dirs.rs) (the hex: Relax codegen identity (codegen_id.rs), target and the crate's
 //! fingerprint), shared by every program that uses that crate.
 //!
 //! Layout:
 //!   header (HEADER bytes): magic "RCS1", format u32, active slot u32, slot capacity u32 (index
 //!     entries per slot), then per slot: entry count u64, data end u64, index checksum u64;
-//!     the writing Relax build u64 (stable::build_id's low half: build_of); header checksum u64 last
+//!     the writing Relax build u64 (the codegen identity's low half, codegen_id.rs: build_of); header checksum u64 last
 //!   index slot 0, index slot 1 (capacity x INDEX_ENTRY bytes each): sorted (key u128, offset u64,
 //!     length u32, kind u32, payload checksum u64)
 //!   entries (8-byte aligned payloads) up to the active slot's data end
@@ -41,11 +41,11 @@ const MIN_CAP: u32 = 256;
 /// Where the header names the Relax build that wrote the store.
 const BUILD_AT: usize = 64;
 
-/// This Relax build's id as store headers carry it. Every store name hashes the build id
+/// This Relax build's codegen identity (codegen_id.rs) as store headers carry it. Every store name hashes it
 /// (cache.rs front_store_name, code_store_name, front_graph_key; run stores are one process's),
 /// so a store is only ever written by one build.
 pub fn this_build() -> u64 {
-    crate::stable::build_id() as u64
+    crate::codegen_id::id() as u64
 }
 
 /// One index entry: (key, offset, length, kind, checksum).

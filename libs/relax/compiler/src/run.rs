@@ -1107,9 +1107,9 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         }
     }
     phase("resolve", t);
-    // C0 (relax-cache.md): crate fingerprints + build id, computed and reported only
+    // C0 (relax-cache.md): crate fingerprints + codegen identity, computed and reported only
     if std::env::var_os("MAKEPAD_RUN_CACHE_FP").is_some() {
-        crate::stable::report_fingerprints(&prog);
+        crate::stable::report_fingerprints(&prog, crate::codegen_id::id());
         if std::env::var("MAKEPAD_RUN_CACHE_FP").map_or(false, |v| v == "features") {
             return 0;
         }

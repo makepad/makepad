@@ -206,12 +206,14 @@ pub extern "C" fn relax_domain_id() -> u32 {
 
 /// For Relax std (`__relax_domain_enter`): the first thing a started thread does.
 pub extern "C" fn relax_domain_enter(base: u64, token: u64) {
-    let _kept = crate::zone_alloc::kept();
-    unsafe {
-        let t = crate::domain_threads::data(crate::jit::tls_block());
-        if token != 0 { t.registrations.push((base, token)); }
-    }
-    enter(base);
+    crate::jit::host_boundary("relax_domain_enter", move || {
+        let _kept = crate::zone_alloc::kept();
+        unsafe {
+            let t = crate::domain_threads::data(crate::jit::tls_block());
+            if token != 0 { t.registrations.push((base, token)); }
+        }
+        enter(base);
+    })
 }
 
 fn register_current(base: u64) {
@@ -227,12 +229,14 @@ static NEXT_THREAD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 
 /// Reserve before OS thread creation: main may return before a child reaches its entry.
 pub extern "C" fn relax_domain_reserve(base: u64) -> u64 {
-    let token = NEXT_THREAD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if let Some(d) = domains().iter_mut().find(|d| d.info.base == base && base != 0) {
-        d.threads.push((token, format!("thread-{token}")));
-        return token;
-    }
-    0
+    crate::jit::host_boundary("relax_domain_reserve", move || {
+        let token = NEXT_THREAD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(d) = domains().iter_mut().find(|d| d.info.base == base && base != 0) {
+            d.threads.push((token, format!("thread-{token}")));
+            return token;
+        }
+        0
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -280,27 +284,31 @@ impl Callback {
 }
 
 pub extern "C" fn relax_domain_name(name: *const u8) {
-    let base = current();
-    let t = unsafe { crate::domain_threads::data(crate::jit::tls_block()) };
-    let Some((_, token)) = t.registrations.iter().find(|r| r.0 == base) else { return };
-    let name = unsafe { std::ffi::CStr::from_ptr(name.cast()) }.to_string_lossy().into_owned();
-    if let Some(d) = domains().iter_mut().find(|d| d.info.base == base) {
-        if let Some(entry) = d.threads.iter_mut().find(|e| e.0 == *token) { entry.1 = name; }
-    }
+    crate::jit::host_boundary("relax_domain_name", move || {
+        let base = current();
+        let t = unsafe { crate::domain_threads::data(crate::jit::tls_block()) };
+        let Some((_, token)) = t.registrations.iter().find(|r| r.0 == base) else { return };
+        let name = unsafe { std::ffi::CStr::from_ptr(name.cast()) }.to_string_lossy().into_owned();
+        if let Some(d) = domains().iter_mut().find(|d| d.info.base == base) {
+            if let Some(entry) = d.threads.iter_mut().find(|e| e.0 == *token) { entry.1 = name; }
+        }
+    })
 }
 
 /// Called after the TLS block and every Relax std TLS destructor are finished (also on a
 /// failed OS spawn, while the parent still holds its own registration).
 pub extern "C" fn thread_finished(base: u64, token: u64) {
-    if token == 0 { return; }
-    let id = {
-        let mut ds = domains();
-        let Some(d) = ds.iter_mut().find(|d| d.info.base == base) else { return };
-        d.threads.retain(|e| e.0 != token);
-        d.info.id
-    };
-    teardown(id);
-    CHANGED.notify_all();
+    crate::jit::host_boundary("thread_finished", move || {
+        if token == 0 { return; }
+        let id = {
+            let mut ds = domains();
+            let Some(d) = ds.iter_mut().find(|d| d.info.base == base) else { return };
+            d.threads.retain(|e| e.0 != token);
+            d.info.id
+        };
+        teardown(id);
+        CHANGED.notify_all();
+    })
 }
 
 /// The offset in a domain block of what `s` names, when its storage is per domain: a static, a

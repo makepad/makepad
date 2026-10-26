@@ -5,6 +5,11 @@ use std::path::PathBuf;
 mod build_sources;
 #[path = "src/native_cfg.rs"]
 mod native_cfg;
+#[path = "../base/src/sha256.rs"]
+#[allow(dead_code)]
+mod sha256;
+#[path = "../self_stamp.rs"]
+mod self_stamp;
 
 // Package, Makepad path, and (for proc-macro wrappers) the generated module.
 const PACKAGES: &[(&str, &str, Option<&str>)] = &[
@@ -81,12 +86,15 @@ fn main() {
     let mut wrappers = String::from("use super::{Entry, Function};\n");
     let mut entries = String::new();
     let mut divergent = Vec::new();
+    // the source stamp covers the proc-macro sources this crate embeds, outside the package
+    let mut stamped = Vec::new();
     for (name, relative, module) in PACKAGES {
         let root = makepad.join(relative);
         packages.push_str(&format!("({name:?}, &[\n"));
         let files = build_sources::package(&root);
         divergent.extend(native_cfg::check_package(name, &files));
         for (path, data) in files {
+            stamped.push((format!("{name}/{path}"), data.clone()));
             packages.push_str(&format!("({path:?}, include_bytes!({:?})),\n", root.join(&path)));
             if path == "src/lib.rs" {
                 if let Some(module) = module {
@@ -102,4 +110,6 @@ fn main() {
     wrappers.push_str(&format!("pub static ENTRIES: &[Entry] = &[\n{entries}];\n"));
     std::fs::write(out.join("sources.rs"), packages).expect("write native source identity");
     std::fs::write(out.join("bindings.rs"), wrappers).expect("write native wrappers");
+    println!("cargo:rerun-if-changed=../self_stamp.rs");
+    self_stamp::write(&stamped);
 }

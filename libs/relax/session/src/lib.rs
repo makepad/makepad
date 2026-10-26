@@ -16,3 +16,6 @@ pub struct Session {
     pub options: Options,
     pub runtime: RuntimeOptions,
 }
+
+// This crate's source stamp (build.rs, libs/relax/self_stamp.rs): relax-compiler folds it into the codegen identity.
+include!(concat!(env!("OUT_DIR"), "/src_stamp.rs"));

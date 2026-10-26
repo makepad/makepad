@@ -6,6 +6,10 @@ description = "Relax base layer (see src/lib.rs)"
 license = "MIT OR Apache-2.0"
 publish = false
 
+# files outside this crate its build reads
+[package.metadata.commercial]
+include = ["../self_stamp.rs"]
+
 [dependencies]
 relax-lex = { workspace = true }
 relax-session = { workspace = true }

@@ -13119,14 +13119,14 @@ pub fn wide_float_addrs() -> [u64; 2] {
 }
 
 rt_fn! {
-fn rt_wide_f32(signed: u64, lo: u64, hi: u64) -> f32 {
+leaf fn rt_wide_f32(signed: u64, lo: u64, hi: u64) -> f32 {
     let value = ((hi as u128) << 64) | lo as u128;
     if signed != 0 { (value as i128) as f32 } else { value as f32 }
 }
 }
 
 rt_fn! {
-fn rt_wide_f64(signed: u64, lo: u64, hi: u64) -> f64 {
+leaf fn rt_wide_f64(signed: u64, lo: u64, hi: u64) -> f64 {
     let value = ((hi as u128) << 64) | lo as u128;
     if signed != 0 { (value as i128) as f64 } else { value as f64 }
 }
