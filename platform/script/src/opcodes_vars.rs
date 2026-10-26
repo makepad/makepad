@@ -827,6 +827,9 @@ impl<'a> ScriptVm<'a> {
             self.bail("scopes empty in scope");
             return;
         };
+        // The scope is now a script value: it escapes, with the scopes it reads through, so no
+        // eager free at loop or call exit takes it while the value lives.
+        self.bx.heap.ref_object_chain(scope);
         self.bx.threads.cur().push_stack_value(scope.into());
         self.bx.threads.cur().trap.goto_next();
     }

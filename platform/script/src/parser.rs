@@ -50,6 +50,8 @@ enum State {
     ForBody {
         idents: u32,
         index: u32,
+        /// Code index where the source expression starts.
+        expr_start: u32,
     },
     ForExpr {
         code_start: u32,
@@ -1630,6 +1632,50 @@ impl ScriptParser {
         }
     }
 
+    /// A `for` source that is exactly a range literal (`for i in a..b`): its
+    /// code ends in RANGE and no branch in it can jump past that RANGE to the
+    /// `for` with another value. Mark the RANGE, so the loop knows it holds
+    /// the only reference to the range object.
+    fn mark_range_for_source(&mut self, expr_start: u32) {
+        let end = self.opcodes.len();
+        if end == 0 || (expr_start as usize) >= end || self.opcodes[end - 1] != Opcode::RANGE.into() {
+            return;
+        }
+        let branches = self.opcodes[expr_start as usize..end - 1].iter().any(|code| {
+            matches!(
+                code.as_opcode(),
+                Some((
+                    Opcode::LOGIC_AND_TEST
+                        | Opcode::LOGIC_OR_TEST
+                        | Opcode::NIL_OR_TEST
+                        | Opcode::IF_TEST
+                        | Opcode::IF_ELSE
+                        | Opcode::TRY_TEST
+                        | Opcode::TRY_ERR
+                        | Opcode::TRY_OK
+                        | Opcode::OK_TEST
+                        | Opcode::OK_END
+                        | Opcode::RETURN
+                        | Opcode::RETURN_IF_ERR
+                        | Opcode::FOR_1
+                        | Opcode::FOR_2
+                        | Opcode::FOR_3
+                        | Opcode::LOOP
+                        | Opcode::BREAKIFNOT
+                        | Opcode::FOR_END
+                        | Opcode::BREAK
+                        | Opcode::CONTINUE
+                        | Opcode::FN_BODY_DYN
+                        | Opcode::FN_BODY_TYPED,
+                    _
+                ))
+            )
+        });
+        if !branches {
+            self.set_opcode_args(end as u32 - 1, OpcodeArgs::RANGE_FOR_SOURCE);
+        }
+    }
+
     fn set_opcode_args(&mut self, index: u32, args: OpcodeArgs) {
         self.opcodes[index as usize].set_opcode_args(args);
     }
@@ -1654,7 +1700,8 @@ impl ScriptParser {
                 if id.not_empty() {
                     if id == id!(in) {
                         // alright we move on to parsing the range expr
-                        self.state.push(State::ForBody { idents, index });
+                        let expr_start = self.code_len();
+                        self.state.push(State::ForBody { idents, index, expr_start });
                         self.state.push(State::BeginExpr { required: true });
                         return 1;
                     } else if idents < 3 {
@@ -1686,9 +1733,9 @@ impl ScriptParser {
                 }
                 error!(self, tokenizer, "Unexpected state in parsing for");
             }
-            State::ForBody { idents, index } => {
+            State::ForBody { idents, index, expr_start } => {
                 // alright lets emit a for instruction
-
+                self.mark_range_for_source(expr_start);
                 let code_start = self.code_len();
                 if idents == 1 {
                     self.slot_loop_enter(true);

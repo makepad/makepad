@@ -3117,8 +3117,19 @@ impl<'a> ScriptVm<'a> {
         }
         let scope = self.bx.code.bodies.borrow()[body_id as usize].scope.obj;
         self.bx.heap.objects[scope].proto = parent.into();
+        self.ref_reparented_scope(scope);
         let v = self.eval_body(body_id, ScriptObject::ZERO);
         v.as_object().filter(|o| self.bx.heap.as_fn(*o).is_some())
+    }
+
+    /// A body scope given a new proto keeps the REFFED invariant (`ScriptHeap::ref_object_chain`):
+    /// if the scope is REFFED, so is the chain it now reads through.
+    fn ref_reparented_scope(&mut self, scope: ScriptObject) {
+        if self.bx.heap.objects[scope].tag.is_reffed() {
+            if let Some(parent) = self.bx.heap.objects[scope].proto.as_object() {
+                self.bx.heap.ref_object_chain(parent);
+            }
+        }
     }
 
     /// The scope the last body evaluated from `file` ended in (its top-level
@@ -3162,6 +3173,7 @@ impl<'a> ScriptVm<'a> {
                 req.body = self.add_script_mod_with(req.module.to_owned(), false);
                 let scope = self.bx.code.bodies.borrow()[req.body as usize].scope.obj;
                 self.bx.heap.objects[scope].proto = req.scope.into();
+                self.ref_reparented_scope(scope);
                 self.eval_body(req.body, ScriptObject::ZERO)
             }
             EVAL_MODULE => {

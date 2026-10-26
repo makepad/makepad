@@ -110,8 +110,7 @@ impl ScriptHeap {
 
     #[inline]
     pub fn set_reffed(&mut self, ptr: ScriptObject) {
-        let object = &mut self.objects[ptr];
-        object.tag.set_reffed();
+        self.ref_object_chain(ptr);
     }
 
     #[inline]

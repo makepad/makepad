@@ -26,7 +26,7 @@ rw:html_parse
 rw:piano_render
 rw:ogg_decode
 rw:audio_mix
-rw:splash_eval --settle 20 --native-settle 8
+rw:splash_eval
 rw:csg_boolean
 rw:box3d_physics
 rw:sandbox_sim

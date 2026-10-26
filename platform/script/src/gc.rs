@@ -931,10 +931,29 @@ impl ScriptHeap {
     pub fn escape_value(&mut self, v: ScriptValue) {
         if let Some(obj) = v.as_object() {
             if self.objects.is_valid(obj) {
-                let tag = &mut self.objects[obj].tag;
-                if tag.is_alloced() {
-                    tag.set_reffed();
-                }
+                self.ref_object_chain(obj);
+            }
+        }
+    }
+
+    /// Tag `obj` REFFED, and its proto chain up to the first object that already is. Keeps the
+    /// invariant that a REFFED object's protos are all REFFED: a loop scope does not tag its proto
+    /// (the enclosing scope, `OBJ_NEW_LOOP_SCOPE`), so when a loop scope escapes (a closure made in
+    /// the loop body, `scope` stored as a value) the scopes it reads through are pinned with it
+    /// and no eager free at loop or call exit can take them. Stops at the first REFFED object: by
+    /// the invariant everything above it is REFFED already.
+    #[inline]
+    pub(crate) fn ref_object_chain(&mut self, obj: ScriptObject) {
+        let mut cur = obj;
+        while self.objects.is_valid(cur) {
+            let object = &mut self.objects[cur];
+            if !object.tag.is_alloced() || object.tag.is_reffed() {
+                return;
+            }
+            object.tag.set_reffed();
+            match object.proto.as_object() {
+                Some(proto) => cur = proto,
+                None => return,
             }
         }
     }

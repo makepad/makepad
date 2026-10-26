@@ -83,6 +83,10 @@ pub const OBJ_NEW: u32 = 0;
 pub const OBJ_NEW_WITH_PROTO: u32 = 1;
 pub const OBJ_NEW_WITH_PROTO_NO_VEC: u32 = 2;
 pub const OBJ_NEW_MODULE: u32 = 3;
+/// A loop's scope: no vec copy, and its proto (the enclosing scope) is NOT tagged REFFED, so the
+/// enclosing call/iteration scope stays eagerly freeable. Escaping the loop scope later
+/// (`ScriptHeap::ref_object_chain`) tags the enclosing scopes then.
+pub const OBJ_NEW_LOOP_SCOPE: u32 = 4;
 
 // obj_mode modes
 pub const OBJ_MODE_FREEZE: u32 = 0;
@@ -344,10 +348,11 @@ impl ScriptHeap {
     pub fn obj_new(&mut self, mode: u32, proto: ScriptValue) -> ScriptObject {
         match mode {
             OBJ_NEW => self.new_object_impl(),
-            OBJ_NEW_WITH_PROTO => self.new_with_proto_impl(proto, true),
-            OBJ_NEW_WITH_PROTO_NO_VEC => self.new_with_proto_impl(proto, false),
+            OBJ_NEW_WITH_PROTO => self.new_with_proto_impl(proto, true, true),
+            OBJ_NEW_WITH_PROTO_NO_VEC => self.new_with_proto_impl(proto, false, true),
+            OBJ_NEW_LOOP_SCOPE => self.new_with_proto_impl(proto, false, false),
             OBJ_NEW_MODULE => {
-                let md = self.new_with_proto_impl(proto, true);
+                let md = self.new_with_proto_impl(proto, true, true);
                 self.set_value_impl(self.modules, proto, md.into(), NoTrap);
                 md
             }
@@ -375,7 +380,10 @@ impl ScriptHeap {
             OBJ_MODE_STRING_KEYS => object.tag.set_string_keys(),
             OBJ_MODE_SHADER_IO => object.tag.set_shader_io(ShaderIoType(arg as u32)),
             OBJ_MODE_MADE_AT => object.made_at = ScriptIp { body: (arg >> 32) as u16, index: arg as u32 },
-            OBJ_MODE_REFFED => object.tag.set_reffed(),
+            OBJ_MODE_REFFED => {
+                self.ref_object_chain(obj);
+                return 0;
+            }
             OBJ_MODE_TYPE_DEFAULT => {
                 if let Some(ty_index) = object.tag.as_type_index() {
                     // Add to type_defaults mapping (GC will scan this table)
@@ -477,10 +485,17 @@ impl ScriptHeap {
         self.obj_new(OBJ_NEW_WITH_PROTO_NO_VEC, proto)
     }
 
+    /// A loop iteration scope under `parent` (see [`OBJ_NEW_LOOP_SCOPE`]).
+    #[inline]
+    pub fn new_loop_scope(&mut self, parent: ScriptObject) -> ScriptObject {
+        self.obj_new(OBJ_NEW_LOOP_SCOPE, parent.into())
+    }
+
     fn new_with_proto_impl(
         &mut self,
         proto: ScriptValue,
         copy_vec_from_auto_proto: bool,
+        ref_proto: bool,
     ) -> ScriptObject {
         let (proto_fwd, proto_ptr) = if let Some(ptr) = proto.as_object() {
             self.touch_obj(ptr);
@@ -515,7 +530,9 @@ impl ScriptHeap {
         ) {
             return self.allocation_poison_object;
         }
-        self.objects[proto_ptr].tag.set_reffed();
+        if ref_proto {
+            self.ref_object_chain(proto_ptr);
+        }
 
         if let Some(obj) = self.objects_free.pop() {
             // obj already has the correct generation from gc.rs sweep
