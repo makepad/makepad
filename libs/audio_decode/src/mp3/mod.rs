@@ -27,8 +27,8 @@ mod bits;
 mod header;
 mod layer3;
 mod synth;
-mod tables;
-mod tables_lsf;
+pub mod tables;
+pub mod tables_lsf;
 
 pub use header::{ChannelMode, FrameHeader, VbrInfo, Version};
 

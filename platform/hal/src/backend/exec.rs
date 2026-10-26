@@ -23,6 +23,15 @@ pub struct SubmittedFrame {
     pub window: bool,
 }
 
+/// The picture under the pointer of a drag out of the app (`DragStart`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DragImage {
+    pub w: u32,
+    pub h: u32,
+    /// `w` x `h` RGBA8 rows, top row first.
+    pub rgba: Vec<u8>,
+}
+
 /// What the executor hands to the backend's window system. A backend without one (headless,
 /// offscreen windows) takes none of these ([`Gpu::os`] answers false) and the executor answers
 /// what it can itself: geometry events, an immediate `Closed`, empty dialog results.
@@ -49,7 +58,8 @@ pub enum OsCmd {
     ClipSet { text: String },
     ClipRead { req: u64, primary: bool },
     SelectionSet { text: String },
-    DragStart { id: Id, items: Vec<(u32, String)> },
+    /// `items`: (`input::drag_item` kind, string); `image`: an RGBA8 drag image.
+    DragStart { id: Id, items: Vec<(u32, String)>, image: Option<DragImage> },
     MenuSet { items: Vec<(MenuItem, String)> },
     /// Create or update tray `tray`: `alpha` is `w * h` bytes, `items` its menu.
     /// `flags`: `tray_flags`.
@@ -1077,9 +1087,13 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             let text = String::from_utf8_lossy(text).into_owned();
             os_window(gpu, s, id, OsCmd::ImeSync { id, selection: [sel_start, sel_end], composition: [comp_start, comp_end], text })
         }
-        HalCmd::DragStart { id, count, items } => {
-            let items: Vec<(u32, String)> = read_items::<DragItem>(items, count).map(|i| (i.kind, s.string(i.str).unwrap_or("").to_string())).collect();
-            os_window(gpu, s, id, OsCmd::DragStart { id, items })
+        HalCmd::DragStart { id, count, image_w, image_h, items } => {
+            let split = (count as usize * <DragItem as crate::buffers::Wire>::SIZE).min(items.len());
+            let (list, pixels) = items.split_at(split);
+            let image = (image_w > 0 && image_h > 0 && pixels.len() == image_w as usize * image_h as usize * 4)
+                .then(|| DragImage { w: image_w, h: image_h, rgba: pixels.to_vec() });
+            let items: Vec<(u32, String)> = read_items::<DragItem>(list, count).map(|i| (i.kind, s.string(i.str).unwrap_or("").to_string())).collect();
+            os_window(gpu, s, id, OsCmd::DragStart { id, items, image })
         }
         HalCmd::AppIcon { w, h, rgba } => {
             gpu.os(sid, OsCmd::AppIcon { w, h, rgba: rgba.to_vec() });

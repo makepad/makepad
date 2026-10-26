@@ -29,6 +29,7 @@ use std::sync::Arc;
 
 mod audio;
 mod cache;
+mod drag_out;
 mod columns;
 mod connection;
 mod eq;
@@ -1365,6 +1366,15 @@ pub struct App {
 }
 
 impl App {
+    /// Songs dragged out of a list (drag_out.rs); a refusal or a partial
+    /// drag says why in the status line.
+    fn drag_out(&mut self, cx: &mut Cx, window: WindowId, paths: Vec<Option<String>>) {
+        if let Some(message) = drag_out::start(cx, window, paths) {
+            self.model.error = Some(message);
+            self.model.changed();
+        }
+    }
+
     /// 1 when the output list leads with "Choose a device" (devices known,
     /// none active, nothing picked), else 0: the list row minus this is the
     /// device's index.
@@ -3051,6 +3061,12 @@ impl MatchEvent for App {
         if let Some(row) = tracks.radio(actions) {
             self.radio(Some(row));
         }
+        for table in [&tracks, &plist] {
+            if let Some((rows, window)) = table.drag_out(actions) {
+                let paths = rows.iter().filter_map(|row| self.model.row_uri(*row)).map(|uri| drag_out::draggable_path(&self.model.index, &uri)).collect();
+                self.drag_out(cx, window, paths);
+            }
+        }
         if let Some((at, abs)) = self.ui.library_list(cx, ids!(library)).menu(actions) {
             let commands = self.model.playlist_commands(at);
             self.open_menu(cx, commands, abs);
@@ -3068,6 +3084,11 @@ impl MatchEvent for App {
             Some(UpNextAction::Jump(at)) => self.model.jump(at),
             Some(UpNextAction::Remove(at)) => self.model.edit_queue(|queue| drop(queue.remove(at))),
             Some(UpNextAction::Move { from, to }) => self.model.edit_queue(|queue| queue.move_to(from, to)),
+            Some(UpNextAction::DragOut(at, window)) => {
+                let uri = self.model.queue.upcoming().nth(at).map(|(_, item)| item.uri.clone());
+                let path = uri.and_then(|uri| drag_out::draggable_path(&self.model.index, &uri));
+                self.drag_out(cx, window, vec![path]);
+            }
             Some(UpNextAction::Menu(at, abs)) => {
                 self.up_next_menu = Some(at);
                 let rows = up_next_commands().iter().map(|(label, id)| MenuRow::new(*id, label)).collect();

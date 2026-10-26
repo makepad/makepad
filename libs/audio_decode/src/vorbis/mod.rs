@@ -108,6 +108,11 @@ fn read_ident(packet: &[u8], limits: &Limits) -> Result<Ident, AudioError> {
 
 /// Vorbis comments: a vendor string then `KEY=value` pairs.
 fn read_comments(packet: &[u8], tags: &mut Tags) -> Result<(), AudioError> {
+    each_comment(packet, |key, value| tags.push(key, value))
+}
+
+/// Every `KEY=value` pair of a comment packet, values as written.
+fn each_comment(packet: &[u8], mut f: impl FnMut(&str, &str)) -> Result<(), AudioError> {
     if packet.len() < 7 || packet[0] != 3 || &packet[1..7] != b"vorbis" {
         return Err(AudioError::BadHeader("vorbis comment"));
     }
@@ -139,7 +144,7 @@ fn read_comments(packet: &[u8], tags: &mut Tags) -> Result<(), AudioError> {
         let text = String::from_utf8_lossy(&packet[at..end]);
         at = end;
         if let Some((key, value)) = text.split_once('=') {
-            tags.push(key, value);
+            f(key, value);
         }
     }
     Ok(())
@@ -951,6 +956,22 @@ pub fn read_tags(bytes: &[u8]) -> Result<Tags, AudioError> {
     let packet = reader.next_packet()?.ok_or(AudioError::Truncated)?;
     read_comments(packet.data, &mut tags)?;
     Ok(tags)
+}
+
+/// The comments of the second header packet as written: keys upper-cased,
+/// values whole (multi-line lyrics included), unlike [`read_tags`], which
+/// bounds and cleans them for a library row. For carrying the tags over
+/// when a file is converted.
+pub fn read_comments_verbatim(bytes: &[u8]) -> Result<Vec<(String, String)>, AudioError> {
+    let mut reader = PacketReader::new(bytes);
+    {
+        let packet = reader.next_packet()?.ok_or(AudioError::Empty)?;
+        read_ident(packet.data, &Limits::default())?;
+    }
+    let packet = reader.next_packet()?.ok_or(AudioError::Truncated)?;
+    let mut out = Vec::new();
+    each_comment(packet.data, |key, value| out.push((key.trim().to_ascii_uppercase(), value.to_string())))?;
+    Ok(out)
 }
 
 #[cfg(test)]

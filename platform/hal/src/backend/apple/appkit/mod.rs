@@ -21,6 +21,7 @@
 mod app;
 mod classes;
 mod clipboard;
+mod drag_out;
 mod ime;
 mod keys;
 mod main_lag;

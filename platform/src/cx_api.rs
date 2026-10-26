@@ -410,7 +410,8 @@ pub enum CxOsOp {
     /// immediate, synthetic in-window drag protocol.
     StartExternalDragging {
         window_id: WindowId,
-        items: Vec<DragItem>,
+        items: Vec<crate::event::DragOutFile>,
+        image: Option<crate::event::DragImage>,
     },
     UpdateMacosMenu(MacosMenu),
     SetTray(crate::tray::TrayIcon),
@@ -1778,24 +1779,30 @@ impl Cx {
         }
     }
 
-    /// Starts a native drag-and-drop session that can leave the Makepad app.
-    ///
-    /// `FilePath` items must contain absolute paths to existing regular files
-    /// and must not carry an `internal_id`. The source window is explicit so
-    /// a multi-window application never starts the session from a stale Cocoa
-    /// event or the wrong native surface. Unsupported item/platform
-    /// combinations are rejected by the platform adapter. Every accepted or
-    /// rejected request completes with `Event::DragEnd`, allowing callers to
-    /// release gesture state without platform-specific timeouts.
-    pub fn start_external_dragging(&mut self, window_id: WindowId, items: Vec<DragItem>) {
+    /// Starts a native drag-and-drop session that can leave the Makepad app, from the press
+    /// in progress in `window_id`: files another app can take (a chat, a mail, the file
+    /// manager), each an existing file by absolute path or a [`crate::event::FilePromise`] whose
+    /// producer starts now, on its own thread. The source window is explicit so a multi-window
+    /// application never starts the session from a stale event or the wrong native surface.
+    /// Every accepted or rejected request completes with `Event::DragEnd`, so callers release
+    /// their gesture state without platform-specific timeouts.
+    pub fn start_external_dragging(&mut self, window_id: WindowId, drag: crate::event::DragOut) {
         if self.script_data.std.host_io_only() { return; }
         self.platform_ops.iter().for_each(|op| {
             if matches!(op, CxOsOp::StartExternalDragging { .. }) {
                 panic!("start external drag twice");
             }
         });
+        let items = drag
+            .items
+            .into_iter()
+            .map(|item| match item {
+                crate::event::DragOutItem::File(path) => crate::event::DragOutFile::File(path),
+                crate::event::DragOutItem::Promise(promise) => promise.start(),
+            })
+            .collect();
         self.platform_ops
-            .push_back(CxOsOp::StartExternalDragging { window_id, items });
+            .push_back(CxOsOp::StartExternalDragging { window_id, items, image: drag.image });
     }
 
     pub fn set_cursor(&mut self, cursor: MouseCursor) {

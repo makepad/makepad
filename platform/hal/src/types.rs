@@ -668,6 +668,9 @@ pub mod input {
     pub mod drag_item {
         pub const FILE: u32 = 0;
         pub const STRING: u32 = 1;
+        /// A file the app is still making for a drag out (`crate::drag_promise`): the string is
+        /// `<final path>\n<mime type>`. Only in `DragStart`.
+        pub const PROMISE: u32 = 2;
     }
 }
 

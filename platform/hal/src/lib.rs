@@ -31,6 +31,7 @@ pub mod buffers;
 pub mod clock;
 pub mod fake_camera;
 pub mod clipboard;
+pub mod drag_promise;
 pub mod direct;
 #[cfg(target_os = "linux")]
 pub mod wide_desktop;

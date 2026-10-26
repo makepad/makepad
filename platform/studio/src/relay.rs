@@ -154,6 +154,11 @@ pub enum ChildRelay {
     SetTray(RelayTray),
     /// Remove tray `tray`. APPENDED LAST.
     RemoveTray { tray: u64 },
+    /// The child started a drag of files out of its window (`Cx::start_external_dragging`): the
+    /// host carries them under the pointer from here and drops them on whatever window the
+    /// pointer is let go over. Promised files (`makepad_hal::drag_promise`) may still be being
+    /// written; the host waits for them at the drop. APPENDED LAST.
+    StartFileDrag { paths: Vec<String> },
 }
 
 /// Host → child.

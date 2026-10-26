@@ -891,6 +891,20 @@ impl Shell for App {
                 }
                 OsCmd::Cursor { cursor, .. } => self.hub.send(vec![AppToStudio::SetCursor(mouse_cursor(cursor))]),
                 OsCmd::ClipSet { text } => self.hub.send(vec![AppToStudio::SetClipboard(text)]),
+                // A drag out of the window: the WM carries the files from here (`StartFileDrag`),
+                // so the app's own gesture ends now, as when a desktop drag session ends.
+                OsCmd::DragStart { id, items, .. } => {
+                    let paths: Vec<String> = crate::drag_promise::to_files(items)
+                        .into_iter()
+                        .filter(|(kind, _)| *kind == input::drag_item::FILE)
+                        .map(|(_, path)| path)
+                        .collect();
+                    if !paths.is_empty() {
+                        self.hub.send(vec![AppToStudio::Relay(ChildRelay::StartFileDrag { paths })]);
+                    }
+                    let recipient = self.resolve((sid, id)).and_then(|k| self.windows.get(&k)).map_or((sid, id), |w| w.recipient);
+                    self.state.shared.push(recipient, |q, id| q.drag_drop(id, -100000.0, -100000.0, false, 0, &[]));
+                }
                 OsCmd::SelectionSet { text } => {
                     self.hub.send(vec![AppToStudio::Relay(ChildRelay::SetPrimarySelection { text: text.clone() })]);
                     self.selection.text = text;

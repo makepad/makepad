@@ -750,22 +750,26 @@ impl Win {
         }
     }
 
-    /// Starts a Finder-compatible file drag from this window (`start_external_dragging`).
-    pub fn start_external_drag(&self, items: &[(u32, String)]) -> bool {
+    /// Starts a drag out of this window (`start_external_dragging`): existing files as file URLs,
+    /// files the app is still making as promises (`super::drag_out`), under `image` when given
+    /// (pixels at the window's backing scale), else the file type's icon.
+    pub fn start_external_drag(&self, items: &[(u32, String)], image: Option<&crate::backend::exec::DragImage>) -> bool {
         if self.retired.get() || items.is_empty() {
             return false;
         }
-        let paths: Option<Vec<&str>> = items.iter().map(|(kind, s)| (*kind == input::drag_item::FILE).then_some(s.as_str())).collect();
-        let Some(paths) = paths else {
-            eprintln!("[hal] an external drag accepts only public file paths");
-            return false;
-        };
-        if paths.iter().any(|p| {
-            let path = std::path::Path::new(p);
-            !path.is_absolute() || !path.is_file()
-        }) {
-            eprintln!("[hal] an external drag requires absolute paths to existing files");
-            return false;
+        for (kind, s) in items {
+            let ok = match *kind {
+                input::drag_item::FILE => {
+                    let path = std::path::Path::new(s);
+                    path.is_absolute() && path.is_file()
+                }
+                input::drag_item::PROMISE => std::path::Path::new(crate::drag_promise::decode(s).0).is_absolute(),
+                _ => false,
+            };
+            if !ok {
+                eprintln!("[hal] an external drag takes absolute paths of existing or promised files only");
+                return false;
+            }
         }
         unsafe {
             let event = self.last_press.get();
@@ -779,30 +783,61 @@ impl Win {
             let window_point: NSPoint = msg_send![event, locationInWindow];
             let view_point: NSPoint = msg_send![self.view, convertPoint: window_point fromView: nil];
             let workspace: ObjcId = msg_send![class!(NSWorkspace), sharedWorkspace];
-            let mut dragging_items = Vec::with_capacity(paths.len());
-            for (index, path) in paths.iter().enumerate() {
-                let ns_path = str_to_nsstring(path);
-                let file_url: ObjcId = msg_send![class!(NSURL), fileURLWithPath: ns_path isDirectory: NO];
-                if file_url == nil {
+            let scale: f64 = msg_send![self.window, backingScaleFactor];
+            let picture = image.map(|i| {
+                let size = NSSize { width: i.w as f64 / scale.max(1.0), height: i.h as f64 / scale.max(1.0) };
+                (app::nsimage_from_rgba(i.w, i.h, &i.rgba, size), size)
+            });
+            let mut dragging_items = Vec::with_capacity(items.len());
+            for (index, (kind, s)) in items.iter().enumerate() {
+                let (writer, icon_path) = if *kind == input::drag_item::PROMISE {
+                    (super::drag_out::promise_writer(s), crate::drag_promise::decode(s).0)
+                } else {
+                    let url: ObjcId = msg_send![class!(NSURL), fileURLWithPath: str_to_nsstring(s) isDirectory: NO];
+                    if url != nil {
+                        let () = msg_send![url, retain];
+                    }
+                    (url, s.as_str())
+                };
+                if writer == nil {
                     continue;
                 }
                 let item: ObjcId = msg_send![class!(NSDraggingItem), alloc];
-                let item: ObjcId = msg_send![item, initWithPasteboardWriter: file_url];
+                let item: ObjcId = msg_send![item, initWithPasteboardWriter: writer];
+                let () = msg_send![writer, release];
                 if item == nil {
                     continue;
                 }
-                let icon: ObjcId = msg_send![workspace, iconForFile: ns_path];
-                let icon: ObjcId = if icon == nil { nil } else { msg_send![icon, copy] };
                 let offset = index as f64 * 3.0;
-                let frame = NSRect {
-                    origin: NSPoint { x: view_point.x - 24.0 + offset, y: view_point.y - 24.0 - offset },
-                    size: NSSize { width: 48.0, height: 48.0 },
+                let (contents, size) = match picture {
+                    Some((Some(img), size)) => {
+                        let () = msg_send![img, retain];
+                        (img, size)
+                    }
+                    _ => {
+                        // a promised file does not exist yet: its type's icon, by extension
+                        let icon: ObjcId = if *kind == input::drag_item::PROMISE {
+                            let ext = std::path::Path::new(icon_path).extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+                            msg_send![workspace, iconForFileType: str_to_nsstring(&ext)]
+                        } else {
+                            msg_send![workspace, iconForFile: str_to_nsstring(icon_path)]
+                        };
+                        let icon: ObjcId = if icon == nil { nil } else { msg_send![icon, copy] };
+                        (icon, NSSize { width: 48.0, height: 48.0 })
+                    }
                 };
-                let _: () = msg_send![item, setDraggingFrame: frame contents: icon];
-                if icon != nil {
-                    let _: () = msg_send![icon, release];
+                let frame = NSRect {
+                    origin: NSPoint { x: view_point.x - size.width * 0.5 + offset, y: view_point.y - size.height * 0.5 - offset },
+                    size,
+                };
+                let _: () = msg_send![item, setDraggingFrame: frame contents: contents];
+                if contents != nil {
+                    let _: () = msg_send![contents, release];
                 }
                 dragging_items.push(item);
+            }
+            if let Some((Some(img), _)) = picture {
+                let () = msg_send![img, release];
             }
             if dragging_items.is_empty() {
                 return false;

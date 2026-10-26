@@ -1189,9 +1189,9 @@ fn command(sid: u32, cmd: OsCmd) {
             let () = msg_send![pasteboard, declareTypes: array owner: nil];
             let () = msg_send![pasteboard, setString: str_to_nsstring(&text) forType: NSStringPboardType];
         },
-        OsCmd::DragStart { id, items } => {
+        OsCmd::DragStart { id, items, image } => {
             if let Some(win) = window_of(id) {
-                if !win.start_external_drag(&items) {
+                if !win.start_external_drag(&items, image.as_ref()) {
                     eprintln!("[hal] could not start external file drag");
                     // a native session ends with its source callback; a rejected start needs the
                     // same completion signal so application gesture guards recover at once
@@ -1239,6 +1239,22 @@ fn set_application_icon(w: u32, h: u32, rgba: &[u8]) {
         return;
     }
     unsafe {
+        let Some(ns_image) = nsimage_from_rgba(w, h, rgba, NSSize { width: width as f64, height: height as f64 }) else {
+            return;
+        };
+        let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+        let () = msg_send![ns_app, setApplicationIconImage: ns_image];
+        let () = msg_send![ns_image, release];
+    }
+}
+
+/// An NSImage (+1 retained) of `w` x `h` RGBA8 rows, shown at `size` points.
+pub(super) unsafe fn nsimage_from_rgba(w: u32, h: u32, rgba: &[u8], size: NSSize) -> Option<ObjcId> {
+    let (width, height) = (w as usize, h as usize);
+    if width == 0 || height == 0 || rgba.len() < width * height * 4 {
+        return None;
+    }
+    {
         let bitmap_rep: ObjcId = msg_send![class!(NSBitmapImageRep), alloc];
         let bitmap_rep: ObjcId = msg_send![bitmap_rep,
             initWithBitmapDataPlanes: std::ptr::null_mut::<*mut u8>()
@@ -1253,17 +1269,17 @@ fn set_application_icon(w: u32, h: u32, rgba: &[u8]) {
             bitsPerPixel: 32i64
         ];
         if bitmap_rep == nil {
-            return;
+            return None;
         }
         let bitmap_data: *mut u8 = msg_send![bitmap_rep, bitmapData];
         if !bitmap_data.is_null() {
             std::ptr::copy_nonoverlapping(rgba.as_ptr(), bitmap_data, width * height * 4);
         }
         let ns_image: ObjcId = msg_send![class!(NSImage), alloc];
-        let ns_image: ObjcId = msg_send![ns_image, initWithSize: NSSize { width: width as f64, height: height as f64 }];
+        let ns_image: ObjcId = msg_send![ns_image, initWithSize: size];
         let () = msg_send![ns_image, addRepresentation: bitmap_rep];
-        let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
-        let () = msg_send![ns_app, setApplicationIconImage: ns_image];
+        let () = msg_send![bitmap_rep, release];
+        Some(ns_image)
     }
 }
 

@@ -815,9 +815,9 @@ impl State {
             OsCmd::ClipRead { req, primary } => {
                 self.read_clipboard(selection::Purpose::Reply(sid, req), primary)
             }
-            OsCmd::DragStart { id, items } => {
+            OsCmd::DragStart { id, items, .. } => {
                 if let Some(k) = self.resolve((sid, id)) {
-                    self.start_drag(k, items);
+                    self.start_drag(k, crate::drag_promise::to_files(items));
                 }
             }
             OsCmd::DragReply { id, to, answer } => {

@@ -643,8 +643,8 @@ fn command(s: &'static Shared, sid: u32, cmd: OsCmd) {
             let owner = APP.with_borrow(|a| session_window(a, sid).map(|w| w.hwnd.get().0 as usize)).unwrap_or(0);
             dialog::open(dialog::Request { sid, req, kind, title, location, filename, filters, owner });
         }
-        OsCmd::DragStart { id, items } => match target(id) {
-            Some(w) => drag::start(&w, &items),
+        OsCmd::DragStart { id, items, .. } => match target(id) {
+            Some(w) => drag::start(&w, &crate::drag_promise::to_files(items)),
             None => s.push((sid, id), |q, id| q.drag_drop(id, -100000.0, -100000.0, false, 0, &[])),
         },
         OsCmd::PointerLock { id, mode } => {

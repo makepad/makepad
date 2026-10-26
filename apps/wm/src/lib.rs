@@ -594,6 +594,10 @@ pub struct App {
     shot_last: f64,
     #[rust]
     shot_pointer: Vec2d,
+    /// Files a hosted app is dragging out of its window (`ChildRelay::StartFileDrag`): the
+    /// client they came from and their paths, carried until the pointer is let go.
+    #[rust]
+    file_carry: Option<(ClientId, Vec<String>)>,
     #[rust]
     shot_thumb_screen: Rect,
     /// This node's AI hub: the AI Hub app the WM starts, and what the WM tells it.
@@ -3584,6 +3588,11 @@ impl App {
                         if self.trays.remove(client, tray) {
                             self.trays_changed(cx);
                         }
+                        return;
+                    }
+                    ChildRelay::StartFileDrag { paths } => {
+                        self.file_carry = Some((client, paths));
+                        cx.set_cursor(MouseCursor::Grabbing);
                         return;
                     }
                     _ => {}
@@ -6879,6 +6888,7 @@ impl App {
         if self.state.is_some() { self.behind_observe(cx, event); }
         if self.phone_search_event(cx,event) {return;}
         if self.state.is_some() && self.phone_pointer(cx,event) {return;}
+        if self.state.is_some() && self.file_carry_event(cx, event) {return;}
         if self.state.is_some() && self.shot_event(cx, event) {return;}
         if self.state.is_some() && self.spaces_pointer(cx, event) {return;}
         if self.state.is_some() && self.snap_event(cx,event) {return;}
@@ -7148,6 +7158,49 @@ impl App {
                     cx.set_cursor(MouseCursor::Default);
                 }
             }
+        }
+    }
+}
+
+impl App {
+    /// Files carried out of a hosted app's window: the pointer takes them to another window,
+    /// which gets them as a file drop where the pointer is let go (the drop a screenshot
+    /// thumbnail makes). Promised files are waited for first: their producer started with the
+    /// drag, so this is usually no wait at all.
+    fn file_carry_event(&mut self, cx: &mut Cx, event: &Event) -> bool {
+        if self.file_carry.is_none() {
+            return false;
+        }
+        match event {
+            Event::MouseMove(_) => {
+                cx.set_cursor(MouseCursor::Grabbing);
+                true
+            }
+            Event::MouseUp(e) => {
+                let Some((from, paths)) = self.file_carry.take() else { return false };
+                cx.set_cursor(MouseCursor::Default);
+                let items: Vec<(u32, String)> = paths.iter().map(|p| (makepad_hal::input::drag_item::FILE, p.clone())).collect();
+                if !makepad_hal::drag_promise::wait_promised(&items) {
+                    log!("wm: a dragged file could not be made; nothing dropped");
+                    return true;
+                }
+                let target = self.desk(cx).borrow_mut::<WmDesk>().and_then(|mut d| {
+                    if d.window_at(e.abs) == Some(from) {
+                        return None;
+                    }
+                    d.drop_files_at(cx, e.abs, paths)
+                });
+                if let Some(client) = target {
+                    log!("wm: files from client {from} dropped on client {client}");
+                    self.focus_client(cx, client);
+                }
+                true
+            }
+            Event::MouseDown(_) => {
+                self.file_carry = None;
+                false
+            }
+            _ => false,
         }
     }
 }

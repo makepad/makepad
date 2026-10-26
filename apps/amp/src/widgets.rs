@@ -87,6 +87,9 @@ script_mod! {
             default_row_height: 36.0
             cols: 6
             allow_col_reorder: true
+            // A press that travels carries the picked rows out of the
+            // window (drag_out.rs); Shift picks a run of rows.
+            row_drag: true
         }
     }
 
@@ -805,6 +808,9 @@ pub struct TrackTable {
     /// The row the keyboard or a press picked.
     #[rust]
     picked: Option<usize>,
+    /// The picked run of rows (Shift extends it): what a drag out carries.
+    #[rust]
+    picked_rows: Option<std::ops::Range<usize>>,
     /// The page and query drawn: a new one starts at the top.
     #[rust]
     shown: Option<(Page, String)>,
@@ -840,6 +846,8 @@ pub enum TrackTableAction {
     Menu(usize, DVec2),
     /// A row's radio button was pressed.
     Radio(usize),
+    /// A press on a row travelled out: drag these rows out of the window.
+    DragOut(Vec<usize>, WindowId),
 }
 
 impl TrackTable {
@@ -904,6 +912,14 @@ impl TrackTableRef {
     pub fn radio(&self, actions: &Actions) -> Option<usize> {
         match actions.find_widget_action(self.widget_uid())?.cast() {
             TrackTableAction::Radio(row) => Some(row),
+            _ => None,
+        }
+    }
+
+    /// Rows to drag out of the window, and the window.
+    pub fn drag_out(&self, actions: &Actions) -> Option<(Vec<usize>, WindowId)> {
+        match actions.find_widget_action(self.widget_uid())?.cast() {
+            TrackTableAction::DragOut(rows, window) => Some((rows, window)),
             _ => None,
         }
     }
@@ -1256,11 +1272,26 @@ impl Widget for TrackTable {
             match action {
                 DataGridAction::SelectionChanged { selection } => {
                     self.picked = selection.map(|selection| selection.head.0);
+                    self.picked_rows = selection.map(|selection| {
+                        let (first, last) = selection.row_range();
+                        first..last + 1
+                    });
                 }
                 // Return and a double-click both ask to "edit" a cell; in a
                 // read-only list that is the row being chosen.
                 DataGridAction::EditCell { row, replace: None, .. } => {
                     cx.widget_action(uid, TrackTableAction::Activated(row));
+                }
+                // A press that travelled: the picked rows when it began on
+                // one of them, else the row itself, go out of the window.
+                DataGridAction::RowDragStarted { row, .. } => {
+                    let rows: Vec<usize> = match &self.picked_rows {
+                        Some(range) if range.contains(&row) => range.clone().collect(),
+                        _ => vec![row],
+                    };
+                    if let Some(window) = cx.get_window_id_of(&grid.area()) {
+                        cx.widget_action(uid, TrackTableAction::DragOut(rows, window));
+                    }
                 }
                 DataGridAction::CellReleased { row, .. } => {
                     if self.radio_button.is_some_and(|(at, button)| at == row && button.contains(self.pointer)) {
@@ -1356,6 +1387,8 @@ pub enum UpNextAction {
     Remove(usize),
     /// Move the upcoming track `from` into the gap `to`.
     Move { from: usize, to: usize },
+    /// The carried upcoming track left the list: drag it out of the window.
+    DragOut(usize, WindowId),
 }
 
 impl UpNext {
@@ -1547,6 +1580,17 @@ impl Widget for UpNext {
                     self.gap = None;
                 }
                 DataGridAction::RowDragMoved { abs } => {
+                    // Carried off the list, the track leaves the window as a
+                    // file (drag_out.rs) instead of moving in the queue.
+                    if let Some(at) = self.carrying.filter(|_| !grid.area().rect(cx).contains(abs)) {
+                        if let Some(window) = cx.get_window_id_of(&grid.area()) {
+                            self.carrying = None;
+                            self.gap = None;
+                            grid.redraw(cx);
+                            cx.widget_action(uid, UpNextAction::DragOut(at, window));
+                            continue;
+                        }
+                    }
                     if self.carrying.is_some() {
                         let gap = grid.borrow().and_then(|grid| grid.row_gap_at(abs));
                         if gap != self.gap {

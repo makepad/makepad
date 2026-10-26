@@ -1480,8 +1480,9 @@ impl Shell for App {
                 OsCmd::ClipRead { req, primary } => self
                     .selection
                     .read(selection::Purpose::Reply(sid, req), primary),
-                OsCmd::DragStart { id, items } => {
+                OsCmd::DragStart { id, items, .. } => {
                     if let Some(n) = self.find((sid, id)) {
+                        let items = crate::drag_promise::to_files(items);
                         self.selection.start_drag(n, (sid, id), items, self.shared);
                     }
                 }

@@ -7,7 +7,7 @@ use crate::{
     cx_api::CxOsOp,
     makepad_live_id::*,
     event::hal_intake::hal_window_id,
-    event::DragItem,
+    event::DragOutFile,
     MouseCursor,
     macos_menu::MacosMenu,
     window::WindowId,
@@ -453,7 +453,7 @@ impl Cx {
                     // the in-window drag protocol: Drag / Drop are made from the pointer events
                     self.hal.internal_drag_items = Some(std::sync::Arc::new(items));
                 }
-                CxOsOp::StartExternalDragging { window_id, items } => {
+                CxOsOp::StartExternalDragging { window_id, items, image } => {
                     if self.hal.hosted.is_some() {
                         crate::error!("external file dragging is not available in the hosted runtime");
                         self.call_event_handler(&crate::event::Event::DragEnd);
@@ -463,14 +463,23 @@ impl Cx {
                     let flat: Vec<makepad_hal::DragItem> = items
                         .iter()
                         .map(|i| match i {
-                            DragItem::FilePath { path, .. } => makepad_hal::DragItem { kind: makepad_hal::input::drag_item::FILE, str: fb.intern(path) },
-                            DragItem::String { value, .. } => makepad_hal::DragItem { kind: makepad_hal::input::drag_item::STRING, str: fb.intern(value) },
-                            DragItem::VirtualFile(_) => makepad_hal::DragItem::default(),
+                            DragOutFile::File(path) => makepad_hal::DragItem { kind: makepad_hal::input::drag_item::FILE, str: fb.intern(path) },
+                            DragOutFile::Promise { path, mime } => makepad_hal::DragItem {
+                                kind: makepad_hal::input::drag_item::PROMISE,
+                                str: fb.intern(&makepad_hal::drag_promise::encode(path, mime)),
+                            },
                         })
                         .collect();
                     let mut bytes = Vec::new();
                     flat.iter().for_each(|i| i.write(&mut bytes));
-                    fb.w.drag_start(hal_window_id(window_id), flat.len() as u32, &bytes);
+                    let (w, h) = match &image {
+                        Some(i) if i.width > 0 && i.height > 0 && i.rgba.len() == i.width as usize * i.height as usize * 4 => {
+                            bytes.extend_from_slice(&i.rgba);
+                            (i.width, i.height)
+                        }
+                        _ => (0, 0),
+                    };
+                    fb.w.drag_start(hal_window_id(window_id), flat.len() as u32, w, h, &bytes);
                 }
                 CxOsOp::UpdateMacosMenu(menu) => {
                     if self.hal.hosted.is_some() { continue; }

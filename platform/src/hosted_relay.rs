@@ -363,6 +363,9 @@ impl HostRelayServer {
             // Trays are a window manager's (the makepad WM takes them before this server sees
             // them); any other host has no tray area for its children.
             ChildRelay::SetTray(_) | ChildRelay::RemoveTray { .. } => {}
+            // A file drag out of a child is carried by a window manager (the makepad WM takes it
+            // before this server sees it); other hosts have no desktop to drop it on.
+            ChildRelay::StartFileDrag { .. } => {}
         }
         Vec::new()
     }

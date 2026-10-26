@@ -160,8 +160,9 @@ hal_commands! {
     ClipSet = 40, clip_set { text: rng };
     /// The Linux primary selection.
     SelectionSet = 41, selection_set { text: rng };
-    /// `items`: `count` flat `DragItem`s.
-    DragStart = 42, drag_start { id: obj, count: u32, items: rng };
+    /// A drag out of the app from window `id`: `items` holds `count` flat `DragItem`s, then the
+    /// drag image, `image_w` x `image_h` RGBA8 rows (none when either is zero).
+    DragStart = 42, drag_start { id: obj, count: u32, image_w: u32, image_h: u32, items: rng };
     /// `items`: `count` flat `MenuItem`s.
     MenuSet = 43, menu_set { count: u32, items: rng };
     /// `filters`: `count` flat strings (u32 length + bytes), a description and the comma-separated

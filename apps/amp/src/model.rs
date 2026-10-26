@@ -1226,6 +1226,15 @@ impl Model {
     }
 
     /// What a row's menu offers, and what each does.
+    /// The track URI a row stands for: a library track or a catalog track.
+    pub fn row_uri(&self, row: usize) -> Option<String> {
+        match self.rows.get(row)? {
+            Row::Track { id, .. } => self.index.tracks.get(*id as usize).map(|track| track.uri.clone()),
+            Row::Catalog { kind: "Track", uri, .. } => Some(uri.clone()),
+            _ => None,
+        }
+    }
+
     pub fn row_commands(&self, row: usize) -> Vec<(RowCommand, Activate)> {
         let mut out = Vec::new();
         match self.rows.get(row) {
