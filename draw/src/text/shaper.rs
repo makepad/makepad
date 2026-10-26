@@ -18,9 +18,9 @@ use {
     unicode_segmentation::UnicodeSegmentation,
 };
 
-static WARNED_MISSING_GLYPHS: Mutex<Option<HashSet<char>>> = Mutex::new(None);
+pub(crate) static WARNED_MISSING_GLYPHS: Mutex<Option<HashSet<char>>> = Mutex::new(None);
 
-fn mark_missing_glyph_for_warning(warned: &Mutex<Option<HashSet<char>>>, ch: char) -> bool {
+pub(crate) fn mark_missing_glyph_for_warning(warned: &Mutex<Option<HashSet<char>>>, ch: char) -> bool {
     let Ok(mut warned) = warned.try_lock() else {
         return false;
     };
@@ -303,6 +303,10 @@ impl Shaper {
         {
             return;
         }
+        // The OS font lookup says it, once it failed too (`super::system_fallback`).
+        if super::system_fallback::reports_miss(ch) {
+            return;
+        }
         if mark_missing_glyph_for_warning(&WARNED_MISSING_GLYPHS, ch) {
             crate::makepad_platform::log!("{}", missing_glyph_message(ch, diagnostics));
         }
@@ -493,7 +497,7 @@ impl Shaper {
     }
 }
 
-fn missing_glyph_message(ch: char, diagnostics: &FontDiagnostics) -> String {
+pub(crate) fn missing_glyph_message(ch: char, diagnostics: &FontDiagnostics) -> String {
     format!(
         "font miss U+{:04X} role={} set={} tried=[{}]",
         ch as u32,

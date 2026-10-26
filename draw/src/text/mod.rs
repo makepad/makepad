@@ -14,6 +14,9 @@ pub mod selection;
 pub mod shaper;
 pub mod slice;
 pub mod slug_atlas;
+pub mod system_fallback;
+#[cfg(test)]
+mod script_render_tests;
 
 // The font tables, outlines and rasterisation live in `makepad-font-core`, shared with the HAL's
 // font service; these paths stay the text stack's.

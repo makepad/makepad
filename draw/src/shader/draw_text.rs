@@ -476,6 +476,8 @@ fn prepare_glyph(cx: &mut Cx2d, glyph: &LaidoutGlyph, dpxs_per_em: f32) -> (Opti
 pub struct PreparedTextGlyph<G = PreparedGlyph> {
     pub pen_x_in_lpxs: f32,
     pub offset_x_in_lpxs: f32,
+    /// The glyph's vertical mark offset, y down (0 for most glyphs).
+    pub offset_y_in_lpxs: f32,
     pub advance_in_lpxs: f32,
     pub font_size_in_lpxs: f32,
     pub glyph: G,
@@ -703,6 +705,7 @@ impl DrawText {
             glyphs.push(PreparedTextGlyph {
                 pen_x_in_lpxs: glyph.origin_in_lpxs.x * self.font_scale,
                 offset_x_in_lpxs: glyph.offset_in_lpxs() * self.font_scale,
+                offset_y_in_lpxs: glyph.origin_in_lpxs.y * self.font_scale,
                 advance_in_lpxs: glyph.advance_in_lpxs() * self.font_scale,
                 font_size_in_lpxs: glyph.font_size_in_lpxs * self.font_scale,
                 glyph: prepared,
@@ -1396,12 +1399,13 @@ impl DrawText {
             return laidout;
         }
         let started = Cx::time_now();
+        let mut laidout = laidout;
         if self.text_style.font_family.request_lazy_fonts_for_glyph_miss(
             cx,
             text,
             has_missing_glyph,
         ) {
-            let laidout = self.layout_loaded(
+            laidout = self.layout_loaded(
                 cx,
                 first_row_indent_in_lpxs,
                 first_row_min_line_spacing_below_in_lpxs,
@@ -1414,7 +1418,27 @@ impl DrawText {
                 "lazy font face loaded and text laid out again in {:.2} ms",
                 (Cx::time_now() - started) * 1000.0
             );
-            return laidout;
+            if !laidout.rows.iter().flat_map(|row| &row.glyphs).any(|glyph| glyph.id == 0) {
+                return laidout;
+            }
+        }
+        // What no face of the family draws (Devanagari, Arabic, Thai, ... in
+        // a Latin theme) comes from the OS's own font for that script.
+        let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
+        let found = fonts
+            .borrow_mut()
+            .request_system_fallback(self.text_style.font_family.to_font_family_id(), text);
+        if found {
+            laidout = self.layout_loaded(
+                cx,
+                first_row_indent_in_lpxs,
+                first_row_min_line_spacing_below_in_lpxs,
+                max_width_in_lpxs,
+                wrap,
+                align,
+                text,
+            );
+            cx.redraw_all();
         }
         laidout
     }

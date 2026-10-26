@@ -18,6 +18,7 @@ pub mod num;
 pub mod raster;
 pub mod sdfer;
 pub mod slug;
+pub mod system_fonts;
 
 pub use makepad_shared_bytes::{MappedBytes, SharedBytes};
 pub use rustybuzz;

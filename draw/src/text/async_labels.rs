@@ -158,7 +158,8 @@ impl LabelCache {
                             );
                         }
                     }
-                    layouter.define_font_family(
+                    // Sent again when its faces change (a lazy or OS face arrived).
+                    layouter.set_font_family_definition(
                         family.id,
                         FontFamilyDefinition {
                             expected_member_count: family.font_ids.len(),
@@ -343,6 +344,13 @@ impl LabelCache {
                 }
                 if requested {
                     draw.text_style.ensure_fonts_loaded(cx);
+                }
+                requested |= fonts.borrow_mut().request_system_fallback(key.family, text);
+                if requested {
+                    // The worker shapes with the family it was sent: send it
+                    // again with its new faces, and this run with it.
+                    self.families.remove(&key.family);
+                    self.ready.remove(&key);
                     cx.redraw_all();
                 }
             }

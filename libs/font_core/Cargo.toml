@@ -22,3 +22,5 @@ ab_glyph_rasterizer = { version = "0.1.8", path = "../ab_glyph_rasterizer" }
 sdfer = { path = "../sdfer", version = "0.2.1" }
 fxhash = { version = "0.2.1", path = "../fxhash" }
 makepad-zune-png = { version = "0.5.2", path = "../zune/zune-png" }
+# Already built for rustybuzz: groups characters by script for the OS font fallback.
+unicode-script = { version = "0.5.2", path = "../unicode/unicode-script" }

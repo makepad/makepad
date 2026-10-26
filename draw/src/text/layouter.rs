@@ -373,6 +373,10 @@ impl Layouter {
                     continue;
                 }
                 self.missing_count += 1;
+                // The OS font lookup says it, once it failed too.
+                if super::system_fallback::reports_miss(c) {
+                    continue;
+                }
                 if self.missing_reported.insert((glyph.font.id(), c)) {
                     let face = glyph.font.with_ttf_parser_face(|f| {
                         f.names().into_iter().filter(|n| n.name_id == 4 && n.is_unicode()).find_map(|n| n.to_string())
@@ -430,6 +434,20 @@ impl Layouter {
 
     pub fn define_font(&mut self, id: FontId, definition: FontDefinition) {
         self.loader.define_font(id, definition);
+    }
+
+    /// Appends an OS face to every family (see
+    /// [`Loader::add_system_fallback`]): the laid-out texts are dropped, so
+    /// the boxes they drew lay out again with real glyphs.
+    pub fn add_system_fallback(&mut self, id: FontId, definition: FontDefinition, bold: bool) {
+        if !self.loader.is_font_known(id) {
+            self.loader.define_font(id, definition);
+        }
+        self.loader.add_system_fallback(id, bold);
+        self.family_generation += 1;
+        self.cached_results.clear();
+        self.cache_lru_order.clear();
+        self.cache_bytes = 0;
     }
 
     pub fn get_or_load_font_family(&mut self, id: FontFamilyId) -> Rc<FontFamily> {
@@ -760,18 +778,21 @@ impl LayoutContext {
     }
 
     fn append_text(&mut self, text: &ShapedText) {
-        for glyph in &text.glyphs {
+        for shaped in &text.glyphs {
             let mut glyph = LaidoutGlyph {
                 origin_in_lpxs: Point::ZERO,
-                font: glyph.font.clone(),
+                font: shaped.font.clone(),
                 font_size_in_lpxs: self.style.font_size_in_lpxs(),
                 color: self.style.color,
-                id: glyph.id,
-                cluster: self.current_row_len() + glyph.cluster,
-                advance_in_ems: glyph.advance_in_ems,
-                offset_in_ems: glyph.offset_in_ems,
+                id: shaped.id,
+                cluster: self.current_row_len() + shaped.cluster,
+                advance_in_ems: shaped.advance_in_ems,
+                offset_in_ems: shaped.offset_in_ems,
             };
             glyph.origin_in_lpxs.x = self.current_point_in_lpxs.x;
+            // The font's vertical mark positioning (GPOS: Devanagari, Arabic
+            // and Thai marks stacked above or below their base), y down.
+            glyph.origin_in_lpxs.y = -shaped.y_offset_in_ems * glyph.font_size_in_lpxs;
             self.current_point_in_lpxs.x += glyph.advance_in_lpxs();
             self.glyphs.push(glyph);
         }

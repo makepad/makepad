@@ -13,6 +13,7 @@ use {
         loader::{FontDefinition, FontFamilyDefinition},
         rasterizer::{OutlineRasterizationMode, Rasterizer},
         slug_atlas::SlugGlyphCacheResult,
+        system_fallback::SystemFallback,
     },
     crate::makepad_platform::*,
     fxhash::FxHashSet,
@@ -53,6 +54,7 @@ pub struct FontsMemoryBytes {
 pub struct Fonts {
     layouter: Layouter,
     lazy_font_requests: LazyFontRequests,
+    system_fallback: SystemFallback,
     missing_font_paths: FxHashSet<String>,
     #[cfg(target_arch = "wasm32")]
     needs_prepare_atlases: bool,
@@ -97,6 +99,7 @@ impl Fonts {
         Self {
             layouter,
             lazy_font_requests: Default::default(),
+            system_fallback: Default::default(),
             missing_font_paths: FxHashSet::default(),
             // Before AtlasInfo arrives, the unresolved slot is this transparent texel. The
             // lent host atlas reserves the same texel for the lifetime of its texture.
@@ -153,6 +156,7 @@ impl Fonts {
         Self {
             layouter,
             lazy_font_requests: Default::default(),
+            system_fallback: Default::default(),
             missing_font_paths: FxHashSet::default(),
             needs_prepare_atlases: false,
             atlas_texture: Texture::new_with_format(
@@ -341,6 +345,13 @@ impl Fonts {
     ) -> bool {
         self.lazy_font_requests
             .take_for_glyph_miss(id, family, text, has_missing_glyph)
+    }
+
+    /// The OS fonts for the characters of `text` no face of the family
+    /// covers ([`super::system_fallback`]); true when a face joined the
+    /// families, so the text lays out again.
+    pub fn request_system_fallback(&mut self, id: FontFamilyId, text: &str) -> bool {
+        self.system_fallback.request(&mut self.layouter, id, text)
     }
 
     pub fn is_font_family_complete(
