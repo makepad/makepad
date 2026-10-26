@@ -58,8 +58,14 @@ impl Decoded {
     }
 }
 
+/// Thumbnails kept (key pictures, decoded whole).
+const THUMBS: usize = 16;
+
 #[derive(Default)]
 struct State {
+    /// The pictures around the target are decoded and kept (false: a preview of a live history,
+    /// only thumbnails).
+    fill: bool,
     target: usize,
     /// The user steps back (the last move went to an earlier picture): fill behind first.
     backward: bool,
@@ -76,6 +82,11 @@ struct State {
     failed: BTreeMap<usize, String>,
     /// What the thread is doing, for the status line.
     work: String,
+    /// The thumbnail asked for (a key picture: one decode from nothing), the ones decoded, and
+    /// the one for the UI to take.
+    thumb_want: Option<usize>,
+    thumbs: BTreeMap<usize, Arc<Decoded>>,
+    thumb_ready: Option<Arc<Decoded>>,
 }
 
 impl State {
@@ -141,7 +152,18 @@ impl Drop for Scrub {
 
 impl Scrub {
     pub fn start(snap: Arc<Snapshot>, at: usize, signal: SignalToUI) -> Scrub {
-        let shared = Arc::new(Shared { state: Mutex::new(State { target: at, ..State::default() }), wake: Condvar::new() });
+        Self::spawn(snap, State { target: at, fill: true, ..State::default() }, signal)
+    }
+
+    /// Thumbnails only (the scrubber over a live history: nothing is decoded until a moment
+    /// is hovered).
+    pub fn preview(snap: Arc<Snapshot>, signal: SignalToUI) -> Scrub {
+        let at = snap.len().saturating_sub(1);
+        Self::spawn(snap, State { target: at, fill: false, ..State::default() }, signal)
+    }
+
+    fn spawn(snap: Arc<Snapshot>, state: State, signal: SignalToUI) -> Scrub {
+        let shared = Arc::new(Shared { state: Mutex::new(state), wake: Condvar::new() });
         let (s, sh) = (snap.clone(), shared.clone());
         let thread = std::thread::Builder::new().name("desklink-scrub".into()).spawn(move || Engine::new(s, sh, signal).run()).ok();
         Scrub { snap, shared, thread }
@@ -164,6 +186,31 @@ impl Scrub {
         drop(s);
         self.shared.wake.notify_all();
         hit
+    }
+
+    /// A thumbnail of picture `i`: the picture itself when it is decoded already, else the key
+    /// picture its run starts from (one decode), later through [`Self::take_thumb`].
+    pub fn want_thumb(&self, i: usize) {
+        let Some(p) = self.snap.pictures.get(i) else { return };
+        let mut s = self.shared.state.lock().unwrap();
+        if let Some(d) = s.cache.get(&i).cloned() {
+            s.thumb_ready = Some(d);
+            s.thumb_want = None;
+            return;
+        }
+        let Some(key) = p.sync else { return };
+        if let Some(d) = s.thumbs.get(&key).cloned() {
+            s.thumb_ready = Some(d);
+            s.thumb_want = None;
+            return;
+        }
+        s.thumb_want = Some(key);
+        drop(s);
+        self.shared.wake.notify_all();
+    }
+
+    pub fn take_thumb(&self) -> Option<Arc<Decoded>> {
+        self.shared.state.lock().unwrap().thumb_ready.take()
     }
 
     pub fn take_ready(&self) -> Option<Arc<Decoded>> {
@@ -207,6 +254,8 @@ struct Engine {
 enum Job {
     /// Decode up to `upto`, keeping the pictures from `keep_from` on.
     Decode { upto: usize, keep_from: usize },
+    /// A key picture's thumbnail.
+    Thumb(usize),
     Idle,
 }
 
@@ -225,6 +274,11 @@ impl Engine {
         let back = cap * 3 / 4;
         let ahead = (cap / 4).max(2);
         let decodes = |i: usize| self.snap.pictures[i].sync.is_some() && !s.failed.contains_key(&i);
+        let thumb = s.thumb_want.filter(|k| *k < n && !s.thumbs.contains_key(k) && decodes(*k));
+        if !s.fill {
+            s.thumb_want = thumb;
+            return thumb.map_or(Job::Idle, Job::Thumb);
+        }
         if !s.cache.contains_key(&t) {
             if !decodes(t) {
                 return Job::Idle;
@@ -235,6 +289,10 @@ impl Engine {
         } else if s.shown != Some(t) && s.ready.as_ref().is_none_or(|r| r.index != t) {
             s.ready = s.cache.get(&t).cloned();
             self.signal.set();
+        }
+        // a hovered moment's thumbnail before filling the cache
+        if let Some(k) = thumb {
+            return Job::Thumb(k);
         }
         // the way the user moves first; ahead is cheap from where the decoders are, behind is a
         // decode from the key run
@@ -263,8 +321,10 @@ impl Engine {
                     }
                 }
             };
-            if let Job::Decode { upto, keep_from } = job {
-                self.decode(upto, keep_from);
+            match job {
+                Job::Decode { upto, keep_from } => self.decode(upto, keep_from),
+                Job::Thumb(k) => self.thumb(k),
+                Job::Idle => {}
             }
         }
     }
@@ -326,6 +386,33 @@ impl Engine {
                     self.at = None;
                     return;
                 }
+            }
+        }
+    }
+
+    /// Key picture `k` decoded on its own (the decoders start over there).
+    fn thumb(&mut self, k: usize) {
+        self.decoders.clear();
+        self.at = None;
+        let decoded = self.decode_one(k);
+        let mut s = self.shared.state.lock().unwrap();
+        s.thumb_want = None;
+        match decoded {
+            Ok(Some((width, height, parts))) => {
+                self.at = Some(k);
+                let d = Arc::new(Decoded { index: k, width, height, parts });
+                while s.thumbs.len() >= THUMBS {
+                    let far = *s.thumbs.keys().max_by_key(|j| j.abs_diff(k)).unwrap();
+                    s.thumbs.remove(&far);
+                }
+                s.thumbs.insert(k, d.clone());
+                s.thumb_ready = Some(d);
+                self.signal.set();
+            }
+            Ok(None) => {}
+            Err(e) => {
+                s.failed.insert(k, e);
+                self.decoders.clear();
             }
         }
     }

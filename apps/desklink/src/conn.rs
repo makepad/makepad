@@ -59,23 +59,14 @@ pub struct Latency {
 
 /// This display's refresh (Hz; 0 = not measured yet): every connection tells its desktop.
 pub static DISPLAY_HZ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-/// The rate cap the user set (Mbit/s, all tiles; 0 = auto: the desktop's own): every connection
-/// tells its desktop (`Encoding::mbps`).
-pub static RATE_CAP_MBPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-/// The codec the user chose (`proto::pref::{AUTO, H264, HEVC}`): every connection tells its
-/// desktop (`Encoding::codec`).
-pub static CODEC_PREF: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(proto::pref::AUTO);
 /// This machine's H.265 decode is unusable: in software (its hardware decoder does not take
 /// that profile) or failing on a key frame. `auto` asks for H.264 from then on.
 pub static HEVC_UNUSABLE: AtomicBool = AtomicBool::new(false);
 
-/// The codec this viewer asks for: the user's choice; `auto` is H.264 once H.265 proved
+/// The codec this viewer asks for: the desktop's choice (auto), H.264 once H.265 proved
 /// unusable here ([`HEVC_UNUSABLE`]).
 fn codec_wanted() -> u8 {
-    match CODEC_PREF.load(Ordering::Acquire) {
-        proto::pref::AUTO if HEVC_UNUSABLE.load(Ordering::Acquire) => proto::pref::H264,
-        c => c,
-    }
+    if HEVC_UNUSABLE.load(Ordering::Acquire) { proto::pref::H264 } else { proto::pref::AUTO }
 }
 
 /// What this viewer's decoders take (`Hello::caps`): Apple's VideoToolbox decodes H.264 High
@@ -108,19 +99,31 @@ impl StreamRate {
     }
 }
 
-/// The picture area in device pixels (width << 32 | height) and the scale (hundredths), as the
-/// view last drew it: told to the desktop once it has held still (`WINDOW_SETTLE`).
-static VIEW_WINDOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static VIEW_SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// A window's picture area in device pixels and its scale (hundredths), as the view last drew
+/// it: each connection has its own (the window that shows it sets it), told to the desktop once
+/// it has held still (`WINDOW_SETTLE`).
+#[derive(Default)]
+pub struct ViewWindow {
+    /// width << 32 | height
+    size: std::sync::atomic::AtomicU64,
+    scale: std::sync::atomic::AtomicU32,
+}
+
+impl ViewWindow {
+    pub fn set(&self, width: u32, height: u32, scale: u32) {
+        self.size.store((width as u64) << 32 | height as u64, Ordering::Release);
+        self.scale.store(scale, Ordering::Release);
+    }
+
+    fn get(&self) -> (u64, u32) {
+        (self.size.load(Ordering::Acquire), self.scale.load(Ordering::Acquire))
+    }
+}
+
 /// A window size is told once it held this long (a live resize sends only where it ends).
 const WINDOW_SETTLE: Duration = Duration::from_millis(250);
 /// A window size that has not held still this long after it changed is reported in the log.
 const WINDOW_LATEST: Duration = Duration::from_millis(1000);
-
-pub fn set_view_window(width: u32, height: u32, scale: u32) {
-    VIEW_WINDOW.store((width as u64) << 32 | height as u64, Ordering::Release);
-    VIEW_SCALE.store(scale, Ordering::Release);
-}
 
 #[derive(Clone, Debug, Default)]
 pub struct Shared {
@@ -205,6 +208,8 @@ pub struct Connection {
     pub latest: Arc<Mutex<Option<Picture>>>,
     /// The received bitstream of the last seconds (always recorded).
     pub history: Arc<Mutex<History>>,
+    /// The size of the window that shows it (its desktop follows it).
+    pub view: Arc<ViewWindow>,
     tx: Sender<ClientMsg>,
     paused: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
@@ -237,7 +242,8 @@ impl Connection {
         let stop = Arc::new(AtomicBool::new(false));
         let reconnect = Arc::new(AtomicBool::new(false));
         let max_backoff = Duration::from_secs(if discovered { 600 } else { 30 });
-        let net = Net { host: host.clone(), port, shared: shared.clone(), latest: latest.clone(), history: history.clone(), rx, paused: paused.clone(), stop: stop.clone(), reconnect: reconnect.clone(), signal, cmd: tx.clone(), max_backoff };
+        let view = Arc::new(ViewWindow::default());
+        let net = Net { host: host.clone(), port, shared: shared.clone(), latest: latest.clone(), history: history.clone(), view: view.clone(), rx, paused: paused.clone(), stop: stop.clone(), reconnect: reconnect.clone(), signal, cmd: tx.clone(), max_backoff };
         let thread = match std::thread::Builder::new().name(format!("desklink-net-{host}")).spawn(move || net.run()) {
             Ok(t) => Some(t),
             Err(e) => {
@@ -245,7 +251,7 @@ impl Connection {
                 None
             }
         };
-        Connection { name, host, port, shared, latest, history, tx, paused, stop, reconnect, thread }
+        Connection { name, host, port, shared, latest, history, view, tx, paused, stop, reconnect, thread }
     }
 
     /// A desktop played from an Annex-B dump (dev: `--dump-play`): its pictures decoded the way
@@ -261,7 +267,7 @@ impl Connection {
         shared.lock().unwrap().state = Some(State::Connected);
         let (s, l, h, st) = (shared.clone(), latest.clone(), history.clone(), stop.clone());
         let thread = std::thread::Builder::new().name("desklink-dump".into()).spawn(move || play_loop(path, gpu, still, s, l, h, st, signal)).ok();
-        Connection { name: "dump".into(), host: "dump".into(), port: 0, shared, latest, history, tx, paused: Arc::new(AtomicBool::new(false)), stop, reconnect: Arc::new(AtomicBool::new(false)), thread }
+        Connection { name: "dump".into(), host: "dump".into(), port: 0, shared, latest, history, view: Arc::new(ViewWindow::default()), tx, paused: Arc::new(AtomicBool::new(false)), stop, reconnect: Arc::new(AtomicBool::new(false)), thread }
     }
 
     pub fn send(&self, msg: ClientMsg) {
@@ -291,6 +297,7 @@ struct Net {
     shared: Arc<Mutex<Shared>>,
     latest: Arc<Mutex<Option<Picture>>>,
     history: Arc<Mutex<History>>,
+    view: Arc<ViewWindow>,
     rx: Receiver<ClientMsg>,
     paused: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
@@ -408,7 +415,7 @@ impl Net {
         // the display refresh last told to the desktop
         let mut told_hz = 0u32;
         // the Encoding last told (rate cap, codec): sent once at the start, then on changes
-        let mut told_encoding: Option<(u32, u8)> = None;
+        let mut told_encoding: Option<u8> = None;
         // the window last told, the one seen since when, and since when the window differs from
         // the one told (a size that keeps changing is told after WINDOW_LATEST anyway)
         let (mut told_window, mut seen_window) = ((0u64, 0u32), ((0u64, 0u32), Instant::now()));
@@ -427,16 +434,16 @@ impl Net {
                     break Err(format!("write: {e}"));
                 }
             }
-            let encoding = (RATE_CAP_MBPS.load(Ordering::Acquire), codec_wanted());
-            if told_encoding != Some(encoding) {
-                told_encoding = Some(encoding);
-                let (cap, codec) = encoding;
-                let msg = ClientMsg::Encoding { chroma: proto::pref::AUTO, codec, preset: proto::pref::AUTO, mbps: cap.min(u16::MAX as u32) as u16, fps: 0 };
+            // the desktop's choices (auto) except a codec this machine cannot decode
+            let codec = codec_wanted();
+            if told_encoding != Some(codec) {
+                told_encoding = Some(codec);
+                let msg = ClientMsg::Encoding { chroma: proto::pref::AUTO, codec, preset: proto::pref::AUTO, mbps: 0, fps: 0 };
                 if let Err(e) = proto::write_all(&mut stream, &msg.encode()) {
                     break Err(format!("write: {e}"));
                 }
             }
-            let window = (VIEW_WINDOW.load(Ordering::Acquire), VIEW_SCALE.load(Ordering::Acquire));
+            let window = self.view.get();
             if window != told_window {
                 differs_since.get_or_insert_with(Instant::now);
             }

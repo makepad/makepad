@@ -104,6 +104,8 @@ pub struct App {
     menu_sid: Cell<u32>,
     pulse: Cell<ObjcId>,
     menu_delegate: Cell<ObjcId>,
+    /// The Dock icon's menu (`menu_kind::DOCK` items; the system adds the windows), nil: none.
+    dock_menu: Cell<ObjcId>,
     pasteboard: Cell<ObjcId>,
     nap: Cell<ObjcId>,
     marked_attributes: Cell<ObjcId>,
@@ -142,6 +144,7 @@ pub fn app() -> &'static App {
             menu_sid: Cell::new(0),
             pulse: Cell::new(nil),
             menu_delegate: Cell::new(nil),
+            dock_menu: Cell::new(nil),
             pasteboard: Cell::new(nil),
             nap: Cell::new(nil),
             marked_attributes: Cell::new(nil),
@@ -1440,6 +1443,9 @@ fn update_menu(items: &[(MenuItem, String)]) {
         let () = msg_send![main_menu, setDelegate: a.menu_delegate.get()];
         // menus[0] is the root, menus[i] the submenu of node i
         let mut menus: Vec<ObjcId> = vec![main_menu];
+        let dock_menu: ObjcId = msg_send![class!(NSMenu), new];
+        let () = msg_send![dock_menu, setAutoenablesItems: NO];
+        let mut docked = 0;
         for (item, name) in items {
             let parent = menus.get(item.parent as usize).copied().unwrap_or(main_menu);
             match item.kind & 0xff {
@@ -1477,6 +1483,13 @@ fn update_menu(items: &[(MenuItem, String)]) {
                         let target: ObjcId = msg_send![a.classes().menu_target, new];
                         let () = msg_send![sub_item, setTarget: target];
                         (*target).set_ivar("command_u64", item.cmd as usize);
+                        if item.kind & menu_kind::DOCK != 0 {
+                            // the same command from the Dock icon's menu (no key equivalent there)
+                            let dock_item: ObjcId = msg_send![dock_menu, addItemWithTitle: str_to_nsstring(name) action: sel!(menuAction:) keyEquivalent: str_to_nsstring("")];
+                            let () = msg_send![dock_item, setTarget: target];
+                            let () = msg_send![dock_item, setEnabled: if enabled { YES } else { NO }];
+                            docked += 1;
+                        }
                     }
                 }
                 _ => {
@@ -1486,9 +1499,15 @@ fn update_menu(items: &[(MenuItem, String)]) {
                 }
             }
         }
+        a.dock_menu.set(if docked > 0 { dock_menu } else { nil });
         let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
         let () = msg_send![ns_app, setMainMenu: main_menu];
     }
+}
+
+/// The Dock icon's menu (`applicationDockMenu:`): the app's `menu_kind::DOCK` items, nil for none.
+pub fn dock_menu() -> ObjcId {
+    app().dock_menu.get()
 }
 
 // ------------------------------------------------------------------ dialogs

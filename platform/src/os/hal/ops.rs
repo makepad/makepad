@@ -56,7 +56,7 @@ fn flatten_menu(menu: &MacosMenu, parent: u32, out: &mut Vec<(MenuItem, String)>
                 flatten_menu(i, me, out);
             }
         }
-        MacosMenu::Item { name, command, shift, key, enabled } => {
+        MacosMenu::Item { name, command, shift, key, enabled, dock } => {
             let mut kind = self::menu::ITEM;
             if *command == live_id!(quit) {
                 kind |= self::menu::QUIT;
@@ -66,6 +66,9 @@ fn flatten_menu(menu: &MacosMenu, parent: u32, out: &mut Vec<(MenuItem, String)>
             }
             if !*enabled {
                 kind |= self::menu::DISABLED;
+            }
+            if *dock {
+                kind |= self::menu::DOCK;
             }
             push(MenuItem { parent, kind, cmd: command.0, key: key.to_index(), str: 0 }, name.clone(), out);
         }

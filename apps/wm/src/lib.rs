@@ -6309,6 +6309,7 @@ impl MatchEvent for App {
                     key: KeyCode::KeyQ,
                     shift: true,
                     enabled: true,
+                    dock: false,
                     name: "Quit wm".to_string(),
                 }],
             }],

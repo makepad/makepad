@@ -299,6 +299,8 @@ pub mod menu_kind {
     /// the application's About item: the system's About panel (name, version, icon from the
     /// bundle), not a command
     pub const ABOUT: u32 = 1 << 13;
+    /// the item is in the Dock icon's menu too (macOS; the system lists the app's windows there)
+    pub const DOCK: u32 = 1 << 14;
 }
 
 /// `FileDialog::kind`: the dialog in the low byte, bit 8: choose several.

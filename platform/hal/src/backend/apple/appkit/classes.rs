@@ -142,8 +142,14 @@ fn define_app_delegate() -> *const Class {
         (string != nil).then(|| (input::drag_item::STRING, nsstring_to_string(string)))
     }
 
+    // the Dock icon's menu: the items the app marked for it (the system adds the windows)
+    extern "C" fn application_dock_menu(_: &Object, _: Sel, _: ObjcId) -> ObjcId {
+        super::app::dock_menu()
+    }
+
     let mut decl = ClassDecl::new("HalAppDelegate", class!(NSObject)).unwrap();
     unsafe {
+        decl.add_method(sel!(applicationDockMenu:), application_dock_menu as extern "C" fn(&Object, Sel, ObjcId) -> ObjcId);
         decl.add_method(sel!(applicationShouldTerminate:), application_should_terminate as extern "C" fn(&Object, Sel, ObjcId) -> isize);
         decl.add_method(sel!(application:openURLs:), application_open_urls as extern "C" fn(&Object, Sel, ObjcId, ObjcId));
         decl.add_method(sel!(applicationShouldHandleReopen:hasVisibleWindows:), application_should_handle_reopen as extern "C" fn(&Object, Sel, ObjcId, BOOL) -> BOOL);
