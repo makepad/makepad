@@ -77,11 +77,24 @@ impl Shared {
             q.safe_area(id, insets[0] as f64, insets[1] as f64, insets[2] as f64, insets[3] as f64);
         });
     }
+    /// Sends `f`'s events to window `id` of session `sid`.
+    pub fn emit_to(&self, sid: u32, id: Id, time: u64, f: impl FnOnce(&mut EventQueue, Id)) {
+        let mut q = EventQueue::new();
+        q.set_time(time);
+        f(&mut q, id);
+        let wake = { let mut s = lock(&self.state); s.events.push((Some(sid), q)); s.wake.clone() };
+        if let Some(wake) = wake { wake(); }
+    }
+    /// FrameReady for the windows that asked; an XR window stays pending for the XR thread.
     pub fn frame(&self, time: u64) {
+        let xr_window = lock(&self.registry).xr_window;
         let (pending, wake, period) = {
             let mut s = lock(&self.state);
             if !s.active { return; }
-            (std::mem::take(&mut s.pending), s.wake.clone(), (1_000_000_000. / s.refresh as f64) as u64)
+            let pending = std::mem::take(&mut s.pending);
+            let (xr, pending): (HashSet<_>, HashSet<_>) = pending.into_iter().partition(|w| Some(*w) == xr_window);
+            s.pending.extend(xr);
+            (pending, s.wake.clone(), (1_000_000_000. / s.refresh as f64) as u64)
         };
         let mut events = Vec::with_capacity(pending.len());
         for (sid, id) in pending {
@@ -117,6 +130,14 @@ impl Shell for AndroidShell {
                 // change the canonical host window independently of the Android surface.
                 Shared::global().display(); true
             }
+            OsCmd::WindowCreate { id, kind, .. } if kind & 0xff == window_kind::XR => super::xr::create_window(sid, id),
+            OsCmd::WindowClose { id } if lock(&Shared::global().registry).xr_window == Some((sid, id)) => {
+                let mut r = lock(&Shared::global().registry);
+                r.xr_window = None; r.xr_see_through = false; true
+            }
+            OsCmd::WindowVisuals { id, visuals, .. } if lock(&Shared::global().registry).xr_window == Some((sid, id)) => {
+                lock(&Shared::global().registry).xr_see_through = visuals & 0xff != 0; true
+            }
             OsCmd::FrameRequest { id } => { lock(&Shared::global().state).pending.insert((sid, id)); jni::request_frame(); true }
             cmd @ (OsCmd::ImeShow { .. } | OsCmd::ImeHide { .. } | OsCmd::ImeSync { .. }) => {
                 if lock(&Shared::global().state).ime_session != Some(sid) { return false; }
@@ -135,9 +156,9 @@ impl AndroidBackend {
     pub fn new(flags: u32, sessions: crate::backend::SessionNotify, notify: Arc<dyn Fn() + Send + Sync>) -> Result<Self, String> {
         let offscreen = flags & open_flags::OFFSCREEN_WINDOWS != 0;
         // A Quest build carries the OpenXR loader: the host window is shown in an XR session.
-        let source: Box<dyn crate::backend::vulkan::VkSurfaceSource> = match super::xr_sys::loader() {
-            Some(gipa) if !offscreen => Box::new(super::xr::XrSurfaces::new(gipa)?),
-            _ => Box::new(AndroidSurfaces),
+        let source: Box<dyn crate::backend::vulkan::VkSurfaceSource> = match (!offscreen).then(super::xr::XrSurfaces::try_new).flatten() {
+            Some(xr) => Box::new(xr?),
+            None => Box::new(AndroidSurfaces),
         };
         let mut core = Vulkan::with_sources(flags, sessions, source, Box::new(NativeImages::default()))?;
         if !offscreen { core.set_shell(Box::new(AndroidShell)); }
@@ -173,7 +194,10 @@ impl AndroidBackend {
     }
 }
 impl Backend for AndroidBackend {
-    fn info(&self) -> HalInfo { HalInfo { dpi: Shared::global().dpi(), ..self.core.info() } }
+    fn info(&self) -> HalInfo {
+        let info = self.core.info();
+        HalInfo { dpi: Shared::global().dpi(), flags: info.flags | if super::xr::active() { info_flags::XR } else { 0 }, ..info }
+    }
     fn submit(&mut self, world: &mut World, sid: u32, view: &CmdView) {
         self.ensure_host(world);
         self.drain(world);
@@ -195,6 +219,9 @@ impl Backend for AndroidBackend {
         state.events.retain(|(s, _)| *s != Some(sid));
         state.pending.retain(|(s, _)| *s != sid);
         if state.recipient.is_some_and(|(s, _)| s == sid) { state.recipient = self.host.map(|id| (HOST, id)); }
+        drop(state);
+        let mut registry = lock(&shared.registry);
+        if registry.xr_window.is_some_and(|(s, _)| s == sid) { registry.xr_window = None; }
     }
     fn before_exit(&mut self) { self.core.before_exit(); }
 }

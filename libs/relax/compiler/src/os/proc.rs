@@ -408,6 +408,8 @@ mod imp {
         unsafe { *pool.table.add(i) = target };
         let a = pool.base + 16 * i as u64;
         pool.used.insert(target, a);
+        // one stub per target, never reused: say how fast they go (Sandbox's race used up 4096)
+        if (i + 1).is_power_of_two() && i >= 1023 { eprintln!("makepad-run: {} of {} C-callable stubs in use", i + 1, pool.count); }
         a
     }
 

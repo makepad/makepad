@@ -547,6 +547,17 @@ impl Drop for Publishing {
 /// initializer, JIT code, a request, a pump, a front write). Inside `publish` it is a bug (panic);
 /// inside `publish_or_bail` the publish ends (PublishBail) and its caller fronts `slot` off the
 /// owner or drops its build.
+/// Resumes a request's panic on the requester. On Android a panic cannot unwind through JIT
+/// frames (the process aborts with "failed to initiate panic"), and the owner's hook is silent:
+/// the panic's message is said first, so the abort names its cause.
+fn resume_said(p: Box<dyn std::any::Any + Send>) -> ! {
+    if cfg!(target_os = "android") {
+        let msg = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned());
+        if let Some(msg) = msg { eprintln!("makepad-run: a request on the owner panicked: {msg}"); }
+    }
+    std::panic::resume_unwind(p)
+}
+
 #[inline]
 #[track_caller]
 pub fn forbid_in_publish(what: &'static str, slot: u32) {
@@ -627,7 +638,7 @@ pub fn publish_or_bail<R>(f: impl FnOnce() -> R) -> Result<R, PublishBail> {
         Ok(r) => Ok(r),
         Err(p) => match p.downcast::<PublishBail>() {
             Ok(b) => Err(*b),
-            Err(p) => std::panic::resume_unwind(p),
+            Err(p) => resume_said(p),
         },
     }
 }
@@ -965,7 +976,7 @@ fn request<R>(site: &'static std::panic::Location<'static>, class: Class, quick:
         Some(p) if p.is::<crate::preempt::OwnerBusy>() => {
             std::panic::resume_unwind(Box::new(crate::preempt::Preempted));
         }
-        Some(p) => std::panic::resume_unwind(p),
+        Some(p) => resume_said(p),
         None => Some(out.unwrap()),
     }
 }

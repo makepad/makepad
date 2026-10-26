@@ -7,7 +7,7 @@
 
 use std::arch::global_asm;
 
-pub const STUBS: usize = 4096;
+pub const STUBS: usize = 32768;
 
 // 16 bytes a stub: adrp, ldr, br, nop
 global_asm!(
@@ -17,7 +17,7 @@ global_asm!(
     ".hidden makepad_stubs",
     "makepad_stubs:",
     ".set stub_index, 0",
-    ".rept 4096",
+    ".rept 32768",
     "adrp x16, makepad_stub_table + stub_index * 8",
     "ldr x16, [x16, :lo12:makepad_stub_table + stub_index * 8]",
     "br x16",
@@ -29,7 +29,7 @@ global_asm!(
     ".globl makepad_stub_table",
     ".hidden makepad_stub_table",
     "makepad_stub_table:",
-    ".zero 32768",
+    ".zero 262144",
     ".text",
 );
 

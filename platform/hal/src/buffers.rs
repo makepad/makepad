@@ -69,6 +69,52 @@ impl Wire for TouchPoint {
     }
 }
 
+/// `XrFrame`: its fields in declaration order, 4 bytes each (floats as their bits, integers as
+/// u32; a hand's pinch strengths one u32 each).
+impl Wire for XrFrame {
+    const SIZE: usize = (7 + 2 * 11 + 2 * 19 + 2 * (1 + 21 * 7 + 5 + 1 + 7 + 4)) * 4;
+    fn write(&self, out: &mut Vec<u8>) {
+        let f = |out: &mut Vec<u8>, v: &[f32]| for x in v { w32(out, x.to_bits()); };
+        let pose = |out: &mut Vec<u8>, p: &XrPose| { f(out, &p.orientation); f(out, &p.position); };
+        pose(out, &self.head);
+        for e in &self.eyes { pose(out, &e.pose); f(out, &e.fov); }
+        for c in &self.controllers { pose(out, &c.grip_pose); pose(out, &c.aim_pose); f(out, &[c.trigger, c.grip]); w32(out, c.buttons); f(out, &c.stick); }
+        for h in &self.hands {
+            w32(out, h.flags);
+            for j in &h.joints { pose(out, j); }
+            f(out, &h.tips);
+            w32(out, h.tips_active);
+            pose(out, &h.aim_pose);
+            for p in h.pinch { w32(out, p as u32); }
+        }
+    }
+    fn read(b: &[u8]) -> Self {
+        let mut at = 0;
+        let mut u = || { let v = r32(b, at); at += 4; v };
+        let pose = |u: &mut dyn FnMut() -> u32| {
+            let mut f = || f32::from_bits(u());
+            XrPose { orientation: [f(), f(), f(), f()], position: [f(), f(), f()] }
+        };
+        let f = |u: &mut dyn FnMut() -> u32| f32::from_bits(u());
+        let head = pose(&mut u);
+        let eye = |u: &mut dyn FnMut() -> u32| XrEye { pose: pose(u), fov: [f(u), f(u), f(u), f(u)] };
+        let eyes = [eye(&mut u), eye(&mut u)];
+        let controller = |u: &mut dyn FnMut() -> u32| XrController { grip_pose: pose(u), aim_pose: pose(u), trigger: f(u), grip: f(u), buttons: u(), stick: [f(u), f(u)] };
+        let controllers = [controller(&mut u), controller(&mut u)];
+        let hand = |u: &mut dyn FnMut() -> u32| {
+            let mut h = XrHand { flags: u(), ..XrHand::default() };
+            for j in &mut h.joints { *j = pose(u); }
+            for t in &mut h.tips { *t = f(u); }
+            h.tips_active = u();
+            h.aim_pose = pose(u);
+            for p in &mut h.pinch { *p = u() as u8; }
+            h
+        };
+        let hands = [hand(&mut u), hand(&mut u)];
+        XrFrame { head, eyes, controllers, hands }
+    }
+}
+
 impl Wire for [u32; 2] {
     const SIZE: usize = 8;
     fn write(&self, out: &mut Vec<u8>) {

@@ -38,6 +38,11 @@ pub(super) struct Registry {
     pub host: Option<Id>,
     pub state: state::SurfaceState,
     pub window: Option<Window>,
+    /// the session's `window_kind::XR` window (an immersive build): its frames go to the XR
+    /// projection layer, paced by the XR thread
+    pub xr_window: Option<(u32, Id)>,
+    /// the XR window is transparent (`WindowVisuals`): the room shows through where it is
+    pub xr_see_through: bool,
 }
 
 pub struct AndroidSurfaces;

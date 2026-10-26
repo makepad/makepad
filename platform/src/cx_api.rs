@@ -1296,6 +1296,23 @@ impl Cx {
         self.platform_ops.push_back(CxOsOp::UpdateMacosMenu(menu));
     }
 
+    /// A head-mounted display shows this app (`xr_start_presenting` gives it a stereo view).
+    pub fn xr_display(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.hal.info.is_some_and(|i| i.flags & makepad_hal::info_flags::XR != 0) }
+        #[cfg(target_arch = "wasm32")]
+        { false }
+    }
+
+    /// The headset's view is see-through: the room shows wherever the XR passes leave alpha 0
+    /// (mixed reality, a passthrough under the projection on headsets that have one).
+    pub fn xr_set_see_through(&mut self, on: bool) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.hal_xr_see_through(on);
+        #[cfg(target_arch = "wasm32")]
+        let _ = on;
+    }
+
     pub fn xr_start_presenting(&mut self) {
         self.platform_ops.push_back(CxOsOp::XrStartPresenting);
     }

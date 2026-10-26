@@ -572,8 +572,8 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 }
                 return;
             }
-            // a dropdown is always a window of its own
-            let adopted = (kind & 0xff != window_kind::DROPDOWN && (adopt || gpu.auto_adopt())).then(|| world.adopt_window(sid, id)).flatten();
+            // a dropdown and an XR view are always windows of their own
+            let adopted = (!matches!(kind & 0xff, window_kind::DROPDOWN | window_kind::XR) && (adopt || gpu.auto_adopt())).then(|| world.adopt_window(sid, id)).flatten();
             let Some(s) = world.session_mut(sid) else { return };
             let geom = match adopted {
                 Some(g) => g,

@@ -342,12 +342,19 @@ impl Vulkan {
         }
         let mut deps = Vec::new();
         let mut window_image = None;
+        // the window image holds every pass of the frame: a stereo frame's left eye (viewport
+        // 0..w/2) asked for a half-wide window image, the right eye for the whole one, and the
+        // left eye was drawn into an image nobody showed
+        let frame_size = view.passes[pr.clone()].iter().fold([0u32; 2], |m, p| {
+            let v = p.viewport;
+            if v.iter().all(|x| x.is_finite() && *x >= 0.0) { [m[0].max((v[0] + v[2]).ceil() as u32), m[1].max((v[1] + v[3]).ceil() as u32)] } else { m }
+        });
         for pass in &view.passes[pr] {
             let draws = &view.draws[slice(pass.draws, view.draws.len()).unwrap()];
             let before = s.stats.skipped_draws;
             let missing = pick && draws.iter().any(|d| read_ids(view.arena, d.pick_tex).any(|t| self.pick_pending.contains(&(sid, t))));
             let mut failed = false;
-            match self.encode_pass(s, target, is_window, pick, pass, draws, view, &mut batch, now, &mut deps) {
+            match self.encode_pass(s, target, is_window, pick, pass, frame_size, draws, view, &mut batch, now, &mut deps) {
                 Ok(image) => { s.stats.passes += 1; if image.is_some() { window_image = image; } }
                 Err(e) => { failed = true; eprintln!("[hal-vulkan] pass: {e}"); s.bad(); s.stats.skipped_draws += draws.len() as u64; }
             }
@@ -440,11 +447,12 @@ impl Vulkan {
         Some(exec::SubmittedFrame { deps, window: scheduled })
     }
 
-    fn encode_pass(&mut self, s: &mut Session, target: Id, is_window: bool, pick: bool, pass: &Pass, draws: &[Draw], view: &CmdView,
+    fn encode_pass(&mut self, s: &mut Session, target: Id, is_window: bool, pick: bool, pass: &Pass, frame_size: [u32; 2], draws: &[Draw], view: &CmdView,
         batch: &mut Batch, now: u64, deps: &mut Vec<LentRef>) -> Result<Option<Arc<Image>>, String> {
         let v = pass.viewport;
         if v.iter().any(|v| !v.is_finite() || *v < 0.0) || v[2] <= 0.0 || v[3] <= 0.0 { return Err(format!("invalid pass viewport {v:?} (target {target:?}, window {is_window})")); }
         let mut size = [(v[0] + v[2]).ceil() as u32, (v[1] + v[3]).ceil() as u32];
+        if is_window { size = [size[0].max(frame_size[0]), size[1].max(frame_size[1])]; }
         // a badge layer is drawn over what the window has (a resize may be landing)
         if let Some(c) = self.compose.as_ref().filter(|_| is_window) { size = [size[0].min(c.desc.w), size[1].min(c.desc.h)]; }
         let mut colors: Vec<(usize, Arc<Image>)> = Vec::new();
@@ -538,7 +546,11 @@ impl Vulkan {
         let framebuffer = unsafe { self.dev.raw.create_framebuffer(&vk::FramebufferCreateInfo::default().render_pass(render_pass.raw)
             .attachments(&views).width(target_size[0]).height(target_size[1]).layers(1), None) }.map_err(error)?;
         batch.framebuffers.push(framebuffer); batch.passes.push(render_pass.clone());
-        let area = vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: vk::Extent2D { width: target_size[0], height: target_size[1] } };
+        // a viewport origin (one eye of a side-by-side stereo target) starts the render area: what
+        // lies before it is neither cleared nor stored over
+        let origin = [(v[0] as u32).min(target_size[0]), (v[1] as u32).min(target_size[1])];
+        let area = vk::Rect2D { offset: vk::Offset2D { x: origin[0] as i32, y: origin[1] as i32 },
+            extent: vk::Extent2D { width: target_size[0] - origin[0], height: target_size[1] - origin[1] } };
 
         // ---- the GPU profiler's timestamps. A recorded frame times the pass whole; a split
         // frame cuts it into one render pass per run of draws of one pipeline on the same
@@ -599,9 +611,11 @@ impl Vulkan {
                     bound = Bound::default();
                 }
                 let scissor = if d.scissor.iter().any(|n| n.is_nan()) { area } else {
+                    // relative to the viewport origin, inside the render area
                     let [x, y, w, h] = d.scissor;
-                    let x0 = x.max(0.0).min(target_size[0] as f32) as u32;
-                    let y0 = y.max(0.0).min(target_size[1] as f32) as u32;
+                    let (x, y) = (x + origin[0] as f32, y + origin[1] as f32);
+                    let x0 = x.max(origin[0] as f32).min(target_size[0] as f32) as u32;
+                    let y0 = y.max(origin[1] as f32).min(target_size[1] as f32) as u32;
                     let x1 = (x + w).max(x0 as f32).min(target_size[0] as f32) as u32;
                     let y1 = (y + h).max(y0 as f32).min(target_size[1] as f32) as u32;
                     vk::Rect2D { offset: vk::Offset2D { x: x0 as i32, y: y0 as i32 }, extent: vk::Extent2D { width: x1 - x0, height: y1 - y0 } }

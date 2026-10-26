@@ -234,10 +234,13 @@ pub mod info_flags {
     /// A makepad window manager hosts the windows (the Linux WM shell): they are its tiles,
     /// which draw their own caption in the WM's style; the WM's messages arrive as `AppMessage`.
     pub const WM_HOSTED: u32 = 256;
+    /// A head-mounted display runs the session: `window_kind::XR` windows show in it, and the
+    /// host window is a panel the person points at.
+    pub const XR: u32 = 512;
 
     #[test]
     fn the_flags_are_distinct_bits() {
-        let all = [PRIVILEGED, EMBEDDED, DISPLAY_CLOCK, GPU_TIMESTAMPS, CLIENT_CHROME, DIRECT_DISPLAY, WINDOW_LAYERS, WINDOW_BADGES, WM_HOSTED];
+        let all = [PRIVILEGED, EMBEDDED, DISPLAY_CLOCK, GPU_TIMESTAMPS, CLIENT_CHROME, DIRECT_DISPLAY, WINDOW_LAYERS, WINDOW_BADGES, WM_HOSTED, XR];
         for (i, a) in all.iter().enumerate() {
             assert!(a.is_power_of_two());
             assert!(all[i + 1..].iter().all(|b| a & b == 0), "flag {a} shares a bit");
@@ -694,6 +697,11 @@ pub mod window_kind {
     /// entry of its own, made hidden. `WindowAtTray` places and shows it under its tray icon; its
     /// focus loss answers `PopupDismissed` (the app hides it). No parent.
     pub const DROPDOWN: u32 = 5;
+    /// A head-mounted display's stereo view (`info_flags::XR`): the shell sizes it (its geom is
+    /// both eyes side by side, the left eye in the left half) and paces it with `XrFrame` events,
+    /// each followed by the window's FrameReady. A frame must be drawn with the eyes of the
+    /// newest `XrFrame`; the shell shows it as the runtime's projection layer with those eyes.
+    pub const XR: u32 = 6;
 }
 
 /// `TraySet::flags`.
@@ -895,6 +903,109 @@ pub struct TouchPoint {
     pub force: f32,
 }
 
+/// A tracked pose in the XR session's reference space: metres, a unit quaternion (x, y, z, w);
+/// y up, -z forward at the start of the session, the floor at y = 0 when the runtime knows it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct XrPose {
+    pub orientation: [f32; 4],
+    pub position: [f32; 3],
+}
+
+/// One eye of an `XrFrame`: where it is and its field of view (radians: left, right, up, down;
+/// left and down negative).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct XrEye {
+    pub pose: XrPose,
+    pub fov: [f32; 4],
+}
+
+/// One controller (the old Android backend's `XrController`, field for field): its grip and
+/// aim poses, the analog trigger and grip (0..1), [`xr_controller`] bits and the thumbstick
+/// (-1..1, up positive, as the runtime reports it).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct XrController {
+    pub grip_pose: XrPose,
+    pub aim_pose: XrPose,
+    pub trigger: f32,
+    pub grip: f32,
+    pub buttons: u32,
+    pub stick: [f32; 2],
+}
+
+/// `XrController::buttons` (the bits of Cx `XrController`).
+pub mod xr_controller {
+    pub const CLICK_X: u32 = 1 << 0;
+    pub const CLICK_Y: u32 = 1 << 1;
+    pub const CLICK_A: u32 = 1 << 2;
+    pub const CLICK_B: u32 = 1 << 3;
+    pub const CLICK_MENU: u32 = 1 << 4;
+    /// the controller is tracked (its poses are valid)
+    pub const ACTIVE: u32 = 1 << 5;
+    pub const CLICK_THUMBSTICK: u32 = 1 << 6;
+    pub const TOUCH_X: u32 = 1 << 7;
+    pub const TOUCH_Y: u32 = 1 << 8;
+    pub const TOUCH_A: u32 = 1 << 9;
+    pub const TOUCH_B: u32 = 1 << 10;
+    pub const TOUCH_THUMBSTICK: u32 = 1 << 11;
+    pub const TOUCH_TRIGGER: u32 = 1 << 12;
+    pub const TOUCH_THUMBREST: u32 = 1 << 13;
+}
+
+/// One tracked hand (XR_EXT_hand_tracking + XR_FB_hand_tracking_aim; the old backend's
+/// `XrHand`, field for field): the 21 joints that are not finger tips (the 26 of the
+/// extension without the tips), each tip as its distance from the joint before it, the aim
+/// pose, [`xr_hand`] flags and the pinch strengths (index, middle, ring, little; 0..255).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct XrHand {
+    pub flags: u32,
+    pub joints: [XrPose; xr_hand::JOINT_COUNT],
+    pub tips: [f32; 5],
+    /// a bit per tip (1 << tip) whose distance is valid, and [`xr_hand::GRAB_ACTIVE`]
+    pub tips_active: u32,
+    pub aim_pose: XrPose,
+    pub pinch: [u8; 4],
+}
+
+impl Default for XrHand {
+    fn default() -> Self { XrHand { flags: 0, joints: [XrPose::default(); xr_hand::JOINT_COUNT], tips: [0.; 5], tips_active: 0, aim_pose: XrPose::default(), pinch: [0; 4] } }
+}
+
+/// `XrHand` flags, joint slots and pinch slots (the values of Cx `XrHand`).
+pub mod xr_hand {
+    pub const IN_VIEW: u32 = 1 << 0;
+    pub const AIM_VALID: u32 = 1 << 1;
+    pub const PINCH_INDEX: u32 = 1 << 2;
+    pub const PINCH_MIDDLE: u32 = 1 << 3;
+    pub const PINCH_RING: u32 = 1 << 4;
+    pub const PINCH_LITTLE: u32 = 1 << 5;
+    pub const DOMINANT_HAND: u32 = 1 << 6;
+    pub const MENU_PRESSED: u32 = 1 << 7;
+    /// in `tips_active`: the grasp (hand_interaction_ext) is held, with hysteresis
+    pub const GRAB_ACTIVE: u32 = 1 << 5;
+    pub const PINCH_STRENGTH_INDEX: usize = 0;
+    pub const PINCH_STRENGTH_MIDDLE: usize = 1;
+    pub const PINCH_STRENGTH_RING: usize = 2;
+    pub const PINCH_STRENGTH_LITTLE: usize = 3;
+    pub const JOINT_COUNT: usize = 21;
+    pub const CENTER: usize = 0;
+    pub const WRIST: usize = 1;
+}
+
+/// The payload of `XrFrame`: the head, both eyes (left, right), both controllers and both hands
+/// (left, right) at the frame's predicted display time.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct XrFrame {
+    pub head: XrPose,
+    pub eyes: [XrEye; 2],
+    pub controllers: [XrController; 2],
+    pub hands: [XrHand; 2],
+}
+
 // ------------------------------------------------------------------ frames
 
 /// One render pass of a frame. `draws` is an element range into the packet's draw array.
@@ -911,6 +1022,8 @@ pub struct Pass {
     pub clear_depth: f32,
     /// per colour attachment: the cube face / array slice it renders into
     pub layer: [u32; 4],
+    /// x, y, w, h in target pixels. Draw scissors are relative to its origin; with an origin
+    /// (an eye of a side-by-side stereo target) the pass clears and stores from the origin on.
     pub viewport: [f32; 4],
     pub dpi: f32,
     pub uniforms: Slice,

@@ -813,6 +813,10 @@ impl Cx {
                     self.hal_repaint_all();
                 }
             }
+            HalEvent::XrFrame { window: _, display_ns, frame } => {
+                let time = self.hal.secs(display_ns);
+                self.hal_xr_frame(time, frame);
+            }
             HalEvent::FrameReady { window, next_ns: _ } => {
                 let window_id = window_id(window);
                 if self.windows.is_valid(window_id) {

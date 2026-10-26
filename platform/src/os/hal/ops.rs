@@ -630,13 +630,13 @@ impl Cx {
                 | CxOsOp::CloseSystemBrowser { .. }) => self.hal_system_browser(op),
                 // the macOS backend never had embedded web views either
                 CxOsOp::CreateWebView { .. } | CxOsOp::UpdateWebView { .. } | CxOsOp::CloseWebView { .. } => self.hal.frames.gap("web views are not implemented on macOS"),
-                CxOsOp::XrStartPresenting
-                | CxOsOp::XrSetRenderScale(_)
+                CxOsOp::XrStartPresenting => self.hal_xr_start(),
+                CxOsOp::XrStopPresenting => self.hal_xr_stop(),
+                CxOsOp::XrSetRenderScale(_)
                 | CxOsOp::XrSetLocalAnchor(_)
                 | CxOsOp::XrSetLocalFloor(_)
                 | CxOsOp::XrAdvertiseAnchor(_)
-                | CxOsOp::XrDiscoverAnchor(_)
-                | CxOsOp::XrStopPresenting => self.hal.frames.gap("XR arrives in phase 5"),
+                | CxOsOp::XrDiscoverAnchor(_) => self.hal.frames.gap("XR render scale and anchors are not on the HAL yet"),
             }
         }
         // A zoom queued layout geometry while handling these ops. Deliver it before the

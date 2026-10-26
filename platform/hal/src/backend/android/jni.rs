@@ -73,11 +73,12 @@ unsafe extern "system" fn resume(_: *mut JNIEnv, _: jclass) {
     emit_lifecycle(lifecycle::RESUME); request_frame();
 }
 unsafe extern "system" fn pause(_: *mut JNIEnv, _: jclass) {
-    lock(&Shared::global().state).active = false;
+    // an XR session keeps drawing while the Activity pauses (its state decides)
+    if !super::xr::active() { lock(&Shared::global().state).active = false; }
     emit_lifecycle(lifecycle::PAUSE);
 }
 unsafe extern "system" fn stop(_: *mut JNIEnv, _: jclass) {
-    lock(&Shared::global().state).active = false;
+    if !super::xr::active() { lock(&Shared::global().state).active = false; }
     emit_lifecycle(lifecycle::BACKGROUND);
 }
 unsafe extern "system" fn destroy(env: *mut JNIEnv, _: jclass) {

@@ -635,7 +635,9 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     let hosted = !entries.is_empty() || !export_names.is_empty() || harness;
     // the `unused_macros` lints need the macro uses of the whole load
     if check { relax_types::macros::uses::record(true); relax_front::program::set_record_import_uses(true); }
-    if !check && !watch && session.is_none() && !hosted {
+    // Android: stderr is the embedder's pipe into logcat, line by line; the session-log tee in
+    // front of it held lines back for up to a minute and lost a crashing run's last lines
+    if !check && !watch && session.is_none() && !hosted && !cfg!(target_os = "android") {
         crate::tui::start(!driver_options.verbose && !QUIET.load(Ordering::Relaxed) && !crate::diag::enabled());
     }
     crate::memstat::start_sampler();

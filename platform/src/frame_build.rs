@@ -1115,9 +1115,14 @@ impl Cx {
             }
             return None;
         };
+        // an XR pass paints into the XR window, once per eye, when the eyes of its next frame came
+        let stereo = matches!(self.passes[pass_id].parent, CxDrawPassParent::Xr);
         let (window, is_window) = match self.passes[pass_id].parent {
             CxDrawPassParent::Window(w) => (Some(w), true),
-            CxDrawPassParent::Xr => return None,
+            CxDrawPassParent::Xr => match self.hal.xr.as_ref() {
+                Some(xr) if xr.frame.is_some() => (Some(xr.window), true),
+                _ => return None,
+            },
             _ => (None, false),
         };
         if let Some(w) = window {
@@ -1147,12 +1152,13 @@ impl Cx {
                 }
             }
         }
-        let dpi = self.passes[pass_id].dpi_factor?;
+        // the XR window is in eye pixels
+        let dpi = if stereo { 1.0 } else { self.passes[pass_id].dpi_factor? };
         // Whole device pixels for every pass, windows too (snapping a window to whole points
         // first made a 715.5 pt hosted window 1432 px wide in its parent's 1431 px image, and
         // it never drew). One rounding rule for a window: the surface pixels are the truth and
         // points are px / dpi exactly, so its rect is the window's inner size.
-        let mut pass_rect = self.get_pass_rect(pass_id, dpi)?;
+        let mut pass_rect = if stereo { crate::makepad_math::Rect::default() } else { self.get_pass_rect(pass_id, dpi)? };
         if let Some(w) = window {
             if self.windows.is_valid(w) && self.windows[w].window_geom.inner_size.x > 0.0 {
                 pass_rect.size = self.windows[w].window_geom.inner_size;
@@ -1279,12 +1285,28 @@ impl Cx {
         if let Some(o) = self.draw_owners.as_mut().filter(|_| !picking) {
             o.begin_packet(serial);
         }
-        fb.w.pass(pass);
         let sploded = self.passes[pass_id].sploded.is_some();
         let step = self.passes[pass_id].zbias_step;
-        let mut zbias = 0.0f32;
         fb.pass_whole = true;
-        self.fb_list(fb, pass_id, list_id, sploded, &mut zbias, step, serial);
+        if stereo {
+            // both eyes side by side: a pass per eye with that eye's camera, each clearing its half
+            let base = self.passes[pass_id].pass_uniforms;
+            let half = (tw / 2) as f32;
+            for eye in 0..2 {
+                let Some(uniforms) = self.hal_xr_eye_uniforms(&base, eye) else { break };
+                let mut p = pass;
+                p.uniforms = Slice::of(uniforms.as_slice());
+                p.viewport = [half * eye as f32, 0.0, half, th as f32];
+                if !p.depth.is_none() { p.load[4] = load::CLEAR; }
+                fb.w.pass(p);
+                let mut zbias = 0.0f32;
+                self.fb_list(fb, pass_id, list_id, sploded, &mut zbias, step, serial);
+            }
+        } else {
+            fb.w.pass(pass);
+            let mut zbias = 0.0f32;
+            self.fb_list(fb, pass_id, list_id, sploded, &mut zbias, step, serial);
+        }
         let end = makepad_hal::clock_ns();
         let (target, kind) = match (window, self.passes[pass_id].color_textures.first()) {
             (Some(w), _) => (Id::new(w.0 as u32, w.1 as u32), makepad_hal::target::WINDOW | capture_flag(w.0) | if self.window_snapshot_wanted(w.0) || self.hal_capture_due(w) || self.screenshot_requests.iter().any(|request| crate::remote::grab_waits_on_window(request.request_id, w.id())) { makepad_hal::target::SNAPSHOT } else { 0 }),

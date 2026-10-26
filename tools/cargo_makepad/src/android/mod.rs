@@ -84,10 +84,23 @@ impl AndroidVariant {
         let quest = *self == Self::Quest;
         let vr_category = if quest { "\n                        <category android:name=\"com.oculus.intent.category.VR\" />" } else { "" };
         let vr_meta = if quest { r#"
-                    <meta-data android:name="com.oculus.supportedDevices" android:value="quest3|quest3s|questpro|quest2" />"# } else { "" };
+                    <meta-data android:name="com.oculus.supportedDevices" android:value="quest3|quest3s|questpro|quest2" />
+                    <meta-data android:name="com.oculus.handtracking.frequency" android:value="HIGH" />
+                    <meta-data android:name="com.oculus.handtracking.version" android:value="V2.0" />"# } else { "" };
         let phone_required = if quest { "false" } else { "true" };
         let vr_features = if quest { r#"
                 <uses-feature android:name="android.hardware.vr.headtracking" android:required="true" android:version="1" />
+                <!-- hands are an input too: the app starts without controllers (no launch check dialog) -->
+                <uses-feature android:name="oculus.software.handtracking" android:required="false" />
+                <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
+                <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="false" />
+                <uses-feature android:name="com.oculus.feature.CONTEXTUAL_BOUNDARYLESS_APP" android:required="false" />
+                <!-- the runtime offers environment depth and the spatial entity (anchor)
+                     extensions only to apps that declare these (as the old Quest manifest did) -->
+                <uses-permission android:name="com.oculus.permission.USE_SCENE" />
+                <uses-permission android:name="horizonos.permission.USE_SCENE" />
+                <uses-permission android:name="com.oculus.permission.USE_ANCHOR_API" />
+                <uses-permission android:name="horizonos.permission.USE_ANCHOR_API" />
                 <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />
                 <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />"# } else { "" };
         let vr_queries = if quest { r#"

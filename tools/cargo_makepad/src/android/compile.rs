@@ -3132,13 +3132,31 @@ pub fn build_host(
     if custom_template.is_file() {
         return Err(format!("{} has its own AndroidManifest template; the host APK needs RunActivity in it", build_crate));
     }
-    let extra_activities = r#"<activity
+    // Quest: MakepadApp is the Activity that shows, so it is the immersive one (Horizon OS reads
+    // the VR category off the Activity it starts; without it MakepadApp opened as a 2D panel
+    // app whose XR session never rendered: a black view)
+    let extra_activities = if *variant == AndroidVariant::Quest {
+        r#"<activity
                     android:name=".MakepadApp"
                     android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
                     android:exported="false"
                     android:launchMode="singleTask"
                     android:windowSoftInputMode="adjustNothing|stateUnchanged"
-                    android:theme="@style/MakepadLaunchTheme" />"#;
+                    android:theme="@style/MakepadLaunchTheme">
+                    <intent-filter>
+                        <action android:name="android.intent.action.MAIN" />
+                        <category android:name="com.oculus.intent.category.VR" />
+                    </intent-filter>
+                    </activity>"#
+    } else {
+        r#"<activity
+                    android:name=".MakepadApp"
+                    android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
+                    android:exported="false"
+                    android:launchMode="singleTask"
+                    android:windowSoftInputMode="adjustNothing|stateUnchanged"
+                    android:theme="@style/MakepadLaunchTheme" />"#
+    };
     let prep_opts = PrepareBuildOpts {
         build_crate,
         res_crate: "makepad-run-android",

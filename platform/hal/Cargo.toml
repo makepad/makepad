@@ -53,6 +53,8 @@ makepad-gpu-trace = { path = "../../libs/gpu_trace", version = "1.0.0" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 makepad-jni-sys = { path = "../../libs/jni-sys", version = "0.4.0" }
+# the OpenXR backend's poses and fields of view (backend/android/xr/sys.rs)
+makepad-math = { path = "../../libs/math", version = "1.0.0" }
 
 # The D3D11 backend and the Win32 shell (Windows): generated Win32/COM bindings
 [target.'cfg(windows)'.dependencies]

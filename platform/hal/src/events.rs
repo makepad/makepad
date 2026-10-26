@@ -330,5 +330,9 @@ hal_events! {
     /// otherwise opens the menu). `x`, `y`, `w`, `h` is the icon's rect and `screen` the visible area
     /// of its screen (x, y, w, h), in points from the primary screen's top left corner, y down
     /// (zero where the system does not say).
+    /// An XR window's frame (`window_kind::XR`): the predicted display time (HAL clock) and the
+    /// head, eyes and hands then, one `XrFrame` (`buffers::Wire`) in the payload. The window's
+    /// FrameReady follows; that frame is drawn with these eyes.
+    XrFrame = 150, xr_frame { window: obj, display_ns: u64, frame: rng };
     TrayClick = 149, tray_click { tray: u64, x: f64, y: f64, w: f64, h: f64, screen: rect };
 }
