@@ -27,12 +27,22 @@ use std::time::{Duration, Instant};
 // dependent that answers the first one locally is how a machine WITH the
 // CUDA toolkit still failed to link with `unresolved external symbol
 // cudaFree`.
+//
+// All of that happens only with this crate's `cuda` feature, which the AI Hub
+// enables (apps/aihub `node`, apps/ai-hub); only the hub runs GPU models. Any
+// other build (every app) is the kernel-less stub and reads no environment, so
+// its unit is the same whoever builds it, and a CUDA build of the hub is a
+// separate unit that never makes the apps' units dirty (CUDAFEAT 10-26).
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(makepad_ai_cuda_kernels)");
+    if env::var_os("CARGO_FEATURE_CUDA").is_none() {
+        println!("cargo:rerun-if-changed=build.rs");
+        return;
+    }
     println!("cargo:rerun-if-env-changed=MAKEPAD_GGML_CUDA_ARCH");
     println!("cargo:rerun-if-env-changed=MAKEPAD_GGML_REQUIRE_CUDA");
     println!("cargo:rerun-if-env-changed=MAKEPAD_GGML_NO_CUDA");
     println!("cargo:rerun-if-env-changed=MAKEPAD_CUDA_ROOT");
-    println!("cargo:rustc-check-cfg=cfg(makepad_ai_cuda_kernels)");
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let require_cuda = env_flag("MAKEPAD_GGML_REQUIRE_CUDA");

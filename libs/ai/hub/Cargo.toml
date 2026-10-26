@@ -38,6 +38,10 @@ paint = ["dep:makepad-ai-paint", "dep:makepad-gltf", "dep:makepad-remesh", "dep:
 paint-cuda = ["paint", "makepad-ai-paint/cuda-taps"]
 # Real LLM prompt expansion via makepad-ai-llm (Qwen3.5/3.6 GGUF).
 llm = ["dep:makepad-ai-llm"]
+# The CUDA kernels for every local model backend (makepad-ai-cuda `cuda`; Linux/Windows,
+# the toolkit named by MAKEPAD_CUDA_ROOT). Only a hub app enables it (apps/aihub `node`,
+# apps/ai-hub): apps that run models in-process stay CPU-only.
+cuda = ["dep:makepad-ai-cuda", "makepad-ai-cuda/cuda"]
 # Speech sessions (AiHub::start_stt / start_tts): the OS engines as the
 # stt.system / tts.system pipes plus the in-process / machine / LAN ladder.
 speech = ["dep:makepad-system-speech"]
@@ -235,6 +239,9 @@ required-features = ["kernel"]
 [[bin]]
 name = "ai-fleet"
 path = "src/bin/ai_fleet.rs"
+
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+makepad-ai-cuda = { path = "../cuda", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 makepad-windows-sys = {path = "../../windows/sys", version = "0.1.0"}

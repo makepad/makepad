@@ -6,6 +6,12 @@ description = "THE CUDA store for Makepad AI models: driver/cuDNN FFI (absorbed 
 license = "MIT"
 links = "makepad_ai_cuda"
 
+[features]
+# Compile and link the CUDA kernels (build.rs; the toolkit named by MAKEPAD_CUDA_ROOT).
+# Only the AI Hub enables it (apps/aihub `node`, apps/ai-hub): apps stay CPU-only and
+# never share a unit with the hub's CUDA build. Without it every extern is a link-clean stub.
+cuda = []
+
 [dependencies]
 makepad-ai-loader = { path = "../loader" }
 

@@ -11,7 +11,8 @@ with `MAKEPAD_GGML_CUDA_ARCH=89` for RTX 4090 and `120a` for RTX 5090/RTX PRO 60
 and set `MAKEPAD_GGML_REQUIRE_CUDA=1` so a missing toolkit fails the build.
 The build only uses the toolkit named by `MAKEPAD_CUDA_ROOT` (on the Ada
 boxes `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4`); it never
-probes `CUDA_PATH`.
+probes `CUDA_PATH`. `makepad-app-ai-hub` enables the kernels by default (its `cuda`
+feature, makepad-ai-cuda's `cuda`); no other app builds them.
 Use the node's compatible CUDA runtime: the current Ada machines have CUDA 12,
 while Blackwell uses CUDA 13. A successful HTTP health check alone does not
 prove an artifact contains compatible GPU kernels; run generation below.

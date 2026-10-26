@@ -30,10 +30,13 @@ depth-native = ["makepad-ai-hub/depth-native"]
 segment-native = ["makepad-ai-hub/segment-native"]
 upscale-native = ["makepad-ai-hub/upscale-native"]
 body-native = ["makepad-ai-hub/body-native"]
+# The CUDA kernels (Linux/Windows, where MAKEPAD_CUDA_ROOT names a toolkit). The hub is the one
+# app with them: apps stay CPU-only, so their builds never share a unit with this one.
+cuda = ["makepad-ai-hub/cuda"]
 # A makepad WM node's hub (the WM starts the app with `--features node`): every local model
-# backend the headless node hub (apps/ai-hub) builds by default, CUDA kernels included where
-# MAKEPAD_CUDA_ROOT names a toolkit. A Mac keeps the default (Metal/CPU backends only).
-node = ["localai", "makepad-ai-hub/flux", "makepad-ai-hub/paint", "makepad-ai-hub/paint-cuda", "makepad-ai-hub/llm",
+# backend the headless node hub (apps/ai-hub) builds by default, CUDA kernels included.
+# A Mac keeps the default (Metal/CPU backends only).
+node = ["localai", "cuda", "makepad-ai-hub/flux", "makepad-ai-hub/paint", "makepad-ai-hub/paint-cuda", "makepad-ai-hub/llm",
     "makepad-ai-hub/tts", "makepad-ai-hub/indextts", "makepad-ai-hub/speech", "makepad-ai-hub/stt", "makepad-ai-hub/video",
     "makepad-ai-hub/interpolate", "makepad-ai-hub/audio", "makepad-ai-hub/mesh", "makepad-ai-hub/matte-native",
     "makepad-ai-hub/depth-native", "makepad-ai-hub/segment-native", "makepad-ai-hub/body-native", "makepad-ai-hub/upscale-native",
