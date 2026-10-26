@@ -163,6 +163,17 @@ impl Serve {
     }
 
     pub fn plan(&self, plan: Plan) {
+        // A plan that offers something reads as Starting until the owner has applied it: the
+        // first tray state of a node's hub was "Not serving: no backend is on" (the empty
+        // published state), the one line the WM logs of it.
+        if !plan.offered.is_empty() {
+            if let Ok(mut p) = self.published.lock() {
+                if p.phase == Phase::Off && p.addr.is_none() {
+                    p.phase = Phase::Starting;
+                    p.seq += 1;
+                }
+            }
+        }
         let _ = self.tx.send(Msg::Plan(plan));
     }
 
@@ -340,6 +351,10 @@ fn owner(rx: Receiver<Msg>, published: Arc<Mutex<Published>>) {
     let mut control: Option<makepad_strict_json::Value> = None;
     let mut note: Option<String> = None;
     let mut since = 0u64;
+    // A start that failed (the port or the cache held by a hub that is going away, no LAN
+    // address yet at boot) is tried again: when, and how many failed in a row.
+    let mut retry: Option<(std::time::Instant, u32)> = None;
+    let mut failed_why = String::new();
     loop {
         // Wait for a message; while serving, wake on the hub's own changes too (a
         // download's progress counts as one).
@@ -377,6 +392,7 @@ fn owner(rx: Receiver<Msg>, published: Arc<Mutex<Published>>) {
                 models.rescan(&plan.cache_dir);
                 current = Some(plan.clone());
                 wanted = Some(plan);
+                retry = None;
             }
             Some(Msg::Control(path, body)) => {
                 if let Some(r) = &running {
@@ -423,6 +439,10 @@ fn owner(rx: Receiver<Msg>, published: Arc<Mutex<Published>>) {
                 wanted = current.clone();
             }
         }
+        // A failed start's time to try again.
+        if running.is_none() && wanted.is_none() && retry.is_some_and(|(at, _)| std::time::Instant::now() >= at) {
+            wanted = current.clone();
+        }
         // Apply a new plan: stop what runs, start what is wanted. A running hub whose
         // on-disk models changed restarts once no job runs (a restart drops loaded models).
         if let Some(plan) = wanted.take() {
@@ -465,11 +485,26 @@ fn owner(rx: Receiver<Msg>, published: Arc<Mutex<Published>>) {
                             });
                             let local = if serving.contains(&Backend::Local) && plan.serves_on_disk() { ids.clone() } else { local_now.clone() };
                             running = Some(Running { plan, handle, local });
+                            if retry.take().is_some() {
+                                eprintln!("aihub: serving on {addr} after a failed start");
+                            }
+                            failed_why.clear();
                         }
-                        Err((reason, notes)) => publish(&mut |p| {
-                            p.phase = if reason.is_empty() { Phase::Off } else { Phase::Failed(reason.clone()) };
-                            p.notes = notes.clone();
-                        }),
+                        Err((reason, notes)) => {
+                            if !reason.is_empty() {
+                                let n = retry.map_or(1, |(_, n)| n + 1);
+                                let wait = retry_wait(n);
+                                if reason != failed_why {
+                                    eprintln!("aihub: not serving: {reason} (trying again in {} s, then less often)", wait.as_secs());
+                                    failed_why = reason.clone();
+                                }
+                                retry = Some((std::time::Instant::now() + wait, n));
+                            }
+                            publish(&mut |p| {
+                                p.phase = if reason.is_empty() { Phase::Off } else { Phase::Failed(reason.clone()) };
+                                p.notes = notes.clone();
+                            })
+                        }
                     }
                 } else {
                     publish(&mut |p| p.notes.clear());
@@ -501,6 +536,12 @@ fn owner(rx: Receiver<Msg>, published: Arc<Mutex<Published>>) {
             p.note = note.clone();
         });
     }
+}
+
+/// The pause before the `n`th try (n >= 1) after failed starts in a row: 5 s, doubling up to a
+/// minute.
+fn retry_wait(n: u32) -> Duration {
+    Duration::from_secs((5u64 << n.saturating_sub(1).min(4)).min(60))
 }
 
 /// A WM node's chat model loads at start (it is pinned through the node's environment, so a
@@ -632,4 +673,14 @@ fn enable_claude(bind: SocketAddr) -> Result<makepad_ai_hub::registry::ModelSpec
         return makepad_ai_hub::claude_cli::enable_stub(bind, exe.into());
     }
     makepad_ai_hub::claude_cli::enable(bind)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_start_is_tried_again_from_5_s_to_a_minute() {
+        assert_eq!((1..=7).map(|n| retry_wait(n).as_secs()).collect::<Vec<_>>(), [5, 10, 20, 40, 60, 60, 60]);
+    }
 }

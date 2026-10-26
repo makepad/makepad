@@ -51,6 +51,9 @@ mod dock_autohide;
 mod hub_link;
 #[cfg(not(target_arch = "wasm32"))]
 mod hub_app;
+/// The deploy's build of this node's AI Hub (the `makepad-wm-hub` binary).
+#[cfg(not(target_arch = "wasm32"))]
+pub use hub_app::build_node_hub;
 mod trays;
 mod dropdown;
 mod gpu_yield;

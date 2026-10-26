@@ -15,6 +15,21 @@ pub struct HubLink {
     gaming: Option<bool>,
     /// The settings turn the WM's hub off: an app an earlier WM left running is stopped.
     stop_leftover: bool,
+    /// No LAN address yet (a boot before the DHCP lease): when it was last looked for. The
+    /// link is made once one is there.
+    lan_wait: Option<std::time::Instant>,
+}
+
+/// How often a WM that found no LAN address for its hub looks again.
+const LAN_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What [`HubLink::make`] decided.
+enum Made {
+    Link(Link),
+    /// This WM runs no hub (the settings, a hidden or in-process WM).
+    None,
+    /// No LAN address to serve on yet: decided again a moment later.
+    NoLanYet,
 }
 
 /// This WM's own hub: the app and the control client pointed at it. None: the settings turn
@@ -30,14 +45,26 @@ impl HubLink {
     /// `processes`: this build can start child processes (`App::processes`). Decided at first
     /// use.
     fn link(&mut self, processes: bool) -> Option<&mut Link> {
-        if self.link.is_none() {
-            let made = self.make(processes);
-            self.link = Some(made);
+        if self.link.is_none() && !self.lan_wait.is_some_and(|at| at.elapsed() < LAN_RETRY) {
+            match self.make(processes) {
+                Made::Link(link) => {
+                    if self.lan_wait.take().is_some() {
+                        makepad_widgets::log!("wm: a LAN address is up: starting the AI Hub");
+                    }
+                    self.link = Some(Some(link));
+                }
+                Made::None => self.link = Some(None),
+                Made::NoLanYet => {
+                    if self.lan_wait.replace(std::time::Instant::now()).is_none() {
+                        makepad_widgets::log!("wm: this machine has no LAN address for the AI Hub to serve on yet: looking again every {} s", LAN_RETRY.as_secs());
+                    }
+                }
+            }
         }
         self.link.as_mut().and_then(Option::as_mut)
     }
 
-    fn make(&mut self, processes: bool) -> Option<Link> {
+    fn make(&mut self, processes: bool) -> Made {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let (path, conf) = crate::hub_app::load_conf();
@@ -45,22 +72,19 @@ impl HubLink {
                 makepad_widgets::log!("wm: the WM starts no AI Hub (off in {}, or a hidden or in-process WM)", path.display());
                 // Only the settings' own `enabled = off`: a hidden test WM leaves the real one alone.
                 self.stop_leftover = processes && std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_none();
-                return None;
+                return Made::None;
             }
-            let Some(base) = conf.base_url() else {
-                makepad_widgets::log!("wm: this machine has no LAN address for the AI Hub to serve on: starting none");
-                return None;
-            };
+            let Some(base) = conf.base_url() else { return Made::NoLanYet };
             // The apps the WM starts chat with the model its hub loads.
             if !conf.model.is_empty() {
                 crate::host::set_child_env("MAKEPAD_AI_MODEL", std::ffi::OsStr::new(&conf.model));
             }
-            Some(Link { hub: FleetHub::start(base), app: crate::hub_app::HubApp::new(path, conf) })
+            Made::Link(Link { hub: FleetHub::start(base), app: crate::hub_app::HubApp::new(path, conf) })
         }
         #[cfg(target_arch = "wasm32")]
         {
             let _ = processes;
-            None
+            Made::None
         }
     }
 

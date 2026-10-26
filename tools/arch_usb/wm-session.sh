@@ -16,12 +16,11 @@ cd "$MAKEPAD_WM_ROOT"
 if test ! -x target/release/makepad-app-wm || test "${MAKEPAD_WM_BUILD:-0}" = 1; then
     cargo build --offline --release -p makepad-app-wm
 fi
-# The AI Hub app is built the way the WM runs it (`cargo run --release -p makepad-app-aihub
-# --features node`, hub_app.rs), in this session's environment, so the WM's start of it compiles
-# nothing (the WM hands its children no `MAKEPAD=linux_direct`, so this build has none either).
-# `node` is the `features` default of ~/.makepad/wm/ai-hub.conf.
+# The AI Hub app is built the way the WM runs it: `makepad-wm-hub build` is the WM's own start of
+# it (`cargo run --release -p makepad-app-aihub --features <features>`, hub_app.rs) with `build`,
+# from the same settings and this session's environment, so the WM's start compiles nothing.
 if test ! -x target/release/makepad-app-aihub || test "${MAKEPAD_WM_BUILD:-0}" = 1; then
-    env -u MAKEPAD cargo run --offline --release -p makepad-app-registry --bin makepad-cargo -- build --features node aihub
+    cargo run --offline --release -p makepad-app-wm --bin makepad-wm-hub -- build
 fi
 
 # The saved display arrangement (order, per-screen modes, render-on GPU):

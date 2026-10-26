@@ -97,6 +97,51 @@ fn hub_target() -> Result<registry::AppTarget<'static>, String> {
     registry::find(APP_ID).map(|entry| entry.target()).ok_or_else(|| "the registry has no aihub".to_string())
 }
 
+/// The app's cargo command: the WM's start, or the deploy's build of exactly that.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Verb {
+    Run,
+    Build,
+}
+
+/// The deploy's build of this node's AI Hub (`makepad-wm-hub build`, run in the WM session's
+/// environment in the checkout the WM runs from): `cargo build` of the very command the WM's
+/// start runs, from the same settings (`ai-hub.conf`: features, the `env` lines, the CUDA
+/// toolkit installed here) and launcher environment, so the WM's `cargo run` of it after the
+/// deploy compiles nothing. One source for both: a feature or toolkit default changes the
+/// build and the start together. Prints the command (variable names only: an `env` line may
+/// carry a token) and returns cargo's status.
+pub fn build_node_hub() -> std::process::ExitCode {
+    let (path, conf) = (NodeConf::path(), NodeConf::load_from(&NodeConf::path()));
+    let app = HubApp::new(path, conf);
+    let mut cmd = match app.cargo(Verb::Build) {
+        Ok(cmd) => cmd,
+        Err(e) => {
+            eprintln!("makepad-wm-hub: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    let set: Vec<String> = cmd.get_envs().filter(|(_, v)| v.is_some()).map(|(k, _)| k.to_string_lossy().into_owned()).collect();
+    eprintln!(
+        "makepad-wm-hub: {} {} (features {:?}; sets {})",
+        cmd.get_program().to_string_lossy(),
+        cmd.get_args().map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" "),
+        app.conf.features,
+        set.join(" ")
+    );
+    match cmd.status() {
+        Ok(status) if status.success() => std::process::ExitCode::SUCCESS,
+        Ok(status) => {
+            eprintln!("makepad-wm-hub: build failed: {status}");
+            std::process::ExitCode::from(status.code().unwrap_or(1).clamp(1, 255) as u8)
+        }
+        Err(e) => {
+            eprintln!("makepad-wm-hub: cannot start cargo: {e}");
+            std::process::ExitCode::from(1)
+        }
+    }
+}
+
 /// `ai-hub.state`: the pid of the app this WM (or an earlier one) started and its identity.
 fn read_state(path: &Path) -> Option<(u32, String)> {
     let text = std::fs::read_to_string(path).ok()?;
@@ -138,6 +183,34 @@ fn user_scope() -> Option<PathBuf> {
     (run.is_file() && bus.is_some_and(|b| b.exists())).then_some(run)
 }
 
+/// The `makepad-ai-hub-<port>-<wm pid>.scope` a process runs in (its `/proc/<pid>/cgroup`
+/// text), for `port`: where this node's WMs start the AI Hub.
+fn hub_scope<'a>(cgroup: &'a str, port: u16) -> Option<&'a str> {
+    let prefix = format!("makepad-ai-hub-{port}-");
+    cgroup.lines().filter_map(|line| line.rsplit('/').next()).find(|unit| {
+        unit.strip_prefix(prefix.as_str()).and_then(|rest| rest.strip_suffix(".scope")).is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
+/// This user's processes in a hub scope for `port` other than `keep`'s (its own children, the
+/// sandboxed Claude, share its scope).
+#[cfg(target_os = "linux")]
+fn rival_hubs(port: u16, keep: Option<u32>) -> Vec<u32> {
+    use std::os::unix::fs::MetadataExt;
+    let scope_of = |pid: u32| std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok().and_then(|c| hub_scope(&c, port).map(str::to_string));
+    let Ok(me) = std::fs::metadata("/proc/self").map(|m| m.uid()) else { return Vec::new() };
+    let kept = keep.and_then(scope_of);
+    let Ok(dir) = std::fs::read_dir("/proc") else { return Vec::new() };
+    let mut out: Vec<u32> = dir
+        .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|pid| Some(*pid) != keep && *pid != std::process::id())
+        .filter(|pid| std::fs::metadata(format!("/proc/{pid}")).is_ok_and(|m| m.uid() == me))
+        .filter(|pid| scope_of(*pid).is_some_and(|scope| kept.as_deref() != Some(scope.as_str())))
+        .collect();
+    out.sort_unstable();
+    out
+}
+
 pub struct HubApp {
     pub conf: NodeConf,
     conf_path: PathBuf,
@@ -158,6 +231,8 @@ pub struct HubApp {
     started_at: f64,
     /// When the first start began waiting for the WM's socket.
     socket_wait: Option<f64>,
+    /// Hubs an earlier WM generation left on this port, being stopped: pid, SIGKILL time.
+    rivals: Vec<(u32, f64)>,
 }
 
 impl HubApp {
@@ -176,6 +251,7 @@ impl HubApp {
             kill_at: None,
             started_at: 0.0,
             socket_wait: None,
+            rivals: Vec::new(),
         }
     }
 
@@ -190,15 +266,24 @@ impl HubApp {
     /// cargo environment of every launcher (`registry::cargo_env`), under the user's systemd
     /// scope and `nice` where they exist: they and cargo exec, so the app's pid is the child's.
     fn command(&self) -> Result<Command, String> {
+        self.cargo(Verb::Run)
+    }
+
+    /// The start's cargo command; `Verb::Build` is the deploy's build of it ([`build_node_hub`]):
+    /// the same package, features, checkout and environment, without the scope and `nice`.
+    fn cargo(&self, verb: Verb) -> Result<Command, String> {
         let root = registry::repo_root().ok_or("no makepad checkout to run the AI Hub from")?;
-        let (cargo, cargo_args) = registry::run_argv_features(&hub_target()?, &root, &self.conf.features, &[]);
+        let (cargo, cargo_args) = match verb {
+            Verb::Run => registry::run_argv_features(&hub_target()?, &root, &self.conf.features, &[]),
+            Verb::Build => registry::build_argv_features(&hub_target()?, &root, &self.conf.features),
+        };
         let mut argv: Vec<std::ffi::OsString> = Vec::new();
         #[cfg(target_os = "linux")]
-        if let Some(run) = user_scope() {
+        if let (Verb::Run, Some(run)) = (verb, user_scope()) {
             let unit = format!("makepad-ai-hub-{}-{}", self.conf.port, std::process::id());
             argv.extend([run.into_os_string(), "--user".into(), "--scope".into(), "--quiet".into(), "--collect".into(), format!("--unit={unit}").into()]);
         }
-        if cfg!(unix) && self.conf.nice > 0 {
+        if verb == Verb::Run && cfg!(unix) && self.conf.nice > 0 {
             argv.extend(["nice".into(), "-n".into(), self.conf.nice.to_string().into()]);
         }
         argv.push(cargo.into_os_string());
@@ -206,7 +291,7 @@ impl HubApp {
         let mut cmd = Command::new(&argv[0]);
         cmd.args(&argv[1..]).current_dir(&root);
         registry::cargo_env(&mut cmd);
-        // Its output is a log file, not a terminal: plain lines.
+        // Its output is a log file (the deploy's: its log), not a terminal: plain lines.
         cmd.env("CARGO_TERM_PROGRESS_WHEN", "never");
         registry::child_env::scrub(&mut cmd);
         for (k, v) in self.conf.hub_env() {
@@ -230,6 +315,9 @@ impl HubApp {
             self.running = Some(Running::Adopted(pid));
             self.restart_at = None;
             self.started_at = now;
+            // An orphan of an older generation may hold the port or the cache it needs: the kept
+            // app's start is tried again on its own once they are gone.
+            self.stop_rivals(now);
             return true;
         }
         makepad_widgets::log!("wm: AI Hub: pid {pid} runs another program or other settings; replacing it");
@@ -259,6 +347,11 @@ impl HubApp {
             }
         };
         if std::mem::take(&mut self.first_start) && self.adopt_or_replace(now, &binary) {
+            return;
+        }
+        if self.stop_rivals(now) {
+            // Started once they are gone: they hold the port and the cache lock it needs.
+            self.restart_at = Some(now + 1.0);
             return;
         }
         let mut cmd = match self.command() {
@@ -309,6 +402,41 @@ impl HubApp {
         self.started_at = now;
     }
 
+    /// Hubs an earlier WM generation started for this port that no WM keeps any more (the
+    /// `makepad-ai-hub-<port>-<wm pid>` scopes of this user other than the running app's): an
+    /// orphan holds the port and the cache lock, so this node's own hub cannot serve (the old
+    /// headless hub left by the WM generation before the app, 10-26). Each gets SIGTERM (its hub
+    /// drains), SIGKILL after the stop grace. True while one is still there.
+    fn stop_rivals(&mut self, now: f64) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            let keep = self.running.as_ref().map(Running::pid);
+            let found = rival_hubs(self.conf.port, keep);
+            for pid in &found {
+                match self.rivals.iter_mut().find(|(p, _)| p == pid) {
+                    None => {
+                        makepad_widgets::log!("wm: AI Hub: pid {pid} is a hub an earlier WM started on port {} and no WM keeps; stopping it", self.conf.port);
+                        makepad_app_host::launch::signal_pid(*pid, false);
+                        self.rivals.push((*pid, now + STOP_GRACE.as_secs_f64()));
+                    }
+                    Some((_, at)) if now >= *at => {
+                        makepad_widgets::log!("wm: AI Hub: pid {pid} outlived its stop; SIGKILL");
+                        makepad_app_host::launch::signal_pid(*pid, true);
+                        *at = f64::INFINITY;
+                    }
+                    Some(_) => {}
+                }
+            }
+            self.rivals.retain(|(p, _)| found.contains(p));
+            return !self.rivals.is_empty();
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = now;
+            false
+        }
+    }
+
     /// A start that failed (not built yet, say) is tried again like an exit.
     fn retry_later(&mut self, now: f64, reason: String) {
         self.crashes += 1;
@@ -352,6 +480,9 @@ impl HubApp {
 
     /// Once a second from the WM's tick: exit, restart.
     pub fn tick(&mut self, now: f64) {
+        if !self.rivals.is_empty() {
+            self.stop_rivals(now);
+        }
         if let (Some(Running::Adopted(pid)), Some(at)) = (&self.running, self.kill_at) {
             if now >= at && app_alive(*pid) {
                 makepad_widgets::log!("wm: AI Hub: pid {pid} outlived its stop; SIGKILL");
@@ -566,6 +697,27 @@ mod tests {
         std::fs::write(&state, format!("pid = {}\nidentity = {}\n", u32::MAX - 7, identity(&program, &h.conf))).unwrap();
         assert!(!h.adopt_or_replace(0.0, &program));
         assert!(h.running.is_none());
+    }
+
+    #[test]
+    fn a_hub_scope_is_the_wms_unit_for_the_port() {
+        let cg = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/makepad-ai-hub-8123-2890550.scope\n";
+        assert_eq!(hub_scope(cg, 8123), Some("makepad-ai-hub-8123-2890550.scope"));
+        assert_eq!(hub_scope(cg, 8124), None, "another port's hub is not this one's rival");
+        assert_eq!(hub_scope("0::/user.slice/user-1000.slice/session-3.scope\n", 8123), None);
+        assert_eq!(hub_scope("0::/app.slice/makepad-ai-hub-8123-.scope\n", 8123), None);
+        assert_eq!(hub_scope("0::/app.slice/makepad-ai-hub-8123-12x.scope\n", 8123), None);
+        assert_eq!(hub_scope("0::/system.slice/makepad-wm.service\n", 8123), None);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn processes_outside_a_hub_scope_are_never_rivals() {
+        // This test process and its children run in no makepad-ai-hub scope.
+        let mut sleeper = Command::new("sleep").arg("30").spawn().unwrap();
+        assert!(!rival_hubs(8123, None).contains(&sleeper.id()));
+        let _ = sleeper.kill();
+        let _ = sleeper.wait();
     }
 
     #[test]

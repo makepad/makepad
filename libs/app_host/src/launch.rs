@@ -253,6 +253,12 @@ mod signal {
         unsafe { kill(-pid, sig) };
     }
 
+    pub fn kill_one(pid: i32, sig: i32) {
+        if pid > 0 {
+            unsafe { kill(pid, sig) };
+        }
+    }
+
     /// `kill(pid, 0)` sends nothing; a zero return means the process (or
     /// group leader) still exists.
     pub fn alive(pid: i32) -> bool {
@@ -297,6 +303,12 @@ pub fn kill_child_group(child: &mut Child, grace: std::time::Duration, pool: &Ta
 #[cfg(unix)]
 pub fn signal_group(pid: u32, kill: bool) {
     signal::kill_group(pid as i32, if kill { signal::SIGKILL } else { signal::SIGTERM });
+}
+
+/// SIGTERM (or with `kill`, SIGKILL) to the one process `pid`, at once and once.
+#[cfg(unix)]
+pub fn signal_pid(pid: u32, kill: bool) {
+    signal::kill_one(pid as i32, if kill { signal::SIGKILL } else { signal::SIGTERM });
 }
 
 /// [`kill_child_group`] for a group leader that is not our child (a process an earlier

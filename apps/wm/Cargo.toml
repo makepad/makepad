@@ -35,6 +35,11 @@ path = "src/lib.rs"
 name = "makepad-app-wm"
 path = "src/main.rs"
 
+# The deploy's build of the node's AI Hub: the WM's own start of it, as a build (hub_app.rs).
+[[bin]]
+name = "makepad-wm-hub"
+path = "src/bin/makepad_wm_hub.rs"
+
 [features]
 default = ["tweaker"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
