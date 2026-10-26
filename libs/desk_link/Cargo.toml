@@ -21,3 +21,8 @@ required-features = ["server"]
 name = "server_admin"
 path = "tests/server_admin.rs"
 required-features = ["server"]
+
+[[test]]
+name = "server_input"
+path = "tests/server_input.rs"
+required-features = ["server"]

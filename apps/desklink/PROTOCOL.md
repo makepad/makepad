@@ -59,7 +59,7 @@ Fixed-size fields are little-endian. `str` and `bytes` are `u32 LE length` + byt
 | 10 | Key | `down bool, keycode u32 (makepad KeyCode index), mods u8 (1 shift, 2 control, 4 alt, 8 logo)` |
 | 11 | Pointer | `x u16, y u16`: position over the stream picture, 0..=65535 on each axis |
 | 12 | Button | `down bool, button u8 (0 left, 1 right, 2 middle, 3 back, 4 forward)` |
-| 13 | Scroll | `dx i32, dy i32` in 1/120 notches; +dy = wheel away from the user |
+| 13 | Scroll | `dx i32, dy i32` in 1/120 notches (a notch = 40 points; fractions carried, so trackpad pixels and momentum stay smooth), in content direction: +dy = the view moves up the content, +dx = right (see Scroll direction) |
 | 14 | Gamepad | `slot u8, buttons u32, left_x i16, left_y i16, right_x i16, right_y i16, left_trigger u8, right_trigger u8` |
 | 15 | GamepadGone | `slot u8` |
 | 20 | Ping | `client_ns u64` (the viewer's clock) |
@@ -190,8 +190,32 @@ The desktop injects input as local devices (Linux: uinput), for the session's li
 
 Its own input stack treats them like plugged-in hardware: key chords, modifiers, focus routing to
 hosted apps and Wayland clients, and gamepads in every app. Every held key and button is released
-when the session ends. The wheel is passed as whole notches; parts of a notch carry over to the
+when the session ends (the server does it for every desktop, `server::HeldInput`), and a viewer
+silent for 6 s (it pings every second) ends its session. The viewer itself sends the up of every
+key and button a window holds whenever that window stops driving the desktop: focus lost, app
+inactive, tab or screen changed, history/scrubber, fullscreen change, window closed, quit
+(modifiers last). An up is only sent, and only passed on, after its down. The wheel is passed as whole notches; parts of a notch carry over to the
 next scroll.
+
+## Scroll direction
+
+Defined once, end to end, so nobody flips it again:
+
+- **makepad `Event::Scroll`**: `scroll.y > 0` = the view moves down the content (the content
+  moves up), `scroll.x > 0` = the view moves right. Each platform backend delivers it with its
+  OS's direction setting already applied (macOS: the user's natural-scrolling setting; Windows
+  and stock Linux desktops: theirs, unchanged).
+- **Our Linux WM** (the HAL direct backend) is the one place makepad decides the direction
+  itself: its *Natural scrolling* setting (desktop menu, default on = the Mac direction) turns
+  both touchpad and mouse wheel (`direct/raw_input.rs` `wheel_scroll`). Every app under the WM
+  gets the result; no app flips anything.
+- **The wire** (`Scroll`) carries what the viewer's user saw: `dy = -scroll.y * 3`, `dx =
+  scroll.x * 3` (1/120 notches). The remote content moves the way local content would on the
+  viewer's machine, whatever the desktop's own setting.
+- **Desktops inject** so that holds: the WM as a high-resolution uinput wheel, turned back by its
+  own natural setting first (its input stack turns it again); Windows `SendInput` wheel (+ =
+  view up; Windows' setting only touches precision touchpads, not injected wheels); macOS a
+  pixel `CGEvent` scroll (+ = view up; posted events are not turned by the user's setting).
 
 ## Latency
 

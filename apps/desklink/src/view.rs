@@ -214,6 +214,14 @@ impl RemoteView {
         self.draw_bg.redraw(cx);
     }
 
+    /// No picture yet: the area the stream's `size` will take (black until it comes).
+    pub fn await_picture(&mut self, cx: &mut Cx, size: [u32; 2]) {
+        if self.size == [0, 0] && size[0] > 0 && size[1] > 0 {
+            self.size = size;
+            self.draw_bg.redraw(cx);
+        }
+    }
+
     pub fn clear(&mut self, cx: &mut Cx) {
         self.parts.clear();
         self.retired.clear();

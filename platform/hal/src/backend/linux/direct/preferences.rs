@@ -18,8 +18,10 @@ pub fn set_pointer_speed(touchpad: bool, hundredths: u32) {
     );
 }
 
-/// Natural scrolling for touchpads: the content follows the fingers, as on
-/// macOS (on by default). Mouse wheels keep their own direction either way.
+/// Natural scrolling, as on macOS: the content follows the fingers on a
+/// touchpad and the wheel on a mouse (on by default in the WM's session; the WM's
+/// setting turns it off). Only this direct backend (our WM) applies it: windowed
+/// backends on another desktop keep that desktop's own direction.
 static NATURAL_SCROLL: AtomicBool = AtomicBool::new(true);
 
 pub fn natural_scroll() -> bool {

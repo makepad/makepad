@@ -416,7 +416,7 @@ impl Desktop for MacDesktop {
             if !unsafe { AXIsProcessTrusted() } {
                 return Err(INPUT_MISSING.into());
             }
-            Ok(Box::new(MacInput { target: target.clone(), at: NSPoint { x: 0.0, y: 0.0 }, held: 0, clicks: (Instant::now(), NSPoint { x: -1e9, y: -1e9 }, 0), wheel: [0, 0], flags: 0, keys_down: Vec::new() }) as Box<dyn Input>)
+            Ok(Box::new(MacInput { target: target.clone(), at: NSPoint { x: 0.0, y: 0.0 }, held: 0, clicks: (Instant::now(), NSPoint { x: -1e9, y: -1e9 }, 0), wheel: [0, 0], flags: 0 }) as Box<dyn Input>)
         })
     }
 }
@@ -458,7 +458,6 @@ struct MacInput {
     /// Wheel motion below a point, carried over.
     wheel: [i32; 2],
     flags: u64,
-    keys_down: Vec<u16>,
 }
 
 unsafe impl Send for MacInput {}
@@ -554,12 +553,8 @@ impl Input for MacInput {
         };
         if down {
             self.flags |= flag;
-            if !self.keys_down.contains(&vk) {
-                self.keys_down.push(vk);
-            }
         } else {
             self.flags &= !flag;
-            self.keys_down.retain(|k| *k != vk);
         }
         unsafe {
             let e = CGEventCreateKeyboardEvent(nil, vk, down);
@@ -573,23 +568,4 @@ impl Input for MacInput {
     /// macOS offers no virtual gamepad without a driver entitlement: left out.
     fn gamepad(&mut self, _slot: u8, _state: &GamepadState) {}
     fn gamepad_gone(&mut self, _slot: u8) {}
-}
-
-impl Drop for MacInput {
-    /// Nothing stays held when the viewer goes.
-    fn drop(&mut self) {
-        let keys = std::mem::take(&mut self.keys_down);
-        self.flags = 0;
-        for vk in keys {
-            unsafe {
-                let e = CGEventCreateKeyboardEvent(nil, vk, false);
-                self.post(e);
-            }
-        }
-        for b in 0..5u8 {
-            if self.held & (1 << b) != 0 {
-                self.button(false, b);
-            }
-        }
-    }
 }

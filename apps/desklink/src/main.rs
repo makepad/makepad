@@ -48,6 +48,7 @@
 mod caption;
 mod clip;
 mod conn;
+mod held;
 mod history;
 mod installed;
 mod scrub;
@@ -866,6 +867,10 @@ impl AppMain for App {
         if let Event::Shutdown = event {
             installed::clear_pid();
             // every connection's threads (and the scrub decoders) end and are joined before the app goes
+            // nothing stays pressed on a desktop: the ups go out before the connections close
+            for vi in 0..self.viewers.len() {
+                self.release_held(vi, "quit");
+            }
             for v in &mut self.viewers {
                 v.scrub = None;
                 v.preview = None;
@@ -912,6 +917,18 @@ impl AppMain for App {
                     self.focused = vi;
                 }
             }
+            // focus gone (Cmd-Tab, another window, a sheet): what this window holds down on its
+            // desktop is let go, the modifiers too; the OS sends us no ups for it any more
+            Event::WindowLostFocus(id) => {
+                if let Some(vi) = self.viewer_of_window(*id) {
+                    self.release_held(vi, "window lost focus");
+                }
+            }
+            Event::Pause | Event::Background => {
+                for vi in 0..self.viewers.len() {
+                    self.release_held(vi, "app inactive");
+                }
+            }
             Event::KeyDown(_) | Event::KeyUp(_) => {
                 let vi = self.focused.min(self.viewers.len() - 1);
                 self.key_event(cx, vi, event);
@@ -949,10 +966,12 @@ impl AppMain for App {
                 let g = &e.new_geom;
                 let v = &mut self.viewers[vi];
                 v.window_px = [(g.inner_size.x * g.dpi_factor).round() as u32, (g.inner_size.y * g.dpi_factor).round() as u32];
-                if v.fullscreen != g.is_fullscreen {
-                    viewer::selftest(&format!("window {vi} fullscreen {}", g.is_fullscreen));
-                }
+                let changed = v.fullscreen != g.is_fullscreen;
                 v.fullscreen = g.is_fullscreen;
+                if changed {
+                    viewer::selftest(&format!("window {vi} fullscreen {}", g.is_fullscreen));
+                    self.release_held(vi, "fullscreen changed");
+                }
             }
         }
         if self.pad_poll.is_event(event).is_some() {

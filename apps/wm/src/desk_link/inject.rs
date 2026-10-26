@@ -38,6 +38,12 @@ const EV_REL: u16 = 2;
 const EV_ABS: u16 = 3;
 const REL_HWHEEL: u16 = 6;
 const REL_WHEEL: u16 = 8;
+const REL_WHEEL_HI_RES: u16 = 0x0b;
+const REL_HWHEEL_HI_RES: u16 = 0x0c;
+
+/// The WM's natural scrolling setting (`host::apply_natural_scroll`): this session's input
+/// stack turns a wheel's direction by it, so the injected wheel is turned back first.
+pub static NATURAL_SCROLL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 const ABS_X: u16 = 0;
 const ABS_Y: u16 = 1;
 const INPUT_PROP_DIRECT: i32 = 1;
@@ -168,8 +174,6 @@ pub struct Injector {
     pads: Vec<Option<Device>>,
     /// Wheel motion below a notch, carried to the next scroll.
     wheel: [i32; 2],
-    keys_down: Vec<u16>,
-    buttons_down: Vec<u16>,
 }
 
 impl Injector {
@@ -184,6 +188,8 @@ impl Injector {
             }
             d.ioctl_int(UI_SET_RELBIT, REL_WHEEL as i32)?;
             d.ioctl_int(UI_SET_RELBIT, REL_HWHEEL as i32)?;
+            d.ioctl_int(UI_SET_RELBIT, REL_WHEEL_HI_RES as i32)?;
+            d.ioctl_int(UI_SET_RELBIT, REL_HWHEEL_HI_RES as i32)?;
             d.abs(ABS_X, 0, 65535)?;
             d.abs(ABS_Y, 0, 65535)
         })?;
@@ -194,7 +200,7 @@ impl Injector {
             }
             Ok(())
         })?;
-        Ok(Injector { pointer, keyboard, pads: Vec::new(), wheel: [0; 2], keys_down: Vec::new(), buttons_down: Vec::new() })
+        Ok(Injector { pointer, keyboard, pads: Vec::new(), wheel: [0; 2] })
     }
 
     /// The pointer at a desktop-normalised position (0..=65535 over the wide desktop).
@@ -212,21 +218,31 @@ impl Injector {
                 button::FORWARD => 4,
                 _ => return,
             };
-        self.buttons_down.retain(|c| *c != code);
-        if down {
-            self.buttons_down.push(code);
-        }
         self.pointer.emit(&[(EV_KEY, code, down as i32)]);
     }
 
-    /// Wheel motion in 1/120 notches; raw input knows whole notches (40 px each).
+    /// The viewer's scroll (1/120 notches, the content direction its user saw: +dy the view
+    /// moves up, +dx right) as a high-resolution wheel (smooth, trackpad pixels and momentum
+    /// included) plus the whole notches a wheel also reports. evdev's +1 is the wheel turned
+    /// away (tilted right): with traditional scrolling the view moves up (right); this
+    /// session's natural setting turns that, so the wheel is turned back first and the
+    /// content moves as it did for the viewer's user.
     pub fn scroll(&mut self, dx: i32, dy: i32) {
+        let turn = if NATURAL_SCROLL.load(std::sync::atomic::Ordering::Relaxed) { -1 } else { 1 };
+        let (dx, dy) = (dx * turn, dy * turn);
         self.wheel[0] += dx;
         self.wheel[1] += dy;
         let notches = [self.wheel[0] / makepad_desk_link::SCROLL_UNITS_PER_NOTCH, self.wheel[1] / makepad_desk_link::SCROLL_UNITS_PER_NOTCH];
         self.wheel[0] -= notches[0] * makepad_desk_link::SCROLL_UNITS_PER_NOTCH;
         self.wheel[1] -= notches[1] * makepad_desk_link::SCROLL_UNITS_PER_NOTCH;
         let mut events = Vec::new();
+        // high resolution first: the WM's raw input then leaves this device's whole notches out
+        if dx != 0 {
+            events.push((EV_REL, REL_HWHEEL_HI_RES, dx));
+        }
+        if dy != 0 {
+            events.push((EV_REL, REL_WHEEL_HI_RES, dy));
+        }
         if notches[0] != 0 {
             events.push((EV_REL, REL_HWHEEL, notches[0]));
         }
@@ -241,10 +257,6 @@ impl Injector {
     /// A key by makepad `KeyCode` index (the viewer's), through the WM's evdev key map.
     pub fn key(&mut self, down: bool, keycode: u32) {
         let Some(code) = crate::wayland_view::evdev_of(makepad_widgets::KeyCode::from_index(keycode)) else { return };
-        self.keys_down.retain(|c| *c != code);
-        if down {
-            self.keys_down.push(code);
-        }
         self.keyboard.emit(&[(EV_KEY, code, down as i32)]);
     }
 
@@ -318,19 +330,5 @@ impl makepad_desk_link::server::Input for Injector {
     }
     fn gamepad_gone(&mut self, slot: u8) {
         Injector::gamepad_gone(self, slot)
-    }
-}
-
-impl Drop for Injector {
-    /// Nothing stays held when the viewer goes: every key and button it pressed is released.
-    fn drop(&mut self) {
-        let keys: Vec<_> = self.keys_down.drain(..).map(|c| (EV_KEY, c, 0)).collect();
-        if !keys.is_empty() {
-            self.keyboard.emit(&keys);
-        }
-        let buttons: Vec<_> = self.buttons_down.drain(..).map(|c| (EV_KEY, c, 0)).collect();
-        if !buttons.is_empty() {
-            self.pointer.emit(&buttons);
-        }
     }
 }

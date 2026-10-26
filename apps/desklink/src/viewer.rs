@@ -4,6 +4,7 @@
 
 use crate::caption::{CaptionToggle, DeskTabs, MenuItem, PopMenu, TabInfo, TabReach};
 use crate::conn::{Latency, State};
+use crate::held::Held;
 use crate::history::Snapshot;
 use crate::scrub::Scrub;
 use crate::scrubber::{ScrubAction, ScrubData, Scrubber, SPAN_NS};
@@ -46,9 +47,12 @@ pub struct Viewer {
     pub selected: Option<usize>,
     /// Keyboard to the desktop (the picture was clicked last).
     pub keyboard: bool,
-    /// Pointer buttons held over the picture (they keep driving it when the pointer leaves).
-    pub held: u32,
+    /// Keys and buttons held down on the desktop it drives (a drag keeps driving the picture
+    /// when the pointer leaves it); let go whenever the window stops driving it.
+    pub input: Held,
     pub last_pointer: Option<(u16, u16)>,
+    /// Scroll below a 1/120 notch, carried to the next (trackpad pixels stay smooth).
+    pub scroll_rest: (f64, f64),
     pub local_over: bool,
     /// The window's inner size in device pixels (fullscreen: the screen's backing size).
     pub window_px: [u32; 2],
@@ -114,8 +118,9 @@ impl Viewer {
             tabs: Vec::new(),
             selected: None,
             keyboard: false,
-            held: 0,
+            input: Held::default(),
             last_pointer: None,
+            scroll_rest: (0.0, 0.0),
             local_over: false,
             window_px: [0, 0],
             fullscreen: false,
@@ -173,10 +178,10 @@ impl App {
             // the history is the shown connection's
             self.close_scrubber(cx, vi);
         }
+        self.release_held(vi, "tab changed");
         let v = &mut self.viewers[vi];
         v.selected = Some(conn);
         v.last_pointer = None;
-        v.held = 0;
         let sink = self.conns.get(conn).map(|c| c.view.clone());
         if let Some(mut r) = self.viewers[vi].widget(cx, ids!(remote)).borrow_mut::<RemoteView>() {
             r.clear(cx);
@@ -210,6 +215,7 @@ impl App {
             if v.scrub_open {
                 self.close_scrubber(cx, vi);
             }
+            self.release_held(vi, "tab closed");
             let v = &mut self.viewers[vi];
             v.selected = None;
             let next = v.tabs.get(k.min(v.tabs.len().saturating_sub(1))).copied();
@@ -285,6 +291,7 @@ impl App {
 
     /// A window made at run time closed: its tabs close with it.
     pub fn window_closed(&mut self, cx: &mut Cx, vi: usize) {
+        self.release_held(vi, "window closed");
         let v = self.viewers.remove(vi);
         drop(v);
         if self.focused >= self.viewers.len() || self.focused == vi {
@@ -368,6 +375,7 @@ impl App {
 
     /// The first window closed: hidden with its tabs (their desktops pause).
     pub fn hide_main(&mut self, cx: &mut Cx) {
+        self.release_held(0, "window closed");
         self.viewers[0].visible = false;
         if self.viewers[0].scrub_open {
             self.close_scrubber(cx, 0);
@@ -385,7 +393,8 @@ impl App {
         if let Some(vi) = self.viewer_of_conn(i) {
             let v = &mut self.viewers[vi];
             if v.selected == Some(i) {
-                v.held = 0;
+                // the session ends: the desktop lets go of what it held
+                v.input.release();
                 v.last_pointer = None;
             }
         }
@@ -393,6 +402,7 @@ impl App {
     }
 
     pub fn next_screen(&mut self, vi: usize) {
+        self.release_held(vi, "screen changed");
         if let Some(c) = self.viewers.get(vi).and_then(|v| v.selected).and_then(|i| self.conns.get(i)) {
             let next = c.shared.lock().unwrap().welcome.as_ref().map(|w| (w.screen + 1) % w.screens.len().max(1) as u32);
             if let Some(index) = next {
@@ -510,6 +520,10 @@ impl App {
         let got_history = ready.is_some();
         let thumb = self.viewers[vi].scrub.as_ref().or(self.viewers[vi].preview.as_ref()).and_then(Scrub::take_thumb);
         let v = &mut self.viewers[vi];
+        if state != State::Connected && v.input.on.is_some_and(|(c, _)| c == ci) {
+            // the session is gone: the desktop let go of what it held
+            v.input.release();
+        }
         let remote = win.widget(cx, ids!(remote));
         let Some(mut view) = remote.borrow_mut::<RemoteView>() else { return };
         if let Some(p) = picture {
@@ -522,6 +536,10 @@ impl App {
             v.decode_sum.0 += l.decode;
             v.decode_sum.1 += 1;
             view.set_picture(cx, p.width, p.height, p.parts, p.frame, p.decoded_ns);
+        }
+        if let Some(w) = welcome.as_ref().filter(|_| state == State::Connected && !paused) {
+            // the picture area is known before the first picture: input maps from the start
+            view.await_picture(cx, w.stream);
         }
         if let Some((d, frame)) = ready {
             view.set_picture(cx, d.width, d.height, d.view_parts(), frame, 0);
@@ -643,7 +661,7 @@ impl App {
                 }
                 let over = placement.to_stream(e.abs).filter(|_| !over_ui(cx, e.abs));
                 v.local_over = over.is_some();
-                let at = if v.held != 0 { Some(placement.to_stream_clamped(e.abs)) } else { over };
+                let at = if v.input.dragging() { Some(placement.to_stream_clamped(e.abs)) } else { over };
                 if let Some((x, y)) = at.filter(|p| Some(*p) != v.last_pointer) {
                     v.last_pointer = Some((x, y));
                     conn.send(ClientMsg::Pointer { x, y });
@@ -659,22 +677,27 @@ impl App {
                 };
                 v.keyboard = true;
                 if let Some(b) = button_of(e.button) {
+                    self.input_on(vi, ci);
+                    let conn = &self.conns[ci];
                     conn.send(ClientMsg::Pointer { x, y });
                     conn.send(ClientMsg::Button { down: true, button: b });
-                    v.held |= 1 << b;
+                    self.viewers[vi].input.button_down(b);
                 }
             }
             Event::MouseUp(e) if Some(e.window_id) == wid => {
-                if let Some(b) = button_of(e.button).filter(|b| v.held & (1 << b) != 0) {
-                    v.held &= !(1 << b);
-                    conn.send(ClientMsg::Button { down: false, button: b });
+                if let Some(b) = button_of(e.button).filter(|b| v.input.button_up(*b)) {
+                    self.send_held(vi, ClientMsg::Button { down: false, button: b });
                 }
             }
             Event::Scroll(e) if Some(e.window_id) == wid && live => {
                 if placement.to_stream(e.abs).is_some() {
-                    // makepad points (40 per wheel notch) -> 1/120 notches; +dy = wheel away
-                    let dx = (e.scroll.x * 3.0).round() as i32;
-                    let dy = (-e.scroll.y * 3.0).round() as i32;
+                    // makepad points (40 per wheel notch) -> 1/120 notches, in the content
+                    // direction this machine's user saw (its OS setting applied, e.g. a Mac's
+                    // natural scrolling): +dy the view moves up, +dx right (PROTOCOL.md)
+                    let x = v.scroll_rest.0 + e.scroll.x * 3.0;
+                    let y = v.scroll_rest.1 - e.scroll.y * 3.0;
+                    let (dx, dy) = (x.trunc() as i32, y.trunc() as i32);
+                    v.scroll_rest = (x - dx as f64, y - dy as f64);
                     if dx != 0 || dy != 0 {
                         conn.send(ClientMsg::Scroll { dx, dy });
                     }
@@ -692,6 +715,12 @@ impl App {
             Event::KeyUp(e) => (e, false),
             _ => return,
         };
+        // the up of a key whose down went to the desktop goes there too, whatever took the
+        // keyboard since (a shortcut, a menu, the scrubber); any other up is the viewer's
+        if !down && self.viewers[vi].input.key_up(e.key_code.to_index()) {
+            self.send_held(vi, ClientMsg::Key { down: false, keycode: e.key_code.to_index(), mods: mods_of(&e.modifiers) });
+            return;
+        }
         if shortcut(e).is_some() {
             if down && !e.is_repeat {
                 if let Some(s) = shortcut(e) {
@@ -710,11 +739,50 @@ impl App {
         if down && (paused || (!v.keyboard && cx.key_focus().is_empty())) && self.scrub_key(cx, vi, e) {
             return;
         }
-        if self.viewers[vi].keyboard && !paused {
-            if let Some(conn) = self.viewers[vi].selected.and_then(|i| self.conns.get(i)) {
-                conn.send(ClientMsg::Key { down, keycode: e.key_code.to_index(), mods: mods_of(&e.modifiers) });
+        if down && self.viewers[vi].keyboard && !paused {
+            if let Some(ci) = self.viewers[vi].selected.filter(|i| *i < self.conns.len()) {
+                self.input_on(vi, ci);
+                let keycode = e.key_code.to_index();
+                self.conns[ci].send(ClientMsg::Key { down, keycode, mods: mods_of(&e.modifiers) });
+                self.viewers[vi].input.key_down(keycode);
             }
         }
+    }
+
+    /// Window `vi` drives connection `ci` now: what it held on another desktop (or on an ended
+    /// session) is let go first.
+    fn input_on(&mut self, vi: usize, ci: usize) {
+        let session = self.conns[ci].session();
+        if self.viewers[vi].input.on != Some((ci, session)) {
+            self.release_held(vi, "desktop changed");
+            self.viewers[vi].input.on = Some((ci, session));
+        }
+    }
+
+    /// An up for a down window `vi` sent: to the desktop (and session) that got the down.
+    fn send_held(&self, vi: usize, msg: ClientMsg) {
+        if let Some((ci, session)) = self.viewers[vi].input.on {
+            if let Some(c) = self.conns.get(ci).filter(|c| c.session() == session) {
+                c.send(msg);
+            }
+        }
+    }
+
+    /// Window `vi` stops driving its desktop (it lost the focus, its tab changed, the history
+    /// paused it, it closed, the app quits): the up of every key and button it holds down
+    /// there goes out, modifiers last, and nothing is held any more.
+    pub fn release_held(&mut self, vi: usize, why: &str) {
+        let Some(v) = self.viewers.get_mut(vi) else { return };
+        let on = v.input.on;
+        let ups = v.input.release();
+        let Some((ci, session)) = on.filter(|_| !ups.is_empty()) else { return };
+        // a session that ended took its downs with it: the desktop let them go
+        let Some(c) = self.conns.get(ci).filter(|c| c.session() == session) else { return };
+        let n = ups.len();
+        for m in ups {
+            c.send(m);
+        }
+        selftest(&format!("window {vi}: {n} held released on {} ({why})", c.name));
     }
 
     /// The scrubber's keys; false when the key is not one of them.
@@ -775,6 +843,7 @@ impl App {
         if self.viewers[vi].selected.is_none() {
             return;
         }
+        self.release_held(vi, "scrubber opened");
         self.viewers[vi].scrub_open = true;
         self.refresh_live_snap(cx, vi);
         self.update_snap_tick(cx);
@@ -830,17 +899,11 @@ impl App {
         if snap.len() == 0 {
             return;
         }
-        // buttons held on the desktop are let go (the mouse now scrubs)
-        let v = &self.viewers[vi];
-        for b in 0..8u8 {
-            if v.held & (1 << b) != 0 {
-                c.send(ClientMsg::Button { down: false, button: b });
-            }
-        }
+        // keys and buttons held on the desktop are let go (the mouse and keys now scrub)
+        self.release_held(vi, "history");
         let cur = at.map_or(snap.len() - 1, |t| snap.at_time(t));
         let scrub = Scrub::start(snap, cur, self.signal.clone());
         let v = &mut self.viewers[vi];
-        v.held = 0;
         v.cur = cur;
         v.hist_shown = None;
         v.range = (None, None);

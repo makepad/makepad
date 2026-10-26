@@ -371,7 +371,7 @@ impl Desktop for WinDesktop {
 
     fn input(&self) -> InputFactory {
         let target = self.target.clone();
-        Arc::new(move || Ok(Box::new(WinInput { target: target.clone(), keys_down: Vec::new(), held: 0 }) as Box<dyn Input>))
+        Arc::new(move || Ok(Box::new(WinInput { target: target.clone() }) as Box<dyn Input>))
     }
 }
 
@@ -410,8 +410,6 @@ fn vk_of(key: makepad_key_code::KeyCode) -> Option<(u16, bool)> {
 
 struct WinInput {
     target: Arc<Mutex<RECT>>,
-    keys_down: Vec<(u16, bool)>,
-    held: u32,
 }
 
 impl WinInput {
@@ -476,11 +474,6 @@ impl Input for WinInput {
             (button::FORWARD, d) => (if d { MOUSEEVENTF_XDOWN.0 } else { MOUSEEVENTF_XUP.0 }, XBUTTON2 as u32),
             _ => return,
         };
-        if down {
-            self.held |= 1 << b;
-        } else {
-            self.held &= !(1 << b);
-        }
         self.mouse(0, 0, data, flags);
     }
 
@@ -496,31 +489,10 @@ impl Input for WinInput {
 
     fn key(&mut self, down: bool, keycode: u32) {
         let Some((vk, extended)) = vk_of(makepad_key_code::KeyCode::from_index(keycode)) else { return };
-        if down {
-            if !self.keys_down.contains(&(vk, extended)) {
-                self.keys_down.push((vk, extended));
-            }
-        } else {
-            self.keys_down.retain(|k| *k != (vk, extended));
-        }
         self.keyboard(vk, extended, down);
     }
 
     /// Windows has no virtual gamepad without a driver: left out.
     fn gamepad(&mut self, _slot: u8, _state: &GamepadState) {}
     fn gamepad_gone(&mut self, _slot: u8) {}
-}
-
-impl Drop for WinInput {
-    /// Nothing stays held when the viewer goes.
-    fn drop(&mut self) {
-        for (vk, ext) in std::mem::take(&mut self.keys_down) {
-            self.keyboard(vk, ext, false);
-        }
-        for b in 0..5u8 {
-            if self.held & (1 << b) != 0 {
-                self.button(false, b);
-            }
-        }
-    }
 }

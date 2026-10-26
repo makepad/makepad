@@ -217,7 +217,10 @@ pub fn load_natural_scroll() -> bool {
 /// Applies the natural scrolling choice to the direct backend's touchpad.
 pub fn apply_natural_scroll(on: bool) {
     #[cfg(target_os = "linux")]
-    makepad_widgets::makepad_platform::linux_input::set_natural_scroll(on);
+    {
+        makepad_widgets::makepad_platform::linux_input::set_natural_scroll(on);
+        crate::desk_link::inject::NATURAL_SCROLL.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
     let _ = on;
 }
 

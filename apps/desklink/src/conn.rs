@@ -127,6 +127,9 @@ const WINDOW_LATEST: Duration = Duration::from_millis(1000);
 pub struct Shared {
     pub state: Option<State>,
     pub welcome: Option<Welcome>,
+    /// Counts the sessions (each `Welcome`): input held on an ended one was let go by the
+    /// desktop.
+    pub session: u64,
     /// Round trip of the last ping (ms).
     pub rtt_ms: Option<f64>,
     /// server clock - viewer clock (ns): the smallest-RTT ping of the last `OFFSET_WINDOW`.
@@ -284,6 +287,11 @@ impl Connection {
         }
     }
 
+    /// The current session (`Shared::session`).
+    pub fn session(&self) -> u64 {
+        self.shared.lock().unwrap().session
+    }
+
     pub fn state(&self) -> State {
         self.shared.lock().unwrap().state.clone().unwrap_or(State::Connecting)
     }
@@ -407,6 +415,12 @@ impl Net {
         let mut differs_since: Option<Instant> = None;
         let result = loop {
             if self.stop.load(Ordering::Acquire) {
+                // what was sent before the close still goes out (the ups of held keys at quit)
+                while let Ok(msg) = self.rx.try_recv() {
+                    if proto::write_all(&mut stream, &msg.encode()).is_err() {
+                        break;
+                    }
+                }
                 break Ok("closed".into());
             }
             if self.reconnect.load(Ordering::Acquire) {
@@ -507,6 +521,7 @@ impl Net {
                         self.history.lock().unwrap().stream_size = size;
                         let mut s = self.shared.lock().unwrap();
                         s.welcome = Some(Welcome { screens, screen, stream: size, input, input_note, server });
+                        s.session += 1;
                         s.state = Some(State::Connected);
                         drop(s);
                         self.signal.set();

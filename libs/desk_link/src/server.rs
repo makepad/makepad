@@ -65,6 +65,77 @@ pub trait Input: Send {
     fn gamepad_gone(&mut self, slot: u8);
 }
 
+/// A session's input devices and what the viewer holds down on them. When the session ends
+/// (the viewer closed, its connection dropped or went silent, the desktop stopped) every key
+/// and button it still holds goes up: the one place every desktop (the WM, the Desk Hosts)
+/// lets go, so nothing stays pressed after a viewer is gone. An up whose down never came is
+/// not passed on: the devices see each key go down and up in turn.
+pub struct HeldInput {
+    pub input: Box<dyn Input>,
+    keys: Vec<u32>,
+    buttons: u8,
+}
+
+impl HeldInput {
+    pub fn new(input: Box<dyn Input>) -> HeldInput {
+        HeldInput { input, keys: Vec::new(), buttons: 0 }
+    }
+
+    pub fn key(&mut self, down: bool, keycode: u32) {
+        let held = self.keys.contains(&keycode);
+        if down {
+            if !held {
+                self.keys.push(keycode);
+            }
+        } else if held {
+            self.keys.retain(|k| *k != keycode);
+        } else {
+            return;
+        }
+        self.input.key(down, keycode);
+    }
+
+    pub fn button(&mut self, down: bool, button: u8) {
+        if button >= 8 {
+            return;
+        }
+        let held = self.buttons & (1 << button) != 0;
+        if down {
+            self.buttons |= 1 << button;
+        } else if held {
+            self.buttons &= !(1 << button);
+        } else {
+            return;
+        }
+        self.input.button(down, button);
+    }
+
+    /// Everything held goes up: buttons, then keys newest first (modifiers went down first, so
+    /// they go up last).
+    pub fn release(&mut self) {
+        for b in 0..8u8 {
+            if self.buttons & (1 << b) != 0 {
+                self.input.button(false, b);
+            }
+        }
+        self.buttons = 0;
+        for k in std::mem::take(&mut self.keys).into_iter().rev() {
+            self.input.key(false, k);
+        }
+    }
+}
+
+impl Drop for HeldInput {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// A viewer pings every second: one silent this long is gone (its machine slept, its link
+/// dropped without a close), and its session ends: what it held goes up. The viewer gives up
+/// on a silent desktop after the same time.
+const SILENT: Duration = Duration::from_secs(6);
+
 /// Makes a session's input devices (`Err`: why the session is view-only).
 pub type InputFactory = Arc<dyn Fn() -> Result<Box<dyn Input>, String> + Send + Sync>;
 pub type Log = Arc<dyn Fn(&str) + Send + Sync>;
@@ -459,7 +530,7 @@ impl SessionCtx {
         let mut injector = match (self.input)() {
             Ok(i) => {
                 self.input_note.lock().unwrap().clear();
-                Some(i)
+                Some(HeldInput::new(i))
             }
             Err(e) => {
                 // said in the log and to the viewer (its Welcome): never a silently dead mouse
@@ -486,7 +557,11 @@ impl SessionCtx {
         // block until the viewer sends (its 1 s ping), and nothing queued was ever written.
         stream.set_read_timeout(Some(Duration::from_millis(1))).map_err(|e| e.to_string())?;
         stream.set_write_timeout(Some(Duration::from_millis(5))).map_err(|e| e.to_string())?;
+        let mut last_heard = Instant::now();
         loop {
+            if last_heard.elapsed() > SILENT {
+                return Ok(format!("the viewer was silent for {} s", SILENT.as_secs()));
+            }
             if self.stop.load(Ordering::Acquire) {
                 let _ = proto::write_all(&mut stream, &ServerMsg::Bye { reason: "the desktop stopped serving".into() }.encode());
                 return Ok("the WM stopped desk link".into());
@@ -526,6 +601,7 @@ impl SessionCtx {
             }
             while let Some((ty, payload)) = read_message(&mut stream, &mut inbox, &mut buf).map_err(|e| e.to_string())? {
                 let msg = ClientMsg::decode(ty, &payload).map_err(|e| e.to_string())?;
+                last_heard = Instant::now();
                 let control = match msg {
                     ClientMsg::Ping { client_ns } => {
                         let pong = ServerMsg::Pong { client_ns, server_ns: (self.clock)() }.encode();
@@ -551,13 +627,13 @@ impl SessionCtx {
                             match input {
                                 ClientMsg::Pointer { x, y } => {
                                     let (x, y) = geometry.to_desktop(x, y);
-                                    inj.pointer(x, y);
+                                    inj.input.pointer(x, y);
                                 }
                                 ClientMsg::Button { down, button } => inj.button(down, button),
-                                ClientMsg::Scroll { dx, dy } => inj.scroll(dx, dy),
+                                ClientMsg::Scroll { dx, dy } => inj.input.scroll(dx, dy),
                                 ClientMsg::Key { down, keycode, .. } => inj.key(down, keycode),
-                                ClientMsg::Gamepad { slot, state } => inj.gamepad(slot, &state),
-                                ClientMsg::GamepadGone { slot } => inj.gamepad_gone(slot),
+                                ClientMsg::Gamepad { slot, state } => inj.input.gamepad(slot, &state),
+                                ClientMsg::GamepadGone { slot } => inj.input.gamepad_gone(slot),
                                 _ => {}
                             }
                         }
