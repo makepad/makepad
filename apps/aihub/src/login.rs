@@ -12,8 +12,7 @@
 //! The app also records its pid in `app.pid` next to its settings while it runs from a bundle,
 //! so the installer can stop the installed copy (by that pid only) before replacing it.
 
-use makepad_shell_kit::tray_app::{bundle_exe, LoginItem};
-use std::path::PathBuf;
+use makepad_shell_kit::tray_app::{bundle_exe, AppPid, LoginItem};
 
 pub const LABEL: &str = "nl.makepad.aihub";
 
@@ -31,28 +30,17 @@ pub fn set(on: bool) -> Result<(), String> {
 }
 
 /// The pid file next to the settings (the installer reads `~/.makepad/ai-hub/app.pid`).
-fn pid_path() -> PathBuf {
-    makepad_ai_hub::home::makepad_home().join("ai-hub").join("app.pid")
+fn pid() -> AppPid {
+    AppPid(makepad_ai_hub::home::makepad_home().join("ai-hub").join("app.pid"))
 }
 
 /// Records this process while it runs from a bundle.
 pub fn write_pid() {
-    if bundle_exe().is_some() {
-        let path = pid_path();
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(path, format!("{}\n", std::process::id()));
-    }
+    pid().write()
 }
 
 pub fn clear_pid() {
-    if bundle_exe().is_some() {
-        let path = pid_path();
-        if std::fs::read_to_string(&path).ok().and_then(|t| t.trim().parse::<u32>().ok()) == Some(std::process::id()) {
-            let _ = std::fs::remove_file(path);
-        }
-    }
+    pid().clear()
 }
 
 #[cfg(test)]

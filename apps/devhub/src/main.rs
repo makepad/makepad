@@ -15,6 +15,7 @@
 pub use makepad_widgets;
 
 mod glyph;
+mod installed;
 mod view;
 
 use makepad_devhub::explorer::{self, Snapshot};
@@ -63,6 +64,7 @@ const TRAY: LiveId = live_id!(devhub_tray);
 const QUIT: LiveId = live_id!(quit_devhub);
 const SEEN: LiveId = live_id!(seen_all);
 const OPEN: LiveId = live_id!(open_window);
+const LOGIN: LiveId = live_id!(open_at_login);
 const DROPDOWN: Vec2d = Vec2d { x: 620.0, y: 720.0 };
 
 fn log_line(line: &str) {
@@ -186,6 +188,9 @@ pub struct App {
     dismissed: Option<std::time::Instant>,
     #[rust]
     tray_key: String,
+    /// "Open at login": None = not offered (not an installed bundle)
+    #[rust]
+    login: Option<bool>,
 }
 
 impl App {
@@ -213,7 +218,7 @@ impl App {
 
     fn refresh(&mut self, cx: &mut Cx) {
         let (g, status) = self.status();
-        let key = format!("{g:?}|{status}");
+        let key = format!("{g:?}|{status}|{:?}", self.login);
         if key != self.tray_key {
             self.tray_key = key;
             let mut menu = vec![TrayMenuItem::Item { id: live_id!(status), label: status.clone(), enabled: false, checked: None }, TrayMenuItem::Line];
@@ -221,6 +226,9 @@ impl App {
                 menu.push(TrayMenuItem::item(SEEN, "Mark all read"));
                 if !cx.desktop_has_tray_dropdown() {
                     menu.push(TrayMenuItem::item(OPEN, "Open in window"));
+                }
+                if let Some(on) = self.login {
+                    menu.push(TrayMenuItem::Item { id: LOGIN, label: "Open at login".into(), enabled: true, checked: Some(on) });
                 }
             }
             menu.push(TrayMenuItem::item(QUIT, "Quit devhub"));
@@ -264,6 +272,7 @@ impl App {
             let _ = std::fs::write(&n.conf_path, format!("enabled = off\n{}\n", kept.join("\n")));
         }
         let _ = std::fs::remove_file(proto::control_socket());
+        installed::clear_pid();
         cx.remove_tray(TRAY);
         cx.quit();
     }
@@ -318,6 +327,8 @@ impl MatchEvent for App {
             cx.quit();
             return;
         }
+        installed::write_pid();
+        self.login = installed::login();
         self.state.tab = Tab::Inbox;
         self.state.view = "jit";
         self.timer = cx.start_interval(0.5);
@@ -358,6 +369,15 @@ impl AppMain for App {
             Event::Timer(t) if self.timer.is_timer(t).is_some() => self.refresh(cx),
             Event::TrayMenu(e) if e.tray == TRAY => match e.item {
                 id if id == QUIT => return self.quit(cx),
+                id if id == LOGIN => {
+                    let on = !self.login.unwrap_or(false);
+                    match installed::set_login(on) {
+                        Ok(()) => log_line(&format!("devhub: open at login {}", if on { "on" } else { "off" })),
+                        Err(e) => log_line(&format!("devhub: open at login: {e}")),
+                    }
+                    self.login = installed::login();
+                    self.refresh(cx);
+                }
                 id if id == SEEN => {
                     self.act(DevhubAction::SeenAll);
                     self.refresh(cx);
@@ -401,6 +421,7 @@ impl AppMain for App {
                 self.ui.window(cx, ids!(dropdown_window)).set_visible(cx, false);
                 self.set_looking();
             }
+            Event::Shutdown => installed::clear_pid(),
             Event::WindowCloseRequested(e) if cx.has_tray() => {
                 e.accept_close.set(false);
                 self.ui.window(cx, ids!(main_window)).set_visible(cx, false);

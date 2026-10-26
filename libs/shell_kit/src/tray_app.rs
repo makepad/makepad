@@ -142,6 +142,29 @@ pub fn bundle_exe() -> Option<PathBuf> {
     (cfg!(target_os = "macos") && in_bundle).then_some(exe)
 }
 
+/// The pid record of an app installed as a bundle (`<settings dir>/app.pid`): written while it runs
+/// from the `.app`, so its installer (tools/<app>/install-mac.sh) stops the installed copy by
+/// that pid only before replacing it. Nothing is recorded for a `cargo run` or `makepad run` copy.
+pub struct AppPid(pub PathBuf);
+
+impl AppPid {
+    pub fn write(&self) {
+        if bundle_exe().is_some() {
+            if let Some(dir) = self.0.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(&self.0, format!("{}\n", std::process::id()));
+        }
+    }
+
+    /// Removes the record when it is this process's.
+    pub fn clear(&self) {
+        if bundle_exe().is_some() && std::fs::read_to_string(&self.0).ok().and_then(|t| t.trim().parse::<u32>().ok()) == Some(std::process::id()) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+}
+
 pub fn xml(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
