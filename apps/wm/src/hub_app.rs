@@ -534,9 +534,9 @@ impl<C: ServiceConf> Supervised<C> {
     /// headless hub left by the WM generation before the app, 10-26). Each gets SIGTERM (its hub
     /// drains), SIGKILL after the stop grace. True while one is still there.
     fn stop_rivals(&mut self, now: f64) -> bool {
-        let label = self.kind.label;
         #[cfg(target_os = "linux")]
         {
+            let label = self.kind.label;
             let keep = self.running.as_ref().map(Running::pid);
             let found = rival_hubs(self.kind.file, self.conf.port(), keep);
             for pid in &found {

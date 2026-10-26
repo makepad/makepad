@@ -3,8 +3,6 @@
 //! ([`crate::discovery::registry_dir`], the same for every process whatever its TMPDIR). On Windows the same
 //! discovery file points at the loopback carrier (`carrier::loopback`: TCP on 127.0.0.1 behind a token).
 
-use crate::endpoint::Endpoint;
-use std::io;
 use std::path::PathBuf;
 
 /// The socket and discovery file paths of process `pid`.
@@ -25,6 +23,8 @@ extern "C" fn cleanup() {
 #[cfg(unix)]
 mod imp {
     use super::*;
+    use crate::endpoint::Endpoint;
+    use std::io;
     use crate::carrier::Carrier;
     use crate::frame::FrameReader;
     use std::os::unix::net::{UnixListener, UnixStream};
@@ -162,6 +162,8 @@ pub use imp::*;
 #[cfg(windows)]
 mod imp {
     use super::*;
+    use crate::endpoint::Endpoint;
+    use std::io;
     /// No Unix sockets here: the endpoint listens on loopback TCP (ephemeral port) behind a random
     /// token, both written to the discovery file `{"pid","app","socket":"tcp:127.0.0.1:PORT",
     /// "token","started_ms","caps"}` (+ `extra`). Returns `tcp:127.0.0.1:PORT`.
