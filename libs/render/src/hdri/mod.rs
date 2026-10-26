@@ -1528,6 +1528,54 @@ impl Env {
         self.bake_par_marched(width, volumetric::MARCH_MAX_WIDTH, run)
     }
 
+    /// A row-parallel bake whose texels are each sampled `jitter` texels off
+    /// their centre ([x along a row, y down the map], a sub-texel offset, each
+    /// within +-0.5), handed to `sink(y, row)` row by row instead of kept: for
+    /// a caller that sums jittered bakes into one image (antialiasing: the hard
+    /// edges of a skyline, a beacon, an aurora's fold) without holding a
+    /// second map. The texel footprint the lookups take ([`Sampling`]) is the
+    /// bake's own at `width`. The texels on the hot spots (the sun's and the
+    /// moon's discs) are their texel's area average, as a bake makes them,
+    /// which no jitter moves. `run(n, f)` spreads the rows as for
+    /// [`Self::bake_par`]; a row it skips is never handed over. With jitter
+    /// [0, 0] each row is that row of [`Self::bake_par`]'s map bit for bit.
+    pub fn bake_rows_jittered_par(
+        &self,
+        width: usize,
+        jitter: [f32; 2],
+        run: impl FnOnce(usize, &(dyn Fn(usize) + Sync)),
+        sink: &(dyn Fn(usize, &[[f32; 4]]) + Sync),
+    ) {
+        let cache = self.cloud_cache(width, volumetric::MARCH_MAX_WIDTH);
+        let at = Sampling::bake(width, cache.as_ref());
+        let radiance = |d: Vec3f| self.radiance_with(d, None, at);
+        // bake_par_with's size rounding.
+        let width = width.max(2);
+        let height = (width / 2).max(1);
+        let hot = hot_reaches(&self.hot_spots(), width, height);
+        let [jx, jy] = jitter.map(|j| if j.is_finite() { j.clamp(-0.5, 0.5) } else { 0.0 });
+        let bake_row = |y: usize| {
+            if y >= height {
+                return;
+            }
+            // bake_par_with's texel-centre arithmetic plus the jitter (x + 0.5 + 0 is x + 0.5 exactly), through the
+            // same functions, so an unjittered row matches the bake's bits.
+            let v = (y as f32 + 0.5 + jy) / height as f32;
+            let row: Vec<[f32; 4]> = (0..width)
+                .map(|x| {
+                    if hot.iter().any(|spot| spot.covers(x, y, width, height)) {
+                        return hot_texel(&radiance, x, y, width, height);
+                    }
+                    let d = ibl::equirect_uv_to_dir([(x as f32 + 0.5 + jx) / width as f32, v]);
+                    let c = texel(radiance(vec(d)));
+                    [c[0], c[1], c[2], 1.0]
+                })
+                .collect();
+            sink(y, &row);
+        };
+        run(height, &bake_row);
+    }
+
     /// The cloud march a bake of `width` reads: None when it marches every
     /// texel itself (no volume, or a map no wider than `march_max`).
     fn cloud_cache(&self, width: usize, march_max: usize) -> Option<volumetric::CloudCache> {
@@ -1849,8 +1897,46 @@ fn refine_hot_spots(map: &mut EnvMap, radiance: &dyn Fn(Vec3f) -> Vec3f, hot: &[
     if w == 0 || h == 0 || map.data.len() != w * h {
         return;
     }
+    for spot in hot_reaches(hot, w, h) {
+        for y in spot.rows.clone() {
+            for x in 0..w {
+                if spot.covers(x, y, w, h) {
+                    map.data[y * w + x] = hot_texel(radiance, x, y, w, h);
+                }
+            }
+        }
+    }
+}
+
+/// A hot spot as the refinement reaches it in a `w` x `h` map (`hot_reaches`): the feature plus a texel's diagonal,
+/// every texel it can touch.
+struct HotReach {
+    centre: Vec3f,
+    cos_reach: f32,
+    rows: std::ops::Range<usize>,
+}
+
+impl HotReach {
+    /// The texel (x, y)'s centre lies within the reach.
+    fn covers(&self, x: usize, y: usize, w: usize, h: usize) -> bool {
+        if !self.rows.contains(&y) {
+            return false;
+        }
+        let (u, v) = ((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
+        // (spelled as the refinement always tested it, so a NaN counts as within)
+        !(vec(ibl::equirect_uv_to_dir([u, v])).dot(self.centre) < self.cos_reach)
+    }
+}
+
+/// The hot spots `refine_hot_spots` refines in a `w` x `h` map, with their reach; a feature as wide as
+/// HOT_MAX_TEXELS texels or wider is resolved by the grid itself and left out.
+fn hot_reaches(hot: &[(Vec3f, f32)], w: usize, h: usize) -> Vec<HotReach> {
+    if w == 0 || h == 0 {
+        return Vec::new();
+    }
     // One texel of latitude, in radians.
     let step = std::f32::consts::PI / h as f32;
+    let mut reaches = Vec::new();
     for &(centre, radius) in hot {
         // The negated comparison also skips a NaN radius.
         if !centre.is_finite() || !(radius > 0.0) || radius >= HOT_MAX_TEXELS * step {
@@ -1864,29 +1950,28 @@ fn refine_hot_spots(map: &mut EnvMap, radiance: &dyn Fn(Vec3f) -> Vec3f, hot: &[
         let rows = reach / step;
         let y0 = (row - rows).floor().max(0.0) as usize;
         let y1 = ((row + rows).ceil().max(0.0) as usize).min(h);
-        for y in y0..y1 {
-            let v = (y as f32 + 0.5) / h as f32;
-            for x in 0..w {
-                let u = (x as f32 + 0.5) / w as f32;
-                if vec(ibl::equirect_uv_to_dir([u, v])).dot(centre) < cos_reach {
-                    continue;
-                }
-                let mut sum = Vec3f::default();
-                for j in 0..HOT_SAMPLES {
-                    let sv = v + ((j as f32 + 0.5) / HOT_SAMPLES as f32 - 0.5) / h as f32;
-                    for i in 0..HOT_SAMPLES {
-                        let su = u + ((i as f32 + 0.5) / HOT_SAMPLES as f32 - 0.5) / w as f32;
-                        let s = radiance(vec(ibl::equirect_uv_to_dir([su, sv])));
-                        if s.is_finite() {
-                            sum += s;
-                        }
-                    }
-                }
-                let c = texel(sum * (1.0 / (HOT_SAMPLES * HOT_SAMPLES) as f32));
-                map.data[y * w + x] = [c[0], c[1], c[2], 1.0];
+        reaches.push(HotReach { centre, cos_reach, rows: y0..y1 });
+    }
+    reaches
+}
+
+/// The texel (x, y) of a `w` x `h` map on a hot spot: the mean of HOT_SAMPLES x HOT_SAMPLES sub-samples spread over
+/// it (a sample that is not finite counts as black), through `texel`'s clean-up.
+fn hot_texel(radiance: &dyn Fn(Vec3f) -> Vec3f, x: usize, y: usize, w: usize, h: usize) -> [f32; 4] {
+    let (u, v) = ((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
+    let mut sum = Vec3f::default();
+    for j in 0..HOT_SAMPLES {
+        let sv = v + ((j as f32 + 0.5) / HOT_SAMPLES as f32 - 0.5) / h as f32;
+        for i in 0..HOT_SAMPLES {
+            let su = u + ((i as f32 + 0.5) / HOT_SAMPLES as f32 - 0.5) / w as f32;
+            let s = radiance(vec(ibl::equirect_uv_to_dir([su, sv])));
+            if s.is_finite() {
+                sum += s;
             }
         }
     }
+    let c = texel(sum * (1.0 / (HOT_SAMPLES * HOT_SAMPLES) as f32));
+    [c[0], c[1], c[2], 1.0]
 }
 
 /// Test probes (the plan owner's D15): how often this thread did each piece
@@ -2267,6 +2352,52 @@ mod tests {
         assert_eq!(env.bake_par(0, four_threads), env.bake(0), "the same size rounding");
         // A serial runner (what the UI thread does) gives the same bits too.
         assert_eq!(bake_par_with(16, &coded, |n, f| (0..n).for_each(f)), bake_with(16, &coded));
+    }
+
+    /// The rows `Env::bake_rows_jittered_par` hands over at `jitter`, gathered into one map's texels.
+    fn jittered_rows(env: &Env, width: usize, jitter: [f32; 2]) -> Vec<[f32; 4]> {
+        let (w, h) = (width.max(2), (width.max(2) / 2).max(1));
+        let texels = Mutex::new(vec![[-1.0f32; 4]; w * h]);
+        env.bake_rows_jittered_par(width, jitter, four_threads, &|y, row| {
+            assert_eq!(row.len(), w);
+            texels.lock().unwrap()[y * w..(y + 1) * w].copy_from_slice(row);
+        });
+        texels.into_inner().unwrap()
+    }
+
+    /// Task 10 (the preview's antialiasing): without a jitter the row bake hands over the bake's rows bit for bit,
+    /// the sun's disc refined as the bake refines it; a jitter moves the samples off the texel centres, and the texels
+    /// on the disc stay their area average.
+    #[test]
+    fn an_unjittered_row_bake_is_the_bake() {
+        let mut p = HdriParams { mode: "sky".to_string(), ..HdriParams::default() };
+        p.sky.sun.mode = "manual".to_string();
+        p.sky.sun.elevation_deg = 30.0;
+        p.lights.push(LightParams::default());
+        let env = Env::new(&p);
+        for width in [64, 34] {
+            let map = env.bake_par(width, four_threads);
+            assert!(jittered_rows(&env, width, [0.0, 0.0]) == map.data, "width {width}: the unjittered rows are the bake's");
+            let hot = hot_reaches(&env.hot_spots(), map.width, map.height);
+            assert!(!hot.is_empty(), "width {width}: the sun's disc is refined");
+            let jittered = jittered_rows(&env, width, [0.375, -0.125]);
+            assert!(jittered != map.data, "width {width}: the jitter moved nothing");
+            let (w, h) = (map.width, map.height);
+            let mut on_disc = 0;
+            for y in 0..h {
+                for x in 0..w {
+                    if hot.iter().any(|spot| spot.covers(x, y, w, h)) {
+                        on_disc += 1;
+                        assert_eq!(jittered[y * w + x], map.data[y * w + x], "width {width}: the disc's texel ({x}, {y})");
+                    }
+                }
+            }
+            assert!(on_disc > 0);
+        }
+        // A runner that skips rows hands over only the rows it ran.
+        let handed = Mutex::new(Vec::new());
+        env.bake_rows_jittered_par(16, [0.1, 0.1], |_, f| (0..8).filter(|y| y % 3 == 0).for_each(f), &|y, _| handed.lock().unwrap().push(y));
+        assert_eq!(handed.into_inner().unwrap(), vec![0, 3, 6]);
     }
 
     #[test]
