@@ -21,6 +21,24 @@ pub const EXPANDED: &[&str] = &["Debug", "Default", "Hash", "PartialOrd", "Ord",
 
 /// The trait surface of compiler-owned derives, including marker/glue derives.
 /// Hosted derives with the same spelling must still use their actual output.
+/// Where the arguments of a `derive` attribute start, given the attribute's tokens `lo..hi`:
+/// its path is `derive` (the prelude macro) or a path through `core`/`std` that ends in `derive`
+/// (`core::prelude::v1::derive`, `::std::prelude::rust_2021::derive`). None for any other path:
+/// `my_crate::derive` is a macro of that crate, not the built-in.
+pub(crate) fn derive_attr_args(lo: usize, hi: usize, kind: impl Fn(usize) -> T, is: impl Fn(usize, &[u8]) -> bool) -> Option<usize> {
+    let mut i = lo;
+    if i < hi && kind(i) == T::PathSep { i += 1; }
+    let first = i;
+    let last = loop {
+        if i >= hi || !matches!(kind(i), T::Ident | T::RawIdent) { return None; }
+        i += 1;
+        if i < hi && kind(i) == T::PathSep { i += 1; } else { break i - 1; }
+    };
+    if !is(last, b"derive") { return None; }
+    if (last != first || first != lo) && !(is(first, b"core") || is(first, b"std")) { return None; }
+    Some(i)
+}
+
 pub fn trait_path(name: &str) -> Option<&'static str> {
     Some(match name {
         "Debug" => "fmt::Debug", "Default" => "default::Default", "Hash" => "hash::Hash",
@@ -187,13 +205,7 @@ impl<'a> Parser<'a> {
         let mut wanted: Vec<&'static str> = Vec::new();
         for a in self.ast.list(it.attrs) {
             let (lo, hi) = (a.toks.lo as usize, a.toks.hi as usize);
-            let mut p = lo;
-            while p < hi && matches!(self.toks.at(p).kind, T::Ident | T::RawIdent | T::KwCrate | T::KwSelfValue | T::KwSuper | T::PathSep) {
-                p += 1;
-            }
-            if p == lo || self.tok_text(self.toks.at(p - 1)) != b"derive" {
-                continue;
-            }
+            let Some(p) = derive_attr_args(lo, hi, |i| self.toks.at(i).kind, |i, w| self.tok_text(self.toks.at(i)) == w) else { continue };
             for i in p..hi {
                 let t = self.toks.at(i);
                 if t.kind != T::Ident {

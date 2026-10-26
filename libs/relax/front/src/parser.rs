@@ -1675,10 +1675,12 @@ impl<'a> Parser<'a> {
                         };
                         match target_def {
                             Some(d) => Some(d),
-                            // a std macro Relax handles by its name (format family, assert, ..):
-                            // the alias forwards its tokens to it, as `alias!(..)` => `target!(..)`
+                            // a std macro Relax handles by its name (format family, assert, ..),
+                            // imported from std/core/alloc or from the prelude (`use vec as v;`: a
+                            // one-segment path, whose first segment `q` is the target itself): the
+                            // alias forwards its tokens to it, as `alias!(..)` => `target!(..)`
                             None if !STD_PRELUDE_MACROS.contains(&name.as_str())
-                                && matches!(q.as_str(), "std" | "core" | "alloc")
+                                && (matches!(q.as_str(), "std" | "core" | "alloc") || q == target)
                                 && (STD_PRELUDE_MACROS.contains(&target.as_str())
                                     || matches!(target.as_str(), "asm" | "global_asm" | "naked_asm" | "assert_matches" | "debug_assert_matches" | "const_format_args")) => m.forwarding_def(&name, &self.krate, &target),
                             None => None,

@@ -113,10 +113,10 @@ impl<T, E> Result<T, E> {
         self
     }
     pub const fn iter(&self) -> Iter<'_, T> {
-        Iter { inner: crate::option::Iter::from_option(self.as_ref().ok()) }
+        Iter { inner: self.as_ref().ok() }
     }
     pub const fn iter_mut(&mut self) -> IterMut<'_, T> {
-        IterMut { inner: crate::option::IterMut { inner: self.as_mut().ok() } }
+        IterMut { inner: self.as_mut().ok() }
     }
     #[track_caller]
     pub fn expect(self, msg: &str) -> T
@@ -247,59 +247,66 @@ fn unwrap_failed(msg: &str, error: &dyn fmt::Debug) -> ! {
     crate::panicking::panic_fmt(format_args!("{msg}: {error:?}"))
 }
 
+// core/src/result.rs: the iterators hold the `Ok` reference itself (their Debug shows `Iter { inner: .. }`)
 #[derive(Debug)]
-pub struct Iter<'a, T> {
-    inner: crate::option::Iter<'a, T>,
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+pub struct Iter<'a, T: 'a> {
+    inner: Option<&'a T>,
 }
 
 impl<'a, T> Iterator for Iter<'a, T> {
     type Item = &'a T;
     fn next(&mut self) -> Option<&'a T> {
-        self.inner.next()
+        self.inner.take()
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.inner.size_hint()
+        let n = if self.inner.is_some() { 1 } else { 0 };
+        (n, Some(n))
     }
 }
 
 impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
     fn next_back(&mut self) -> Option<&'a T> {
-        self.inner.next_back()
+        self.inner.take()
     }
 }
 
-impl<'a, T> Clone for Iter<'a, T> {
-    fn clone(&self) -> Iter<'a, T> {
-        Iter { inner: self.inner.clone() }
+impl<T> ExactSizeIterator for Iter<'_, T> {}
+impl<T> crate::iter::FusedIterator for Iter<'_, T> {}
+unsafe impl<A> crate::iter::TrustedLen for Iter<'_, A> {}
+
+impl<T> Clone for Iter<'_, T> {
+    fn clone(&self) -> Self {
+        Iter { inner: self.inner }
     }
 }
-
-impl<'a, T> ExactSizeIterator for Iter<'a, T> {}
-impl<'a, T> crate::iter::FusedIterator for Iter<'a, T> {}
 
 #[derive(Debug)]
-pub struct IterMut<'a, T> {
-    inner: crate::option::IterMut<'a, T>,
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+pub struct IterMut<'a, T: 'a> {
+    inner: Option<&'a mut T>,
 }
 
 impl<'a, T> Iterator for IterMut<'a, T> {
     type Item = &'a mut T;
     fn next(&mut self) -> Option<&'a mut T> {
-        self.inner.next()
+        self.inner.take()
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.inner.size_hint()
+        let n = if self.inner.is_some() { 1 } else { 0 };
+        (n, Some(n))
     }
 }
 
 impl<'a, T> DoubleEndedIterator for IterMut<'a, T> {
     fn next_back(&mut self) -> Option<&'a mut T> {
-        self.inner.next_back()
+        self.inner.take()
     }
 }
 
-impl<'a, T> ExactSizeIterator for IterMut<'a, T> {}
-impl<'a, T> crate::iter::FusedIterator for IterMut<'a, T> {}
+impl<T> ExactSizeIterator for IterMut<'_, T> {}
+impl<T> crate::iter::FusedIterator for IterMut<'_, T> {}
+unsafe impl<A> crate::iter::TrustedLen for IterMut<'_, A> {}
 
 #[derive(Clone, Debug)]
 pub struct IntoIter<T> {

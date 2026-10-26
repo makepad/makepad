@@ -1354,6 +1354,22 @@ impl<'a> Lcx<'a> {
     }
 
     /// `&place` as leaves: the address, or for an unsized place its fat pointer.
+    /// The value of const generic parameter `i` in this instance with its type: a scalar keeps
+    /// its declared width (an `i8` sign-extended, `i128`/`u128` as two words; bool and char
+    /// arguments are not target-usize array lengths).
+    fn const_param_value(&mut self, i: u32) -> Option<(Val, TyId)> {
+        let TyKind::Const(v) = self.b.args.get(i as usize).map(|a| self.kind(*a))? else { return None };
+        let value = v.try_to_value(&self.u.tcx.tys).expect("normalized const argument");
+        let scalar = value.valtree.try_to_leaf().expect("scalar const argument");
+        let bits = scalar.to_bits(scalar.size());
+        let val = if self.is_wide(value.ty) {
+            Val::L(vec![self.iconst(bits as u64 as i64), self.iconst((bits >> 64) as u64 as i64)])
+        } else {
+            Val::L(vec![self.iconst(extend_const(bits as i64, self.int_ty(value.ty)))])
+        };
+        Some((val, value.ty))
+    }
+
     fn ref_to_place(&mut self, p: &Place, t: TyId) -> Vec<VReg> {
         if self.unsized_ty(t) {
             if let Place::Regs(r) = p {
@@ -6477,20 +6493,9 @@ impl<'a> Lcx<'a> {
                 }
                 Some(Res::Def(d)) => self.lower_def_value(e, d, t),
                 // a const generic param's value in this instance
-                Some(Res::ConstParam(i)) => match self.b.args.get(i as usize).map(|a| self.kind(*a)) {
-                    Some(TyKind::Const(v)) => {
-                        // Scalar constants retain their declared width (bool and
-                        // char arguments are not target-usize array lengths).
-                        let value = v.try_to_value(&self.u.tcx.tys).expect("normalized const argument");
-                        let scalar = value.valtree.try_to_leaf().expect("scalar const argument");
-                        let bits = scalar.to_bits(scalar.size());
-                        if self.is_wide(value.ty) {
-                            Val::L(vec![self.iconst(bits as u64 as i64), self.iconst((bits >> 64) as u64 as i64)])
-                        } else {
-                            Val::L(vec![self.iconst(extend_const(bits as i64, self.int_ty(value.ty)))])
-                        }
-                    }
-                    _ => {
+                Some(Res::ConstParam(i)) => match self.const_param_value(i) {
+                    Some((v, _)) => v,
+                    None => {
                         self.err(self.pos, "internal: const generic param without a value in this instance".to_string());
                         self.dummy_val(t)
                     }
@@ -11966,19 +11971,9 @@ impl<'a> Lcx<'a> {
                                     let ct = self.u.tcx.const_ty(&self.u.prog, d).unwrap_or(self.u.tcx.tys.error);
                                     (self.const_val(d, Vec::new(), ct), ct)
                                 }
-                                Some(Res::ConstParam(i)) => match self.b.args.get(i as usize).map(|a| self.kind(*a)) {
-                                    Some(TyKind::Const(v)) => {
-                                        let value = v.try_to_value(&self.u.tcx.tys).expect("normalized const argument");
-                                        let scalar = value.valtree.try_to_leaf().expect("scalar const argument");
-                                        let bits = scalar.to_bits(scalar.size());
-                                        let val = if self.is_wide(value.ty) {
-                                            Val::L(vec![self.iconst(bits as u64 as i64), self.iconst((bits >> 64) as u64 as i64)])
-                                        } else {
-                                            Val::L(vec![self.iconst(extend_const(bits as i64, self.int_ty(value.ty)))])
-                                        };
-                                        (val, value.ty)
-                                    }
-                                    _ => continue,
+                                Some(Res::ConstParam(i)) => match self.const_param_value(i) {
+                                    Some(vt) => vt,
+                                    None => continue,
                                 },
                                 _ => continue,
                             }

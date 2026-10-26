@@ -1405,11 +1405,7 @@ fn index_builtin_derives(file: &mut FileIndex, index: &crate::rs_index::NameInde
         for attr in crate::cfg::attrs_before(view, keyword, cfg) {
             let lo = attr.toks.lo as usize;
             let hi = attr.toks.hi as usize;
-            let mut p = lo;
-            while p < hi && matches!(tokens[p].kind, T::Ident | T::RawIdent | T::KwCrate | T::KwSelfValue | T::KwSuper | T::PathSep) {
-                p += 1;
-            }
-            if p == lo || crate::cfg::tok_str(view, p - 1) != b"derive" { continue; }
+            let Some(p) = crate::parser::derive::derive_attr_args(lo, hi, |i| tokens[i].kind, |i, w| crate::cfg::tok_str(view, i) == w) else { continue };
             if let Some(traits) = builtin_derive_list(src, &tokens[p..hi]) {
                 for tr in traits {
                     file.impls.push((Some(format!("core::{tr}")), format!("{module}::{}", item.name)));
@@ -1458,14 +1454,10 @@ fn rust_eager_reason(src: &[u8], tokens: &[Tok], names: &Names, ci: usize, modul
             let end = demand::close(tokens, open);
             let Some(name) = tokens.get(open + 1).filter(|_| open + 1 < end) else { i = end + 1; continue; };
             let name = std::str::from_utf8(&src[name.lo as usize..name.hi as usize]).unwrap_or("");
-            let mut p = open + 1;
-            while p < end && matches!(tokens[p].kind, T::Ident | T::RawIdent | T::KwCrate | T::KwSelfValue | T::KwSuper | T::PathSep) {
-                p += 1;
-            }
-            let is_derive = p > open + 1 && std::str::from_utf8(&src[tokens[p - 1].lo as usize..tokens[p - 1].hi as usize]).unwrap_or("") == "derive";
+            let derive_args = crate::parser::derive::derive_attr_args(open + 1, end, |i| tokens[i].kind, |i, w| &src[tokens[i].lo as usize..tokens[i].hi as usize] == w);
             match name {
                 "lang" | "no_mangle" | "export_name" | "link" | "link_name" | "link_section" | "used" | "global_allocator" | "alloc_error_handler" | "panic_handler" => file = Some(("language or linkage attribute", false)),
-                _ if is_derive && builtin_derive_list(src, &tokens[p..end]).is_some() => {
+                _ if derive_args.is_some_and(|p| builtin_derive_list(src, &tokens[p..end]).is_some()) => {
                     file = Some(("indexed compiler derive output", false));
                 }
                 "default" if !crate::macro_reg::has_attr(name) => {}

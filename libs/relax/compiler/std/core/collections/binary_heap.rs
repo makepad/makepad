@@ -301,8 +301,9 @@ impl<T: Ord> Extend<T> for BinaryHeap<T> {
     }
 }
 
-#[derive(Debug)]
-pub struct Iter<'a, T> {
+// alloc/src/collections/binary_heap/mod.rs
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+pub struct Iter<'a, T: 'a> {
     iter: crate::slice::Iter<'a, T>,
 }
 
@@ -312,15 +313,21 @@ impl<'a, T> Iter<'a, T> {
     }
 }
 
-impl<'a, T> Clone for Iter<'a, T> {
-    fn clone(&self) -> Iter<'a, T> {
-        Iter { iter: self.iter.clone() }
+impl<T> Default for Iter<'_, T> {
+    fn default() -> Self {
+        Iter { iter: Default::default() }
     }
 }
 
-impl<'a, T> Default for Iter<'a, T> {
-    fn default() -> Iter<'a, T> {
-        Iter { iter: crate::slice::Iter::default() }
+impl<T: fmt::Debug> fmt::Debug for Iter<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Iter").field(&self.iter.as_slice()).finish()
+    }
+}
+
+impl<T> Clone for Iter<'_, T> {
+    fn clone(&self) -> Self {
+        Iter { iter: self.iter.clone() }
     }
 }
 
@@ -332,12 +339,6 @@ impl<'a, T> Iterator for Iter<'a, T> {
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.iter.size_hint()
     }
-    fn count(self) -> usize {
-        self.iter.count()
-    }
-    fn nth(&mut self, n: usize) -> Option<&'a T> {
-        self.iter.nth(n)
-    }
     fn last(self) -> Option<&'a T> {
         self.iter.last()
     }
@@ -347,14 +348,10 @@ impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
     fn next_back(&mut self) -> Option<&'a T> {
         self.iter.next_back()
     }
-    fn nth_back(&mut self, n: usize) -> Option<&'a T> {
-        self.iter.nth_back(n)
-    }
 }
 
-impl<'a, T> ExactSizeIterator for Iter<'a, T> {}
-unsafe impl<'a, T> crate::iter::TrustedLen for Iter<'a, T> {}
-impl<'a, T> FusedIterator for Iter<'a, T> {}
+impl<T> ExactSizeIterator for Iter<'_, T> {}
+impl<T> FusedIterator for Iter<'_, T> {}
 
 pub type Drain<'a, T> = crate::vec::Drain<'a, T>;
 

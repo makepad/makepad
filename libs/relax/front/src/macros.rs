@@ -2784,18 +2784,13 @@ impl<'a> Parser<'a> {
             let mut i = lo;
             if self.match_seq(matcher, &mut i, hi, &mut binds) && i == hi {
                 uses::used(def, arm as u32);
-                // `$crate` names the defining crate itself, even where the caller reaches the macro
-                // only through a re-export (no dependency of that name); when the macro body
-                // defines a nested `macro_rules!`, keep `::__relax_crate_<krate>` even inside its
-                // own crate so the inner macro's `$crate` still names `def.krate` in downstream callers.
-                fn has_macro_rules(nodes: &[TNode]) -> bool {
-                    nodes.iter().any(|n| match n {
-                        TNode::Tok(t) => t.text == "macro_rules",
-                        TNode::Group(_, _, inner) | TNode::Rep(inner, _, _) => has_macro_rules(inner),
-                        _ => false,
-                    })
-                }
-                let krate_path = if def.krate == self.krate && !has_macro_rules(body) { "crate".to_string() } else { format!("::__relax_crate_{}", def.krate) };
+                // `$crate` names the defining crate by identity (rustc: the `$crate` token keeps the
+                // definition's hygiene), wherever the transcribed tokens end up: a caller that reaches
+                // the macro only through a re-export, and also this crate's own expansions, whose
+                // tokens can become the body of a macro another crate expands (a nested
+                // `macro_rules!`, or tokens passed on to a macro that defines one). `crate` would
+                // name the crate expanding that macro.
+                let krate_path = format!("::__relax_crate_{}", def.krate);
                 let mut out = Transcript { edition: self.edition, ..Default::default() };
                 self.transcribe(body, &binds, &mut Vec::new(), &krate_path, &mut out)?;
                 out.s.push(' ');

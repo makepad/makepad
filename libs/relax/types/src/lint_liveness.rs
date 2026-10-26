@@ -551,14 +551,20 @@ impl<'c, 'a> Unit<'c, 'a> {
     }
 
     /// A call that never returns (its result is `!`, or a type without values) ends the flow.
+    /// In a closure (rustc_mir_transform/src/liveness.rs `visit_terminator`): at a call that does
+    /// not return the unwind may be caught, so the by-reference captures are live there; an `FnMut`
+    /// closure is also called again after any call unwinds (its `UnwindResume` becomes a jump to
+    /// the start). Both are the path to the body's exit. A returning call in an `Fn`/`FnOnce`
+    /// closure keeps no capture live.
     fn after_call(&mut self, e: ExprId) {
-        if self.closure.is_some() {
-            if let Some(c) = self.cur {
+        let diverges = self.is_never(e) || self.uninhabited(e);
+        if let (Some(info), Some(c)) = (&self.closure, self.cur) {
+            if diverges || info.fn_mut {
                 let ex = self.exit;
                 self.link(c, ex);
             }
         }
-        if self.is_never(e) || self.uninhabited(e) { self.cur = None; }
+        if diverges { self.cur = None; }
     }
 
     fn uninhabited(&mut self, e: ExprId) -> bool {
