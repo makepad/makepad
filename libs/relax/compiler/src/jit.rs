@@ -431,6 +431,8 @@ pub struct Unit {
     pub(crate) veneers: relax_session::sync::Mutex<HashMap<u64, u64>>,
     /// invalidatable code (invalid.rs): per group, its own page-aligned chunks of the code area
     pub(crate) code_groups: relax_session::sync::Mutex<HashMap<crate::invalid::Group, crate::invalid::GroupCode>>,
+    /// the O3 code chunk (`emit_hot`): next free byte, end
+    hot_code: relax_session::sync::Mutex<(u64, u64)>,
     data_next: AtomicU64,
     /// (bytes, align) of str / byte-string / C-string literals and promoted constants -> their
     /// one read-only copy
@@ -3603,6 +3605,7 @@ impl Unit {
             code_next: AtomicU64::new(misc),
             veneers: Default::default(),
             code_groups: Default::default(),
+            hot_code: Default::default(),
             data_next: AtomicU64::new(data_base),
             lit_data: Default::default(),
             data_end: data_base + data_size,
@@ -3948,6 +3951,33 @@ impl Unit {
 
     pub(crate) fn emit_linked(&self, code: &[u8], relocs: &[relax_backend::rir::RelocAt]) -> Result<u64, String> {
         let at = bump(&self.code_next, code.len() as u64, 16, self.exec_base + self.exec_size - os::mem::CODE_TAIL, "out of code memory");
+        let mut c = code.to_vec();
+        self.link_code(&mut c, at, relocs)?;
+        unsafe { os::mem::write_code(at, &c) };
+        crate::coverage::installed(self, at, relocs);
+        Ok(at)
+    }
+
+    /// O3 code (GAPX6, x64 front-end stalls): fresh O3 installs bump in their own chunks of the
+    /// code area (HOT_CHUNK each, taken from the shared bump), so the hot code lies together, not
+    /// between lazy first compiles, glue, count stubs and lower tiers. MAKEPAD_RUN_OPT=-hotcode:
+    /// shared bump.
+    pub(crate) fn emit_hot(&self, code: &[u8], relocs: &[relax_backend::rir::RelocAt]) -> Result<u64, String> {
+        if relax_backend::stats::opt_env_off("-hotcode") {
+            return self.emit_linked(code, relocs);
+        }
+        let need = (code.len() as u64 + 15) & !15;
+        let at = {
+            let mut h = self.hot_code.lock().unwrap_or_else(|e| e.into_inner());
+            if h.0 + need > h.1 {
+                let size = need.max(HOT_CHUNK);
+                let c = bump(&self.code_next, size, 64, self.exec_base + self.exec_size - os::mem::CODE_TAIL, "out of code memory");
+                *h = (c, c + size);
+            }
+            let at = h.0;
+            h.0 += need;
+            at
+        };
         let mut c = code.to_vec();
         self.link_code(&mut c, at, relocs)?;
         unsafe { os::mem::write_code(at, &c) };
@@ -8807,6 +8837,13 @@ unsafe fn base_running(up: *mut Unit, id: u32) {
         }
     }
     o2_base(up, id);
+}
+
+/// The share of the O3 threshold's (decayed) cost at which running baseline code gets its O2 build
+/// (rt_hot): 1/64 (MAKEPAD_RUN_BASE_O2_DIV=<n>: 1/n; 4 was the rule before GAPX6).
+fn base_o2_div() -> u64 {
+    static D: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *D.get_or_init(|| std::env::var("MAKEPAD_RUN_BASE_O2_DIV").ok().and_then(|v| v.parse().ok()).filter(|&n: &u64| n > 0).unwrap_or(64))
 }
 
 /// baseline slots whose cost check found them running but under the threshold (rt_hot, no unit lock): their
@@ -15615,6 +15652,10 @@ struct Counting {
     parked: bool,
     /// a hot loop ran under one of its frames (rt_loop_hot): the work is its callees'
     credited: bool,
+    /// a warm-image slot whose RIR the owner fallback built (counted_build): its O3 build was the
+    /// rule before that fallback, so a window with too little work queues O3 (with the counts so
+    /// far) instead of parking it in counted code every launch (never stored as O3)
+    image: bool,
 }
 /// slots running counted code
 static COUNTING: relax_session::sync::Mutex<Vec<Counting>> = relax_session::sync::Mutex::new(Vec::new());
@@ -15658,6 +15699,11 @@ fn pgo_poll() {
                 let per_s = ((work - e.mark.0.min(work)) as u128 * 1_000_000_000 / win as u128) as u64;
                 if per_s >= PGO_MIN_WORK {
                     crate::inspect::tierlog::note(e.id, crate::inspect::tierlog::ev::WINDOW_END, crate::inspect::tierlog::WIN_WORK, rate, 0);
+                    ready.push((e.id, rate));
+                    return false;
+                }
+                if win >= PGO_WORK_NS && e.image {
+                    crate::inspect::tierlog::note(e.id, crate::inspect::tierlog::ev::WINDOW_END, crate::inspect::tierlog::WIN_DONE, rate, 0);
                     ready.push((e.id, rate));
                     return false;
                 }
@@ -15735,6 +15781,7 @@ unsafe fn counted_build(up: *mut Unit, id: u32, lukewarm: bool) -> bool {
         f.compiled && f.rir.is_none() && f.build_err.is_none() && !f.building
     };
     let (needs, front) = owner::publish(|| refront_settled(up, id, needs_rir(up)));
+    let mut fell_back = false;
     if needs && !owner::is_owner() {
         while !tier1_workers_ready() {
             job_sleep(TIER1_POLL);
@@ -15750,6 +15797,34 @@ unsafe fn counted_build(up: *mut Unit, id: u32, lukewarm: bool) -> bool {
                 build_off_owner(up, &[(id, RirMode::Normal)]);
             }
         }
+        // (GAPX6) a warm-image slot whose RIR the off-owner build gave up on (each round needed
+        // new fronts): built on the owner as the O3 snapshot's fallback builds its root (ensure_rir),
+        // its fronts made here between rounds. Without it the race's hottest slots (reconcile,
+        // View::handle_event, set_uniform, ...) went to O3 with static frequencies every warm
+        // launch: no PGO layout, inlining or register weights for the code that runs the most.
+        // The O3 build that follows finds the RIR built (no second build).
+        let missing = |up: *mut Unit| needs_rir(up) || (&*up).fns[id as usize].rir.as_ref().is_some_and(|r| upgradable(r));
+        if owner::publish(|| missing(up)) {
+            fell_back = true;
+            for _ in 0..PREFRONT_ROUNDS {
+                let Ok((left, needs)) = owner::publish_or_bail(|| {
+                    let _ = owner::take_needs();
+                    if needs_rir(up) {
+                        let _ = build_rir_or_skip(up, id, RirMode::Tier0);
+                    }
+                    if !needs_rir(up) && (&*up).fns[id as usize].rir.as_ref().is_some_and(|r| upgradable(r)) {
+                        let _ = build_rir_or_skip(up, id, RirMode::Normal);
+                    }
+                    (missing(up), owner::take_needs())
+                }) else { break };
+                if !left || needs.is_empty() {
+                    break;
+                }
+                for s in needs {
+                    prefront_slot(&front, s);
+                }
+            }
+        }
     }
     let begin = take_prefronted(&front, || {
         let u = &mut *up;
@@ -15759,6 +15834,9 @@ unsafe fn counted_build(up: *mut Unit, id: u32, lukewarm: bool) -> bool {
         let f = &u.fns[id as usize];
         if !matches!(f.key, FnKey::Inst(..) | FnKey::Closure(..)) || !f.compiled || f.o3.load(Ordering::Relaxed) || f.build_err.is_some()
             || f.building || f.inflight || f.unverified.load(Ordering::Relaxed) || u.frequency_profiles.contains_key(&id) || crate::inspect::instrument::active(id) {
+            if tier1_trace() {
+                eprintln!("O3c-refused #{} {}: key {} compiled {} o3 {} err {} building {} inflight {} unverified {} profiled {}", id, f.name, matches!(f.key, FnKey::Inst(..) | FnKey::Closure(..)), f.compiled, f.o3.load(Ordering::Relaxed), f.build_err.is_some(), f.building, f.inflight, f.unverified.load(Ordering::Relaxed), u.frequency_profiles.contains_key(&id));
+            }
             return None;
         }
         // the RIR O3 will start from (normal RIR, as compile_tier1's snapshot upgrades baseline RIR)
@@ -15767,11 +15845,17 @@ unsafe fn counted_build(up: *mut Unit, id: u32, lukewarm: bool) -> bool {
         // and its O3 build goes ahead
         if needs_rir(up) || f.rir.as_ref().is_some_and(|r| upgradable(r)) {
             PGO_STATS[3].fetch_add(1, Ordering::Relaxed);
+            if tier1_trace() {
+                eprintln!("O3c-refused #{} {}: no normal RIR (needs front {}, upgradable {})", id, f.name, needs_rir(up), f.rir.as_ref().is_some_and(|r| upgradable(r)));
+            }
             return None;
         }
         let u = &*up;
         let f = &u.fns[id as usize];
         // (a naked fn is its assembly alone: a counter would clobber its argument registers)
+        if tier1_trace() && f.rir.as_ref().filter(|r| !r.plain_calls && !r.naked && !r.blocks.is_empty()).is_none() {
+            eprintln!("O3c-refused #{} {}: rir {} plain_calls {}", id, f.name, f.rir.is_some(), f.rir.as_ref().is_some_and(|r| r.plain_calls));
+        }
         let rir = f.rir.as_ref().filter(|r| !r.plain_calls && !r.naked && !r.blocks.is_empty())?.clone();
         let e = &u.env;
         let env = x64::Env { slots: e.slots, tls_key: e.tls_key, tls_slow: e.tls_slow, resume: e.resume, opt_regs: true, syms: e.syms, sym_class: e.sym_class, near: e.near };
@@ -15808,6 +15892,9 @@ unsafe fn counted_build(up: *mut Unit, id: u32, lukewarm: bool) -> bool {
     }));
     let Ok(Ok((c, counted))) = built else {
         PGO_STATS[2].fetch_add(1, Ordering::Relaxed);
+        if tier1_trace() {
+            eprintln!("O3c-refused #{}: counted codegen failed ({})", id, match &built { Ok(Err(e)) => e.as_str(), _ => "panic" });
+        }
         return false;
     };
     let installed = owner::publish(|| {
@@ -15844,7 +15931,7 @@ unsafe fn counted_build(up: *mut Unit, id: u32, lukewarm: bool) -> bool {
                     u.frequency_profiles.insert(id, profile);
                     let weights: &'static [u32] = Box::leak(rir.blocks.iter().map(|b| b.insts.len() as u32 + 1).collect::<Vec<_>>().into_boxed_slice());
                     let at = wall_ns();
-                    COUNTING.lock().unwrap_or_else(|e| e.into_inner()).push(Counting { id, counters, weights, at, lukewarm, mark: (0, at), parked: false, credited: false });
+                    COUNTING.lock().unwrap_or_else(|e| e.into_inner()).push(Counting { id, counters, weights, at, lukewarm, mark: (0, at), parked: false, credited: false, image: fell_back });
                 });
                 // the counted window starts: an idle first worker goes back to its PGO polls
                 w0_wake();
@@ -15928,10 +16015,13 @@ fn rt_hot(slot: u64) -> u64 {
                 Some(r) => rate = r,
                 None => {
                     // under the threshold: the stub stays, counting on. Baseline code that keeps
-                    // running (a quarter of the threshold's cost, decayed) gets its O2 build: the
-                    // cache's entry then links optimised code for it
+                    // running (base_o2_div: a 64th of the threshold's cost, decayed) gets its O2
+                    // build: the cache's entry then links optimised code for it. (GAPX6: at a
+                    // quarter, the settled race ran 8% of its UI cycles in baseline code -- per-frame
+                    // UI fns each under the bar -- and 5% more in the count stubs of the tiny
+                    // callees baseline code calls without inlining; both front-end heavy.)
                     let cost = (*rec.add(9)).load(Ordering::Relaxed);
-                    if cost >= threshold / 4 {
+                    if cost >= threshold / base_o2_div() {
                         note_slow_base(u, slot as u32);
                     }
                     crate::inspect::tierlog::note(slot as u32, crate::inspect::tierlog::ev::CHECK, 0, cost, code);
@@ -17668,7 +17758,10 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                 let at = if blob {
                     u.emit_or_redirect(&code, &relocs, "O3").expect("O3 interpreted code installs")
                 } else {
-                    u.emit_grouped(o3_group, &code, &relocs).expect("O3 code links (checked)")
+                    match o3_group {
+                        Some(_) => u.emit_grouped(o3_group, &code, &relocs),
+                        None => u.emit_hot(&code, &relocs),
+                    }.expect("O3 code links (checked)")
                 };
                 if !blob {
                     code_growth(if sandboxed { GROW_MODULE } else if u.retiers.contains_key(&id) { GROW_REOPT } else { GROW_TIERUP }, code.len());
@@ -22060,6 +22153,9 @@ fn code_full(size: u64) -> ! {
     eprintln!("{}", msg);
     std::process::abort();
 }
+
+/// the size of one O3 code chunk (`Unit::emit_hot`)
+const HOT_CHUNK: u64 = 1 << 20;
 
 fn bump(next: &AtomicU64, size: u64, align: u64, end: u64, full: &str) -> u64 {
     let a = align.max(1);

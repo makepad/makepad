@@ -98,6 +98,7 @@ pub fn alloc_sig(al: &Alloc) -> u64 {
     h
 }
 
+#[derive(Clone)]
 pub struct Alloc {
     pub loc: Vec<Loc>,
     pub used_callee_int: Vec<u8>,

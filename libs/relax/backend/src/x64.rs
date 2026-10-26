@@ -123,6 +123,7 @@ impl Env {
     }
 }
 
+#[derive(Clone)]
 struct Asm {
     b: Vec<u8>,
     /// pending scaled index (index reg, shift) for the next memory operand
@@ -341,9 +342,9 @@ impl Asm {
         self.byte(0x90 | cc);
         self.modrm_rr(0, r);
     }
-    /// movzx r64, r8
+    /// movzx r32, r8 (a 32-bit write zero-extends: the r64 form's REX.W is a wasted byte)
     fn movzx8(&mut self, dst: u8, src: u8) {
-        self.rex(true, dst, 0, src, src >= 4);
+        self.rex(false, dst, 0, src, src >= 4);
         self.byte(0x0f);
         self.byte(0xb6);
         self.modrm_rr(dst, src);
@@ -370,7 +371,8 @@ impl Asm {
                 self.modrm_rr(d, s);
             }
             (16, false) => {
-                self.rex(true, d, 0, s, false);
+                // movzx r32, r16 (zero-extends to 64)
+                self.rex(false, d, 0, s, false);
                 self.byte(0x0f);
                 self.byte(0xb7);
                 self.modrm_rr(d, s);
@@ -392,14 +394,15 @@ impl Asm {
     }
     fn load_ext(&mut self, dst: u8, base: u8, disp: i32, bytes: u8, signed: bool) {
         match (bytes, signed) {
+            // (zero extension: the 32-bit form, which zero-extends to 64, needs no REX.W)
             (1, s) => {
-                self.rex(true, dst, 0, base, false);
+                self.rex(s, dst, 0, base, false);
                 self.byte(0x0f);
                 self.byte(if s { 0xbe } else { 0xb6 });
                 self.modrm_mem(dst, base, disp);
             }
             (2, s) => {
-                self.rex(true, dst, 0, base, false);
+                self.rex(s, dst, 0, base, false);
                 self.byte(0x0f);
                 self.byte(if s { 0xbf } else { 0xb7 });
                 self.modrm_mem(dst, base, disp);
@@ -468,9 +471,15 @@ impl Asm {
             return;
         }
         self.byte(0x48);
-        self.byte(0x81);
-        self.modrm_rr(5, RSP);
-        self.u32(n);
+        if n < 128 {
+            self.byte(0x83);
+            self.modrm_rr(5, RSP);
+            self.byte(n as u8);
+        } else {
+            self.byte(0x81);
+            self.modrm_rr(5, RSP);
+            self.u32(n);
+        }
     }
     fn call_r(&mut self, r: u8) {
         self.rex(false, 0, 0, r, false);
@@ -507,6 +516,25 @@ impl Asm {
         let p = self.pos();
         self.u32(0);
         p
+    }
+    /// `n` bytes of padding as multi-byte nops (the recommended 1..9-byte forms)
+    fn nops(&mut self, mut n: usize) {
+        const NOPS: [&[u8]; 9] = [
+            &[0x90],
+            &[0x66, 0x90],
+            &[0x0f, 0x1f, 0x00],
+            &[0x0f, 0x1f, 0x40, 0x00],
+            &[0x0f, 0x1f, 0x44, 0x00, 0x00],
+            &[0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00],
+            &[0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00],
+            &[0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
+            &[0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
+        ];
+        while n > 0 {
+            let k = n.min(9);
+            self.b.extend_from_slice(NOPS[k - 1]);
+            n -= k;
+        }
     }
     fn patch(&mut self, at: usize, target: usize) {
         let rel = target as i64 - (at as i64 + 4);
@@ -995,6 +1023,7 @@ fn x64_defers(b: &Block, k: usize, uses: &[u32]) -> bool {
 
 // ------------------------------------------------------------ code generation
 
+#[derive(Clone)]
 struct Gen<'a> {
     /// the function has 256-bit vectors (vzeroupper before calls and returns)
     ymm: bool,
@@ -1114,6 +1143,24 @@ struct Gen<'a> {
     unwind_tab: Vec<(u32, u32)>,
     /// (instruction position, return offset) of every call: the variable table's sites (dbgloc)
     var_calls: Vec<(u32, u32)>,
+    /// forward block jumps (jump_to / jcc_to to a block not placed yet), in emission order: where
+    /// each started -- the first pass of a two-pass emit records them (short_jumps)
+    fwd_at: Vec<usize>,
+    /// the second pass: the first pass's forward-jump starts and block positions. A jump whose
+    /// first-pass distance fits rel8 is emitted short (code between only shrinks in this pass)
+    fwd_hint: Option<std::rc::Rc<(Vec<usize>, Vec<usize>, Vec<u32>, Vec<u32>)>>,
+    /// rel8 fields of short forward jumps: (byte position, target block)
+    fixups8: Vec<(usize, u32)>,
+    /// a short forward jump that did not reach (the first pass's code is used)
+    short_miss: bool,
+    /// align loop heads to 16 bytes (optimised code), and the block frequencies that pick them
+    align_loops: bool,
+    freq: Option<Vec<f32>>,
+    /// per forward jump (fwd_at): loop-head paddings emitted before it; per block: before its start
+    /// (a padding may grow by up to 15 bytes in the second pass: short_fwd's bound counts them)
+    fwd_pads: Vec<u32>,
+    block_pads: Vec<u32>,
+    pads_n: u32,
 }
 
 impl<'a> Gen<'a> {
@@ -1634,10 +1681,18 @@ impl<'a> Gen<'a> {
             }
         }
         self.thru_blocks(&reach);
+        let align = self.loop_heads(&reach);
+        self.block_pads = vec![0; nb];
         for bi in 0..nb {
             if !reach[bi] {
                 continue;
             }
+            if align.get(bi) == Some(&true) {
+                let pad = (16 - self.a.pos() % 16) % 16;
+                self.a.nops(pad);
+                self.pads_n += 1;
+            }
+            self.block_pads[bi] = self.pads_n;
             self.block_pos[bi] = self.a.pos();
             if bi != 0 && self.dom_read.get(bi) == Some(&true) {
                 // a value live into this block may be in rax (keeps_rax): the TLS read's slow path
@@ -1908,6 +1963,12 @@ impl<'a> Gen<'a> {
         for (at, t) in std::mem::take(&mut self.fixups) {
             let target = self.block_pos[t as usize];
             self.a.patch(at, target);
+        }
+        for (at, t) in std::mem::take(&mut self.fixups8) {
+            match i8::try_from(self.block_pos[t as usize] as i64 - (at as i64 + 1)) {
+                Ok(rel) => self.a.b[at] = rel as u8,
+                Err(_) => self.short_miss = true,
+            }
         }
         for (at, start, t) in std::mem::take(&mut self.jt_fix) {
             let rel = self.block_pos[t as usize] as i64 - start as i64;
@@ -2837,6 +2898,51 @@ impl<'a> Gen<'a> {
             .collect();
     }
 
+    /// The loop heads aligned to 16 bytes (LLVM MachineBlockPlacement::alignBlocks, x86's 16-byte
+    /// loop alignment): a block that a later block jumps back to, not cold next to the entry
+    /// (frequency >= entry / 5), entered mostly by its back edges: the block laid out before it
+    /// does not fall into it, or what falls in is at most a fifth of its frequency. Only with
+    /// frequencies.
+    fn loop_heads(&self, reach: &[bool]) -> Vec<bool> {
+        let nb = self.f.blocks.len();
+        let mut a = vec![false; nb];
+        // (no frequencies, e.g. after the allocator split loops: no padding -- aligning every head
+        // of every loop, cold ones included, cost reconcile 3.5% of its bytes in nops)
+        if !self.align_loops || self.freq.is_none() {
+            return a;
+        }
+        for bj in 0..nb {
+            if !reach[bj] {
+                continue;
+            }
+            for s in self.f.blocks[bj].term.succs() {
+                let t = self.thru(s) as usize;
+                if t <= bj && t > 0 && reach[t] {
+                    a[t] = true;
+                }
+            }
+        }
+        if let Some(fr) = &self.freq {
+            let entry = fr.first().copied().unwrap_or(0.0);
+            let mut prev: Option<usize> = None;
+            for b in 0..nb {
+                if !reach[b] {
+                    continue;
+                }
+                if a[b] {
+                    let h = fr[b];
+                    let fall = prev.map_or(0.0, |p| {
+                        let into = self.f.blocks[p].term.succs().filter(|&x| self.thru(x) as usize == b).count();
+                        if into == 0 { 0.0 } else { fr[p] * into as f32 / self.f.blocks[p].term.succs().count().max(1) as f32 }
+                    });
+                    a[b] = h >= entry * 0.2 && fall <= h * 0.2;
+                }
+                prev = Some(b);
+            }
+        }
+        a
+    }
+
     fn thru(&self, b: u32) -> u32 {
         self.thru.get(b as usize).copied().unwrap_or(b)
     }
@@ -2848,6 +2954,12 @@ impl<'a> Gen<'a> {
             if let Some(rel) = self.short_back(target) {
                 self.a.byte(0xeb);
                 self.a.byte(rel as u8);
+                return;
+            }
+            if self.short_fwd(target) {
+                self.a.byte(0xeb);
+                self.fixups8.push((self.a.pos(), target));
+                self.a.byte(0);
                 return;
             }
             let p = self.a.jmp32();
@@ -2862,8 +2974,29 @@ impl<'a> Gen<'a> {
             self.a.byte(rel as u8);
             return;
         }
+        if self.short_fwd(target) {
+            self.a.byte(0x70 | cc);
+            self.fixups8.push((self.a.pos(), target));
+            self.a.byte(0);
+            return;
+        }
         let p = self.a.jcc32(cc);
         self.fixups.push((p, target));
+    }
+
+    /// A forward jump to `target` (not placed yet) starts here: recorded for the second pass; in
+    /// the second pass, whether it fits rel8. Between the jump and its target the second pass
+    /// emits the same instructions as the first, some jumps shorter, none longer, so the
+    /// first pass's distance bounds this one (the patch checks it: `short_miss`).
+    fn short_fwd(&mut self, target: u32) -> bool {
+        let k = self.fwd_at.len();
+        self.fwd_at.push(self.a.pos());
+        self.fwd_pads.push(self.pads_n);
+        let Some(h) = &self.fwd_hint else { return false };
+        match (h.0.get(k), h.1.get(target as usize), h.2.get(k), h.3.get(target as usize)) {
+            (Some(&c1), Some(&t1), Some(&p1), Some(&pt)) if t1 != usize::MAX && t1 > c1 => t1 - c1 - 2 + 15 * pt.saturating_sub(p1) as usize <= 127,
+            _ => false,
+        }
     }
 
     /// rel8 of a two-byte jump emitted here to an already placed block, when it fits (forward
@@ -6609,6 +6742,15 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         pads: Vec::new(),
         unwind_tab: Vec::new(),
         var_calls: Vec::new(),
+        fwd_at: Vec::new(),
+        fwd_hint: None,
+        fixups8: Vec::new(),
+        short_miss: false,
+        align_loops: env.opt_regs && !crate::stats::opt_off(options, "-alignloops"),
+        freq: freq.filter(|fr| fr.len() == f.blocks.len()).map(|fr| fr.to_vec()),
+        fwd_pads: Vec::new(),
+        block_pads: Vec::new(),
+        pads_n: 0,
     };
     g.zero_above = crate::passes::zero_above(options, g.f, &g.low_only);
     if env.opt_regs || g.f.full {
@@ -6617,7 +6759,21 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     if !crate::stats::opt_off(options, "-swrange") {
         g.switch_in_range = crate::switch::switch_in_range(g.f);
     }
+    // optimised code is emitted twice (GAPX6: x64 front end): the first pass places the blocks,
+    // the second emits each forward jump whose first-pass distance fits in rel8 as a 2-byte jump
+    // (jcc rel32 is 6 bytes, jmp 5) -- denser hot code. MAKEPAD_RUN_OPT=-shortjmp: one pass
+    let two_pass = env.opt_regs && !crate::stats::opt_off(options, "-shortjmp");
+    let first = two_pass.then(|| g.clone());
     g.gen(options);
+    if let Some(mut g2) = first {
+        if !g.fwd_at.is_empty() {
+            g2.fwd_hint = Some(std::rc::Rc::new((std::mem::take(&mut g.fwd_at), g.block_pos.clone(), std::mem::take(&mut g.fwd_pads), std::mem::take(&mut g.block_pads))));
+            g2.gen(options);
+            if !g2.short_miss {
+                g = g2;
+            }
+        }
+    }
     // a copy between overlapping frame bytes is a bug of a pass or of the frame layout: a build
     // error where passes are verified (it is emitted in memmove order otherwise)
     if crate::rir::verify_passes_on() {

@@ -1538,9 +1538,20 @@ impl Linker {
             }
             let s = &im.slots[si];
             let n = s.code_n;
-            let off = (total + 15) & !15;
-            layout.push((si, id, off, n, &im.blob[s.code.0 + n..s.code.0 + s.code.1]));
-            total = off + n;
+            layout.push((si, id, 0, n, &im.blob[s.code.0 + n..s.code.0 + s.code.1]));
+        }
+        // the hot code together (GAPX6: x64 front-end stalls): the O3 slots first, in image order
+        // (the order they first ran in), then the rest. The slots stay in image order in `out`
+        // (install order feeds the next manifest's start order). MAKEPAD_RUN_OPT=-hotimage: image order.
+        let hot_first = !relax_backend::stats::opt_env_off("-hotimage");
+        for pass in [true, false] {
+            for e in layout.iter_mut() {
+                if (hot_first && (im.slots[e.0].tier == super::TIER_O3) != pass) || (!hot_first && !pass) {
+                    continue;
+                }
+                e.2 = (total + 15) & !15;
+                total = e.2 + e.3;
+            }
         }
         if total == 0 {
             return out;
