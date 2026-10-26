@@ -59,7 +59,7 @@ pub fn parked_events(domain: u32) -> Option<Vec<std::sync::Arc<str>>> {
         .map(|p| p.event.clone()).collect())
 }
 
-pub const KINDS: &[&str] = &["panic", "hang", "deadlock", "mem", "spike", "hitch", "rtstall", "scripterr", "patchrefused", "patchverified", "patchreverted"];
+pub const KINDS: &[&str] = &["panic", "hang", "deadlock", "mem", "spike", "hitch", "rtstall", "scripterr", "patchrefused", "patchverified", "patchreverted", "engine_request", "engine_reply", "engine_code_update"];
 
 /// Records an event (`fields`: the kind-specific JSON members, without braces). Returns its seq,
 /// or 0 when it repeated one sent in the last 30 s.

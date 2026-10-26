@@ -457,3 +457,4 @@ pub use makepad_script_std::makepad_script::literal::{LiteralOrigin, LiteralReac
 pub use crate::collect::{ScanEvent, Scanner};
 
 pub mod restart;
+pub mod engine_request;

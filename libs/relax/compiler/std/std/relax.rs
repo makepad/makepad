@@ -189,6 +189,67 @@ pub fn live_log(json_line: &str) {
     unsafe { __relax_live_log(json_line.as_ptr(), json_line.len()) }
 }
 
+// ---- engine requests (the inspect channel's `engine_request` events)
+
+extern "C" {
+    fn __relax_engine_request(p: *const u8, n: usize, buf: *mut u8, cap: usize) -> usize;
+    fn __relax_engine_replies(after: u64, buf: *mut u8, cap: usize) -> usize;
+}
+
+/// A change the program needs in its engine's code, for whoever maintains that code (an
+/// in-game AI asks for a verb the engine lacks). Every field is plain text, bounded by the host.
+pub struct EngineRequest<'a> {
+    /// the game (or document) it is about
+    pub game: &'a str,
+    /// one line: what is needed
+    pub summary: &'a str,
+    /// what exactly, and why
+    pub details: &'a str,
+    /// the conversation that led to it (an excerpt)
+    pub context: &'a str,
+    /// where answers go inside the program (e.g. a chat session id); carried back verbatim
+    pub reply_route: &'a str,
+}
+
+/// Posts `req` on the observation channel (an `engine_request` event, with this app, node and
+/// pid). Returns the request's id, which every answer names.
+pub fn post_engine_request(req: &EngineRequest) -> Result<String, String> {
+    let mut record = String::new();
+    for (i, f) in [req.game, req.summary, req.details, req.context, req.reply_route].iter().enumerate() {
+        if i > 0 {
+            record.push('\0');
+        }
+        record.push_str(&f.replace('\0', ""));
+    }
+    let mut buf = [0u8; 512];
+    let n = unsafe { __relax_engine_request(record.as_ptr(), record.len(), buf.as_mut_ptr(), buf.len()) };
+    let text = String::from_utf8_lossy(&buf[..n.min(buf.len())]).into_owned();
+    match text.strip_prefix('!') {
+        Some(why) => Err(why.to_string()),
+        None => Ok(text),
+    }
+}
+
+/// This program's engine-request stream after record `after` (0: all kept), one JSON object
+/// per line: `{"seq":..,"id":..,"status":..,"summary":..,"message":..,"at_ms":..}`. Status
+/// `posted` (the request itself), `received|working|deployed|declined|note` (answers), or
+/// `code_update` (id "": a live edit was applied to this process; message says how and what).
+/// Pass the last `seq` seen to get only newer ones; 0 rebuilds the whole history.
+pub fn engine_replies(after: u64) -> String {
+    unsafe {
+        let mut cap = 4096usize;
+        loop {
+            let mut v: crate::vec::Vec<u8> = crate::vec::Vec::with_capacity(cap);
+            let n = __relax_engine_replies(after, v.as_mut_ptr(), cap);
+            if n <= cap {
+                v.set_len(n);
+                return String::from_utf8_lossy(&v).into_owned();
+            }
+            cap = n + 1024;
+        }
+    }
+}
+
 /// After a restart: when the edit that caused it was saved (unix ms), for save -> back on screen.
 pub fn restart_saved_ms() -> Option<f64> {
     crate::env::var("MAKEPAD_RUN_RESTART_T0").ok().and_then(|v| v.parse::<f64>().ok()).filter(|v| *v > 0.0)
