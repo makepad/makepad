@@ -429,6 +429,8 @@ impl CxMediaApi for Cx {
 
 #[cfg(target_os = "android")]
 mod android_socket;
+#[cfg(target_os = "android")]
+pub(crate) mod android_fleet;
 
 impl crate::cx_api::CxOsApi for Cx {
     fn init_cx_os(&mut self) {
@@ -439,6 +441,7 @@ impl crate::cx_api::CxOsApi for Cx {
         #[cfg(target_os = "android")]
         {
             android_socket::register();
+            android_fleet::register();
             self.package_root = Some("makepad".to_string());
             self.native_load_dependencies();
         }

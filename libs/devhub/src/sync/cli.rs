@@ -224,8 +224,9 @@ fn send_bundle(c: &Client, node: &str, p: &Push, path: &Path, hash: &str, size: 
     }
 }
 
-/// Makes sure `node` holds every push's commit; prints what moved.
-fn push_to(c: &Client, node: &str, pushes: &[Push], bundles: &Bundles) -> Result<(), String> {
+/// Makes sure `node` holds every push's commit; prints what moved. `Ok(true)`: a device's store
+/// took the files and its JIT patched already (no apply step follows).
+fn push_to(c: &Client, node: &str, pushes: &[Push], bundles: &Bundles) -> Result<bool, String> {
     let status = ask(c, node, "sync", "status")?.into_iter().next().ok_or("no status")?;
     if is_err(&status) {
         return Err(status);
@@ -234,7 +235,7 @@ fn push_to(c: &Client, node: &str, pushes: &[Push], bundles: &Bundles) -> Result
         for p in pushes {
             push_files(c, node, &status, p)?;
         }
-        return Ok(());
+        return Ok(true);
     }
     for p in pushes {
         let has = node_has(&status, p.repo);
@@ -249,7 +250,7 @@ fn push_to(c: &Client, node: &str, pushes: &[Push], bundles: &Bundles) -> Result
         let r = send_bundle(c, node, p, &path, &hash, size)?;
         println!("{node} {} {} {}: pushed {:.1} MB in {:.1} s {r}", p.repo, p.branch, &p.sha[..10], size as f64 / 1048576.0, t.elapsed().as_secs_f64());
     }
-    Ok(())
+    Ok(false)
 }
 
 /// A device's store: the files that differ from its rev (all files under its prefixes on a first
@@ -434,7 +435,7 @@ fn sync_push(c: &Client, args: &[&str]) -> i32 {
     let bundles = Arc::new(Bundles::default());
     let pushes = Arc::new(pushes);
     // 1. bundles to every node, in parallel
-    let results: Vec<(String, Result<(), String>)> = std::thread::scope(|s| {
+    let results: Vec<(String, Result<bool, String>)> = std::thread::scope(|s| {
         let hs: Vec<_> = nodes.iter().map(|n| {
             let (pushes, bundles, n2) = (pushes.clone(), bundles.clone(), n.clone());
             let c = c.clone();
@@ -447,7 +448,8 @@ fn sync_push(c: &Client, args: &[&str]) -> i32 {
     let ready: Vec<String> = results
         .into_iter()
         .filter_map(|(n, r)| match r {
-            Ok(()) => Some(n),
+            Ok(false) => Some(n),
+            Ok(true) => None,
             Err(e) => {
                 println!("{n} {{\"err\":{}}}", makepad_remote::json_str(&e));
                 code = 1;

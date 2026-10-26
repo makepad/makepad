@@ -3,8 +3,9 @@
 //!
 //! A promise is an `NSFilePromiseProvider` subclass, `HalFilePromise`, that also offers a
 //! lazily resolved `public.file-url`:
-//! - a receiver that takes promises (Finder, Mail) gets `writePromiseToURL`, answered on a
-//!   background operation queue: wait for the file, copy it to the destination;
+//! - a receiver that takes promises (Finder, Mail, chat apps) gets `writePromiseToURL`, answered
+//!   on a background operation queue: wait for the file, copy it next to the destination, sync,
+//!   rename it into place, and only then call the completion handler;
 //! - a receiver that only reads file URLs (most chat and web apps) gets the URL of the finished
 //!   file when it asks for it at the drop. The type is declared `Promised`, so nothing is
 //!   resolved while the pointer only hovers.
@@ -69,9 +70,11 @@ fn define_promise_class() -> *const Class {
             }
             let path = promise_path(this);
             match drag_promise::wait(std::path::Path::new(&path), drag_promise::WAIT) {
+                // The URL's own pasteboard form, exactly what a plain file URL item writes (and
+                // whatever AppKit attaches to it for a sandboxed reader), not a bare string.
                 Ok(()) => {
                     let url: ObjcId = msg_send![class!(NSURL), fileURLWithPath: str_to_nsstring(&path) isDirectory: NO];
-                    msg_send![url, absoluteString]
+                    msg_send![url, pasteboardPropertyListForType: str_to_nsstring(FILE_URL)]
                 }
                 Err(e) => {
                     eprintln!("[hal] drag out: {e}");
@@ -113,8 +116,9 @@ fn define_delegate_class() -> *const Class {
             let path = promise_path(&*provider);
             let dest: ObjcId = msg_send![url, path];
             let dest = nsstring_to_string(dest);
+            // The completion handler runs only after the whole file sits under its final name.
             let result = drag_promise::wait(std::path::Path::new(&path), drag_promise::WAIT)
-                .and_then(|()| std::fs::copy(&path, &dest).map(|_| ()).map_err(|e| format!("copying to {dest}: {e}")));
+                .and_then(|()| drag_promise::deliver(std::path::Path::new(&path), std::path::Path::new(&dest)));
             let error: ObjcId = match result {
                 Ok(()) => nil,
                 Err(e) => {
@@ -186,23 +190,32 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    unsafe fn write_promise(provider: ObjcId, dest: &std::path::Path) -> Option<String> {
-        let result: Arc<Mutex<Option<Option<String>>>> = Arc::new(Mutex::new(None));
+    /// Calls the delegate the way a receiver's drop does. Like an impatient receiver, the
+    /// completion handler reads the destination the instant it is called: the bytes it saw there
+    /// are returned with the error.
+    unsafe fn write_promise_read(provider: ObjcId, dest: &std::path::Path) -> (Option<String>, Option<Vec<u8>>) {
+        let result: Arc<Mutex<Option<(Option<String>, Option<Vec<u8>>)>>> = Arc::new(Mutex::new(None));
         let got = result.clone();
+        let read_at = dest.to_path_buf();
         let block = objc_block!(move |error: ObjcId| {
+            let seen = std::fs::read(&read_at).ok();
             let message = if error == nil {
                 None
             } else {
                 let text: ObjcId = msg_send![error, localizedDescription];
                 Some(nsstring_to_string(text))
             };
-            *got.lock().unwrap() = Some(message);
+            *got.lock().unwrap() = Some((message, seen));
         });
         let url: ObjcId = msg_send![class!(NSURL), fileURLWithPath: str_to_nsstring(&dest.to_string_lossy()) isDirectory: NO];
         let delegate: ObjcId = msg_send![provider, delegate];
         let () = msg_send![delegate, filePromiseProvider: provider writePromiseToURL: url completionHandler: &block];
         let out = result.lock().unwrap().take().expect("the completion handler was called");
         out
+    }
+
+    unsafe fn write_promise(provider: ObjcId, dest: &std::path::Path) -> Option<String> {
+        write_promise_read(provider, dest).0
     }
 
     #[test]
@@ -233,12 +246,56 @@ mod tests {
             });
             let url: ObjcId = msg_send![provider, pasteboardPropertyListForType: str_to_nsstring(FILE_URL)];
             assert!(url != nil, "the file URL resolves once the file is written");
+            // exactly what a plain NSURL item of the finished file puts on the pasteboard
+            let plain: ObjcId = msg_send![class!(NSURL), fileURLWithPath: str_to_nsstring(&path.to_string_lossy()) isDirectory: NO];
+            let plain: ObjcId = msg_send![plain, pasteboardPropertyListForType: str_to_nsstring(FILE_URL)];
+            let same: BOOL = msg_send![url, isEqual: plain];
+            assert!(same != NO, "the lazy file URL is the URL's own pasteboard form");
             let url = nsstring_to_string(url);
             assert!(url.starts_with("file://") && url.ends_with("Night%20Drive.mp3"), "{url}");
             producer.join().unwrap();
             let dest = dir.join("out").join("Night Drive.mp3");
             assert_eq!(write_promise(provider, &dest), None);
             assert_eq!(std::fs::read(&dest).unwrap(), b"ID3 made for the drop");
+            let () = msg_send![provider, release];
+
+            // a video for chat apps: typed public.mpeg-4, and the receiver reading the file the
+            // moment the completion handler runs gets all of it
+            let video = dir.join("Night Drive.mp4");
+            let bytes: Vec<u8> = (0..3_000_000u32).map(|i| (i * 31 % 251) as u8).collect();
+            let producer_path = video.clone();
+            let producer_bytes = bytes.clone();
+            let producer = std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let part = drag_promise::part_path(&producer_path);
+                std::fs::write(&part, &producer_bytes).unwrap();
+                std::fs::rename(&part, &producer_path).unwrap();
+            });
+            let provider = promise_writer(&drag_promise::encode(&video.to_string_lossy(), "video/mp4"));
+            let ty: ObjcId = msg_send![provider, fileType];
+            assert_eq!(nsstring_to_string(ty), "public.mpeg-4");
+            let dest = dir.join("out").join("Night Drive.mp4");
+            let (error, seen) = write_promise_read(provider, &dest);
+            producer.join().unwrap();
+            assert_eq!(error, None);
+            let seen = seen.expect("the file is there when the completion handler runs");
+            assert_eq!(seen.len(), bytes.len(), "whole file at completion");
+            assert!(seen == bytes);
+            assert!(!drag_promise::part_path(&dest).exists(), "no part file left beside it");
+            // what a receiver sees of the delivered file: its type from the name, no quarantine
+            let dest_url: ObjcId = msg_send![class!(NSURL), fileURLWithPath: str_to_nsstring(&dest.to_string_lossy()) isDirectory: NO];
+            let mut content_type: ObjcId = nil;
+            let mut error: ObjcId = nil;
+            let ok: BOOL = msg_send![dest_url, getResourceValue: &mut content_type forKey: str_to_nsstring("NSURLContentTypeKey") error: &mut error];
+            assert!(ok != NO && content_type != nil);
+            let content_type: ObjcId = msg_send![content_type, identifier];
+            let content_type = nsstring_to_string(content_type);
+            let quarantine: ObjcId = nil;
+            let mut quarantine = quarantine;
+            let _: BOOL = msg_send![dest_url, getResourceValue: &mut quarantine forKey: str_to_nsstring("NSURLQuarantinePropertiesKey") error: &mut error];
+            eprintln!("DROP-UTTYPE: {} -> {content_type}, {} bytes, quarantine {}", dest.display(), seen.len(), if quarantine == nil { "none" } else { "SET" });
+            assert_eq!(content_type, "public.mpeg-4");
+            assert!(quarantine == nil, "the delivered file carries no quarantine");
             let () = msg_send![provider, release];
 
             // a producer that failed: the receiver gets an error, not a file

@@ -6,6 +6,10 @@ mod shell;
 #[cfg(target_os = "android")]
 mod surface;
 #[cfg(target_os = "android")]
+mod xr;
+#[cfg(target_os = "android")]
+mod xr_sys;
+#[cfg(target_os = "android")]
 pub mod jni;
 #[cfg(target_os = "android")]
 pub use shell::{AndroidBackend, AndroidParams};
@@ -19,6 +23,9 @@ pub mod assets;
 
 #[cfg(target_os = "android")]
 pub mod socket;
+
+#[cfg(target_os = "android")]
+pub mod fleet;
 
 #[cfg(target_os = "android")]
 pub mod standalone;

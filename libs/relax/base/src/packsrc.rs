@@ -283,7 +283,19 @@ pub fn run(opts: Options) -> Result<(), String> {
     // an Android app reads its resources (fonts, images, ..) from the APK's assets, which the
     // APK builder packages per crate (cargo makepad android): the archive holds the sources
     let assets_in_apk = opts.target.as_deref().is_some_and(|t| t.contains("android"));
-    for p in graph.iter().filter(|_| !assets_in_apk) {
+    // ... except the packed apps' own `resources/`: an app reads its data there by path
+    // (CARGO_MANIFEST_DIR/resources: Sandbox's bundled games), which APK assets cannot serve (no
+    // folder listing)
+    let apps: BTreeSet<&str> = opts.packages.iter().map(|(name, _)| name.as_str()).collect();
+    let is_app = |dir: &str| {
+        let manifest = if dir.is_empty() { "Cargo.toml".to_string() } else { format!("{dir}/Cargo.toml") };
+        std::fs::read_to_string(root.join(manifest)).is_ok_and(|t| {
+            t.lines().skip_while(|l| l.trim() != "[package]").skip(1).take_while(|l| !l.trim_start().starts_with('[')).any(|l| {
+                l.split_once('=').is_some_and(|(k, v)| k.trim() == "name" && apps.contains(v.trim().trim_matches('"')))
+            })
+        })
+    };
+    for p in graph.iter().filter(|p| !assets_in_apk || is_app(p)) {
         let res = if p.is_empty() { "resources".to_string() } else { format!("{p}/resources") };
         walk(&root, &res, &mut files)?;
     }

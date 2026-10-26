@@ -83,7 +83,8 @@ pub fn render_ps(name: Option<&str>, lines: &[String], out: &mut String) {
         out.push_str(&format!("{}  error: {}\n", m.name, proto::clean(e, 200)));
         return;
     }
-    out.push_str(&format!("{}  {}  load {:.1}/{}  mem {}/{} GB free  {} JITs\n", m.name, m.os, m.load1, m.cpus, m.mem_avail_mb / 1024, m.mem_total_mb / 1024, m.jits.iter().filter(|j| j.jit).count()));
+    let battery = m.battery.map_or(String::new(), |(level, charging)| format!("  battery {level}%{}", if charging { " charging" } else { "" }));
+    out.push_str(&format!("{}  {}  load {:.1}/{}  mem {}/{} GB free{battery}  {} JITs\n", m.name, m.os, m.load1, m.cpus, m.mem_avail_mb / 1024, m.mem_total_mb / 1024, m.jits.iter().filter(|j| j.jit).count()));
     for j in &m.jits {
         out.push_str(&format!("  {}\n", j.head()));
         let facts = j.facts();

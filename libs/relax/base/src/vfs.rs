@@ -253,6 +253,11 @@ fn edited_file(path: &str) -> Option<std::path::PathBuf> {
     p.is_file().then_some(p)
 }
 
+/// Whether virtual files are writable (an edits folder is set).
+pub fn edits_enabled() -> bool {
+    EDITS.read().unwrap().is_some()
+}
+
 /// The edits folder from MAKEPAD_RUN_EDITS (the runner sets it per licensed app).
 pub fn set_edits(dir: Option<std::path::PathBuf>) {
     // process state: built in the kept heap

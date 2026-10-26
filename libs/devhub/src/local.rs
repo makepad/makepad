@@ -273,7 +273,7 @@ impl Local {
         let m = procinfo::machine();
         let jits = self.jits();
         out.push(format!(
-            "{{\"machine\":{},\"os\":\"{}\",\"cpus\":{},\"load1\":{:.2},\"mem_total_mb\":{},\"mem_avail_mb\":{},\"uptime_s\":{},\"jits\":{}}}",
+            "{{\"machine\":{},\"os\":\"{}\",\"cpus\":{},\"load1\":{:.2},\"mem_total_mb\":{},\"mem_avail_mb\":{},\"uptime_s\":{},\"jits\":{}{}}}",
             json_str(&self.machine),
             m.os,
             m.cpus,
@@ -281,7 +281,8 @@ impl Local {
             m.mem_total_mb,
             m.mem_avail_mb,
             m.uptime_s,
-            jits.len()
+            jits.len(),
+            m.battery.map_or(String::new(), |(level, charging)| format!(",\"battery\":{level},\"charging\":{charging}"))
         ));
         // every JIT's detail at once (each `jit` answer samples 250 ms)
         let details: Vec<Detail> = std::thread::scope(|sc| {

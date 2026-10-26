@@ -1,5 +1,5 @@
 //! Process and machine numbers for the explorer, read from the OS without asking the process:
-//! `/proc` on Linux, `proc_pidinfo` / `sysctl` on macOS. CPU is a percentage over the time since
+//! `/proc` on Linux and Android, `proc_pidinfo` / `sysctl` on macOS. CPU is a percentage over the time since
 //! the previous sample of the same pid ([`CpuMeter`]).
 
 use std::collections::HashMap;
@@ -21,6 +21,23 @@ pub struct Machine {
     pub mem_avail_mb: u64,
     pub uptime_s: u64,
     pub cpus: u32,
+    /// battery level 0..=100 and charging (a device: the JIT host's [`set_battery_source`])
+    pub battery: Option<(u32, bool)>,
+}
+
+static BATTERY: std::sync::OnceLock<fn() -> Option<(u32, bool)>> = std::sync::OnceLock::new();
+
+/// A JIT host on a battery device (Android: BatteryManager through the HAL) names where the
+/// battery reading comes from; machines without one report none.
+pub fn set_battery_source(f: fn() -> Option<(u32, bool)>) {
+    let _ = BATTERY.set(f);
+}
+
+/// This machine's numbers, with the battery when a source is set.
+pub fn machine() -> Machine {
+    let mut m = os::machine();
+    m.battery = BATTERY.get().and_then(|f| f());
+    m
 }
 
 pub fn alive(pid: u32) -> bool {
@@ -38,7 +55,7 @@ pub fn alive(pid: u32) -> bool {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod os {
     use super::*;
 
@@ -66,7 +83,7 @@ mod os {
     }
 
     pub fn machine() -> Machine {
-        let mut m = Machine { os: "linux", ..Machine::default() };
+        let mut m = Machine { os: if cfg!(target_os = "android") { "android" } else { "linux" }, ..Machine::default() };
         if let Ok(l) = std::fs::read_to_string("/proc/loadavg") {
             m.load1 = l.split_whitespace().next().and_then(|v| v.parse().ok()).unwrap_or(0.0);
         }
@@ -82,6 +99,21 @@ mod os {
         }
         if let Ok(u) = std::fs::read_to_string("/proc/uptime") {
             m.uptime_s = u.split_whitespace().next().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) as u64;
+        } else {
+            // an Android app may not read /proc/uptime (nor /proc/loadavg: its load stays 0)
+            #[repr(C)]
+            struct Timespec {
+                sec: i64,
+                nsec: i64,
+            }
+            extern "C" {
+                fn clock_gettime(clock: i32, ts: *mut Timespec) -> i32;
+            }
+            let mut ts = Timespec { sec: 0, nsec: 0 };
+            // CLOCK_BOOTTIME
+            if unsafe { clock_gettime(7, &mut ts) } == 0 {
+                m.uptime_s = ts.sec.max(0) as u64;
+            }
         }
         m.cpus = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1);
         m
@@ -158,11 +190,11 @@ mod os {
         let mut load = [0f64; 3];
         unsafe { getloadavg(load.as_mut_ptr(), 3) };
         let total = sysctl_u64("hw.memsize") >> 20;
-        Machine { os: "macos", load1: load[0], mem_total_mb: total, mem_avail_mb: 0, uptime_s: 0, cpus: std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1) }
+        Machine { os: "macos", load1: load[0], mem_total_mb: total, mem_avail_mb: 0, uptime_s: 0, cpus: std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1), battery: None }
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
 mod os {
     use super::*;
     pub fn proc(_pid: u32) -> Option<Proc> {
@@ -173,7 +205,7 @@ mod os {
     }
 }
 
-pub use os::{machine, proc};
+pub use os::proc;
 
 /// CPU % per pid between samples (the hub samples every couple of seconds; readers take the
 /// last rate).

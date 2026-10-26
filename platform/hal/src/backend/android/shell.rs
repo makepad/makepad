@@ -35,6 +35,9 @@ pub(super) struct State {
     pub physical_keyboard: Option<bool>,
     pub ime: Option<(i32, bool)>,
     pub wake: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// An immersive (OpenXR) build: the host window is the XR panel, this many pixels at this
+    /// density, whatever the Activity's own surface is.
+    pub xr: Option<([u32; 2], f32)>,
 }
 pub(super) struct Shared {
     pub registry: Mutex<Registry>,
@@ -44,10 +47,10 @@ impl Shared {
     pub fn global() -> &'static Self {
         static VALUE: OnceLock<Shared> = OnceLock::new();
         VALUE.get_or_init(|| Self { registry: Mutex::new(Registry::default()), state: Mutex::new(State {
-            recipient: None, ime_session: None, events: Vec::new(), params: AndroidParams::default(), refresh: 60., insets: [0.; 4], pending: HashSet::new(), active: false, focused: false, physical_keyboard: None, ime: None, wake: None,
+            recipient: None, ime_session: None, events: Vec::new(), params: AndroidParams::default(), refresh: 60., insets: [0.; 4], pending: HashSet::new(), active: false, focused: false, physical_keyboard: None, ime: None, wake: None, xr: None,
         }) })
     }
-    pub fn dpi(&self) -> f32 { lock(&self.state).params.density }
+    pub fn dpi(&self) -> f32 { let s = lock(&self.state); s.xr.map_or(s.params.density, |(_, dpi)| dpi) }
     pub fn emit(&self, time: u64, f: impl FnOnce(&mut EventQueue, Id)) {
         let mut q = EventQueue::new();
         q.set_time(time);
@@ -63,7 +66,10 @@ impl Shared {
     }
     pub fn display(&self) {
         let size = lock(&self.registry).state.size;
-        let (dpi, refresh, insets) = { let s = lock(&self.state); (s.params.density, s.refresh, s.insets) };
+        let (size, dpi, refresh, insets) = { let s = lock(&self.state); match s.xr {
+            Some((size, dpi)) => (size, dpi, s.refresh, [0.; 4]),
+            None => (size, s.params.density, s.refresh, s.insets),
+        } };
         self.emit(clock_ns(), |q, id| {
             q.display(id, dpi, refresh);
             q.geom(id, 0., 0., size[0] as f64 / dpi as f64, size[1] as f64 / dpi as f64, dpi, window_state::RESTORE);
@@ -127,8 +133,13 @@ impl AndroidBackend {
     /// `notify` makes every pump look (the Activity's events and frame callbacks); `sessions` the
     /// session a GPU result is for.
     pub fn new(flags: u32, sessions: crate::backend::SessionNotify, notify: Arc<dyn Fn() + Send + Sync>) -> Result<Self, String> {
-        let mut core = Vulkan::with_sources(flags, sessions, Box::new(AndroidSurfaces), Box::new(NativeImages::default()))?;
         let offscreen = flags & open_flags::OFFSCREEN_WINDOWS != 0;
+        // A Quest build carries the OpenXR loader: the host window is shown in an XR session.
+        let source: Box<dyn crate::backend::vulkan::VkSurfaceSource> = match super::xr_sys::loader() {
+            Some(gipa) if !offscreen => Box::new(super::xr::XrSurfaces::new(gipa)?),
+            _ => Box::new(AndroidSurfaces),
+        };
+        let mut core = Vulkan::with_sources(flags, sessions, source, Box::new(NativeImages::default()))?;
         if !offscreen { core.set_shell(Box::new(AndroidShell)); }
         lock(&Shared::global().state).wake = Some(notify);
         Ok(Self { core, host: None, offscreen })

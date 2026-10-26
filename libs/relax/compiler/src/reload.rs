@@ -3455,6 +3455,12 @@ pub(crate) fn watch_kick() {
     watch_events::kick();
 }
 
+/// An embedder wrote sources the watcher cannot hear (files of a mounted store's edits folder: a
+/// JIT host's devhub push): the live watcher looks now.
+pub fn sources_changed() {
+    watch_events::kick();
+}
+
 
 pub extern "C" fn __relax_live_edit_enabled() -> bool {
     crate::layout::LIVE_SESSION.load(std::sync::atomic::Ordering::Relaxed)
@@ -4138,6 +4144,14 @@ pub fn start_watcher(up: *mut Unit, inputs: Inputs) {
 }
 
 pub(crate) fn stamp(path: &str) -> Option<(std::time::SystemTime, u64)> {
+    // a file of a mounted store changes only by an edit (its file in the edits folder: a device's
+    // devhub push); the store under a run never changes, and is not read to stat it
+    if crate::vfs::is_virtual(path) {
+        return Some(match crate::vfs::edited_disk_path(path).and_then(|p| std::fs::metadata(p).ok()) {
+            Some(m) => (m.modified().ok()?, m.len()),
+            None => (std::time::UNIX_EPOCH, 0),
+        });
+    }
     let m = std::fs::metadata(path).ok()?;
     Some((m.modified().ok()?, m.len()))
 }
@@ -4160,7 +4174,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
     let own_files = |u: &Unit| -> Vec<(String, u32)> {
         u.prog.current_source_files().into_iter().filter(|(p, _)| {
             !(p.is_empty() || (!std_dir.is_empty() && crate::vfs::relative_path(p, &std_dir).is_some()) || p.contains("/.cargo/registry/") || p.contains("/.cargo/git/") || p.contains("/rustlib/"))
-                && std::path::Path::new(p).is_file()
+                && crate::vfs::is_file(p)
         }).collect()
     };
     // (the watcher's holds read the program's files only: lock_unit_quick)
@@ -4455,7 +4469,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             let f = &mut files[k];
             f.2 = stamp(&f.0);
             if f.1 == u32::MAX || crate::native_macros::owns_path(&f.0) { continue; }
-            let src = match std::fs::read(&f.0) {
+            let src = match crate::vfs::read(&f.0) {
                 Ok(s) => s,
                 Err(_) => continue,
             };

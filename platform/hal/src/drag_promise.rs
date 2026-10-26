@@ -67,6 +67,29 @@ pub fn wait(path: &Path, timeout: Duration) -> Result<(), String> {
     }
 }
 
+/// Hand a finished promised file to a receiver's `dest` (a file promise's destination): copy it
+/// to a hidden file in `dest`'s folder, put its bytes on the disk, and rename it to `dest`. The
+/// destination name appears only with the whole file under it, so a receiver that reads it the
+/// moment it is told the file is there (or watches the folder) never sees a partial or empty file.
+pub fn deliver(src: &Path, dest: &Path) -> Result<(), String> {
+    let part = part_path(dest);
+    let result = (|| {
+        let copied = std::fs::copy(src, &part).map_err(|e| format!("copying to {}: {e}", dest.display()))?;
+        let file = std::fs::File::open(&part).map_err(|e| format!("opening {}: {e}", part.display()))?;
+        file.sync_all().map_err(|e| format!("syncing {}: {e}", part.display()))?;
+        let len = file.metadata().map_err(|e| e.to_string())?.len();
+        if len == 0 || len != copied {
+            return Err(format!("{} came out {len} bytes", dest.display()));
+        }
+        drop(file);
+        std::fs::rename(&part, dest).map_err(|e| format!("renaming to {}: {e}", dest.display()))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    result
+}
+
 /// The folder promised files are made in (one subfolder per drag).
 pub fn root() -> PathBuf {
     std::env::temp_dir().join("makepad-drag-out")
@@ -136,6 +159,14 @@ mod tests {
         std::fs::write(failed_path(&bad), "no decoder").unwrap();
         assert_eq!(wait(&bad, Duration::from_secs(1)), Err("no decoder".into()));
         assert!(wait(&dir.join("never.mp3"), Duration::from_millis(50)).is_err());
+        // delivery: the destination name only ever holds the whole file, no part file stays
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        deliver(&good, &out.join("a.mp3")).unwrap();
+        assert_eq!(std::fs::read(out.join("a.mp3")).unwrap(), b"x");
+        assert!(!part_path(&out.join("a.mp3")).exists());
+        assert!(deliver(&dir.join("missing.mp3"), &out.join("m.mp3")).is_err());
+        assert!(!out.join("m.mp3").exists() && !part_path(&out.join("m.mp3")).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

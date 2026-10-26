@@ -688,12 +688,98 @@ mod platform;
 #[path = "backend/windows/tls_server.rs"]
 pub(crate) mod platform;
 
+#[cfg(target_os = "android")]
+mod platform {
+    //! The JIT host's registered provider (Java security on the device: backend/android.rs).
+    use crate::backend::{platform_crypto, PlatformTlsServer, PlatformTlsSession};
+    use std::io::{self, Read, Write};
+    use std::net::TcpStream;
+
+    pub fn generate_p256() -> io::Result<[u8; 97]> {
+        platform_crypto()?.generate_p256()
+    }
+    pub fn ecdh_p256(key: &[u8; 97], peer_point: &[u8]) -> io::Result<[u8; 32]> {
+        platform_crypto()?.ecdh_p256(key, peer_point)
+    }
+    pub fn sign_p256_sha256(key: &[u8; 97], msg: &[u8]) -> io::Result<Vec<u8>> {
+        platform_crypto()?.sign_p256_sha256(key, msg)
+    }
+    pub fn verify_p256_sha256(point: &[u8], msg: &[u8], sig: &[u8]) -> bool {
+        platform_crypto().is_ok_and(|c| c.verify_p256_sha256(point, msg, sig))
+    }
+    pub struct ServerConfig(Box<dyn PlatformTlsServer>);
+    impl ServerConfig {
+        pub fn new(cert: &[u8], key: &[u8; 97]) -> io::Result<Self> {
+            Ok(Self(platform_crypto()?.tls_server(cert, key)?))
+        }
+        pub fn accept(&self, tcp: TcpStream) -> io::Result<ServerStream> {
+            let session = self.0.accept(&tcp)?;
+            Ok(ServerStream { tcp, session, plain: Vec::new(), at: 0, eof: false })
+        }
+    }
+    pub struct ServerStream {
+        tcp: TcpStream,
+        session: Box<dyn PlatformTlsSession>,
+        /// decrypted bytes not read yet (from `at`)
+        plain: Vec<u8>,
+        at: usize,
+        eof: bool,
+    }
+    impl ServerStream {
+        pub fn tcp(&self) -> &TcpStream {
+            &self.tcp
+        }
+        pub fn shutdown(&mut self) {
+            let bye = self.session.close();
+            let _ = self.tcp.write_all(&bye);
+            let _ = self.tcp.shutdown(std::net::Shutdown::Both);
+        }
+    }
+    impl Read for ServerStream {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let mut net = [0u8; 16384];
+            while self.at >= self.plain.len() {
+                if self.eof {
+                    return Ok(0);
+                }
+                let n = self.tcp.read(&mut net)?;
+                if n == 0 {
+                    self.eof = true;
+                    return Ok(0);
+                }
+                let (plain, reply, closed) = self.session.unwrap(&net[..n])?;
+                if !reply.is_empty() {
+                    self.tcp.write_all(&reply)?;
+                }
+                self.eof = closed;
+                self.plain = plain;
+                self.at = 0;
+            }
+            let n = buf.len().min(self.plain.len() - self.at);
+            buf[..n].copy_from_slice(&self.plain[self.at..self.at + n]);
+            self.at += n;
+            Ok(n)
+        }
+    }
+    impl Write for ServerStream {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let net = self.session.wrap(buf)?;
+            self.tcp.write_all(&net)?;
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.tcp.flush()
+        }
+    }
+}
+
 #[cfg(not(any(
     target_os = "macos",
     target_os = "ios",
     target_os = "tvos",
     target_os = "linux",
-    target_os = "windows"
+    target_os = "windows",
+    target_os = "android"
 )))]
 mod platform {
     use std::io;

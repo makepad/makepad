@@ -134,7 +134,7 @@ impl FilePromise {
             let result = std::fs::create_dir_all(&dir)
                 .map_err(|e| e.to_string())
                 .and_then(|()| produce(&part))
-                .and_then(|()| std::fs::rename(&part, &path).map_err(|e| e.to_string()));
+                .and_then(|()| complete(&part, &path));
             if let Err(e) = result {
                 crate::error!("drag out: making {}: {e}", path.display());
                 let _ = std::fs::remove_file(&part);
@@ -146,6 +146,21 @@ impl FilePromise {
         }
         promised
     }
+}
+
+/// Puts a finished producer's file in place: its bytes reach the disk first (a receiver that
+/// opens the final name right away, from any process, reads the whole file), then the rename
+/// makes the complete file appear under its final name in one step. An empty file is a failed
+/// producer, not a file to hand over.
+fn complete(part: &std::path::Path, path: &std::path::Path) -> Result<(), String> {
+    let file = std::fs::File::open(part).map_err(|e| format!("the producer wrote no file: {e}"))?;
+    let len = file.metadata().map_err(|e| e.to_string())?.len();
+    if len == 0 {
+        return Err("the producer wrote an empty file".into());
+    }
+    file.sync_all().map_err(|e| format!("syncing {}: {e}", part.display()))?;
+    drop(file);
+    std::fs::rename(part, path).map_err(|e| e.to_string())
 }
 
 /// Removes the temporary folders of drags out more than a day old (a receiver may read a
@@ -480,5 +495,11 @@ mod drag_out_tests {
         let DragOutFile::Promise { path, .. } = failing.start() else { panic!("a promise") };
         let err = makepad_hal::drag_promise::wait(std::path::Path::new(&path), std::time::Duration::from_secs(10)).unwrap_err();
         assert_eq!(err, "no decoder for Opus");
+        // a producer that "succeeds" with an empty file never hands a 0-byte file to a receiver
+        let empty = FilePromise { name: "e.mp4".into(), mime: String::new(), produce: Box::new(|part| std::fs::write(part, b"").map_err(|e| e.to_string())) };
+        let DragOutFile::Promise { path, .. } = empty.start() else { panic!("a promise") };
+        let err = makepad_hal::drag_promise::wait(std::path::Path::new(&path), std::time::Duration::from_secs(10)).unwrap_err();
+        assert_eq!(err, "the producer wrote an empty file");
+        assert!(!std::path::Path::new(&path).exists());
     }
 }

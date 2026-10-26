@@ -95,6 +95,8 @@ pub struct MachineRow {
     pub load1: f64,
     pub mem_total_mb: u64,
     pub mem_avail_mb: u64,
+    /// a battery device: level 0..=100 and charging
+    pub battery: Option<(u32, bool)>,
     pub jits: Vec<JitRow>,
     /// why it could not be asked (link down, refused)
     pub err: Option<String>,
@@ -132,6 +134,9 @@ pub fn parse_ps(name: &str, lines: &[String]) -> MachineRow {
             m.load1 = num(&v, "load1");
             m.mem_total_mb = num(&v, "mem_total_mb") as u64;
             m.mem_avail_mb = num(&v, "mem_avail_mb") as u64;
+            if v.get("battery").is_some() {
+                m.battery = Some((num(&v, "battery") as u32, matches!(v.get("charging"), Some(Value::Bool(true)))));
+            }
         } else if v.get("pid").is_some() {
             m.jits.push(JitRow {
                 pid: num(&v, "pid") as u32,

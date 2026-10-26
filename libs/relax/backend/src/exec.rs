@@ -31,8 +31,30 @@ mod sys {
         pub fn pthread_jit_write_protect_np(enabled: i32);
         #[cfg(target_os = "macos")]
         pub fn sys_icache_invalidate(start: *mut c_void, len: usize);
-        #[cfg(all(any(target_os = "linux", target_os = "android"), target_arch = "aarch64"))]
-        pub fn __clear_cache(start: *mut c_void, end: *mut c_void);
+    }
+
+    /// Makes the instruction cache see code just written at [start, end): what libgcc's
+    /// __clear_cache does (bionic exports no such symbol). Clean the data cache to the point of
+    /// unification, then invalidate the instruction cache, by the line sizes CTR_EL0 reports.
+    #[cfg(all(any(target_os = "linux", target_os = "android"), target_arch = "aarch64"))]
+    pub unsafe fn clear_cache(start: *mut c_void, end: *mut c_void) {
+        let (start, end) = (start as usize, end as usize);
+        let ctr: usize;
+        std::arch::asm!("mrs {}, ctr_el0", out(reg) ctr, options(nomem, nostack, preserves_flags));
+        let dline = 4usize << ((ctr >> 16) & 0xf);
+        let iline = 4usize << (ctr & 0xf);
+        let mut a = start & !(dline - 1);
+        while a < end {
+            std::arch::asm!("dc cvau, {}", in(reg) a, options(nostack, preserves_flags));
+            a += dline;
+        }
+        std::arch::asm!("dsb ish", options(nostack, preserves_flags));
+        let mut a = start & !(iline - 1);
+        while a < end {
+            std::arch::asm!("ic ivau, {}", in(reg) a, options(nostack, preserves_flags));
+            a += iline;
+        }
+        std::arch::asm!("dsb ish", "isb", options(nostack, preserves_flags));
     }
 }
 
@@ -108,7 +130,7 @@ impl Code {
                     return None;
                 }
                 #[cfg(target_arch = "aarch64")]
-                sys::__clear_cache(ptr, (ptr as *mut u8).add(len) as *mut _);
+                sys::clear_cache(ptr, (ptr as *mut u8).add(len) as *mut _);
             }
             Some(Code { ptr: ptr as *mut u8, map_len, len: bytes.len() })
         }

@@ -92,6 +92,8 @@ pub use crate::backend::{
     register_platform_socket_factory as register_android_socket_stream_factory_shim,
     PlatformSocketFactory as AndroidSocketStreamFactory,
     PlatformSocketStream as AndroidSocketStream,
+    register_platform_crypto as register_android_crypto, PlatformCrypto as AndroidCrypto,
+    PlatformTlsServer as AndroidTlsServer, PlatformTlsSession as AndroidTlsSession,
 };
 
 #[cfg(target_arch = "wasm32")]

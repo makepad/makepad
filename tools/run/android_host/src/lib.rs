@@ -6,6 +6,12 @@ pub mod boot;
 mod trampolines;
 #[cfg(target_os = "android")]
 mod jni;
+// the same adapter the program registers (makepad-platform), for the host's own makepad-network
+#[cfg(target_os = "android")]
+#[path = "../../../../platform/src/os/hal/android_fleet.rs"]
+mod android_fleet;
+#[cfg(target_os = "android")]
+mod devhub;
 #[cfg(target_os = "android")]
 mod logcat;
 #[cfg(target_os = "android")]

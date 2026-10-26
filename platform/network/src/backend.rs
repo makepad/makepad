@@ -9,10 +9,11 @@ use crate::ui_signal::SignalToUI;
 #[cfg(target_os = "android")]
 mod android;
 #[cfg(target_os = "android")]
-pub(crate) use self::android::connect_platform_socket_stream;
+pub(crate) use self::android::{connect_platform_socket_stream, platform_crypto};
 #[cfg(target_os = "android")]
 pub use self::android::{
-    clear_platform_socket_factory, register_platform_socket_factory, PlatformSocketFactory, PlatformSocketStream,
+    clear_platform_socket_factory, register_platform_crypto, register_platform_socket_factory, PlatformCrypto, PlatformSocketFactory, PlatformSocketStream,
+    PlatformTlsServer, PlatformTlsSession,
 };
 #[cfg(any(target_os = "ios", target_os = "macos", target_os = "tvos"))]
 pub mod apple;

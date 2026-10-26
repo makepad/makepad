@@ -30,6 +30,7 @@ use std::sync::Arc;
 mod audio;
 mod cache;
 mod drag_out;
+mod drop_video;
 mod columns;
 mod connection;
 mod eq;

@@ -1640,3 +1640,103 @@ pub fn open_url(url: &str) -> bool {
         }
     })
 }
+
+/// Fleet identity crypto on Android (native code has no libcrypto/libssl; the platform's Java
+/// security providers do the work: backend/android/fleet.rs). Keys are X9.63 (97 bytes), points
+/// 65 bytes. Byte results go into `out`; the return is the byte count, or -1 on failure.
+#[cfg(target_os = "android")]
+fn fleet_out(r: Result<Vec<u8>, String>, out: &mut [u8]) -> i64 {
+    match r {
+        Ok(v) if v.len() <= out.len() => {
+            out[..v.len()].copy_from_slice(&v);
+            v.len() as i64
+        }
+        _ => -1,
+    }
+}
+
+/// A fresh P-256 key into `out` (97 bytes).
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_fleet_generate(out: &mut [u8]) -> i64 {
+    fleet_out(backend::android::fleet::generate_p256(), out)
+}
+
+/// DER ECDSA-SHA256 of `msg` by `key` into `out` (at most 72 bytes).
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_fleet_sign(key: &[u8], msg: &[u8], out: &mut [u8]) -> i64 {
+    fleet_out(backend::android::fleet::sign(key, msg), out)
+}
+
+/// 1 when `sig` (DER) is `point`'s ECDSA-SHA256 of `msg`.
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_fleet_verify(point: &[u8], msg: &[u8], sig: &[u8]) -> u32 {
+    backend::android::fleet::verify(point, msg, sig) as u32
+}
+
+/// The raw P-256 ECDH secret of `key` and `point` into `out` (32 bytes).
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_fleet_ecdh(key: &[u8], point: &[u8], out: &mut [u8]) -> i64 {
+    fleet_out(backend::android::fleet::ecdh(key, point), out)
+}
+
+/// A TLS server context (certificate DER + key): a handle, or -1.
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_fleet_tls_server(cert: &[u8], key: &[u8]) -> i64 {
+    backend::android::fleet::server(cert, key).unwrap_or(-1)
+}
+
+/// A new server session of a context: a handle, or -1.
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_fleet_tls_session(server: i64) -> i64 {
+    backend::android::fleet::session(server).unwrap_or(-1)
+}
+
+/// Feeds a session ciphertext from the peer (empty: advance the handshake). Returns bit 0 =
+/// handshaking, bit 1 = closed, or -1 on failure. Output waits for `hal_fleet_tls_take`.
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_fleet_tls_feed(session: i64, data: &[u8]) -> i64 {
+    match backend::android::fleet::feed(session, data) {
+        Ok((hs, closed)) => hs as i64 | (closed as i64) << 1,
+        Err(_) => -1,
+    }
+}
+
+/// Encrypts plaintext (`close` != 0: stages the close_notify instead). 0, or -1 on failure.
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_fleet_tls_wrap(session: i64, data: &[u8], close: u32) -> i64 {
+    if close != 0 {
+        backend::android::fleet::close(session);
+        return 0;
+    }
+    backend::android::fleet::wrap(session, data).map_or(-1, |_| 0)
+}
+
+/// Moves waiting bytes (`app` != 0: plaintext, else ciphertext to send) into `out`: the count
+/// (0: none), -1 for an unknown handle.
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_fleet_tls_take(session: i64, app: u32, out: &mut [u8]) -> i64 {
+    backend::android::fleet::take(session, app != 0, out)
+}
+
+/// Frees a server or session handle.
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_fleet_tls_free(handle: i64) {
+    backend::android::fleet::free(handle)
+}
+
+/// The battery: level 0..=100 in bits 0..8, bit 8 = charging; -1 when unknown.
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_battery() -> i64 {
+    backend::android::fleet::battery().map_or(-1, |(level, charging)| level as i64 | (charging as i64) << 8)
+}

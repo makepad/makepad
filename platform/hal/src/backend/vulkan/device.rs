@@ -124,8 +124,10 @@ const BUDGET_REUSE: std::time::Duration = std::time::Duration::from_millis(250);
 
 static SHARED: Mutex<Option<(Vec<String>, Arc<Device>)>> = Mutex::new(None);
 
-/// Owns a VkInstance: destroyed when the last device on it is gone.
-struct InstanceLife(makepad_vulkan::Instance);
+/// Owns a VkInstance: destroyed when the last device on it is gone. `creator` is the runtime
+/// that made it (and makes its devices, a replacement after a loss too), with the loader's
+/// `vkGetInstanceProcAddr` it was given.
+struct InstanceLife(makepad_vulkan::Instance, Option<(Arc<dyn super::surface::VkCreator>, makepad_vulkan::commands::PfnGetInstanceProcAddr)>);
 impl Drop for InstanceLife {
     fn drop(&mut self) { unsafe { self.0.destroy_instance(None) } }
 }
@@ -173,18 +175,33 @@ impl Device {
         }
         let names: Vec<_> = instance_extensions.iter().map(|n| n.as_ptr()).collect();
         let app = vk::ApplicationInfo::default().application_name(c"Makepad HAL").api_version(vk::API_VERSION_1_1);
-        let instance = unsafe { entry.create_instance(&vk::InstanceCreateInfo::default().application_info(&app).enabled_extension_names(&names), None) }
-            .map_err(|e| format!("vkCreateInstance: {e:?}"))?;
+        let info = vk::InstanceCreateInfo::default().application_info(&app).enabled_extension_names(&names);
+        let creator = source.creator();
+        let (instance, creator) = match creator {
+            Some(creator) => {
+                let gipa = entry.table.get_instance_proc_addr.ok_or("Vulkan loader lacks vkGetInstanceProcAddr")?;
+                let handle = unsafe { creator.create_instance(gipa, &info) }?;
+                (unsafe { makepad_vulkan::Instance::from_handle(&entry, handle) }, Some((creator, gipa)))
+            }
+            None => (unsafe { entry.create_instance(&info, None) }.map_err(|e| format!("vkCreateInstance: {e:?}"))?, None),
+        };
         if log_enabled() { eprintln!("[hal-vulkan] vkCreateInstance succeeded"); }
-        let life = Arc::new(InstanceLife(instance.clone()));
-        let mut devices = unsafe { instance.enumerate_physical_devices() }
-            .map_err(|e| format!("vkEnumeratePhysicalDevices: {e:?}"))?;
-        devices.sort_by_key(|p| match unsafe { instance.get_physical_device_properties(*p) }.device_type {
-            vk::PhysicalDeviceType::DISCRETE_GPU => 0,
-            vk::PhysicalDeviceType::INTEGRATED_GPU => 1,
-            _ => 2,
-        });
-        source.order_devices(&instance, &mut devices)?;
+        let life = Arc::new(InstanceLife(instance.clone(), creator));
+        // a runtime that makes the device names its GPU
+        let devices = match &life.1 {
+            Some((creator, _)) => vec![unsafe { creator.physical_device(instance.handle()) }?],
+            None => {
+                let mut devices = unsafe { instance.enumerate_physical_devices() }
+                    .map_err(|e| format!("vkEnumeratePhysicalDevices: {e:?}"))?;
+                devices.sort_by_key(|p| match unsafe { instance.get_physical_device_properties(*p) }.device_type {
+                    vk::PhysicalDeviceType::DISCRETE_GPU => 0,
+                    vk::PhysicalDeviceType::INTEGRATED_GPU => 1,
+                    _ => 2,
+                });
+                source.order_devices(&instance, &mut devices)?;
+                devices
+            }
+        };
         let wanted = Wanted { instance_extensions, optional };
         for physical in devices {
             if let Some(device) = Self::open(&life, physical, &wanted)? { return Ok(device); }
@@ -326,7 +343,12 @@ impl Device {
         };
         let mut waited = 0u64;
         let raw = loop {
-            match unsafe { instance.create_device(physical, &create, None) } {
+            let made = match &life.1 {
+                Some((creator, gipa)) => unsafe { creator.create_device(*gipa, physical, &create) }
+                    .map(|handle| unsafe { makepad_vulkan::Device::from_handle(instance, handle) }),
+                None => unsafe { instance.create_device(physical, &create, None) },
+            };
+            match made {
                 Ok(raw) => break raw,
                 Err(e) if short_of_memory(e) => {
                     if waited == 0 { eprintln!("[hal-vulkan] vkCreateDevice device={name:?}: {e:?}; waiting for GPU memory"); }

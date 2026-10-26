@@ -23,7 +23,7 @@ mod bits;
 pub mod id3;
 mod psy;
 mod quantize;
-mod resample;
+pub mod resample;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;

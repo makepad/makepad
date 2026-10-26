@@ -13,6 +13,9 @@ pub enum HostOs {
 #[derive(Clone, Copy, PartialEq)]
 pub enum AndroidVariant {
     Default,
+    /// Meta Quest: the launcher activity is an immersive VR one (the OpenXR loader goes in
+    /// the APK and the HAL draws through an OpenXR session)
+    Quest,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -48,11 +51,12 @@ impl AndroidVariant {
         for opt in opt.split(",") {
             match opt {
                 "default" => return Ok(AndroidVariant::Default),
+                "quest" => return Ok(AndroidVariant::Quest),
                 _ => (),
             }
         }
         return Err(format!(
-            "please provide a valid android variant: default"
+            "please provide a valid android variant: default, quest"
         ));
     }
 
@@ -75,9 +79,28 @@ impl AndroidVariant {
             ""
         };
         let debuggable_str = if *debuggable { "true" } else { "false" };
+        // Quest: the launcher starts immersive (Horizon OS reads the VR category), the OpenXR
+        // loader reaches the runtime broker, and the phone-only hardware is optional
+        let quest = *self == Self::Quest;
+        let vr_category = if quest { "\n                        <category android:name=\"com.oculus.intent.category.VR\" />" } else { "" };
+        let vr_meta = if quest { r#"
+                    <meta-data android:name="com.oculus.supportedDevices" android:value="quest3|quest3s|questpro|quest2" />"# } else { "" };
+        let phone_required = if quest { "false" } else { "true" };
+        let vr_features = if quest { r#"
+                <uses-feature android:name="android.hardware.vr.headtracking" android:required="true" android:version="1" />
+                <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />
+                <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />"# } else { "" };
+        let vr_queries = if quest { r#"
+                <provider android:name="x" android:authorities="org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker" />
+                <intent>
+                <action android:name="org.khronos.openxr.OpenXRRuntimeService" />
+                </intent>
+                <intent>
+                <action android:name="org.khronos.openxr.OpenXRApiLayerService" />
+                </intent>"# } else { "" };
 
         match self {
-            Self::Default => format!(
+            Self::Default | Self::Quest => format!(
                 r#"<?xml version="1.0" encoding="utf-8"?>
                 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
                 xmlns:tools="http://schemas.android.com/tools"
@@ -96,7 +119,7 @@ impl AndroidVariant {
                     <!-- Lets adb shell attach simpleperf to a release build (API 29+, ignored below). -->
                     <profileable android:shell="true" tools:targetApi="29" />
                     <!-- Without this the system caps the window at its default 1.86 aspect and letterboxes every taller phone (a black band under the app, where the gesture bar is). -->
-                    <meta-data android:name="android.max_aspect" android:value="3.0" />
+                    <meta-data android:name="android.max_aspect" android:value="3.0" />{vr_meta}
                     <activity
                     android:name=".{class_name}"
                     android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
@@ -106,15 +129,15 @@ impl AndroidVariant {
                     android:theme="@style/MakepadLaunchTheme">
                     <intent-filter>
                         <action android:name="android.intent.action.MAIN" />
-                        <category android:name="android.intent.category.LAUNCHER" />
+                        <category android:name="android.intent.category.LAUNCHER" />{vr_category}
                     </intent-filter>
                     </activity>
                     {extra_activities}
                 </application>
                 <uses-sdk android:minSdkVersion="{sdk_version}" android:targetSdkVersion="{target_sdk_version}" />
                 <uses-feature android:glEsVersion="0x00020000" android:required="true"/>
-                <uses-feature android:name="android.hardware.bluetooth_le" android:required="true"/>
-                <uses-feature android:name="android.software.midi" android:required="true"/>
+                <uses-feature android:name="android.hardware.bluetooth_le" android:required="{phone_required}"/>
+                <uses-feature android:name="android.software.midi" android:required="{phone_required}"/>{vr_features}
                 <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
                 <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"  />
                 <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"  />
@@ -130,7 +153,7 @@ impl AndroidVariant {
                 <uses-permission android:name="android.permission.USE_BIOMETRIC" />
                 <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
 
-                <queries>
+                <queries>{vr_queries}
                 <intent>
                 <action android:name="android.intent.action.MAIN" />
                 </intent>
@@ -274,7 +297,7 @@ fn android_help() -> &'static str {
   cargo makepad android [options] build-aab <cargo args>\n\
   cargo makepad android keystore-create <path> [keytool options]\n\
   cargo makepad android [options] run <cargo args>\n\
-  cargo makepad android [options] build-host|run-host [--privileged] --app <package> [--font-set=Latin|International] [cargo flags]\n\
+  cargo makepad android [options] build-host|run-host [--privileged] [--devhub-name=<name>] [--debuggable] --app <package> [--font-set=Latin|International] [cargo flags]\n\
   cargo makepad android [options] adb <adb args>\n\
   cargo makepad android [options] adb-tcp [port]\n\
 \n\
@@ -298,7 +321,8 @@ Common options:\n\
   --no-icon\n\
   --sdk-path=<path>\n\
   --host-os=linux-x64|windows-x64|macos-aarch64|macos-x64\n\
-  --variant=default\n\
+  --variant=default|quest                  quest: an immersive Meta Quest (OpenXR) APK\n\
+  --quest                                  (build-host/run-host) same as --variant=quest\n\
   --devices=<serial1,serial2,...>|all    (for run and adb-tcp)\n\
   --keep-sdk-sources\n\
 \n\
@@ -503,6 +527,8 @@ fn parse_host_args(args: &[String]) -> Result<compile::HostOpts, String> {
     let mut env = Vec::new();
     let mut privileged = false;
     let mut font_assets = Vec::new();
+    let mut devhub_name = None;
+    let mut debuggable = false;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -517,6 +543,10 @@ fn parse_host_args(args: &[String]) -> Result<compile::HostOpts, String> {
             font_assets.push(f.to_string());
         } else if a == "--privileged" {
             privileged = true;
+        } else if a == "--debuggable" {
+            debuggable = true;
+        } else if let Some(n) = a.strip_prefix("--devhub-name=") {
+            devhub_name = Some(n.to_string());
         } else if let Some(f) = a.strip_prefix("--font-set=") {
             font_set = f.to_string();
         } else if let Some(app) = apps.last_mut() {
@@ -530,7 +560,7 @@ fn parse_host_args(args: &[String]) -> Result<compile::HostOpts, String> {
     if apps.is_empty() {
         return Err("run-host needs --app <package> (repeat it for more apps)".to_string());
     }
-    Ok(compile::HostOpts { apps, env, font_set, privileged, font_assets })
+    Ok(compile::HostOpts { apps, env, font_set, privileged, font_assets, devhub_name, debuggable })
 }
 
 pub fn handle_android(mut args: &[String]) -> Result<(), String> {
@@ -771,7 +801,9 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
             )
         }
         "build-host" | "run-host" => {
-            let host = parse_host_args(&args[1..])?;
+            let variant = if args[1..].iter().any(|a| a == "--quest") { AndroidVariant::Quest } else { variant };
+            let host_args: Vec<String> = args[1..].iter().filter(|a| *a != "--quest").cloned().collect();
+            let host = parse_host_args(&host_args)?;
             if args[0] == "build-host" {
                 compile::build_host(
                     &sdk_dir,
@@ -846,6 +878,15 @@ mod tests {
         // band under the app where the gesture bar is.
         let xml = AndroidVariant::Default.manifest_xml(&test_args("App", "dev.makepad.app"));
         assert!(xml.contains("android:name=\"android.max_aspect\" android:value=\"3.0\""));
+    }
+
+    #[test]
+    fn quest_manifest_launches_immersive() {
+        let xml = AndroidVariant::Quest.manifest_xml(&test_args("App", "dev.makepad.app"));
+        assert!(xml.contains("com.oculus.intent.category.VR"));
+        assert!(xml.contains("android.hardware.vr.headtracking"));
+        assert!(xml.contains("org.khronos.openxr.runtime_broker"));
+        assert!(!AndroidVariant::Default.manifest_xml(&test_args("App", "dev.makepad.app")).contains("com.oculus"));
     }
 
     #[test]
