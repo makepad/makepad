@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
-const HELP: &str = "makepad devhub sync words (the master; nodes by hub name, `all` = every fleet node):
+pub const HELP: &str = "  sync words (the master; nodes by hub name, `all` = every node):
   sync status [node...]                         each node's synced checkout, store refs, last apply
   sync push <node,...|all> [--makepad <branch>] [--commercial <branch>|--no-commercial]
             [--repo <dir>] [--build on|off] [--restart none|auto|wm|apps]
@@ -22,9 +22,13 @@ const HELP: &str = "makepad devhub sync words (the master; nodes by hub name, `a
                                                 push branches (default work + commercial main) as signed
                                                 bundles, fast-forward the node's checkout, prebuild,
                                                 restart; --session: every listed JIT patches at one tick
+  rebuild <node,...|all> [wm|apps]              push work + commercial main, prebuild, restart the WM (wm), our
+                                                launches (apps) or what the build replaced (default)
   wm-restart <node>                             restart the node's WM (and AI Hub) through its service
-  launch <node> --lease=<id> [--visible|--hidden] [--lan] [K=V...] <app> [args...]
-                                                start <app> under makepad run on the node; prints its JIT id
+  launch <node> --lease <id> [--visible|--hidden] [--lan] [K=V...] <app> [args...]
+                                                start <app> (registry name or package) under makepad run on the
+                                                node; prints its JIT id (--lease defaults to $DEVHUB_LEASE)
+  restart <node>/<pid>                          stop a launch and start it again (same lease, env, args)
   stop <node>/<pid>                             stop a launch by its JIT id (also <node>/<app>#<pid>)
   launched <node>                               the node's running launches
   launch-log <node>/<pid> [n]                   the tail of a launch's log";
@@ -519,6 +523,51 @@ fn sync_push(c: &Client, args: &[&str]) -> i32 {
     code
 }
 
+/// `launch` arguments as the node's `launch` line: (node, words). Flags go anywhere before the
+/// app: `--lease L3`, `--lease=L3` and `lease=L3` are one flag; without one, `DEVHUB_LEASE`
+/// (what `devhub lease` prints to export) is used.
+fn launch_words(args: &[&str]) -> Result<(String, String), String> {
+    let mut node = None;
+    let mut lease = None;
+    let mut words = vec!["launch".to_string()];
+    let mut i = 0;
+    let mut app = false;
+    while i < args.len() {
+        let w = args[i];
+        if app {
+            words.push(w.to_string());
+        } else {
+            match w {
+                "--visible" => words.push("visible".into()),
+                "--hidden" => words.push("hidden".into()),
+                "--lan" => words.push("lan".into()),
+                "--lease" => {
+                    i += 1;
+                    lease = Some(args.get(i).ok_or("--lease needs a lease id")?.to_string());
+                }
+                "--" => {}
+                w if w.starts_with("--lease=") => lease = Some(w["--lease=".len()..].to_string()),
+                w if w.starts_with("lease=") => lease = Some(w["lease=".len()..].to_string()),
+                w if w.starts_with("--") => return Err(format!("unknown flag `{w}`")),
+                w if node.is_none() => node = Some(w.to_string()),
+                // K=V env words, then the app and its args
+                w => {
+                    app = !(w.contains('=') && w.split('=').next().is_some_and(|k| !k.is_empty() && k.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')));
+                    words.push(w.to_string());
+                }
+            }
+        }
+        i += 1;
+    }
+    let node = node.ok_or("which node?")?;
+    if !app {
+        return Err("which app?".into());
+    }
+    let lease = lease.or_else(|| std::env::var("DEVHUB_LEASE").ok().filter(|l| !l.is_empty())).ok_or("needs a write lease: --lease <id> (take one with `makepad devhub lease screen --node <node>`)")?;
+    words.insert(1, format!("lease={lease}"));
+    Ok((node, words.join(" ")))
+}
+
 /// `<node>/<pid>` or `<node>/<app>#<pid>`.
 fn jit_id(s: &str) -> Option<(String, u32)> {
     let (n, rest) = s.split_once('/')?;
@@ -527,7 +576,7 @@ fn jit_id(s: &str) -> Option<(String, u32)> {
 
 pub fn main(args: &[&str]) -> Option<i32> {
     let verb = *args.first()?;
-    if !matches!(verb, "sync" | "launch" | "stop" | "launched" | "launch-log" | "wm-restart") {
+    if !matches!(verb, "sync" | "launch" | "stop" | "launched" | "launch-log" | "wm-restart" | "rebuild" | "restart") {
         return None;
     }
     if args.len() < 2 || matches!(args[1], "-h" | "--help" | "help") {
@@ -567,19 +616,31 @@ pub fn main(args: &[&str]) -> Option<i32> {
                 2
             }
         },
-        ("launch", [node, rest @ ..]) if !rest.is_empty() => {
-            let mut words = vec!["launch".to_string()];
-            for w in rest.iter() {
-                match *w {
-                    "--visible" => words.push("visible".into()),
-                    "--hidden" => words.push("hidden".into()),
-                    "--lan" => words.push("lan".into()),
-                    w if w.starts_with("--lease=") => words.push(format!("lease={}", &w["--lease=".len()..])),
-                    "--" => {}
-                    w => words.push(w.to_string()),
-                }
+        ("launch", rest) => match launch_words(rest) {
+            Ok((node, words)) => out(&node, ask(&c, &node, "launch", &words)),
+            Err(e) => {
+                eprintln!("makepad devhub launch: {e}\n{HELP}");
+                2
             }
-            out(node, ask(&c, node, "launch", &words.join(" ")))
+        },
+        ("restart", [id]) => match jit_id(id) {
+            Some((n, pid)) => out(&n, ask(&c, &n, "launch", &format!("relaunch {pid}"))),
+            None => {
+                eprintln!("makepad devhub restart <node>/<pid>");
+                2
+            }
+        },
+        ("rebuild", [node, what @ ..]) => {
+            let restart = match what {
+                [] => "auto",
+                ["wm"] => "wm",
+                ["apps"] => "apps",
+                _ => {
+                    eprintln!("makepad devhub rebuild <node,...|all> [wm|apps]");
+                    return Some(2);
+                }
+            };
+            sync_push(&c, &[node, "--build", "on", "--restart", restart])
         }
         ("stop", [id]) => match jit_id(id) {
             Some((n, pid)) => out(&n, ask(&c, &n, "launch", &format!("stop {pid}"))),

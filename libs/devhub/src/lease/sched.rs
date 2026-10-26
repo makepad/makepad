@@ -14,8 +14,9 @@ use crate::proto::{hub_record, Record, Sev};
 use makepad_remote::json_str;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
-/// No beat from the holder for this long: the lease expires.
-pub const BEAT_EXPIRY_MS: u64 = 30_000;
+/// No beat from the holder for this long: the lease expires (holders beat every 2 s; a holder
+/// on the master's machine is also watched by its pid, which ends its lease within a second).
+pub const BEAT_EXPIRY_MS: u64 = 10_000;
 /// A waiting lease's priority improves by one per this much waiting (starvation guard).
 pub const AGE_STEP_MS: u64 = 600_000;
 /// A wait this long becomes a warn (once).
@@ -77,18 +78,22 @@ pub struct Req {
     pub repo_dir: Option<String>,
     /// inspect leases: the JIT (pid or app)
     pub jit: Option<String>,
+    /// the holder process on the master's machine (the CLI that asked): its end ends the lease
+    pub holder: Option<u32>,
+    /// the agent behind the lane (`DEVHUB_AGENT`): what the panel shows and `evict` can name
+    pub agent: Option<String>,
 }
 
 impl Req {
     pub fn new(lane: &str, kind: Kind) -> Req {
-        Req { lane: lane.to_string(), kind, node: None, needs: Vec::new(), prio: DEFAULT_PRIO, rev: None, repo_dir: None, jit: None }
+        Req { lane: lane.to_string(), kind, node: None, needs: Vec::new(), prio: DEFAULT_PRIO, rev: None, repo_dir: None, jit: None, holder: None, agent: None }
     }
 
     pub fn to_json(&self) -> String {
         let opt = |o: &Option<String>| o.as_deref().map_or("null".to_string(), json_str);
         let needs: Vec<String> = self.needs.iter().map(|(k, v)| format!("{}:{}", json_str(k), json_str(v))).collect();
         format!(
-            "{{\"lane\":{},\"kind\":\"{}\",\"node\":{},\"needs\":{{{}}},\"prio\":{},\"rev\":{},\"repo_dir\":{},\"jit\":{}}}",
+            "{{\"lane\":{},\"kind\":\"{}\",\"node\":{},\"needs\":{{{}}},\"prio\":{},\"rev\":{},\"repo_dir\":{},\"jit\":{},\"holder\":{},\"agent\":{}}}",
             json_str(&self.lane),
             self.kind.as_str(),
             opt(&self.node),
@@ -96,7 +101,9 @@ impl Req {
             self.prio,
             opt(&self.rev),
             opt(&self.repo_dir),
-            opt(&self.jit)
+            opt(&self.jit),
+            self.holder.map_or("null".to_string(), |p| p.to_string()),
+            opt(&self.agent)
         )
     }
 
@@ -111,6 +118,8 @@ impl Req {
         r.rev = s("rev");
         r.repo_dir = s("repo_dir");
         r.jit = s("jit");
+        r.agent = s("agent").filter(|a| crate::trust::valid_name(a));
+        r.holder = v.get("holder").and_then(super::num).map(|p| p as u32).filter(|p| *p > 1);
         if let Some(makepad_strict_json::Value::Obj(pairs)) = v.get("needs") {
             for (k, x) in pairs {
                 r.needs.push((k.clone(), x.as_str().map(str::to_string).or_else(|| super::num(x).map(|n| n.to_string())).unwrap_or_default()));
@@ -169,6 +178,8 @@ pub struct Lease {
     warned: bool,
     /// the node's `lease-start` answer (work, target, env)
     pub start: String,
+    /// what the node says it runs, its work dir and disk use (`lease-beat` info)
+    pub info: String,
     seq: u64,
 }
 
@@ -189,7 +200,7 @@ impl Lease {
             _ => "null".into(),
         };
         format!(
-            "{{\"id\":{},\"lane\":{},\"kind\":\"{}\",\"state\":\"{}\",\"node\":{},\"addr\":{},\"pos\":{},\"reason\":{},\"prio\":{},\"wait_s\":{},\"how\":{},\"jit\":{},\"start\":{}}}",
+            "{{\"id\":{},\"lane\":{},\"kind\":\"{}\",\"state\":\"{}\",\"node\":{},\"addr\":{},\"pos\":{},\"reason\":{},\"prio\":{},\"wait_s\":{},\"how\":{},\"jit\":{},\"agent\":{},\"beat_s\":{},\"granted_s\":{},\"info\":{},\"start\":{}}}",
             json_str(&self.id),
             json_str(&self.req.lane),
             self.req.kind.as_str(),
@@ -202,6 +213,10 @@ impl Lease {
             (self.granted_ms.unwrap_or(now).saturating_sub(self.asked_ms)) / 1000,
             how,
             opt(&self.req.jit),
+            opt(&self.req.agent),
+            now.saturating_sub(self.beat_ms) / 1000,
+            self.granted_ms.map_or("null".to_string(), |g| (now.saturating_sub(g) / 1000).to_string()),
+            if self.info.starts_with('{') { self.info.as_str() } else { "null" },
             if self.start.starts_with('{') { self.start.as_str() } else { "null" }
         )
     }
@@ -277,12 +292,14 @@ impl NodeView {
     /// `x86_64 linux · 16 cores · load 2.1 · 40/60 GB · disk 105 GB free (floor 25) · RTX 5090`.
     pub fn caps_line(&self) -> String {
         let Some(c) = &self.caps else { return if self.up { "no caps yet".into() } else { "down".into() } };
+        let cpu = c.cpu_pct.map_or(String::new(), |p| format!("cpu {p:.0}% \u{b7} "));
         let mut s = format!(
-            "{} {} \u{b7} {} cores \u{b7} load {:.1} \u{b7} {:.0}/{:.0} GB \u{b7} disk {:.0} GB free (floor {:.0})",
+            "{} {} \u{b7} {} cores \u{b7} {cpu}load {:.1} \u{b7} {:.0}/{:.0} GB free \u{b7} disk {:.0} GB free (floor {:.0})",
             c.arch, c.os, c.cores, c.load1, c.ram_avail_gb, c.ram_gb, c.disk_free_gb, c.disk_floor_gb
         );
-        for (g, v) in &c.gpus {
-            s.push_str(&format!(" \u{b7} {g} {v:.0} GB"));
+        for (i, (g, v)) in c.gpus.iter().enumerate() {
+            let busy = c.gpu_busy.get(i).map_or(String::new(), |(u, m)| format!(" {u:.0}% {m:.0}/"));
+            s.push_str(&format!(" \u{b7} {}{busy}{}{v:.0} GB", g.trim_start_matches("NVIDIA ").trim_start_matches("GeForce "), if busy.is_empty() { " " } else { "" }));
         }
         if let Some((p, ch)) = c.battery {
             s.push_str(&format!(" \u{b7} battery {p}%{}", if ch { " charging" } else { "" }));
@@ -354,6 +371,8 @@ pub struct Sched {
     holds: HashMap<String, String>,
     out: Vec<Action>,
     pub lane_cap: u32,
+    /// lanes and agents the user evicted: no new leases until unblocked
+    pub blocked: Vec<String>,
 }
 
 /// `1st 2nd 3rd 4th … 11th 12th 13th … 21st`.
@@ -422,6 +441,7 @@ impl Sched {
             holds: HashMap::new(),
             out: Vec::new(),
             lane_cap: LANE_CAP,
+            blocked: Vec::new(),
         }
     }
 
@@ -495,8 +515,15 @@ impl Sched {
             reason: String::new(),
             warned: false,
             start: String::new(),
+            info: String::new(),
             seq: self.seq,
         };
+        if let Some(who) = self.blocked_of(&l.req) {
+            self.leases.push(l);
+            let i = self.leases.len() - 1;
+            self.end_at(i, "denied", Sev::Warn, &format!("evicted by the user ({who} is blocked until `devhub unblock {who}`)"), now);
+            return id;
+        }
         if l.req.kind != Kind::Inspect && running >= self.lane_cap {
             self.event(Sev::Warn, format!("{} for {}: over the lane cap ({running}/{} running), queued", l.tag(), l.req.lane, self.lane_cap), Some(&l));
         }
@@ -531,6 +558,9 @@ impl Sched {
         let line = match (how, held) {
             ("denied", _) => format!("{} for {} denied: {why}", l.tag(), l.req.lane),
             ("expired", _) => format!("{} of {} expired: no heartbeat for {} s{}", l.tag(), l.req.lane, BEAT_EXPIRY_MS / 1000, if node.is_some() { "; cleaning up" } else { " (was queued)" }),
+            ("evicted", _) => format!("{} of {} ended: evicted by the user{}", l.tag(), l.req.lane, if node.is_some() { "; cleaning up" } else { "" }),
+            ("overridden", _) => format!("{} of {} ended: {why}{}", l.tag(), l.req.lane, if node.is_some() { "; cleaning up" } else { "" }),
+            ("holder-dead", _) => format!("{} of {} released: its holder (pid {}) ended{}", l.tag(), l.req.lane, l.req.holder.unwrap_or(0), if node.is_some() { "; cleaning up" } else { " (was queued)" }),
             (_, Some(h)) => format!("{} of {} ended ({how}{}) after {}", l.tag(), l.req.lane, if why.is_empty() { String::new() } else { format!(": {why}") }, dur(h)),
             (_, None) => format!("{} for {} left the queue ({how}{})", l.tag(), l.req.lane, if why.is_empty() { String::new() } else { format!(": {why}") }),
         };
@@ -552,6 +582,72 @@ impl Sched {
             }
             None => false,
         }
+    }
+
+    fn blocked_of(&self, r: &Req) -> Option<String> {
+        self.blocked.iter().find(|b| **b == r.lane || r.agent.as_deref() == Some(b.as_str())).cloned()
+    }
+
+    /// The node's word on a live lease (running, work, disk).
+    pub fn set_info(&mut self, id: &str, info: &str) {
+        if let Some(l) = self.leases.iter_mut().find(|l| l.id == id) {
+            l.info = info.to_string();
+        }
+    }
+
+    /// The user evicts a lane or agent: every lease of it ends (`evicted`) and it is blocked.
+    /// Returns the leases ended.
+    pub fn evict(&mut self, who: &str, now: u64) -> Vec<String> {
+        if !self.blocked.iter().any(|b| b == who) {
+            self.blocked.push(who.to_string());
+        }
+        let ids: Vec<String> = self.leases.iter().filter(|l| l.req.lane == who || l.req.agent.as_deref() == Some(who)).map(|l| l.id.clone()).collect();
+        for id in &ids {
+            if let Some(i) = self.leases.iter().position(|l| l.id == *id) {
+                self.end_at(i, "evicted", Sev::Warn, "evicted by the user", now);
+            }
+        }
+        self.event(Sev::Warn, format!("{who} evicted by the user: {} ended, no new leases until `devhub unblock {who}`", ids.len()), None);
+        ids
+    }
+
+    pub fn unblock(&mut self, who: &str) -> bool {
+        let had = self.blocked.iter().any(|b| b == who);
+        self.blocked.retain(|b| b != who);
+        if had {
+            self.event(Sev::Info, format!("{who} unblocked by the user"), None);
+        }
+        had
+    }
+
+    /// The user takes a node now: its live leases end (`overridden`), except `to`'s; with `to`,
+    /// that lane's waiting leases go to the front of the queue, pinned to the node.
+    pub fn override_node(&mut self, node: &str, to: Option<&str>, now: u64) -> Result<Vec<String>, String> {
+        if !self.nodes.contains_key(node) {
+            return Err(format!("no node {node}"));
+        }
+        let ids: Vec<String> = self.leases.iter().filter(|l| l.state.live() && l.node.as_deref() == Some(node) && Some(l.req.lane.as_str()) != to).map(|l| l.id.clone()).collect();
+        let who = to.map_or("the user".to_string(), |t| format!("lane {t}"));
+        for id in &ids {
+            if let Some(i) = self.leases.iter().position(|l| l.id == *id) {
+                self.end_at(i, "overridden", Sev::Warn, &format!("{node} given to {who}"), now);
+            }
+        }
+        let mut moved = 0;
+        if let Some(t) = to {
+            for l in self.leases.iter_mut().filter(|l| l.state == State::Queued && l.req.lane == t) {
+                l.req.prio = i32::MIN / 2;
+                l.req.node = Some(node.to_string());
+                moved += 1;
+            }
+        }
+        self.event(Sev::Warn, format!("node {node} overridden by the user: given to {who}; {} ended{}", ids.len(), if to.is_some() { format!(", {moved} of its waiting leases to the front") } else { String::new() }), None);
+        Ok(ids)
+    }
+
+    /// Leases whose holder process (on the master's machine) is gone.
+    pub fn holders_gone(&self, alive: &dyn Fn(u32) -> bool) -> Vec<String> {
+        self.leases.iter().filter(|l| l.req.holder.is_some_and(|p| !alive(p))).map(|l| l.id.clone()).collect()
     }
 
     /// The node set the lease up: `answer` is its `lease-start` line.
@@ -595,6 +691,7 @@ impl Sched {
             reason: String::new(),
             warned: false,
             start: v.get("start").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            info: String::new(),
             seq: self.seq,
         };
         self.leases.push(l);
@@ -1123,12 +1220,17 @@ mod tests {
         s.started(&b, "{\"ok\":1}");
         s.beat(&b, 20_000);
         s.beat(&q, 20_000);
-        assert!(s.tick(40_000).iter().all(|a| !matches!(a, Action::End { .. })));
-        s.beat(&q, 45_000);
-        let a = s.tick(50_001);
+        assert!(s.tick(30_000).iter().all(|a| !matches!(a, Action::End { .. })));
+        s.beat(&q, 25_000);
+        let a = s.tick(30_001);
         assert!(a.iter().any(|a| matches!(a, Action::End { id, node: Some(n), how } if *id == b && n == "a" && how == "expired")));
         assert!(a.iter().any(|a| matches!(a, Action::Event(r) if r.sev == Sev::Warn && r.line.contains("expired"))));
         assert_eq!(state(&s, &q).0, "starting");
+        // a holder pid that is gone ends its lease at once
+        s.leases.iter_mut().find(|l| l.id == q).unwrap().req.holder = Some(4242);
+        assert_eq!(s.holders_gone(&|p| p != 4242), vec![q.clone()]);
+        assert!(s.release(&q, "holder-dead", 30_500));
+        assert_eq!(s.get(&q).map(|l| l.state.clone()), Some(State::Ended("holder-dead".into())));
     }
 
     #[test]

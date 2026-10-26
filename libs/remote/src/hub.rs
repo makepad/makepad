@@ -181,6 +181,21 @@ impl Hub {
         }
     }
 
+    /// Drops the links whose host name `keep` refuses (a host that turned out to be another
+    /// name of a machine the hub already links to).
+    pub fn retain(&self, keep: &dyn Fn(&str) -> bool) {
+        self.0.links.lock().unwrap().retain(|l| {
+            let kept = keep(&l.host.name);
+            if !kept {
+                // a dropped client does not end its connection on its own
+                if let Some(c) = &l.client {
+                    c.close();
+                }
+            }
+            kept
+        });
+    }
+
     /// Clients currently connected to the hub's socket.
     pub fn clients(&self) -> usize {
         let mut c = self.0.clients.lock().unwrap();

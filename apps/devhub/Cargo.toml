@@ -14,3 +14,5 @@ path = "src/main.rs"
 makepad-widgets = { path = "../../widgets", default-features = false }
 makepad-shell-kit = { path = "../../libs/shell_kit" }
 makepad-devhub = { path = "../../libs/devhub" }
+makepad-remote = { workspace = true }
+makepad-strict-json = { workspace = true }

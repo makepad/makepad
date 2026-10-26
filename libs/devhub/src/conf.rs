@@ -17,6 +17,9 @@ pub const NODE_CONF_ENV: &str = "MAKEPAD_DEVHUB_NODE_CONF";
 /// launch = makepad run    # what `session launch <app>` runs
 /// nice = 10               # the WM starts it under nice
 /// embedded = off          # on: devhub runs inside the JIT host it observes (phones, headsets)
+/// discovery = on          # off: no LAN beacon (macOS: sending or receiving broadcasts asks the
+///                         # Local Network question, which nobody answers on a headless Mac);
+///                         # the master still dials it from nodes.conf. Default off on macOS.
 /// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct NodeConf {
@@ -31,11 +34,28 @@ pub struct NodeConf {
     pub embedded: bool,
     /// the WM starts it under `nice -n <nice>` (0: not niced)
     pub nice: i32,
+    /// announce itself and listen for the other nodes on the LAN beacon
+    pub discovery: bool,
+}
+
+/// `makepad run` by this very binary when it is the `makepad` tool (`makepad devhub serve`), so a
+/// hub started outside a shell never looks `makepad` up on PATH; else `makepad` next to it, then
+/// the bare name.
+fn default_launch() -> Vec<String> {
+    let exe = std::env::current_exe().ok();
+    let tool = exe.as_ref().and_then(|e| {
+        if e.file_stem().is_some_and(|s| s == "makepad") {
+            return Some(e.clone());
+        }
+        let sib = e.with_file_name(if cfg!(windows) { "makepad.exe" } else { "makepad" });
+        sib.is_file().then_some(sib)
+    });
+    vec![tool.map_or_else(|| "makepad".to_string(), |t| t.display().to_string()), "run".into()]
 }
 
 impl Default for NodeConf {
     fn default() -> Self {
-        NodeConf { enabled: true, name: String::new(), host: None, port: proto::NODE_PORT, hitch_ms: proto::HITCH_MS, launch: vec!["makepad".into(), "run".into()], embedded: false, nice: 10 }
+        NodeConf { enabled: true, name: String::new(), host: None, port: proto::NODE_PORT, hitch_ms: proto::HITCH_MS, launch: default_launch(), embedded: false, nice: 10, discovery: !cfg!(target_os = "macos") }
     }
 }
 
@@ -54,6 +74,7 @@ impl NodeConf {
                 "hitch_ms" => c.hitch_ms = v.parse().unwrap_or(c.hitch_ms),
                 "nice" => c.nice = v.parse().unwrap_or(c.nice),
                 "embedded" => c.embedded = matches!(v, "on" | "true" | "1"),
+                "discovery" => c.discovery = matches!(v, "on" | "true" | "1"),
                 "launch" if !v.is_empty() => c.launch = v.split_whitespace().map(str::to_string).collect(),
                 _ => eprintln!("devhub: conf: skipped `{line}`"),
             }

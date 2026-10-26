@@ -10,13 +10,15 @@ use std::time::Duration;
 
 const HELP: &str = "makepad devhub (or observe): the local devhub (start it with `cargo run --release -p makepad-app-devhub`)
   stream [--json] [--all]                 one line per event, live (--all: info lines too)
-  ls                                      machines and their JITs
+  ls [machine]                            machines and their JITs, each with what it is up to
   inspect <machine>/<pid|app> <cmd...>    any inspect command on that JIT (master: every node)
+  top <node>                              CPU, GPU, RAM, disk and the busiest processes of a node
+  log <node>/<pid|app> [n]                the tail of a JIT's log (its session log, or its launch log)
   reply <request-id> <status> <message>   answer an engine request (received working deployed declined note)
   inbox [--all]                           what needs a look (master), newest first
   show <id>                               an event with its detail (master inbox)
   clear <id|all>                          remove from the inbox (seen <id|all> marks it read)
-  hubs                                    the hubs this one links to
+  hubs [--json]                           the node hubs this one links to (nodes.conf + the nodes they heard)
   serve [--node <conf>]                   run a hub here without its app (master, or a node with that conf)";
 
 pub(crate) fn control() -> Result<Client, String> {
@@ -70,56 +72,37 @@ fn num(v: &Value, k: &str) -> f64 {
     }
 }
 
-fn dur(s: f64) -> String {
-    let s = s as u64;
-    if s >= 3600 { format!("{}h{:02}m", s / 3600, (s / 60) % 60) } else if s >= 60 { format!("{}m{:02}s", s / 60, s % 60) } else { format!("{s}s") }
-}
 
-/// `ps` lines as the `ls` block of one machine.
-pub fn render_ps(lines: &[String], out: &mut String) {
-    for l in lines {
-        let Ok(v) = makepad_strict_json::parse(l.as_bytes()) else { continue };
-        let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
-        if v.get("machine").is_some() {
-            out.push_str(&format!(
-                "{}  {}  load {:.1}/{}  mem {}/{} GB free  {} JITs\n",
-                s("machine"),
-                s("os"),
-                num(&v, "load1"),
-                num(&v, "cpus"),
-                num(&v, "mem_avail_mb") as u64 / 1024,
-                num(&v, "mem_total_mb") as u64 / 1024,
-                num(&v, "jits")
-            ));
-        } else if v.get("pid").is_some() {
-            let cpu = match v.get("cpu_pct") {
-                Some(Value::Null) | None => "-".to_string(),
-                _ => format!("{:.0}%", num(&v, "cpu_pct")),
-            };
-            let kind = if v.get("jit").and_then(|j| j.as_bool()) == Some(true) { "" } else { "  (native)" };
-            let state = s("state");
-            let state: String = state.chars().take(80).collect();
-            out.push_str(&format!(
-                "  {:>7} {:<16} up {:<7} cpu {:<5} rss {:>5}M thr {:<3} {}{kind}\n",
-                num(&v, "pid"),
-                s("app"),
-                dur(num(&v, "up_s")),
-                cpu,
-                num(&v, "rss_mb"),
-                num(&v, "threads"),
-                state
-            ));
-        } else if let Some(e) = v.get("err").and_then(|e| e.as_str()) {
-            out.push_str(&format!("  error: {}\n", proto::clean(e, 200)));
+/// `ps` lines as the `ls` block of one machine: the machine, then each JIT with what it is up to.
+pub fn render_ps(name: Option<&str>, lines: &[String], out: &mut String) {
+    let mut m = crate::explorer::parse_ps("", lines);
+    if let Some(n) = name {
+        m.name = n.to_string();
+    }
+    if let Some(e) = &m.err {
+        out.push_str(&format!("{}  error: {}\n", m.name, proto::clean(e, 200)));
+        return;
+    }
+    out.push_str(&format!("{}  {}  load {:.1}/{}  mem {}/{} GB free  {} JITs\n", m.name, m.os, m.load1, m.cpus, m.mem_avail_mb / 1024, m.mem_total_mb / 1024, m.jits.iter().filter(|j| j.jit).count()));
+    for j in &m.jits {
+        out.push_str(&format!("  {}\n", j.head()));
+        let facts = j.facts();
+        if !facts.is_empty() {
+            out.push_str(&format!("      {facts}\n"));
+        }
+        for (kind, line, age) in j.recent.iter().take(2) {
+            out.push_str(&format!("      {kind} {}s ago: {}\n", age, proto::clean(line, 160)));
         }
     }
 }
 
-fn ls(c: &Client) -> i32 {
+fn ls(c: &Client, only: Option<&str>) -> i32 {
     let mut out = String::new();
-    match ask(c, None, "ps", "ps") {
-        Ok(lines) => render_ps(&lines, &mut out),
-        Err(e) => out.push_str(&format!("this machine: {e}\n")),
+    if only.is_none_or(|o| o == local_name(c)) {
+        match ask(c, None, "ps", "ps") {
+            Ok(lines) => render_ps(None, &lines, &mut out),
+            Err(e) => out.push_str(&format!("this machine: {e}\n")),
+        }
     }
     if has(c, "hosts") {
         for h in ask(c, None, "hosts", "hosts").unwrap_or_default() {
@@ -128,8 +111,11 @@ fn ls(c: &Client) -> i32 {
                 continue;
             }
             let name = v.get("host").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            if only.is_some_and(|o| o != name) {
+                continue;
+            }
             match ask(c, Some(&name), "ps", "ps") {
-                Ok(lines) => render_ps(&lines, &mut out),
+                Ok(lines) => render_ps(Some(&name), &lines, &mut out),
                 Err(e) => out.push_str(&format!("{name}  down: {}\n", proto::clean(&e, 160))),
             }
         }
@@ -224,7 +210,7 @@ fn reply(c: &Client, id: &str, status: &str, msg: &str) -> i32 {
 pub fn main(args: &[String]) -> i32 {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     if matches!(a.first().copied(), None | Some("-h") | Some("--help") | Some("help")) {
-        println!("{HELP}\n{}", crate::lease::client::HELP);
+        println!("{HELP}\n{}\n{}", crate::lease::client::HELP, crate::sync::help());
         return if a.is_empty() { 2 } else { 0 };
     }
     if a.first() == Some(&"serve") {
@@ -244,7 +230,7 @@ pub fn main(args: &[String]) -> i32 {
         }
     };
     match a.as_slice() {
-        ["ls", ..] => ls(&c),
+        ["ls", rest @ ..] => ls(&c, rest.first().copied()),
         ["stream", rest @ ..] => stream(&c, rest.contains(&"--json"), rest.contains(&"--all")),
         ["inspect", target, cmd @ ..] if !cmd.is_empty() => inspect(&c, target, &args[2..]),
         ["reply", id, status, msg @ ..] => reply(&c, id, status, &msg.join(" ")),
@@ -252,9 +238,61 @@ pub fn main(args: &[String]) -> i32 {
         ["show", id] => lines_out(ask(&c, None, "inbox", &format!("show {id}")), false),
         ["clear", id] => lines_out(ask(&c, None, "inbox", &format!("clear {id}")), false),
         ["seen", id] => lines_out(ask(&c, None, "inbox", &format!("seen {id}")), false),
-        ["hubs", ..] if has(&c, "hosts") => match ask(&c, None, "hosts", "hosts") {
+        ["top", node, rest @ ..] => match ask(&c, if *node == local_name(&c) { None } else { Some(node) }, "top", &format!("top {}", rest.first().unwrap_or(&"12"))) {
+            Ok(lines) => {
+                let mut out = String::new();
+                crate::top::render(&lines, &mut out);
+                print!("{out}");
+                0
+            }
+            Err(e) => {
+                eprintln!("makepad devhub top: {node}: {e}");
+                2
+            }
+        },
+        ["log", target, rest @ ..] => {
+            let Some((node, who)) = target.split_once('/') else {
+                eprintln!("makepad devhub log <node>/<pid|app> [n]");
+                return 2;
+            };
+            let who = who.rsplit('#').next().unwrap_or(who);
+            match ask(&c, Some(node), "jitlog", &format!("jitlog {who} {}", rest.first().unwrap_or(&"40"))) {
+                Ok(lines) => {
+                    let mut code = 0;
+                    for l in lines {
+                        let Ok(v) = makepad_strict_json::parse(l.as_bytes()) else { continue };
+                        if let Some(t) = v.get("line").and_then(|x| x.as_str()) {
+                            println!("{t}");
+                        } else if let Some(p) = v.get("log").and_then(|x| x.as_str()) {
+                            eprintln!("== {node}:{p}");
+                        } else if let Some(e) = v.get("err").and_then(|x| x.as_str()) {
+                            eprintln!("makepad devhub log: {node}: {e}");
+                            code = 1;
+                        }
+                    }
+                    code
+                }
+                Err(e) => {
+                    eprintln!("makepad devhub log: {node}: {e}");
+                    2
+                }
+            }
+        }
+        ["hubs", rest @ ..] if has(&c, "hosts") => match ask(&c, None, "hosts", "hosts") {
             Ok(l) => {
-                l.iter().for_each(|l| println!("{l}"));
+                for l in &l {
+                    match makepad_strict_json::parse(l.as_bytes()).ok().filter(|_| !rest.contains(&"--json")) {
+                        Some(v) => {
+                            let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                            let tail = match s("state").as_str() {
+                                "up" => format!("up  {:.1} ms", num(&v, "rtt_ms")),
+                                st => format!("{st}  {}", proto::clean(&s("err"), 120)),
+                            };
+                            println!("{:<10} {:<22} {tail}", s("host"), s("addr"));
+                        }
+                        None => println!("{l}"),
+                    }
+                }
                 0
             }
             Err(e) => {

@@ -24,6 +24,10 @@ const CMD_TIMEOUT: Duration = Duration::from_secs(3);
 /// How long a `ps` keeps a JIT's state answer.
 const STATE_TTL: Duration = Duration::from_secs(5);
 const LOG_TAIL: usize = 4 << 10;
+const RECENT: usize = 8;
+/// A program's line that says its settings are wrong (printed once by the program to stderr,
+/// which the session log keeps): a `config` record.
+pub const CONFIG_ERROR: &str = "config error:";
 
 pub type Publish = Arc<dyn Fn(Record) + Send + Sync>;
 
@@ -41,10 +45,30 @@ pub struct Jit {
     client: Client,
 }
 
+/// What a JIT is up to, from its own answers (`jit`, `code`, `panics`, `session`), asked only
+/// when someone looks and kept for [`STATE_TTL`].
+#[derive(Clone, Debug, Default)]
+pub struct Detail {
+    /// `idle` / `busy …`, what runs, the queues
+    pub state: String,
+    /// `session: compiled … first, O2 n, O3 n; warm links n`
+    pub session: String,
+    pub fps: Option<f64>,
+    /// started from stored code (warm links) or compiled everything (cold)
+    pub warm: Option<bool>,
+    pub code_mb: Option<f64>,
+    /// panics parked, waiting for a decision
+    pub panics: u32,
+    /// edits that wait for a restart (`session pending`)
+    pub restart_pending: u32,
+}
+
 struct State {
     jits: BTreeMap<u32, Jit>,
-    /// pid -> (when, first line of `jit`)
-    jit_state: BTreeMap<u32, (Instant, String)>,
+    /// pid -> (when, its detail)
+    jit_state: BTreeMap<u32, (Instant, Detail)>,
+    /// pid -> its recent records (at_ms, kind, line), newest last, at most [`RECENT`]
+    recent: BTreeMap<u32, std::collections::VecDeque<(u64, String, String)>>,
     cpu: CpuMeter,
     /// JITs seen gone with their discovery file still there (a lister removes stale files, so
     /// the scan records it before it lists)
@@ -74,12 +98,48 @@ impl Local {
             include_self,
             hitch_ms,
             publish,
-            state: Mutex::new(State { jits: BTreeMap::new(), jit_state: BTreeMap::new(), cpu: CpuMeter::default(), crashed: Default::default() }),
+            state: Mutex::new(State { jits: BTreeMap::new(), jit_state: BTreeMap::new(), recent: BTreeMap::new(), cpu: CpuMeter::default(), crashed: Default::default() }),
             stop: AtomicBool::new(false),
         });
         let l = local.clone();
         let _ = std::thread::Builder::new().name("devhub-scan".into()).spawn(move || l.scan_loop());
         local
+    }
+
+    /// Publishes a JIT's record and keeps it in that JIT's recent list (the explorer's events).
+    fn emit(&self, r: Record) {
+        if r.pid != 0 && r.kind != "exit" {
+            let mut st = self.state.lock().unwrap();
+            let q = st.recent.entry(r.pid).or_default();
+            q.push_back((r.at_ms, r.kind.clone(), proto::clean(&r.line, 200)));
+            while q.len() > RECENT {
+                q.pop_front();
+            }
+        }
+        (self.publish)(r);
+    }
+
+    /// New lines of a JIT's session log since `off` that report a config error.
+    fn config_errors(&self, jit: &Jit, off: &mut u64) {
+        use std::io::{Read, Seek, SeekFrom};
+        let Some(path) = jit.session_log.as_deref().filter(|p| !p.is_empty()) else { return };
+        let Ok(mut f) = std::fs::File::open(path) else { return };
+        let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+        if len <= *off {
+            *off = len.min(*off);
+            return;
+        }
+        let from = (*off).max(len.saturating_sub(256 << 10));
+        let _ = f.seek(SeekFrom::Start(from));
+        let mut b = Vec::new();
+        let _ = f.take(len - from).read_to_end(&mut b);
+        *off = len;
+        for line in String::from_utf8_lossy(&b).lines() {
+            if let Some(i) = line.find(CONFIG_ERROR) {
+                let what = proto::clean(line[i + CONFIG_ERROR.len()..].trim(), 300);
+                self.emit(hub_record(&self.machine, &jit.app, jit.pid, "config", Sev::Warn, format!("config error: {what}"), String::new()));
+            }
+        }
     }
 
     pub fn stop(&self) {
@@ -146,20 +206,26 @@ impl Local {
                     let Some(body) = l.strip_prefix('{').filter(|_| l.contains("\"summary\"")) else { continue };
                     let ev = format!("{{\"event\":\"engine_request\",{body}");
                     if let Some(r) = proto::from_jit_event(&self.machine, &jit.app, jit.pid, &ev, self.hitch_ms) {
-                        (self.publish)(r);
+                        self.emit(r);
                     }
                 }
             }
             let mut feed = jit.client.feed("observe");
+            let mut log_off = 0u64;
+            let mut log_look = Instant::now();
             loop {
                 if self.stop.load(Ordering::Acquire) {
                     return;
+                }
+                if log_look.elapsed() >= Duration::from_secs(3) {
+                    log_look = Instant::now();
+                    self.config_errors(&jit, &mut log_off);
                 }
                 match feed.next(Duration::from_secs(1), 3) {
                     Ok(Some((_, line))) => {
                         let line = String::from_utf8_lossy(&line);
                         if let Some(r) = proto::from_jit_event(&self.machine, &jit.app, jit.pid, &line, self.hitch_ms) {
-                            (self.publish)(r);
+                            self.emit(r);
                         }
                     }
                     Ok(None) => {
@@ -186,6 +252,7 @@ impl Local {
             let mut st = self.state.lock().unwrap();
             st.jits.remove(&jit.pid);
             st.jit_state.remove(&jit.pid);
+            st.recent.remove(&jit.pid);
             st.crashed.remove(&jit.pid) || registry_file(jit.pid).exists()
         };
         let up = proto::wall_ms().saturating_sub(jit.started_ms) / 1000;
@@ -216,22 +283,44 @@ impl Local {
             m.uptime_s,
             jits.len()
         ));
-        for j in jits {
+        // every JIT's detail at once (each `jit` answer samples 250 ms)
+        let details: Vec<Detail> = std::thread::scope(|sc| {
+            let hs: Vec<_> = jits.iter().map(|j| sc.spawn(move || if j.run.is_some() { self.detail(j) } else { Detail::default() })).collect();
+            hs.into_iter().map(|h| h.join().unwrap_or_default()).collect()
+        });
+        let now = proto::wall_ms();
+        for (j, d) in jits.iter().zip(details) {
             let p = procinfo::proc(j.pid).unwrap_or_default();
             let pct = self.state.lock().unwrap().cpu.rate(j.pid);
-            let state = if j.run.is_some() { self.jit_state(&j) } else { String::new() };
+            let recent: Vec<String> = self
+                .state
+                .lock()
+                .unwrap()
+                .recent
+                .get(&j.pid)
+                .map(|q| q.iter().rev().map(|(at, k, l)| format!("{{\"kind\":{},\"line\":{},\"age_s\":{}}}", json_str(k), json_str(l), now.saturating_sub(*at) / 1000)).collect())
+                .unwrap_or_default();
+            let opt = |v: Option<f64>| v.map_or("null".to_string(), |x| format!("{x:.1}"));
             out.push(format!(
-                "{{\"pid\":{},\"app\":{},\"up_s\":{},\"cpu_pct\":{},\"rss_mb\":{},\"threads\":{},\"jit\":{},\"observe\":{},\"run\":{},\"state\":{}}}",
+                "{{\"pid\":{},\"app\":{},\"up_s\":{},\"cpu_pct\":{},\"rss_mb\":{},\"threads\":{},\"jit\":{},\"observe\":{},\"run\":{},\"state\":{},\"session\":{},\"fps\":{},\"warm\":{},\"code_mb\":{},\"panics\":{},\"restart_pending\":{},\"exe_replaced\":{},\"recent\":[{}]}}",
                 j.pid,
                 json_str(&j.app),
-                proto::wall_ms().saturating_sub(j.started_ms) / 1000,
+                now.saturating_sub(j.started_ms) / 1000,
                 pct.map_or("null".to_string(), |p| format!("{p:.1}")),
                 p.rss_bytes >> 20,
                 p.threads,
                 j.run.is_some(),
                 j.observe,
                 json_str(j.run.as_deref().unwrap_or("")),
-                json_str(&state)
+                json_str(&d.state),
+                json_str(&d.session),
+                opt(d.fps),
+                d.warm.map_or("null".to_string(), |w| w.to_string()),
+                opt(d.code_mb),
+                d.panics,
+                d.restart_pending,
+                exe_replaced(j.pid),
+                recent.join(",")
             ));
         }
         let mut st = self.state.lock().unwrap();
@@ -239,18 +328,27 @@ impl Local {
         st.cpu.forget(&|pid| live.contains(&pid));
     }
 
-    /// The first line of the JIT's `jit` answer (tier queues, busy / idle), cached for a few
-    /// seconds: a JIT is asked only when someone looks.
-    fn jit_state(&self, j: &Jit) -> String {
-        if let Some((at, s)) = self.state.lock().unwrap().jit_state.get(&j.pid) {
+    /// A JIT's detail, cached for a few seconds: a JIT is asked only when someone looks.
+    fn detail(&self, j: &Jit) -> Detail {
+        if let Some((at, d)) = self.state.lock().unwrap().jit_state.get(&j.pid) {
             if at.elapsed() < STATE_TTL {
-                return s.clone();
+                return d.clone();
             }
         }
-        // the answer's first line says what was measured; the verdict line follows it
-        let s = j.client.cmd("jit").ok().and_then(|mut l| l.find(|l| l.as_ref().map_or(true, |l| !l.starts_with("{\"measured\""))).and_then(|l| l.ok())).map(|l| proto::clean(&l, 400)).unwrap_or_default();
-        self.state.lock().unwrap().jit_state.insert(j.pid, (Instant::now(), s.clone()));
-        s
+        let ask = |cmd: &str| -> Vec<String> { j.client.cmd(cmd).map(|l| l.flatten().filter(|l| !l.starts_with("{\"measured\"")).collect()).unwrap_or_default() };
+        let mut d = Detail::default();
+        let jit = ask("jit");
+        d.state = jit.first().map(|l| proto::clean(l, 400)).unwrap_or_default();
+        if let Some(sess) = jit.iter().find(|l| l.starts_with("session:")) {
+            d.session = proto::clean(sess, 300);
+            d.warm = sess.rsplit("warm links ").next().and_then(|n| n.trim().parse::<u64>().ok()).map(|n| n > 0);
+        }
+        d.fps = jit.iter().find_map(|l| l.strip_prefix("frames: ")).and_then(|r| r.split_whitespace().next()).and_then(|f| f.parse().ok());
+        d.code_mb = ask("code n=0").iter().find_map(|l| l.strip_prefix("code installed ")).and_then(|r| r.split_whitespace().next()).and_then(|m| m.parse().ok());
+        d.panics = ask("panics").iter().filter(|l| l.starts_with('{') && !l.starts_with("{\"err\"")).count() as u32;
+        d.restart_pending = ask("session").iter().find_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()?.get("restart_pending")?.as_u64()).unwrap_or(0) as u32;
+        self.state.lock().unwrap().jit_state.insert(j.pid, (Instant::now(), d.clone()));
+        d
     }
 
     /// Hands an answer to the JIT that posted engine request `id` (`<machine>.<pid>.<seq>`).
@@ -271,6 +369,12 @@ impl Local {
         }
         Ok(first)
     }
+}
+
+/// The program's binary was replaced on disk since it started (a rebuild it has not restarted
+/// into).
+fn exe_replaced(pid: u32) -> bool {
+    std::fs::read_link(format!("/proc/{pid}/exe")).is_ok_and(|p| p.to_string_lossy().ends_with(" (deleted)"))
 }
 
 fn log_tail(path: &str) -> String {

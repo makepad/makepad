@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
-use view::{DevhubAction, DevhubView, InboxRow, Tab, ViewState};
+use view::{Confirm, DevhubAction, DevhubView, EventRow, InboxRow, JitDo, LeaseRow, Tab, ViewState};
 
 app_main!(App);
 
@@ -82,16 +82,25 @@ fn trust(name: &str) -> Option<Arc<dyn Trust>> {
     }
 }
 
-/// `L12 build@217 · gapx · granted 5m` / `L31 test · gapx · 3rd in queue (lane cap 2/2) · 40 s`.
-fn queue_line(l: &Lease, now: u64) -> String {
-    let secs = |from: u64| {
-        let s = now.saturating_sub(from) / 1000;
-        if s >= 3600 { format!("{}h{:02}m", s / 3600, (s / 60) % 60) } else if s >= 60 { format!("{}m{:02}s", s / 60, s % 60) } else { format!("{s} s") }
-    };
-    let jit = l.req.jit.as_deref().map_or(String::new(), |j| format!(" \u{b7} jit {j}"));
-    match l.state {
-        State::Queued => format!("{} \u{b7} {}{jit} \u{b7} {} in queue ({}) \u{b7} {}", l.tag(), l.req.lane, ordinal(l.pos), l.reason, secs(l.asked_ms)),
-        _ => format!("{} \u{b7} {}{jit} \u{b7} {} {}", l.tag(), l.req.lane, l.state.as_str(), secs(l.granted_ms.unwrap_or(l.asked_ms))),
+/// A scheduler lease as the panel's row.
+fn lease_row(l: &Lease, now: u64) -> LeaseRow {
+    let info = makepad_strict_json::parse(l.info.as_bytes()).ok();
+    let info_s = |k: &str| info.as_ref().and_then(|v| v.get(k)).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let waiting = l.state == State::Queued;
+    LeaseRow {
+        id: l.id.clone(),
+        node: l.node.clone().or_else(|| l.req.node.clone()).unwrap_or_default(),
+        lane: l.req.lane.clone(),
+        agent: l.req.agent.clone().unwrap_or_default(),
+        kind: l.req.kind.as_str().to_string(),
+        waiting,
+        since_s: now.saturating_sub(if waiting { l.asked_ms } else { l.granted_ms.unwrap_or(l.asked_ms) }) / 1000,
+        beat_s: now.saturating_sub(l.beat_ms) / 1000,
+        running: info_s("running"),
+        disk_mb: info.as_ref().and_then(|v| v.get("disk_mb")).and_then(makepad_devhub::lease::num),
+        work: info_s("work"),
+        queue: if waiting { format!("{} in queue ({})", ordinal(l.pos), l.reason) } else { String::new() },
+        jit: l.req.jit.clone().map_or(String::new(), |j| format!("jit {j}")),
     }
 }
 
@@ -106,13 +115,31 @@ struct MasterCore {
     /// the explorer is collected only while the panel shows (an unwatched fleet costs nothing)
     looking: Arc<AtomicBool>,
     snapshot: Arc<Mutex<Snapshot>>,
-    drill: Sender<(String, u32, &'static str)>,
+    /// (machine, pid, inspect command or `!restart` / `!stop` / `!log`)
+    drill: Sender<(String, u32, String)>,
     detail: Arc<Mutex<Vec<String>>>,
+    /// the outcome of the last confirmed action
+    note: Arc<Mutex<String>>,
 }
 
 struct NodeCore {
     node: Node,
     conf_path: PathBuf,
+    /// this machine's JITs with what they are up to (refreshed off the UI thread)
+    jits: Arc<Mutex<Vec<explorer::JitRow>>>,
+}
+
+/// A node service through the master's router: its answer lines.
+fn node_ask(machine: &str, service: &str, line: &str) -> Vec<String> {
+    let c = makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(proto::control_socket()), "devhub-panel");
+    let mut out = Vec::new();
+    if let Err(e) = makepad_remote::hub::ask(&c, machine, service, "", line, &mut |l| {
+        out.push(l.to_string());
+        true
+    }) {
+        out.push(format!("error: {e}"));
+    }
+    out
 }
 
 fn start_master() -> Result<MasterCore, String> {
@@ -129,17 +156,28 @@ fn start_master() -> Result<MasterCore, String> {
         }
         std::thread::sleep(std::time::Duration::from_secs(3));
     });
-    let (drill, rx) = channel::<(String, u32, &'static str)>();
+    let (drill, rx) = channel::<(String, u32, String)>();
     let detail = Arc::new(Mutex::new(Vec::new()));
     let (m, d) = (master.clone(), detail.clone());
     let _ = std::thread::Builder::new().name("devhub-drill".into()).spawn(move || {
         while let Ok((machine, pid, cmd)) = rx.recv() {
-            *d.lock().unwrap() = vec![format!("asking {machine}/{pid}: {cmd} …")];
-            let lines = explorer::drill(&m, &machine, pid, cmd);
+            *d.lock().unwrap() = vec![format!("asking {machine}/{pid}: {cmd} \u{2026}")];
+            let local = machine == m.name;
+            let lines = match cmd.as_str() {
+                "!restart" => explorer::drill(&m, &machine, pid, "session relaunch"),
+                "!stop" if local => vec!["stop: this Mac's own JITs are not stopped from the panel".into()],
+                "!stop" => node_ask(&machine, "launch", &format!("stop {pid}")),
+                "!log" if local => vec!["log: open it with `makepad inspect` on this Mac".into()],
+                "!log" => node_ask(&machine, "jitlog", &format!("jitlog {pid} 40"))
+                    .into_iter()
+                    .map(|l| makepad_strict_json::parse(l.as_bytes()).ok().and_then(|v| v.get("line").or(v.get("log")).or(v.get("err")).and_then(|x| x.as_str()).map(str::to_string)).unwrap_or(l))
+                    .collect(),
+                c => explorer::drill(&m, &machine, pid, c),
+            };
             *d.lock().unwrap() = lines;
         }
     });
-    Ok(MasterCore { master, looking, snapshot, drill, detail })
+    Ok(MasterCore { master, looking, snapshot, drill, detail, note: Arc::new(Mutex::new(String::new())) })
 }
 
 fn start_node(conf_path: PathBuf) -> Result<Option<NodeCore>, String> {
@@ -150,6 +188,14 @@ fn start_node(conf_path: PathBuf) -> Result<Option<NodeCore>, String> {
     }
     let t = trust(&conf.name);
     let node = Node::start(conf, t, Arc::new(|l: &str| log_line(l)))?;
+    let jits = Arc::new(Mutex::new(Vec::new()));
+    let (l, j) = (node.local.clone(), jits.clone());
+    let _ = std::thread::Builder::new().name("devhub-tray-jits".into()).spawn(move || loop {
+        let mut lines = Vec::new();
+        l.ps(&mut lines);
+        *j.lock().unwrap() = explorer::parse_ps("", &lines).jits.into_iter().filter(|j| j.jit).collect();
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    });
     log_line(&format!(
         "devhub: node {} up; control {}; {}",
         node.conf.name,
@@ -160,7 +206,7 @@ fn start_node(conf_path: PathBuf) -> Result<Option<NodeCore>, String> {
             (None, None) => "local only".into(),
         }
     ));
-    Ok(Some(NodeCore { node, conf_path }))
+    Ok(Some(NodeCore { node, conf_path, jits }))
 }
 
 fn start_core() -> Result<Option<Core>, String> {
@@ -204,7 +250,7 @@ impl App {
                 (g, format!("master {} \u{b7} {nodes} nodes \u{b7} {unseen} new{}", m.master.name, if net { "" } else { " \u{b7} no fleet identity" }))
             }
             Some(Core::Node(n)) => {
-                let jits = n.node.local.jits().iter().filter(|j| j.run.is_some()).count();
+                let jits = n.jits.lock().unwrap().len();
                 let lan = match (&n.node.addr, &n.node.lan_off) {
                     (Some(a), _) => format!("LAN {a}"),
                     (None, Some(w)) => w.clone(),
@@ -218,10 +264,28 @@ impl App {
 
     fn refresh(&mut self, cx: &mut Cx) {
         let (g, status) = self.status();
-        let key = format!("{g:?}|{status}|{:?}", self.login);
+        let node_jits = match &self.core {
+            Some(Core::Node(n)) => n.jits.lock().unwrap().iter().map(|j| format!("{}{}", j.head(), j.facts())).collect::<Vec<_>>().join("|"),
+            _ => String::new(),
+        };
+        let key = format!("{g:?}|{status}|{:?}|{node_jits}", self.login);
         if key != self.tray_key {
             self.tray_key = key;
             let mut menu = vec![TrayMenuItem::Item { id: live_id!(status), label: status.clone(), enabled: false, checked: None }, TrayMenuItem::Line];
+            if let Some(Core::Node(n)) = &self.core {
+                // every JIT with what it is up to, not a count
+                let jits = n.jits.lock().unwrap().clone();
+                for (i, j) in jits.iter().enumerate() {
+                    menu.push(TrayMenuItem::Item { id: LiveId(0x6a17_0000 + 2 * i as u64), label: j.head(), enabled: false, checked: None });
+                    let facts = j.facts();
+                    if !facts.is_empty() {
+                        menu.push(TrayMenuItem::Item { id: LiveId(0x6a17_0001 + 2 * i as u64), label: format!("    {facts}"), enabled: false, checked: None });
+                    }
+                }
+                if !jits.is_empty() {
+                    menu.push(TrayMenuItem::Line);
+                }
+            }
             if matches!(self.core, Some(Core::Master(_))) {
                 menu.push(TrayMenuItem::item(SEEN, "Mark all read"));
                 if !cx.desktop_has_tray_dropdown() {
@@ -248,7 +312,30 @@ impl App {
         self.state.detail = m.detail.lock().unwrap().clone();
         self.state.nodes = m.master.leases.nodes();
         let now = proto::wall_ms();
-        self.state.queue = m.master.leases.view().iter().map(|l| (queue_line(l, now), l.state == State::Queued)).collect();
+        self.state.leases = m.master.leases.view().iter().map(|l| lease_row(l, now)).collect();
+        self.state.events = m
+            .master
+            .recent
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .filter(|r| r.kind != "hub")
+            .take(200)
+            .map(|r| EventRow { machine: r.machine.clone(), sev: r.sev.as_str().to_string(), line: format!("{}{}", if r.app.is_empty() { String::new() } else { format!("{}#{} ", r.app, r.pid) }, r.line), age_s: now.saturating_sub(r.at_ms) / 1000 })
+            .collect();
+        let mut blocked = Vec::new();
+        m.master.leases.serve("blocked", "", &mut blocked);
+        self.state.blocked = blocked.iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()?.get("blocked")?.as_str().map(str::to_string)).collect();
+        // the user's own inspect leases stay alive while the panel runs
+        for (_, id) in self.state.user_leases.clone() {
+            let mut out = Vec::new();
+            m.master.leases.serve("beat", &id, &mut out);
+            if out.first().is_none_or(|l| l.contains("\"state\":\"ended\"") || l.starts_with("{\"err\"")) {
+                self.state.user_leases.retain(|u| u.1 != id);
+            }
+        }
+        self.state.note = m.note.lock().unwrap().clone();
         self.state.status = status;
         let st = self.state.clone();
         for id in [ids!(drop_view), ids!(hub_view)] {
@@ -288,16 +375,99 @@ impl App {
                 m.master.inbox.lock().unwrap().clear("all");
             }
             DevhubAction::SeenAll => m.master.inbox.lock().unwrap().mark_seen("all"),
+            DevhubAction::Expand(machine) => {
+                if self.state.collapsed.contains(&machine) {
+                    self.state.collapsed.retain(|e| *e != machine);
+                } else {
+                    self.state.collapsed.push(machine);
+                }
+            }
             DevhubAction::Select(machine, pid) => {
+                if self.state.selected.as_ref() == Some(&(machine.clone(), pid)) {
+                    self.state.selected = None;
+                    return;
+                }
                 self.state.view = "jit";
                 self.state.selected = Some((machine.clone(), pid));
-                let _ = m.drill.send((machine, pid, "jit"));
+                let _ = m.drill.send((machine, pid, "jit".into()));
             }
             DevhubAction::View(v) => {
                 if let Some((machine, pid)) = self.state.selected.clone() {
                     self.state.view = v;
-                    let _ = m.drill.send((machine, pid, v));
+                    // `timeline` needs a window to look at: the last 2 s
+                    let cmd = if v == "timeline" { "timeline last ms=2000".to_string() } else { v.to_string() };
+                    let _ = m.drill.send((machine, pid, cmd));
                 }
+            }
+            DevhubAction::Jit(a) => {
+                let Some((machine, pid)) = self.state.selected.clone() else { return };
+                match a {
+                    JitDo::Restart => {
+                        let _ = m.drill.send((machine, pid, "!restart".into()));
+                    }
+                    JitDo::Stop => {
+                        let _ = m.drill.send((machine, pid, "!stop".into()));
+                    }
+                    JitDo::Log => {
+                        self.state.view = "log";
+                        let _ = m.drill.send((machine, pid, "!log".into()));
+                    }
+                    JitDo::Lease => {
+                        let key = (machine.clone(), pid);
+                        let mut out = Vec::new();
+                        match self.state.user_leases.iter().position(|u| u.0 == key) {
+                            Some(i) => {
+                                let id = self.state.user_leases.remove(i).1;
+                                let lm = m.master.leases.clone();
+                                std::thread::spawn(move || lm.serve("release", &id, &mut Vec::new()));
+                            }
+                            None => {
+                                let mut req = makepad_devhub::lease::sched::Req::new("user", makepad_devhub::lease::Kind::Inspect);
+                                req.node = Some(machine);
+                                req.jit = Some(pid.to_string());
+                                m.master.leases.serve("lease", &req.to_json(), &mut out);
+                                if let Some(id) = out.first().and_then(|l| makepad_strict_json::parse(l.as_bytes()).ok()).and_then(|v| v.get("id").and_then(|x| x.as_str()).map(str::to_string)) {
+                                    self.state.user_leases.push((key, id));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            DevhubAction::Ask(c) => self.state.confirm = Some(c),
+            DevhubAction::Cancel => self.state.confirm = None,
+            DevhubAction::Confirmed(c) => {
+                self.state.confirm = None;
+                let (lm, note) = (m.master.leases.clone(), m.note.clone());
+                *note.lock().unwrap() = format!("{} \u{2026}", c.question().split('?').next().unwrap_or(""));
+                // releases wait for the node's cleanup: never on the UI thread
+                std::thread::spawn(move || {
+                    let mut out = Vec::new();
+                    let what = match &c {
+                        Confirm::Release(id) => {
+                            lm.serve("release", id, &mut out);
+                            format!("{id} released")
+                        }
+                        Confirm::Evict(who) => {
+                            lm.serve("evict", who, &mut out);
+                            format!("{who} evicted and blocked")
+                        }
+                        Confirm::Override(n, to) => {
+                            lm.serve("override", &format!("{n}{}", to.as_ref().map_or(String::new(), |t| format!(" --to {t}"))), &mut out);
+                            format!("{n} taken")
+                        }
+                    };
+                    let err = out.iter().find_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()?.get("err")?.as_str().map(str::to_string));
+                    *note.lock().unwrap() = match err {
+                        Some(e) => format!("failed: {e}"),
+                        None => format!("{what}; its processes stopped and dirs cleaned"),
+                    };
+                });
+            }
+            DevhubAction::Unblock(who) => {
+                let mut out = Vec::new();
+                m.master.leases.serve("unblock", &who, &mut out);
+                *m.note.lock().unwrap() = format!("{who} unblocked");
             }
             DevhubAction::Dev(node, on) => {
                 if let Err(e) = m.master.leases.set_dev(&node, on) {
@@ -329,11 +499,18 @@ impl MatchEvent for App {
         }
         installed::write_pid();
         self.login = installed::login();
-        self.state.tab = Tab::Inbox;
+        self.state.tab = Tab::Fleet;
         self.state.view = "jit";
         self.timer = cx.start_interval(0.5);
         if cx.desktop_has_tray_dropdown() {
             cx.show_in_dock(false);
+        }
+        // `MAKEPAD_DEVHUB_OPEN=1`: the master's panel opens as a window at start (a terminal
+        // master, a desktop without a tray, a frame grab)
+        if matches!(self.core, Some(Core::Master(_))) && std::env::var_os("MAKEPAD_DEVHUB_OPEN").is_some_and(|v| v == "1") {
+            self.window_shown = true;
+            self.set_looking();
+            self.ui.window(cx, ids!(main_window)).show(cx);
         }
         self.refresh(cx);
     }

@@ -33,7 +33,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 /// The services this module adds to the node's master endpoint.
-pub const WORDS: &[&str] = &["lease-start", "lease-run", "lease-log", "lease-end", "lease-beat", "policy", "caps", "disk", "recover-get", "recover-del"];
+pub const WORDS: &[&str] = &["lease-start", "lease-run", "lease-log", "lease-end", "lease-beat", "policy", "lease-conf", "caps", "disk", "recover-get", "recover-del"];
 
 const LOG_CHUNK: usize = 64 << 10;
 const RECOVER_CHUNK: usize = 256 << 10;
@@ -149,7 +149,7 @@ impl Lease {
 pub struct Exec {
     pub machine: String,
     publish: Publish,
-    pub conf: LeaseConf,
+    conf: std::sync::RwLock<LeaseConf>,
     /// the ledger folder (`~/.makepad/devhub/leases`)
     state: PathBuf,
     opts: Opts,
@@ -157,6 +157,8 @@ pub struct Exec {
     dev: AtomicBool,
     leases: Mutex<BTreeMap<String, Lease>>,
     pub guard: Guard,
+    /// lease id -> (when measured, MB in its work + target + tmp dirs): measured off the beat
+    disk_use: Arc<Mutex<std::collections::HashMap<String, (Instant, u64)>>>,
 }
 
 /// Lease ids, lanes, env keys: what a path, a unit name and a line can hold.
@@ -180,7 +182,7 @@ impl Exec {
     pub fn new(machine: &str, conf: LeaseConf, state: PathBuf, opts: Opts, publish: Publish) -> Arc<Exec> {
         let guard = Guard::new(machine, Roots::of(&conf.work), conf.disk_floor_gb, conf.disk_warn_gb, conf.role.users(), publish.clone());
         let scopes = opts.scopes.unwrap_or_else(user_bus);
-        let x = Arc::new(Exec { machine: machine.to_string(), publish, dev: AtomicBool::new(!conf.role.users()), conf, state, opts, scopes, leases: Mutex::new(BTreeMap::new()), guard });
+        let x = Arc::new(Exec { machine: machine.to_string(), publish, dev: AtomicBool::new(!conf.role.users()), conf: std::sync::RwLock::new(conf), state, opts, scopes, leases: Mutex::new(BTreeMap::new()), guard, disk_use: Default::default() });
         let mut back = Vec::new();
         for e in std::fs::read_dir(&x.state).into_iter().flatten().flatten() {
             let p = e.path();
@@ -200,6 +202,42 @@ impl Exec {
         let w = Arc::downgrade(&x);
         let _ = std::thread::Builder::new().name("devhub-disk".into()).spawn(move || disk_loop(w));
         x
+    }
+
+    /// The lease policy now (`lease-conf set` changes it while the hub runs).
+    pub fn conf(&self) -> LeaseConf {
+        self.conf.read().unwrap().clone()
+    }
+
+    /// `lease-conf` (show) or `lease-conf set k=v ...`: the master sets this node's role and
+    /// budgets; written to `lease.conf` (kept across restarts) and in force at once.
+    fn lease_conf(&self, rest: &str) -> String {
+        let mut w = rest.split_whitespace();
+        if w.next() == Some("set") {
+            let pairs: Vec<(String, String)> = w.filter_map(|kv| kv.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            if pairs.is_empty() {
+                return err("lease-conf set <key=value>...");
+            }
+            for (k, v) in &pairs {
+                if let Err(e) = caps::settable(k, v) {
+                    return err(e);
+                }
+            }
+            let path = caps::conf_path();
+            let text = caps::conf_with(&std::fs::read_to_string(&path).unwrap_or_default(), &pairs);
+            let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
+            let tmp = path.with_extension("conf.new");
+            if let Err(e) = std::fs::write(&tmp, &text).and_then(|_| std::fs::rename(&tmp, &path)) {
+                return err(format!("{}: {e}", path.display()));
+            }
+            let conf = LeaseConf::parse(&text, &caps::home_dir());
+            self.guard.set_policy(conf.disk_floor_gb, conf.disk_warn_gb, conf.role.users());
+            *self.conf.write().unwrap() = conf;
+            let what: Vec<String> = pairs.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            self.emit("lease", Sev::Info, format!("lease: {} lease.conf set {}", self.machine, what.join(" ")));
+        }
+        let apply = if crate::sync::store::source_store().is_some() { "store" } else { "checkout" };
+        caps::measure(&self.machine, &self.conf(), apply).to_json()
     }
 
     fn emit(&self, kind: &str, sev: Sev, line: String) {
@@ -239,9 +277,10 @@ impl Exec {
             "lease-end" => vec![self.end_cmd(rest)],
             "lease-beat" => vec![self.beat(rest)],
             "policy" => vec![self.policy(rest)],
+            "lease-conf" => vec![self.lease_conf(rest)],
             "caps" => {
                 let apply = if crate::sync::store::source_store().is_some() { "store" } else { "checkout" };
-                vec![caps::measure(&self.machine, &self.conf, apply).to_json()]
+                vec![caps::measure(&self.machine, &self.conf(), apply).to_json()]
             }
             "disk" => match rest.strip_prefix("clean ") {
                 Some(lane) => vec![self.clean_lane(lane.trim())],
@@ -288,7 +327,8 @@ impl Exec {
                 }
             }
         }
-        let w = &self.conf.work;
+        let conf = self.conf();
+        let w = &conf.work;
         let tmp = w.join("tmp").join(&id);
         let (work, target, ws) = match rev_of("makepad") {
             Some(sha) => match self.workspace(&id, &lane, &sha, rev_of("commercial").as_deref()) {
@@ -334,7 +374,8 @@ impl Exec {
             return Err("rev: a 40-hex commit".into());
         }
         let (store, cstore) = stores()?;
-        let w = &self.conf.work;
+        let conf = self.conf();
+        let w = &conf.work;
         let path = w.join("wt").join(format!("{lane}-{id}"));
         std::fs::create_dir_all(w.join("wt")).map_err(|e| e.to_string())?;
         git(None, Some(&store), &["worktree", "add", "--detach", "-q", &path.to_string_lossy(), sha])?;
@@ -394,7 +435,8 @@ impl Exec {
             full.push("--".into());
         }
         full.extend(["nice", "-n", "10"].map(String::from));
-        let cpus = if l.kind == Kind::Timed { &self.conf.cpus_timed } else { &self.conf.cpus_shared };
+        let conf = self.conf();
+        let cpus = if l.kind == Kind::Timed { &conf.cpus_timed } else { &conf.cpus_shared };
         if !cpus.is_empty() {
             full.extend(["taskset".to_string(), "-c".to_string(), cpus.clone()]);
         }
@@ -474,17 +516,47 @@ impl Exec {
 
     fn beat(&self, rest: &str) -> String {
         let mut leases = self.leases.lock().unwrap();
-        let (mut live, mut unknown) = (Vec::new(), Vec::new());
+        let (mut live, mut unknown, mut info) = (Vec::new(), Vec::new(), Vec::new());
         for id in rest.split_whitespace() {
             match leases.get_mut(id) {
                 Some(l) => {
                     l.beat = Instant::now();
                     live.push(json_str(id));
+                    // what it runs now (its newest live process) and its disk use, for the panel
+                    let running = l.runs.iter().rev().find(|r| proc_start(r.pid) == Some(r.start)).and_then(|r| crate::top::label(r.pid).map(|c| (r.pid, c)));
+                    let dirs = vec![l.work.clone(), l.target.clone(), l.tmp.clone()];
+                    let mb = self.disk_of(id, dirs);
+                    info.push(format!(
+                        "{}:{{\"running\":{},\"pid\":{},\"work\":{},\"disk_mb\":{}}}",
+                        json_str(id),
+                        running.as_ref().map_or("null".into(), |(_, c)| json_str(c)),
+                        running.as_ref().map_or(0, |(p, _)| *p),
+                        json_str(&l.work.to_string_lossy()),
+                        mb.map_or("null".into(), |m| m.to_string())
+                    ));
                 }
                 None => unknown.push(json_str(id)),
             }
         }
-        format!("{{\"live\":[{}],\"unknown\":[{}]}}", live.join(","), unknown.join(","))
+        format!("{{\"live\":[{}],\"unknown\":[{}],\"info\":{{{}}}}}", live.join(","), unknown.join(","), info.join(","))
+    }
+
+    /// A lease's disk use in MB, measured at most every 2 min on a thread of its own (a target
+    /// dir walk can take seconds); None until the first measure.
+    fn disk_of(&self, id: &str, dirs: Vec<PathBuf>) -> Option<u64> {
+        let mut m = self.disk_use.lock().unwrap();
+        let known = m.get(id).copied();
+        if known.is_none_or(|(at, _)| at.elapsed() > std::time::Duration::from_secs(120)) {
+            // mark it measured now, so one walk runs at a time
+            m.insert(id.to_string(), (Instant::now(), known.map_or(u64::MAX, |k| k.1)));
+            let (map, id) = (self.disk_use.clone(), id.to_string());
+            let _ = std::thread::Builder::new().name("devhub-lease-du".into()).spawn(move || {
+                let mut seen = std::collections::HashSet::new();
+                let bytes: u64 = dirs.iter().filter(|d| seen.insert((*d).clone())).map(|d| super::disk::dir_size(d).0).sum();
+                map.lock().unwrap().insert(id, (Instant::now(), bytes >> 20));
+            });
+        }
+        known.map(|k| k.1).filter(|m| *m != u64::MAX)
     }
 
     /// `lease-end <id> <how> [{"inspect":{"pid":N,"breaks":[..],"probes":[..],"paused":true}}]`
@@ -531,7 +603,7 @@ impl Exec {
             }
             let except = (ws.repo == "makepad").then_some("apps/commercial");
             let tag = if ws.repo == "makepad" { format!("{}-{}", l.lane, l.id) } else { format!("{}-{}-{}", l.lane, l.id, ws.repo) };
-            match recover_worktree(&ws.path, except, &l.id, &self.conf.work.join("recovered"), &tag) {
+            match recover_worktree(&ws.path, except, &l.id, &self.conf().work.join("recovered"), &tag) {
                 Ok(Some(b)) => {
                     self.emit("ws", Sev::Warn, format!("ws_recovered: {} {} on {} had unsaved work in {}: bundled to {}", l.id, l.lane, self.machine, ws.repo, b.display()));
                     recovered.push(b);
@@ -599,7 +671,7 @@ impl Exec {
     }
 
     fn recovered_path(&self, p: &str) -> Result<PathBuf, String> {
-        let root = std::fs::canonicalize(self.conf.work.join("recovered")).map_err(|_| "nothing recovered on this node".to_string())?;
+        let root = std::fs::canonicalize(self.conf().work.join("recovered")).map_err(|_| "nothing recovered on this node".to_string())?;
         let p = std::fs::canonicalize(p).map_err(|e| format!("{p}: {e}"))?;
         if !p.starts_with(&root) || !p.is_file() {
             return Err("only files under <work>/recovered".into());
@@ -637,7 +709,8 @@ impl Exec {
         if let Some(l) = self.leases.lock().unwrap().values().find(|l| l.lane == lane) {
             return err(format!("lane {lane} holds live lease {}", l.id));
         }
-        let w = &self.conf.work;
+        let conf = self.conf();
+        let w = &conf.work;
         let paths = [w.join("lane").join(lane), w.join("target").join(format!("lane-{lane}")), w.join("target").join(format!("lane-{lane}.last")), caps::home_dir().join("rc/pool").join(lane)];
         let mut freed = 0u64;
         let mut removed = Vec::new();
@@ -1090,7 +1163,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         assert!(group_alive(pid, start));
         let beat = x.handle("lease-beat", "L1 L404");
-        assert_eq!(beat[0], r#"{"live":["L1"],"unknown":["L404"]}"#);
+        assert!(beat[0].starts_with(r#"{"live":["L1"],"unknown":["L404"],"info":{"L1":{"running":"sleep 300","pid":"#), "{beat:?}");
         let e = x.handle("lease-end", "L1 released");
         assert!(e[0].contains(&format!("\"killed\":[{pid}]")) && e[0].contains("\"leak\":[]"), "{e:?}");
         assert!(!group_alive(pid, start));
@@ -1135,7 +1208,7 @@ mod tests {
         x.handle("lease-start", r#"{"id":"L3","lane":"b","kind":"screen","rev":null}"#);
         let r = x.handle("lease-run", &format!("L3 . {}", b64(&["/bin/sleep", "300"])));
         let pid = field(&r[0], "run").and_then(|v| super::super::num(&v)).unwrap() as u32;
-        let conf = x.conf.clone();
+        let conf = x.conf();
         let y = Exec::new("t", conf, base.join("leases"), Opts::default(), Arc::new(|_| {}));
         assert!(y.handle("lease-beat", "L3")[0].contains("\"live\":[\"L3\"]"));
         let e = y.handle("lease-end", "L3 released");

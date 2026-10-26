@@ -21,11 +21,13 @@ use std::sync::{Arc, Mutex};
 
 pub use crate::conf::{NodeConf, NODE_CONF_ENV};
 
-/// A hub this node knows: name, address, when it was last heard.
+/// A hub this node knows: name, address, its fleet identity (the credential name its signed
+/// announcement checked out under), when it was last heard.
 #[derive(Clone, Debug)]
 pub struct PeerInfo {
     pub name: String,
     pub addr: String,
+    pub fleet: String,
     pub seen_ms: u64,
 }
 
@@ -35,14 +37,17 @@ pub struct Peers {
 }
 
 impl Peers {
-    pub fn saw(&mut self, name: &str, addr: &str) {
+    /// One machine is one entry: keyed by its fleet identity (a box that announces on two
+    /// addresses, or under a new hub name, stays one peer).
+    pub fn saw(&mut self, name: &str, addr: &str, fleet: &str) {
         let now = proto::wall_ms();
-        match self.list.iter_mut().find(|p| p.name == name) {
+        match self.list.iter_mut().find(|p| p.fleet == fleet) {
             Some(p) => {
+                p.name = name.to_string();
                 p.addr = addr.to_string();
                 p.seen_ms = now;
             }
-            None => self.list.push(PeerInfo { name: name.to_string(), addr: addr.to_string(), seen_ms: now }),
+            None => self.list.push(PeerInfo { name: name.to_string(), addr: addr.to_string(), fleet: fleet.to_string(), seen_ms: now }),
         }
     }
 
@@ -53,7 +58,7 @@ impl Peers {
 
     pub fn lines(&self, out: &mut Vec<String>) {
         for p in &self.list {
-            out.push(format!("{{\"hub\":{},\"addr\":{},\"seen_ms\":{}}}", json_str(&p.name), json_str(&p.addr), p.seen_ms));
+            out.push(format!("{{\"hub\":{},\"addr\":{},\"fleet\":{},\"seen_ms\":{}}}", json_str(&p.name), json_str(&p.addr), json_str(&p.fleet), p.seen_ms));
         }
     }
 }
@@ -95,7 +100,54 @@ pub fn master_endpoint(name: &str, launch: Vec<String>, local: &Arc<Local>, peer
     );
     let p = peers.clone();
     ep.register("peers", 1, lines::service("peers", Arc::new(move |_, out| p.lock().unwrap().lines(out))));
+    let machine = name.to_string();
+    ep.register(
+        "top",
+        1,
+        lines::service(
+            "top",
+            Arc::new(move |line, out| {
+                let n = line.split_whitespace().find_map(|w| w.parse::<usize>().ok()).unwrap_or(12).min(100);
+                out.extend(crate::top::top(&machine, n));
+            }),
+        ),
+    );
+    let l = local.clone();
+    ep.register("jitlog", 1, lines::service("jitlog", Arc::new(move |line, out| jit_log(&l, line, out))));
     (ep, sink)
+}
+
+/// `jitlog <pid|app> [n]`: the last `n` lines of a JIT's session log, or of its launch log when
+/// devhub launched it.
+fn jit_log(local: &Local, line: &str, out: &mut Vec<String>) {
+    let mut w = line.split_whitespace().skip_while(|x| *x == "jitlog");
+    let who = w.next().unwrap_or("");
+    let n = w.next().and_then(|x| x.parse::<usize>().ok()).unwrap_or(40).min(2000);
+    let jits = local.jits();
+    let jit = jits.iter().find(|j| j.pid.to_string() == who).or_else(|| jits.iter().filter(|j| j.app == who).max_by_key(|j| j.started_ms));
+    let pid = jit.map(|j| j.pid).or_else(|| who.parse().ok());
+    let path = jit.and_then(|j| j.session_log.clone()).filter(|p| !p.is_empty()).map(PathBuf::from).or_else(|| pid.and_then(crate::sync::launch_log));
+    let Some(path) = path else {
+        return out.push(format!("{{\"err\":{}}}", json_str(&format!("no JIT or launch `{who}` with a log here"))));
+    };
+    let text = read_tail(&path, 512 << 10);
+    let lines: Vec<&str> = text.lines().collect();
+    out.push(format!("{{\"log\":{},\"pid\":{}}}", json_str(&path.display().to_string()), pid.unwrap_or(0)));
+    for l in &lines[lines.len().saturating_sub(n)..] {
+        out.push(format!("{{\"line\":{}}}", json_str(&proto::clean(l, 1000))));
+    }
+}
+
+/// The last `max` bytes of a file, from a line start.
+fn read_tail(path: &std::path::Path, max: u64) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else { return String::new() };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let _ = f.seek(SeekFrom::Start(len.saturating_sub(max)));
+    let mut b = Vec::new();
+    let _ = f.read_to_end(&mut b);
+    let s = String::from_utf8_lossy(&b).into_owned();
+    if len > max { s.split_once('\n').map_or(s.clone(), |(_, r)| r.to_string()) } else { s }
 }
 
 /// The endpoint other hubs are served by.
@@ -170,7 +222,9 @@ impl Node {
         match trust.listen(SocketAddr::new(ip, node.conf.port), pick, Some(accepted), log.clone()) {
             Ok(a) => {
                 node.addr = Some(a);
-                if let Err(e) = crate::cluster::start(&node.conf.name, a.port(), node.peers.clone(), log.clone()) {
+                if !node.conf.discovery {
+                    log("devhub: discovery off: no LAN beacon (the master dials this node from its nodes.conf)");
+                } else if let Err(e) = crate::cluster::start(&node.conf.name, a.port(), node.peers.clone(), log.clone()) {
                     log(&format!("devhub: {e}"));
                 }
             }

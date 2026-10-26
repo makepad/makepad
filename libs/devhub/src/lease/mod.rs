@@ -133,6 +133,10 @@ pub struct Caps {
     pub disk_total_gb: f64,
     /// `name:vram_gb` per GPU
     pub gpus: Vec<(String, f64)>,
+    /// per GPU, in the order of `gpus`: (use %, VRAM used GB)
+    pub gpu_busy: Vec<(f64, f64)>,
+    /// CPU use of all cores since the previous measure (None: the first one)
+    pub cpu_pct: Option<f64>,
     /// a display / WM session the node can show windows on
     pub display: Option<String>,
     /// percent and charging, on devices with a battery
@@ -158,15 +162,24 @@ impl Caps {
     }
 
     pub fn to_json(&self) -> String {
-        let gpus: Vec<String> = self.gpus.iter().map(|(n, v)| format!("{{\"name\":{},\"vram_gb\":{v:.1}}}", json_str(n))).collect();
+        let gpus: Vec<String> = self
+            .gpus
+            .iter()
+            .enumerate()
+            .map(|(i, (n, v))| {
+                let busy = self.gpu_busy.get(i).map_or(String::new(), |(u, m)| format!(",\"util_pct\":{u:.0},\"used_gb\":{m:.1}"));
+                format!("{{\"name\":{},\"vram_gb\":{v:.1}{busy}}}", json_str(n))
+            })
+            .collect();
         let slots: Vec<String> = self.slots.iter().map(|(k, n)| format!("\"{}\":{n}", k.as_str())).collect();
         format!(
-            "{{\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cores\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"apply\":{}}}",
+            "{{\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cores\":{},\"cpu_pct\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"apply\":{}}}",
             json_str(&self.node),
             json_str(&self.arch),
             json_str(&self.os),
             json_str(&self.cpu),
             self.cores,
+            self.cpu_pct.map_or("null".to_string(), |p| format!("{p:.1}")),
             self.load1,
             self.ram_gb,
             self.ram_avail_gb,
@@ -195,6 +208,7 @@ impl Caps {
             os: s("os"),
             cpu: s("cpu"),
             cores: f("cores") as u32,
+            cpu_pct: v.get("cpu_pct").and_then(num),
             load1: f("load1"),
             ram_gb: f("ram_gb"),
             ram_avail_gb: f("ram_avail_gb"),
@@ -212,6 +226,9 @@ impl Caps {
         if let Some(a) = v.get("gpus").and_then(|x| x.as_arr()) {
             for g in a {
                 c.gpus.push((g.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(), g.get("vram_gb").and_then(num).unwrap_or(0.0)));
+                if let Some(u) = g.get("util_pct").and_then(num) {
+                    c.gpu_busy.push((u, g.get("used_gb").and_then(num).unwrap_or(0.0)));
+                }
             }
         }
         if let Some(b) = v.get("battery").filter(|b| b.get("pct").is_some()) {
@@ -263,6 +280,8 @@ mod tests {
             disk_free_gb: 105.0,
             disk_total_gb: 1200.0,
             gpus: vec![("RTX 5090".into(), 32.0)],
+            gpu_busy: vec![(37.0, 4.5)],
+            cpu_pct: Some(12.5),
             display: Some("wm".into()),
             battery: None,
             role: Some(Role::Pool),

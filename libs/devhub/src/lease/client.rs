@@ -20,10 +20,15 @@ pub const HELP: &str = "  lease <kind> [--node N|--needs k=v,..] [--lane L] [--p
                                           hold a lease (kinds: build test screen long timed gpu inspect gate);
                                           with a cmd: run it there and exit with its code
   run <lane> <kind> [--node N|--needs ..] -- cmd...   ship this worktree to the node, run the cmd under a lease
-  release <id>                            end a lease
+  release <id>                            end a lease (says how its node cleaned up)
+  override <node> [--to <lane>]           take the node now: its leases end; to the user (dev off) or a lane
+  evict <lane|agent>                      end every lease of it, clean up, block new ones; unblock <lane|agent>
+  blocked                                 the lanes and agents the user blocked
   queue | leases [--all]                  live and waiting leases, positions and reasons
   nodes                                   capabilities, dev switch and leases per node
   node <n> dev on|off                     the node's dev switch (the user's decision)
+  node <n> [role pool|suite|bench|user-wm|device] [set slots.build=3 disk_floor_gb=40 ...]
+                                          the node's role and budgets (its lease.conf, kept on the node)
   disk <node> [--dry-run]                 the node's disk categories and reclaim
   landed <lane> | clean <lane>            delete the lane's dirs on every node and its merged Mac worktree";
 
@@ -155,6 +160,13 @@ struct Held {
 
 /// Asks for the lease and waits for it (one stderr line per change); Err(exit code).
 fn acquire(c: &Client, req: &Req) -> Result<Held, i32> {
+    // this process holds it: the master ends the lease as soon as this pid is gone
+    let mut req = req.clone();
+    req.holder = Some(std::process::id());
+    if req.agent.is_none() {
+        req.agent = std::env::var("DEVHUB_AGENT").ok().filter(|a| crate::trust::valid_name(a));
+    }
+    let req = &req;
     let mut v = one(c, "lease", &req.to_json()).map_err(|e| {
         eprintln!("makepad devhub lease: {e}");
         2
@@ -197,12 +209,12 @@ fn acquire(c: &Client, req: &Req) -> Result<Held, i32> {
     }
 }
 
-fn release(c: &Client, id: &str, exit: Option<i32>) {
+fn release(c: &Client, id: &str, exit: Option<i32>) -> Option<Value> {
     let line = match exit {
         Some(code) => format!("{id} released exit={code}"),
         None => id.to_string(),
     };
-    let _ = one(c, "release", &line);
+    one(c, "release", &line).ok()
 }
 
 /// Runs `cmd` on the node under the lease (relative to its work dir), streams its output.
@@ -267,6 +279,7 @@ fn lease(args: &[&str]) -> i32 {
     }
     let _ = std::io::stdout().flush();
     // the holder: beat until the lease ends, its watch pid dies, or this process is killed
+    let mut lost: Option<()> = None;
     loop {
         std::thread::sleep(BEAT);
         if o.watch.is_some_and(|p| !pid_alive(p)) {
@@ -274,27 +287,52 @@ fn lease(args: &[&str]) -> i32 {
             eprintln!("{}: watched pid ended; released", held.id);
             return 0;
         }
-        match one(&c, "beat", &held.id) {
+        match master().and_then(|c| one(&c, "beat", &held.id)) {
             Ok(v) if s(&v, "state") == "ended" => {
-                eprintln!("{}: ended ({})", held.id, s(&v, "how"));
+                let why = s(&v, "reason");
+                eprintln!("{}: ended ({}){}", held.id, s(&v, "how"), if why.is_empty() { String::new() } else { format!(": {why}") });
                 return 0;
             }
-            Ok(_) => {}
-            Err(e) => return fail(format!("beat {}: {e}", held.id)),
+            Ok(_) => {
+                if lost.take().is_some() {
+                    eprintln!("{}: the master is back; still held", held.id);
+                }
+            }
+            // a restarting master keeps its granted leases (leases.live): keep beating
+            Err(e) if e.starts_with("no lease") => return fail(format!("beat {}: {e}", held.id)),
+            Err(e) => {
+                if lost.is_none() {
+                    eprintln!("{}: the master does not answer ({e}); still holding, retrying", held.id);
+                    lost = Some(());
+                }
+            }
         }
     }
 }
 
 fn finish(c: &Client, held: &Held, r: Result<i32, String>) -> i32 {
-    match r {
-        Ok(code) => {
-            release(c, &held.id, Some(code));
-            code
-        }
-        Err(e) => {
-            release(c, &held.id, None);
-            fail(e)
-        }
+    let (exit, code) = match r {
+        Ok(code) => (Some(code), code),
+        Err(e) => (None, fail(e)),
+    };
+    if let Some(v) = release(c, &held.id, exit) {
+        eprintln!("{}", released_line(&v));
+    }
+    code
+}
+
+/// `L3 screen@100 (lane x) released; 100 cleaned up: 2 processes stopped, 120 MB freed`.
+fn released_line(v: &Value) -> String {
+    let node = s(v, "node");
+    let at = if node.is_empty() { String::new() } else { format!("@{node}") };
+    let head = format!("{} {}{at} (lane {}) {}", s(v, "id"), s(v, "kind"), s(v, "lane"), match s(v, "how").as_str() {
+        "released" | "" => "released".to_string(),
+        how => format!("ended ({how})"),
+    });
+    let Some(c) = v.get("cleanup") else { return head };
+    match s(c, "cleanup").as_str() {
+        "ok" => format!("{head}; {} cleaned up: {} stopped, {} MB freed{}", s(c, "node"), super::master::plural(n(c, "stopped") as usize, "process", "processes"), n(c, "freed_mb"), if n(c, "leak") > 0.0 { format!(", {} LEFT (see the inbox)", super::master::plural(n(c, "leak") as usize, "process", "processes")) } else { String::new() }),
+        other => format!("{head}; {other}"),
     }
 }
 
@@ -393,7 +431,19 @@ fn queue(c: &Client, all: bool) -> i32 {
         let tail = match s(&v, "state").as_str() {
             "queued" => format!("{} in queue ({}) waiting {} s", ordinal(n(&v, "pos") as usize), s(&v, "reason"), n(&v, "wait_s")),
             "ended" => format!("ended ({}){}", s(&v, "how"), if s(&v, "reason").is_empty() { String::new() } else { format!(": {}", s(&v, "reason")) }),
-            st => format!("{st}{}", v.get("start").map(|x| format!(" work={}", s(x, "work"))).unwrap_or_default()),
+            st => {
+                let info = v.get("info").filter(|i| !i.is_null());
+                let run = info.map(|i| s(i, "running")).filter(|r| !r.is_empty()).map_or(String::new(), |r| format!(" running `{r}`"));
+                let disk = info.and_then(|i| i.get("disk_mb")).and_then(super::num).map_or(String::new(), |m| format!(" disk {:.1} GB", m / 1024.0));
+                let agent = s(&v, "agent");
+                format!(
+                    "{st} {}s ago, beat {}s ago{}{run}{disk}{}",
+                    n(&v, "granted_s"),
+                    n(&v, "beat_s"),
+                    if agent.is_empty() { String::new() } else { format!(" agent {agent}") },
+                    v.get("start").map(|x| format!(" work={}", s(x, "work"))).unwrap_or_default()
+                )
+            }
         };
         let jit = s(&v, "jit");
         println!("{:<6} {:<8} {:<10} {}{}: {tail}", s(&v, "id"), s(&v, "lane"), format!("{}{at}", s(&v, "kind")), if jit.is_empty() { "" } else { "jit " }, jit);
@@ -460,6 +510,28 @@ fn inspect(target: &str, rest: &[&str]) -> Option<i32> {
         }
         Err(e) => fail(e),
     })
+}
+
+/// `node <n> [role R | set k=v..]`: the node's lease.conf, set by the master (persisted on the
+/// node, in force at once); prints its capabilities after.
+fn node_conf(c: &Client, node: &str, what: &str) -> i32 {
+    match node_one(c, node, "lease-conf", &format!("lease-conf {what}")) {
+        Ok(v) => {
+            let caps = super::Caps::parse(&v.to_json()).unwrap_or_default();
+            let slots: Vec<String> = caps.slots.iter().map(|(k, n)| format!("{}={n}", k.as_str())).collect();
+            println!(
+                "{node}: role {}  slots {}  disk floor {:.0} GB (warn {:.0})  timed {}{}",
+                caps.role().as_str(),
+                slots.join(" "),
+                caps.disk_floor_gb,
+                caps.disk_warn_gb,
+                if caps.timed { "on" } else { "off" },
+                if caps.spec.is_empty() { String::new() } else { format!("  spec {}", caps.spec) }
+            );
+            0
+        }
+        Err(e) => fail(e),
+    }
 }
 
 fn disk(c: &Client, node: &str, dry: bool) -> i32 {
@@ -547,7 +619,7 @@ pub fn cli(args: &[&str]) -> Option<i32> {
         }
         return inspect(args.get(1)?, &args[2..]);
     }
-    if !matches!(word, "lease" | "run" | "release" | "queue" | "leases" | "nodes" | "node" | "disk" | "landed" | "clean") {
+    if !matches!(word, "lease" | "run" | "release" | "queue" | "leases" | "nodes" | "node" | "disk" | "landed" | "clean" | "evict" | "unblock" | "override" | "blocked") {
         return None;
     }
     match args {
@@ -561,10 +633,66 @@ pub fn cli(args: &[&str]) -> Option<i32> {
     };
     Some(match args {
         ["release", id] => match one(&c, "release", id) {
-            Ok(_) => 0,
+            Ok(v) => {
+                println!("{}", released_line(&v));
+                0
+            }
             Err(e) => fail(e),
         },
         ["queue" | "leases", rest @ ..] => queue(&c, rest.contains(&"--all")),
+        ["evict", who] => match one(&c, "evict", who) {
+            Ok(v) => {
+                let n = match v.get("ended") {
+                    Some(Value::Obj(o)) => o.len(),
+                    _ => 0,
+                };
+                println!("{who} evicted: {} ended (processes stopped, dirs cleaned); blocked until `makepad devhub unblock {who}`", super::master::plural(n, "lease", "leases"));
+                0
+            }
+            Err(e) => fail(e),
+        },
+        ["unblock", who] => match one(&c, "unblock", who) {
+            Ok(_) => {
+                println!("{who} unblocked: it may take leases again");
+                0
+            }
+            Err(e) => fail(e),
+        },
+        ["blocked"] => match ask(&c, None, "blocked", "blocked") {
+            Ok(l) if l.is_empty() => {
+                println!("nobody is blocked");
+                0
+            }
+            Ok(l) => {
+                l.iter().filter_map(|x| json(x)).for_each(|v| println!("{}", s(&v, "blocked")));
+                0
+            }
+            Err(e) => fail(e),
+        },
+        ["override", node, rest @ ..] => {
+            let to = match rest {
+                [] => None,
+                ["--to", lane] => Some(*lane),
+                _ => {
+                    eprintln!("makepad devhub override <node> [--to <lane>]");
+                    return Some(2);
+                }
+            };
+            match one(&c, "override", &format!("{node}{}", to.map_or(String::new(), |t| format!(" --to {t}")))) {
+                Ok(v) => {
+                    let n = match v.get("ended") {
+                        Some(Value::Obj(o)) => o.len(),
+                        _ => 0,
+                    };
+                    match to {
+                        Some(t) => println!("{node} given to lane {t}: {} ended; its waiting leases go first", super::master::plural(n, "lease", "leases")),
+                        None => println!("{node} given to the user: {} ended; dev switch off (no new leases)", super::master::plural(n, "lease", "leases")),
+                    }
+                    0
+                }
+                Err(e) => fail(e),
+            }
+        }
         ["nodes"] => nodes(&c),
         ["node", node, "dev", v @ ("on" | "off")] => match one(&c, "node-dev", &format!("{node} {v}")) {
             Ok(v) => {
@@ -573,6 +701,9 @@ pub fn cli(args: &[&str]) -> Option<i32> {
             }
             Err(e) => fail(e),
         },
+        ["node", node] => node_conf(&c, node, ""),
+        ["node", node, "role", role] => node_conf(&c, node, &format!("set role={role}")),
+        ["node", node, "set", kvs @ ..] if !kvs.is_empty() => node_conf(&c, node, &format!("set {}", kvs.join(" "))),
         ["disk", node, rest @ ..] => disk(&c, node, rest.contains(&"--dry-run")),
         ["landed" | "clean", lane] => landed(&c, lane),
         _ => {

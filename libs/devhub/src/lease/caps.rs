@@ -83,6 +83,41 @@ impl LeaseConf {
     }
 }
 
+/// Whether the master may set `key = value` in a node's lease.conf (`work` stays the node's own:
+/// moving the work dir under running leases is not a remote switch).
+pub fn settable(key: &str, value: &str) -> Result<(), String> {
+    let num = || value.parse::<f64>().map(|_| ()).map_err(|_| format!("{key} takes a number"));
+    match key {
+        "role" => Role::parse(value).map(|_| ()).ok_or_else(|| "role = pool|suite|bench|user-wm|device".to_string()),
+        "disk_floor_gb" | "disk_warn_gb" => num(),
+        "timed" => matches!(value, "on" | "off").then_some(()).ok_or_else(|| "timed = on|off".to_string()),
+        "spec" => (!value.is_empty() && value.len() <= 64 && value.bytes().all(|b| b.is_ascii_graphic())).then_some(()).ok_or_else(|| "spec: one word".to_string()),
+        "cpus.shared" | "cpus.timed" => (value.is_empty() || valid_cpus(value)).then_some(()).ok_or_else(|| format!("{key}: a CPU list like 8-15,24-31")),
+        k => match k.strip_prefix("slots.").and_then(Kind::parse) {
+            Some(_) => value.parse::<u32>().map(|_| ()).map_err(|_| format!("{key} takes a count")),
+            None => Err(format!("`{key}` is not a lease.conf key the master sets (role, slots.<kind>, disk_floor_gb, disk_warn_gb, timed, spec, cpus.shared, cpus.timed)")),
+        },
+    }
+}
+
+/// `text` with each `key = value` of `pairs` set: the key's line replaced in place (comments
+/// kept), or appended.
+pub fn conf_with(text: &str, pairs: &[(String, String)]) -> String {
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    for (k, v) in pairs {
+        let at = lines.iter().position(|l| l.split('#').next().and_then(|b| b.split_once('=')).is_some_and(|(lk, _)| lk.trim() == k));
+        let line = format!("{k} = {v}");
+        match at {
+            Some(i) => {
+                let comment = lines[i].find('#').map(|c| format!("  {}", &lines[i][c..])).unwrap_or_default();
+                lines[i] = format!("{line}{comment}");
+            }
+            None => lines.push(line),
+        }
+    }
+    format!("{}\n", lines.join("\n"))
+}
+
 fn valid_cpus(v: &str) -> bool {
     !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit() || b == b',' || b == b'-')
 }
@@ -143,6 +178,11 @@ pub fn parse_nvidia(text: &str) -> Vec<(String, f64)> {
         .collect()
 }
 
+/// Whether a `/sys/class/power_supply` entry is the machine's battery (`type`, `scope` files).
+pub fn system_battery(kind: &str, scope: &str) -> bool {
+    kind.trim() == "Battery" && scope.trim() != "Device"
+}
+
 /// A battery from `/sys/class/power_supply/<x>/{capacity,status}`: (percent, charging).
 pub fn parse_battery(capacity: &str, status: &str) -> Option<(u32, bool)> {
     let pct = capacity.trim().parse().ok()?;
@@ -166,7 +206,17 @@ mod os {
         let read = |p: &str| std::fs::read_to_string(p).unwrap_or_default();
         let (cpu, cores) = parse_cpuinfo(&read("/proc/cpuinfo"));
         let (ram, avail) = parse_meminfo(&read("/proc/meminfo"));
+        let gpu = crate::top::gpu_use();
+        // CPU use since the previous measure (the master asks every 10 s)
+        static LAST: std::sync::Mutex<Option<(u64, u64)>> = std::sync::Mutex::new(None);
+        let now = crate::top::parse_proc_stat(&read("/proc/stat"));
+        let cpu_pct = match (LAST.lock().unwrap().replace(now.unwrap_or((0, 0))), now) {
+            (Some(a), Some(b)) if b.1 > a.1 => Some(crate::top::cpu_pct(a, b)),
+            _ => None,
+        };
         Caps {
+            cpu_pct,
+            gpu_busy: gpu.iter().map(|g| (g.util_pct, g.mem_used_gb)).collect(),
             arch: std::env::consts::ARCH.to_string(),
             os: "linux".into(),
             cpu,
@@ -174,24 +224,11 @@ mod os {
             load1: parse_loadavg(&read("/proc/loadavg")),
             ram_gb: ram,
             ram_avail_gb: avail,
-            gpus: gpus(),
+            gpus: gpu.iter().map(|g| (g.name.clone(), g.mem_total_gb)).collect(),
             display: display(),
             battery: battery(),
             ..Default::default()
         }
-    }
-
-    fn gpus() -> Vec<(String, f64)> {
-        // only where the driver is installed: no PATH search for a missing tool on every call
-        let Some(smi) = ["/usr/bin/nvidia-smi", "/usr/local/bin/nvidia-smi", "/opt/bin/nvidia-smi"].into_iter().find(|p| Path::new(p).exists()) else { return Vec::new() };
-        std::process::Command::new(smi)
-            .args(["--query-gpu=name,memory.total", "--format=csv,noheader,nounits"])
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map_or_else(Vec::new, |o| parse_nvidia(&String::from_utf8_lossy(&o.stdout)))
     }
 
     /// A live makepad WM socket (`$XDG_RUNTIME_DIR/makepad-wm-<n>` that accepts), else a Wayland one.
@@ -217,10 +254,13 @@ mod os {
         unsafe { getuid() }
     }
 
+    /// The machine's own battery: a power supply of type Battery whose scope is not `Device`
+    /// (wireless mice and keyboards report theirs as `scope = Device`).
     fn battery() -> Option<(u32, bool)> {
         for e in std::fs::read_dir("/sys/class/power_supply").ok()?.flatten() {
             let p = e.path();
-            if std::fs::read_to_string(p.join("type")).is_ok_and(|t| t.trim() == "Battery") {
+            let read = |f: &str| std::fs::read_to_string(p.join(f)).unwrap_or_default();
+            if system_battery(&read("type"), &read("scope")) {
                 if let Some(b) = parse_battery(&std::fs::read_to_string(p.join("capacity")).unwrap_or_default(), &std::fs::read_to_string(p.join("status")).unwrap_or_default()) {
                     return Some(b);
                 }
@@ -372,6 +412,10 @@ mod tests {
         assert_eq!(parse_battery("87\n", "Discharging\n"), Some((87, false)));
         assert_eq!(parse_battery("100", "Full"), Some((100, true)));
         assert_eq!(parse_battery("", "Charging"), None);
+        assert!(system_battery("Battery\n", ""));
+        assert!(system_battery("Battery\n", "System\n"));
+        assert!(!system_battery("Battery\n", "Device\n"));
+        assert!(!system_battery("Mains\n", ""));
     }
 
     #[test]
@@ -391,6 +435,17 @@ mod tests {
         assert_eq!(c.cpus_timed, "");
         let s = c.slots(0);
         assert!(s.contains(&(Kind::Build, 1)) && s.contains(&(Kind::Test, 6)) && s.contains(&(Kind::Timed, 0)) && s.contains(&(Kind::Gpu, 0)));
+    }
+
+    #[test]
+    fn master_sets_role_and_budgets() {
+        assert!(settable("role", "user-wm").is_ok() && settable("role", "boss").is_err());
+        assert!(settable("slots.build", "3").is_ok() && settable("slots.build", "x").is_err() && settable("slots.nope", "1").is_err());
+        assert!(settable("work", "/tmp").is_err() && settable("cpus.shared", "rm -rf").is_err());
+        let t = conf_with("# 165\nrole = pool  # was\nslots.build = 2\n", &[("role".into(), "user-wm".into()), ("cpus.shared".into(), "8-15,24-31".into())]);
+        assert_eq!(t, "# 165\nrole = user-wm  # was\nslots.build = 2\ncpus.shared = 8-15,24-31\n");
+        let c = LeaseConf::parse(&t, Path::new("/h"));
+        assert_eq!((c.role, c.cpus_shared.as_str()), (Role::UserWm, "8-15,24-31"));
     }
 
     #[test]

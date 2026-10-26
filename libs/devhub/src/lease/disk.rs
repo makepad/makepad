@@ -265,9 +265,9 @@ struct State {
 pub struct Guard {
     pub machine: String,
     pub roots: Roots,
-    pub floor: u64,
-    pub warn: u64,
-    pub user_machine: bool,
+    floor: std::sync::atomic::AtomicU64,
+    warn: std::sync::atomic::AtomicU64,
+    user_machine: std::sync::atomic::AtomicBool,
     publish: Publish,
     state: Mutex<State>,
 }
@@ -277,12 +277,33 @@ impl Guard {
         Guard {
             machine: machine.to_string(),
             roots,
-            floor: (floor_gb * GB) as u64,
-            warn: (warn_gb * GB) as u64,
-            user_machine,
+            floor: ((floor_gb * GB) as u64).into(),
+            warn: ((warn_gb * GB) as u64).into(),
+            user_machine: user_machine.into(),
             publish,
             state: Mutex::new(State { measured: None, dirty: true, below_floor: false, below_warn: false }),
         }
+    }
+
+    /// The master changed the node's lease.conf: floors and the user-machine rule follow.
+    pub fn set_policy(&self, floor_gb: f64, warn_gb: f64, user_machine: bool) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.floor.store((floor_gb * GB) as u64, Relaxed);
+        self.warn.store((warn_gb * GB) as u64, Relaxed);
+        self.user_machine.store(user_machine, Relaxed);
+        self.touch();
+    }
+
+    pub fn floor(&self) -> u64 {
+        self.floor.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn warn_at(&self) -> u64 {
+        self.warn.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn user_machine(&self) -> bool {
+        self.user_machine.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Something changed (a lease started or ended): the next look measures again.
@@ -320,18 +341,18 @@ impl Guard {
         let free = self.free();
         let (floor_cross, warn_cross) = {
             let mut st = self.state.lock().unwrap();
-            let f = free < self.floor && !st.below_floor;
-            let w = free < self.warn && !st.below_warn;
-            st.below_floor = free < self.floor;
-            st.below_warn = free < self.warn;
+            let f = free < self.floor() && !st.below_floor;
+            let w = free < self.warn_at() && !st.below_warn;
+            st.below_floor = free < self.floor();
+            st.below_warn = free < self.warn_at();
             (f, w)
         };
         if warn_cross && !floor_cross {
-            self.emit(Sev::Warn, format!("disk_warn: {} has {:.0} GB free, warn at {:.0} GB", self.machine, gb(free), gb(self.warn)));
+            self.emit(Sev::Warn, format!("disk_warn: {} has {:.0} GB free, warn at {:.0} GB", self.machine, gb(free), gb(self.warn_at())));
         }
-        if free < self.floor {
+        if free < self.floor() {
             if floor_cross {
-                self.emit(Sev::Warn, format!("disk_floor: {} has {:.0} GB free, floor {:.0} GB: reclaiming", self.machine, gb(free), gb(self.floor)));
+                self.emit(Sev::Warn, format!("disk_floor: {} has {:.0} GB free, floor {:.0} GB: reclaiming", self.machine, gb(free), gb(self.floor())));
             }
             self.reclaim(&live(), false);
         } else {
@@ -343,13 +364,13 @@ impl Guard {
     pub fn reclaim(&self, live: &Live, dry: bool) -> Vec<String> {
         let items = self.items(live, !dry);
         let free = self.free();
-        let p = plan(&items, free, self.floor, self.user_machine);
+        let p = plan(&items, free, self.floor(), self.user_machine());
         let mut out = vec![format!(
             "{{\"node\":{},\"free_gb\":{:.1},\"floor_gb\":{:.0},\"warn_gb\":{:.0},\"dry\":{},\"reclaim_gb\":{:.1},\"reaches_floor\":{}}}",
             json_str(&self.machine),
             gb(free),
-            gb(self.floor),
-            gb(self.warn),
+            gb(self.floor()),
+            gb(self.warn_at()),
             dry,
             gb(p.take.iter().map(|i| i.bytes).sum()),
             p.reaches

@@ -135,10 +135,18 @@ fn jit_env() -> Vec<(String, String)> {
         .collect()
 }
 
+/// An app by its registry name (`calculator`), its package (`makepad-app-calculator`) or its
+/// binary.
+pub fn find_app(name: &str) -> Option<&'static makepad_app_registry::AppEntry> {
+    makepad_app_registry::find(name)
+        .or_else(|| makepad_app_registry::apps().iter().find(|a| a.package == name))
+        .or_else(|| makepad_app_registry::find_by_bin(name))
+}
+
 /// Starts `s` from the checkout; returns the pid (the JIT's) and its log.
 pub fn start(conf: &SyncConf, s: &Spec, publish: &crate::local::Publish, machine: &str) -> Result<(u32, PathBuf), String> {
     use std::os::unix::process::CommandExt;
-    let app = makepad_app_registry::find(&s.app).ok_or_else(|| format!("no app `{}` in the registry", s.app))?;
+    let app = find_app(&s.app).ok_or_else(|| format!("no app `{}` in the registry (a registry name like `calculator` or a package like `makepad-app-calculator`)", s.app))?;
     let _ = std::fs::create_dir_all(ledger_dir());
     let log = ledger_dir().join(format!("{}-{}.log", s.app, proto::wall_ms()));
     let file = std::fs::File::create(&log).map_err(|e| format!("{}: {e}", log.display()))?;
@@ -231,7 +239,7 @@ pub fn service(conf: Arc<SyncConf>, publish: crate::local::Publish, machine: Str
                 false
             }
             None => {
-                err(out, "launch: needs lease=<id> (makepad devhub launch --lease <id>)");
+                err(out, "launch: needs a write lease (makepad devhub launch <node> --lease <id> <app>; take one with `makepad devhub lease screen --node <node>`)");
                 false
             }
         };

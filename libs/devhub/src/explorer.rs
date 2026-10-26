@@ -20,6 +20,71 @@ pub struct JitRow {
     pub jit: bool,
     /// the first verdict line of its `jit` answer
     pub state: String,
+    /// tier counts and warm links (`session:` line of `jit`)
+    pub session: String,
+    pub fps: Option<f64>,
+    pub warm: Option<bool>,
+    pub code_mb: Option<f64>,
+    pub panics: u32,
+    pub restart_pending: u32,
+    /// its binary was rebuilt since it started
+    pub exe_replaced: bool,
+    /// (kind, line, age s), newest first
+    pub recent: Vec<(String, String, u64)>,
+}
+
+fn dur(s: u64) -> String {
+    if s >= 3600 { format!("{}h{:02}m", s / 3600, (s / 60) % 60) } else if s >= 60 { format!("{}m{:02}s", s / 60, s % 60) } else { format!("{s}s") }
+}
+
+impl JitRow {
+    /// `sandbox #4412 · up 5m02s · cpu 12% · 900 MB · 80 thr`
+    pub fn head(&self) -> String {
+        let cpu = self.cpu_pct.map_or("-".to_string(), |c| format!("{c:.0}%"));
+        format!("{} #{}{} \u{b7} up {} \u{b7} cpu {cpu} \u{b7} {} MB \u{b7} {} thr", self.app, self.pid, if self.jit { "" } else { " (native)" }, dur(self.up_s), self.rss_mb, self.threads)
+    }
+
+    /// `idle · 60 fps · warm · O2 120 O3 40 · code 12.3 MB · 1 parked panic · stale: …`
+    pub fn facts(&self) -> String {
+        if !self.jit {
+            return String::new();
+        }
+        let mut f = vec![self.state.split(" \u{b7} ").next().unwrap_or("").to_string()];
+        if let Some(fps) = self.fps {
+            f.push(format!("{fps:.0} fps"));
+        }
+        if let Some(w) = self.warm {
+            f.push(if w { "warm" } else { "cold" }.to_string());
+        }
+        // `session: compiled 900 first (...), O2 120, O3 40; warm links 3000` -> the tier counts
+        let tiers: Vec<String> = self.session.split([',', ';']).filter_map(|p| {
+            let p = p.trim();
+            p.strip_prefix("O2 ").or_else(|| p.strip_prefix("O3 ")).map(|n| format!("{} {}", &p[..2], n))
+        }).collect();
+        if let Some(first) = self.session.strip_prefix("session: compiled ").and_then(|r| r.split_whitespace().next()) {
+            f.push(format!("{first} fns{}", if tiers.is_empty() { String::new() } else { format!(" ({})", tiers.join(", ")) }));
+        }
+        if let Some(mb) = self.code_mb {
+            f.push(format!("code {mb:.1} MB"));
+        }
+        if self.panics > 0 {
+            f.push(format!("{} parked panic{}", self.panics, if self.panics == 1 { "" } else { "s" }));
+        }
+        if let Some(st) = self.stale() {
+            f.push(format!("stale: {st}"));
+        }
+        f.retain(|x| !x.is_empty());
+        f.join(" \u{b7} ")
+    }
+
+    /// Not running what the checkout holds: a rebuilt binary, or edits waiting for a restart.
+    pub fn stale(&self) -> Option<String> {
+        match (self.exe_replaced, self.restart_pending) {
+            (true, _) => Some("binary rebuilt: restart to run it".into()),
+            (false, n) if n > 0 => Some(format!("{n} edits wait for a restart")),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -80,6 +145,14 @@ pub fn parse_ps(name: &str, lines: &[String]) -> MachineRow {
                 threads: num(&v, "threads") as u64,
                 jit: v.get("jit").and_then(|j| j.as_bool()).unwrap_or(false),
                 state: text(&v, "state"),
+                session: text(&v, "session"),
+                fps: v.get("fps").filter(|x| !x.is_null()).map(|_| num(&v, "fps")),
+                warm: v.get("warm").and_then(|w| w.as_bool()),
+                code_mb: v.get("code_mb").filter(|x| !x.is_null()).map(|_| num(&v, "code_mb")),
+                panics: num(&v, "panics") as u32,
+                restart_pending: num(&v, "restart_pending") as u32,
+                exe_replaced: v.get("exe_replaced").and_then(|x| x.as_bool()).unwrap_or(false),
+                recent: v.get("recent").and_then(|a| a.as_arr()).map_or_else(Vec::new, |a| a.iter().map(|e| (text(e, "kind"), text(e, "line"), num(e, "age_s") as u64)).collect()),
             });
         } else if let Some(e) = v.get("err").and_then(|e| e.as_str()) {
             m.err = Some(e.to_string());
@@ -107,7 +180,8 @@ pub fn collect(master: &Master) -> Snapshot {
                     lines.push(l.to_string());
                     true
                 }) {
-                    Ok(_) => parse_ps(&h.name, &lines),
+                    // the master's name for it (nodes.conf): what routing and the lease view use
+                    Ok(_) => MachineRow { name: h.name.clone(), ..parse_ps(&h.name, &lines) },
                     Err(e) => MachineRow { name: h.name.clone(), err: Some(e), ..MachineRow::default() },
                 }
             })
@@ -127,14 +201,17 @@ pub fn drill(master: &Arc<Master>, machine: &str, pid: u32, cmd: &str) -> Vec<St
     let mut out = Vec::new();
     if machine == master.name {
         match Client::connect(&pid.to_string()).and_then(|c| c.cmd(cmd)) {
-            Ok(lines) => out.extend(lines.map(|l| l.unwrap_or_else(|e| format!("{{\"err\":\"{e}\"}}")))),
+            Ok(lines) => out.extend(lines.map(|l| l.unwrap_or_else(|e| format!("{{\"err\":\"{e}\"}}"))).filter(|l| !l.starts_with("{\"measured\""))),
             Err(e) => out.push(format!("error: {e}")),
         }
         return out;
     }
     let c = Client::new(Target::Unix(crate::proto::control_socket()), "devhub-explorer");
     if let Err(e) = hub::ask(&c, &format!("{machine}:{pid}"), "cmd", "", cmd, &mut |l| {
-        out.push(l.to_string());
+        // the answer's provenance line is for agents; the panel shows the answer
+        if !l.starts_with("{\"measured\"") {
+            out.push(l.to_string());
+        }
         true
     }) {
         out.push(format!("error: {e}"));

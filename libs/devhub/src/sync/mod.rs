@@ -85,6 +85,25 @@ pub fn register_peer(_ep: &Endpoint, _ctx: &std::sync::Arc<NodeCtx>) {}
 
 pub fn register_control(_ep: &Endpoint, _hub: &makepad_remote::hub::Hub) {}
 
+/// The log of a running launch of this node (None: not one of its launches).
+pub fn launch_log(pid: u32) -> Option<std::path::PathBuf> {
+    #[cfg(feature = "checkout")]
+    return launch::ledger(pid).map(|(_, _, log)| log);
+    #[cfg(not(feature = "checkout"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// The sync words for the top-level help (empty without the checkout applier).
+pub fn help() -> &'static str {
+    #[cfg(feature = "checkout")]
+    return cli::HELP;
+    #[cfg(not(feature = "checkout"))]
+    ""
+}
+
 pub fn cli(args: &[&str]) -> Option<i32> {
     #[cfg(feature = "checkout")]
     return cli::main(args);

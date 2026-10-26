@@ -67,7 +67,7 @@ pub fn start(name: &str, port: u16, peers: Arc<Mutex<Peers>>, log: crate::trust:
                             if hub == own || !crate::trust::valid_name(hub) {
                                 continue;
                             }
-                            peers.lock().unwrap().saw(hub, &format!("{}:{port}", id::normalize(from.ip())));
+                            peers.lock().unwrap().saw(hub, &format!("{}:{port}", id::normalize(from.ip())), &peer.name);
                         }
                         Ok(_) => {}
                         Err(e) => log(&format!("devhub: announcement from {} dropped: {e}", from.ip())),

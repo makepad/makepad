@@ -986,8 +986,10 @@ fn cmd_jit(req: &Req, out: &mut Out) {
     let ms = req.num("ms", 250).clamp(20, 10_000);
     let t0 = std::time::Instant::now();
     let a = activity();
+    let f0 = crate::postframe::FRAMES.load(std::sync::atomic::Ordering::Relaxed);
     std::thread::sleep(std::time::Duration::from_millis(ms));
     let b = activity();
+    let f1 = crate::postframe::FRAMES.load(std::sync::atomic::Ordering::Relaxed);
     // the window as it was (a loaded machine oversleeps)
     let ms = (t0.elapsed().as_millis() as u64).max(1);
     out.measured("JIT compile activity", "postframe::activity (atomics + O2/O3 queue locks), two looks", &[]);
@@ -1003,6 +1005,10 @@ fn cmd_jit(req: &Req, out: &mut Out) {
         b.o3_done,
         b.linked
     ));
+    // a program that presents frames: its rate in the same window (0 = it draws nothing now)
+    if f1 > 0 {
+        out.line(&format!("frames: {:.0} fps in the window ({} presented in all)", (f1 - f0) as f64 * 1000.0 / ms as f64, f1));
+    }
 }
 
 /// The `jit` answer from two looks `ms` apart.

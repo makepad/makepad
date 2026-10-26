@@ -25,7 +25,7 @@ pub type EnsureRev = Arc<dyn Fn(&str, &str, &Path, &str) -> Result<String, Strin
 /// The nodes the master dials: (name, address).
 pub type Hosts = Arc<dyn Fn() -> Vec<(String, String)> + Send + Sync>;
 
-pub const SERVICES: [&str; 7] = ["lease", "beat", "release", "leases", "nodes", "node-dev", "linspect"];
+pub const SERVICES: [&str; 11] = ["lease", "beat", "release", "leases", "nodes", "node-dev", "linspect", "evict", "unblock", "override", "blocked"];
 const NODE_BEAT_MS: u64 = 5_000;
 const CAPS_MS: u64 = 10_000;
 
@@ -51,6 +51,11 @@ pub struct LeaseMaster {
     marks: Mutex<HashMap<String, Marks>>,
     /// (node, jit) -> the lease that holds its breakpoints
     holders: Mutex<HashMap<(String, String), String>>,
+    /// the dev switch each node was last told (a role change on the node moves its default)
+    pushed: Mutex<HashMap<String, bool>>,
+    /// how each ended lease's cleanup went (`release` waits for it and says so)
+    cleanups: Mutex<HashMap<String, String>>,
+    cleaned: std::sync::Condvar,
 }
 
 fn err(e: &str) -> String {
@@ -100,6 +105,19 @@ fn write_dev(path: &Path, node: &str, on: bool) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// The user's block list (`blocked`: one lane or agent per line).
+fn read_blocked(home: &Path) -> Vec<String> {
+    std::fs::read_to_string(home.join("blocked")).unwrap_or_default().lines().map(str::trim).filter(|l| crate::trust::valid_name(l)).map(str::to_string).collect()
+}
+
+fn write_blocked(home: &Path, list: &[String]) {
+    let _ = std::fs::create_dir_all(home);
+    let tmp = home.join("blocked.new");
+    if std::fs::write(&tmp, list.iter().map(|l| format!("{l}\n")).collect::<String>()).is_ok() {
+        let _ = std::fs::rename(&tmp, home.join("blocked"));
+    }
+}
+
 /// The next lease number after the ledger's highest.
 fn next_id(ledger: &Path) -> u64 {
     let text = std::fs::read_to_string(ledger).unwrap_or_default();
@@ -139,6 +157,10 @@ pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+pub fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
 fn strs(v: Option<&makepad_strict_json::Value>) -> Vec<String> {
     v.and_then(|a| a.as_arr()).map(|a| a.iter().map(|x| x.as_str().map(str::to_string).unwrap_or_else(|| super::num(x).map(|n| (n as i64).to_string()).unwrap_or_default())).collect()).unwrap_or_default()
 }
@@ -153,6 +175,7 @@ impl LeaseMaster {
         for line in std::fs::read_to_string(home.join("leases.live")).unwrap_or_default().lines() {
             sched.restore(line, now);
         }
+        sched.blocked = read_blocked(&home);
         LeaseMaster {
             machine: machine.to_string(),
             sched: Mutex::new(sched),
@@ -164,6 +187,34 @@ impl LeaseMaster {
             inline,
             marks: Mutex::new(HashMap::new()),
             holders: Mutex::new(HashMap::new()),
+            pushed: Mutex::new(HashMap::new()),
+            cleanups: Mutex::new(HashMap::new()),
+            cleaned: std::sync::Condvar::new(),
+        }
+    }
+
+    fn cleaned_up(&self, id: &str, summary: String) {
+        let mut c = self.cleanups.lock().unwrap();
+        if c.len() > 256 {
+            c.clear();
+        }
+        c.insert(id.to_string(), summary);
+        self.cleaned.notify_all();
+    }
+
+    /// The cleanup summary of lease `id`, waiting up to `wait` for it.
+    pub fn cleanup_of(&self, id: &str, wait: Duration) -> Option<String> {
+        let end = std::time::Instant::now() + wait;
+        let mut c = self.cleanups.lock().unwrap();
+        loop {
+            if let Some(s) = c.get(id) {
+                return Some(s.clone());
+            }
+            let left = end.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            c = self.cleaned.wait_timeout(c, left).unwrap().0;
         }
     }
 
@@ -208,7 +259,13 @@ impl LeaseMaster {
     /// Places what fits and carries out the scheduler's actions.
     pub fn pump(self: &Arc<Self>) {
         let now = self.now();
-        let acts = self.sched.lock().unwrap().tick(now);
+        let acts = {
+            let mut s = self.sched.lock().unwrap();
+            for id in s.holders_gone(&|pid| crate::procinfo::alive(pid)) {
+                s.release(&id, "holder-dead", now);
+            }
+            s.tick(now)
+        };
         self.act(acts);
     }
 
@@ -279,6 +336,7 @@ impl LeaseMaster {
         let l = self.sched.lock().unwrap().get(id).cloned();
         let marks = self.marks.lock().unwrap().remove(id);
         self.holders.lock().unwrap().retain(|_, v| v != id);
+        let mut summary = "{\"cleanup\":\"nothing to clean\"}".to_string();
         if let (Some(node), Some(l)) = (node, l.as_ref()) {
             // an inspect lease that changed nothing has nothing to undo
             if l.req.kind != Kind::Inspect || marks.is_some() {
@@ -295,14 +353,21 @@ impl LeaseMaster {
                 match self.ask1(node, "lease-end", &format!("lease-end {id} {wire_how}{payload}")) {
                     Ok(v) => {
                         let leak = strs(v.get("leak"));
+                        let killed = strs(v.get("killed"));
+                        let freed = v.get("freed_mb").and_then(super::num).unwrap_or(0.0);
                         if !leak.is_empty() {
                             self.event(Sev::Err, format!("lease_leak: {} of {}: {} processes left after cleanup on {node} (pids {})", l.tag(), l.req.lane, leak.len(), leak.join(" ")));
                         }
+                        self.event(Sev::Info, format!("{} of {}: cleaned up on {node}: {} stopped, {freed:.0} MB freed{}", l.tag(), l.req.lane, plural(killed.len(), "process", "processes"), if leak.is_empty() { String::new() } else { format!(", {} LEFT", leak.len()) }));
+                        summary = format!("{{\"cleanup\":\"ok\",\"node\":{},\"stopped\":{},\"freed_mb\":{freed:.0},\"leak\":{}}}", json_str(node), killed.len(), leak.len());
                         if let Some(path) = v.get("recovered").and_then(|r| r.as_str()) {
                             self.fetch_recovered(node, path, l);
                         }
                     }
-                    Err(e) => self.event(Sev::Warn, format!("{} of {}: cleanup on {node} failed: {e}", l.tag(), l.req.lane)),
+                    Err(e) => {
+                        self.event(Sev::Warn, format!("{} of {}: cleanup on {node} failed: {e}", l.tag(), l.req.lane));
+                        summary = format!("{{\"cleanup\":{}}}", json_str(&format!("failed on {node}: {e}")));
+                    }
                 }
             }
         }
@@ -314,6 +379,7 @@ impl LeaseMaster {
                 let _ = writeln!(f, "{}", l.ledger_line());
             }
         }
+        self.cleaned_up(id, summary);
     }
 
     /// Copies a recovery bundle off the node and fetches it into the lane's repo as
@@ -375,8 +441,14 @@ impl LeaseMaster {
     }
 
     fn push_policy(&self, node: &str, on: bool) {
-        if let Err(e) = self.ask1(node, "policy", &format!("policy dev={}", if on { "on" } else { "off" })) {
-            self.event(Sev::Info, format!("node {node}: policy not pushed: {e}"));
+        match self.ask1(node, "policy", &format!("policy dev={}", if on { "on" } else { "off" })) {
+            Ok(_) => {
+                self.pushed.lock().unwrap().insert(node.to_string(), on);
+            }
+            Err(e) => {
+                self.pushed.lock().unwrap().remove(node);
+                self.event(Sev::Info, format!("node {node}: policy not pushed: {e}"));
+            }
         }
     }
 
@@ -389,8 +461,8 @@ impl LeaseMaster {
             match caps {
                 Some(c) => {
                     let up = self.sched.lock().unwrap().set_caps(name, c, now);
-                    if up {
-                        let on = self.sched.lock().unwrap().dev(name);
+                    let on = self.sched.lock().unwrap().dev(name);
+                    if up || self.pushed.lock().unwrap().get(name) != Some(&on) {
                         self.push_policy(name, on);
                     }
                 }
@@ -410,6 +482,12 @@ impl LeaseMaster {
             }
             let Ok(v) = self.ask1(&node, "lease-beat", &format!("lease-beat {}", ids.join(" "))) else { continue };
             let now = self.now();
+            if let Some(makepad_strict_json::Value::Obj(info)) = v.get("info") {
+                let mut s = self.sched.lock().unwrap();
+                for (id, i) in info {
+                    s.set_info(id, &i.to_json());
+                }
+            }
             for id in strs(v.get("unknown")) {
                 if ids.contains(&id) {
                     self.sched.lock().unwrap().release(&id, "lost", now);
@@ -489,9 +567,15 @@ impl LeaseMaster {
                 let how = w.next().filter(|h| !h.starts_with("exit=")).unwrap_or("released");
                 if self.sched.lock().unwrap().release(id, how, now) {
                     self.pump();
-                    out.extend(self.state_line(id));
+                    // the answer says how the node cleaned up (it waits for the node, not forever)
+                    let cleanup = self.cleanup_of(id, Duration::from_secs(30)).unwrap_or_else(|| "{\"cleanup\":\"still running\"}".into());
+                    out.extend(self.state_line(id).map(|l| format!("{},\"cleanup\":{cleanup}}}", l.strip_suffix('}').unwrap_or(&l))));
                 } else {
-                    out.push(err(&format!("no live lease {id}")));
+                    let ended = self.sched.lock().unwrap().get(id).map(|l| l.state.as_str().to_string());
+                    out.push(err(&match ended {
+                        Some(_) => format!("{id} has already ended (`devhub leases --all`)"),
+                        None => format!("no lease {id}"),
+                    }));
                 }
             }
             "leases" => {
@@ -517,6 +601,52 @@ impl LeaseMaster {
                 }
             }
             "linspect" => self.linspect(line, out),
+            "evict" => {
+                let who = line.trim();
+                if !crate::trust::valid_name(who) {
+                    return out.push(err("evict <lane|agent>"));
+                }
+                let ids = self.sched.lock().unwrap().evict(who, now);
+                write_blocked(&self.home, &self.sched.lock().unwrap().blocked);
+                self.pump();
+                let cleaned: Vec<String> = ids.iter().map(|id| format!("{}:{}", json_str(id), self.cleanup_of(id, Duration::from_secs(30)).unwrap_or_else(|| "{\"cleanup\":\"still running\"}".into()))).collect();
+                out.push(format!("{{\"evicted\":{},\"ended\":{{{}}},\"blocked\":true}}", json_str(who), cleaned.join(",")));
+            }
+            "unblock" => {
+                let who = line.trim();
+                let had = self.sched.lock().unwrap().unblock(who);
+                write_blocked(&self.home, &self.sched.lock().unwrap().blocked);
+                self.pump();
+                out.push(if had { format!("{{\"unblocked\":{}}}", json_str(who)) } else { err(&format!("{who} is not blocked")) });
+            }
+            "blocked" => {
+                for b in self.sched.lock().unwrap().blocked.iter() {
+                    out.push(format!("{{\"blocked\":{}}}", json_str(b)));
+                }
+            }
+            "override" => {
+                let w: Vec<&str> = line.split_whitespace().collect();
+                let (node, to) = match w.as_slice() {
+                    [n] => (*n, None),
+                    [n, "--to", t] | [n, t] => (*n, Some(*t)),
+                    _ => return out.push(err("override <node> [--to <lane>]")),
+                };
+                let r = self.sched.lock().unwrap().override_node(node, to, now);
+                match r {
+                    Ok(ids) => {
+                        if to.is_none() {
+                            // the node is the user's now: no new leases until the user switches it back
+                            if let Err(e) = self.set_dev(node, false) {
+                                return out.push(err(&e));
+                            }
+                        }
+                        self.pump();
+                        let cleaned: Vec<String> = ids.iter().map(|id| format!("{}:{}", json_str(id), self.cleanup_of(id, Duration::from_secs(30)).unwrap_or_else(|| "{\"cleanup\":\"still running\"}".into()))).collect();
+                        out.push(format!("{{\"overridden\":{},\"to\":{},\"ended\":{{{}}}}}", json_str(node), to.map_or("\"user\"".into(), json_str), cleaned.join(",")));
+                    }
+                    Err(e) => out.push(err(&e)),
+                }
+            }
             _ => out.push(err("unknown lease service")),
         }
     }

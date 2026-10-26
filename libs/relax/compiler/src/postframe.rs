@@ -454,9 +454,13 @@ pub(crate) fn rt_compile(t0: u64, dt: u64) {
     }
 }
 
+/// Frames the program presented (the `jit` answer's fps).
+pub static FRAMES: AtomicU64 = AtomicU64::new(0);
+
 /// The program presented a frame (makepad-platform calls the loader symbol `relax_frame_done`
 /// after each frame the HAL finished; on the thread that handles the HAL's events).
 pub(crate) extern "C" fn relax_frame_done() {
+    FRAMES.fetch_add(1, Relaxed);
     let now = wall_ns();
     let fp = present_ns();
     let last = LAST_FRAME.swap(now, Relaxed);
