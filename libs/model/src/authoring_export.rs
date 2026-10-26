@@ -171,7 +171,23 @@ pub(crate) struct VehicleFrame {
 pub(crate) fn vehicle_frame(doc:&Document)->Result<Option<VehicleFrame>> {
     let wheels:Vec<_>=doc.scene().wheels.iter().filter(|(_,w)|crate::VEHICLE_WHEEL_CONNECTIONS.contains(&w.connection.as_str())).collect();
     if wheels.is_empty(){return Ok(None);}
-    if wheels.len()!=4{return Err(Error::Invalid("vehicle export requires all four wheel connections"));}
+    // A two-wheeler (a motorbike): one front and one rear wheel, both on the
+    // centreline; they keep the left slots, which is what a bike reads.
+    let fronts=wheels.iter().filter(|(_,w)|w.connection.contains("front")).count();
+    if wheels.len()==2&&fronts==1{
+        if doc.skeleton().is_some(){return Err(Error::Invalid("vehicle wheels require rigid objects, not a skinned asset"));}
+        let mut at=[[0.;3];2];
+        let mut connections=BTreeMap::new();
+        for (object,wheel) in &wheels {
+            let front=wheel.connection.contains("front");
+            at[if front{0}else{1}]=transform_point(doc.scene().world_matrix(object)?,wheel.pivot);
+            connections.insert((*object).clone(),if front{"wheel_front_left"}else{"wheel_rear_left"}.to_string());
+        }
+        let forward=normalized([at[0][0]-at[1][0],0.,at[0][2]-at[1][2]]).map_err(|_|Error::Invalid("vehicle wheels: the front wheel must stand apart from the rear wheel"))?;
+        let yaw=(dot(forward,[0.,0.,1.])<1.-1e-12).then(||quat_from_to(forward,[0.,0.,1.])).transpose()?;
+        return Ok(Some(VehicleFrame{yaw,connections}));
+    }
+    if wheels.len()!=4{return Err(Error::Invalid("vehicle export requires all four wheel connections (a motorbike: one front and one rear)"));}
     if doc.skeleton().is_some(){return Err(Error::Invalid("vehicle wheels require rigid objects, not a skinned asset"));}
     let mut placed=Vec::new();
     for (object,wheel) in wheels {
