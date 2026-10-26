@@ -30,6 +30,7 @@ mod view;
 use makepad_ai_hub::node_conf::{NodeConf, NODE_CONF_ENV};
 use makepad_ai_hub_panel::hub_control::{parse_snapshot, HubCommand};
 use std::path::PathBuf;
+use makepad_shell_kit::tray_app::TrayDropdown;
 use makepad_widgets::*;
 use serve::{Phase, Plan, Published, Serve};
 use settings::{apply_idle_offs, Backend, Settings};
@@ -73,30 +74,15 @@ pub struct App {
     ui: WidgetRef,
     #[rust]
     hub: Option<Hub>,
-    #[rust]
-    dropdown: Dropdown,
+    #[rust(TrayDropdown::new("aihub", tray::TRAY, DROPDOWN_W))]
+    dropdown: TrayDropdown,
     /// the regular window shows (no tray on this desktop, or "Open in window")
     #[rust]
     window_shown: bool,
 }
 
-/// The tray dropdown's state.
-#[derive(Default)]
-struct Dropdown {
-    open: bool,
-    /// the size it was last shown at (points)
-    size: Vec2d,
-    /// the visible area of the icon's screen at the last click
-    screen: Rect,
-    /// when a click elsewhere closed it: the click on the icon that did is not a new open
-    dismissed: Option<std::time::Instant>,
-}
-
-/// The dropdown's width, and its height cap as a part of the screen.
+/// The dropdown's width.
 const DROPDOWN_W: f64 = 460.0;
-const DROPDOWN_MAX: f64 = 0.8;
-/// A tray click this soon after the dropdown lost the focus is the click that closed it.
-const REOPEN_GUARD: std::time::Duration = std::time::Duration::from_millis(350);
 
 /// The app's state next to the UI: the settings, the hub owner, the clocks.
 struct Hub {
@@ -114,10 +100,7 @@ struct Hub {
 
 /// What the dropdown does, for a tray selftest (`MAKEPAD_TRAY_SELFTEST`) to read.
 fn selftest_note(what: &str) {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *ON.get_or_init(|| std::env::var_os("MAKEPAD_TRAY_SELFTEST").is_some()) {
-        log!("aihub selftest: {what}");
-    }
+    makepad_shell_kit::tray_app::selftest_note("aihub", what);
 }
 
 fn now_ms() -> u64 {
@@ -283,7 +266,7 @@ impl App {
         }
         let state = ViewState { settings, off_at: hub.off_at(&p), published: p, snapshot, now_ms: now_ms(), login: login::state() };
         // only what shows draws; opening either refreshes it first
-        if self.dropdown.open {
+        if self.dropdown.is_open() {
             if let Some(mut v) = self.ui.widget(cx, ids!(drop_view)).borrow_mut::<HubAppView>() {
                 v.set_state(cx, state.clone());
             }
@@ -295,44 +278,15 @@ impl App {
         }
     }
 
-    /// The dropdown's size: the panel's width, as tall as its content (the last draw's) up to
-    /// `DROPDOWN_MAX` of the screen; it scrolls beyond that.
-    fn dropdown_size(&self, cx: &mut Cx) -> Vec2d {
-        let screen_h = if self.dropdown.screen.size.y > 0.0 { self.dropdown.screen.size.y } else { 900.0 };
-        let max = (screen_h * DROPDOWN_MAX).floor();
-        // before its first draw the window's panel (the same content) says how tall it is
-        let content = [ids!(drop_view), ids!(hub_view)].into_iter().map(|id| self.ui.widget(cx, id).borrow::<HubAppView>().map_or(0.0, |v| v.content_height())).find(|h| *h > 1.0).unwrap_or(0.0);
-        let h = if content > 1.0 { content.ceil().min(max) } else { max };
-        dvec2(DROPDOWN_W, h)
-    }
-
-    fn open_dropdown(&mut self, cx: &mut Cx) {
-        let size = self.dropdown_size(cx);
-        self.dropdown.open = true;
-        self.dropdown.size = size;
-        self.ui.window(cx, ids!(dropdown_window)).show_at_tray(cx, tray::TRAY, size);
-        selftest_note(&format!("dropdown opened {}x{}", size.x, size.y));
-        self.refresh(cx, true);
+    /// The panel's height (the last draw's; before its first draw the window's panel, the same
+    /// content, says it).
+    fn content_height(&self, cx: &mut Cx) -> f64 {
+        [ids!(drop_view), ids!(hub_view)].into_iter().map(|id| self.ui.widget(cx, id).borrow::<HubAppView>().map_or(0.0, |v| v.content_height())).find(|h| *h > 1.0).unwrap_or(0.0)
     }
 
     fn close_dropdown(&mut self, cx: &mut Cx, why: &str) {
-        if std::mem::replace(&mut self.dropdown.open, false) {
-            selftest_note(&format!("dropdown closed ({why})"));
-            self.ui.window(cx, ids!(dropdown_window)).set_visible(cx, false);
-        }
-    }
-
-    /// The content grew or shrank (a model loaded, an error came): the open dropdown follows.
-    fn fit_dropdown(&mut self, cx: &mut Cx) {
-        if !self.dropdown.open {
-            return;
-        }
-        let size = self.dropdown_size(cx);
-        if (size.y - self.dropdown.size.y).abs() >= 1.0 {
-            selftest_note(&format!("dropdown fitted to its content: {}x{}", size.x, size.y));
-            self.dropdown.size = size;
-            self.ui.window(cx, ids!(dropdown_window)).show_at_tray(cx, tray::TRAY, size);
-        }
+        let window = self.ui.window(cx, ids!(dropdown_window));
+        self.dropdown.close(cx, &window, why);
     }
 
     /// The regular window ("Open in window"); with it the app has a Dock / taskbar entry.
@@ -455,28 +409,8 @@ impl AppMain for App {
                 }
                 self.refresh(cx, true);
             }
-            // the icon's click toggles the dropdown; the click that just closed it (a click
-            // elsewhere, on the icon) does not open it again
-            // a desktop whose tray click is no dropdown's (the makepad WM, for now): the window
+            // a desktop whose tray click is no dropdown's: the window
             Event::TrayClick(e) if e.tray == tray::TRAY && !cx.has_tray_dropdown() => self.open_window(cx),
-            Event::TrayClick(e) if e.tray == tray::TRAY => {
-                if e.screen.size.y > 0.0 {
-                    self.dropdown.screen = e.screen;
-                }
-                if self.dropdown.open {
-                    self.close_dropdown(cx, "tray click");
-                } else if self.dropdown.dismissed.take().is_some_and(|at| at.elapsed() < REOPEN_GUARD) {
-                } else {
-                    self.open_dropdown(cx);
-                }
-            }
-            Event::PopupDismissed(e) if Some(e.window_id) == self.ui.window(cx, ids!(dropdown_window)).window_id() => {
-                if self.dropdown.open {
-                    self.dropdown.dismissed = Some(std::time::Instant::now());
-                }
-                self.close_dropdown(cx, "focus lost");
-            }
-            Event::KeyDown(k) if k.key_code == KeyCode::Escape && self.dropdown.open => self.close_dropdown(cx, "esc"),
             // Closing the window keeps the hub in the tray where the desktop has one; where it
             // has none, closing is quitting (and quitting stops serving).
             Event::WindowCloseRequested(e) if cx.has_tray() => {
@@ -494,10 +428,17 @@ impl AppMain for App {
             }
             _ => {}
         }
+        // the icon's click toggles the dropdown; a click elsewhere or Esc closes it
+        let window = self.ui.window(cx, ids!(dropdown_window));
+        let content = self.content_height(cx);
+        if self.dropdown.handle_event(cx, event, &window, content) == Some(makepad_shell_kit::tray_app::DropdownChange::Opened) {
+            self.refresh(cx, true);
+        }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
         if let Event::Draw(_) = event {
-            self.fit_dropdown(cx);
+            let content = self.content_height(cx);
+            self.dropdown.fit(cx, &window, content);
         }
     }
 }

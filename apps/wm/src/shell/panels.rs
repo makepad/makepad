@@ -139,7 +139,6 @@ pub fn today() -> (i64, u32, u32) {
 // ======================================================================
 
 /// A Desk Link viewer row in its panel.
-const DESK_LINK_ROW: f64 = 48.0;
 
 /// Which flyout is up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -955,7 +954,7 @@ impl ShellPanel {
                 + self.data.game_controllers.batteries.len() + self.data.game_controllers.receivers.len()
                 + self.headset_list_rows()) as f64,
             PanelKind::Tray(_) => self.tray_menu_height(),
-            PanelKind::DeskLink => 52.0 + DESK_LINK_ROW * self.data.desk_link.len().max(1) as f64,
+            PanelKind::DeskLink => 52.0 + makepad_desk_link_panel::VIEWER_ROW * self.data.desk_link.len().max(1) as f64,
         } + pad * 2.0;
         // The body is inset by the padding AND the popup border. The
         // Display panel's plan is sized to the body, so its card asks for
@@ -1466,7 +1465,6 @@ impl ShellPanel {
     }
 
     fn draw_desk_link(&mut self, cx: &mut Cx2d, body: Rect) {
-        use super::ui::HAlign;
         let tok = self.tokens;
         let fg = tok.popups.text;
         let viewers = self.data.desk_link.clone();
@@ -1477,25 +1475,16 @@ impl ShellPanel {
             n => format!("{n} viewers"),
         };
         self.d.panel_hero(cx, hero, &tok, tok.bar.active, Ico::Record, "Desk Link", &status, 0.0);
-        let (sep, mut rest) = cut_top(rest, 12.0);
+        let (sep, rest) = cut_top(rest, 12.0);
         self.d.separator(cx, rect(sep.pos.x, sep.pos.y + 6.0, sep.size.x, 1.0), fg, 0.12);
-        for v in &viewers {
-            let (row, r2) = cut_top(rest, DESK_LINK_ROW);
-            rest = r2;
-            let w = self.d.button_width(cx, &tok, false, "Disconnect", tok.font.body_small);
-            let button = rect(row.pos.x + row.size.x - w, row.pos.y + 8.0, w, row.size.y - 16.0);
-            let hit = Hit::DeskLinkDisconnect(v.session);
-            let state = if self.hot == Some(hit) { CtrlState::Hover } else { CtrlState::Normal };
-            self.d.button(cx, button, &tok, state, None, "Disconnect", tok.font.body_small, fg, true);
-            self.hits.push((hit, button));
-            let text = rect(row.pos.x, row.pos.y + 6.0, row.size.x - w - 8.0, 18.0);
-            self.d.label_elided(cx, text, false, tok.font.body, fg, HAlign::Left, &format!("{} · {}", v.peer, v.name));
-            let mins = v.secs / 60;
-            let since = if mins == 0 { "just now".to_string() } else if mins < 60 { format!("{mins} min") } else { format!("{} h {} min", mins / 60, mins % 60) };
-            let detail = format!("{} · {since}", if v.paused { "connected, not watching" } else { "watching" });
-            let sub = rect(row.pos.x, row.pos.y + 25.0, row.size.x - w - 8.0, 16.0);
-            self.d.label_elided(cx, sub, false, tok.font.caption, darker(fg, 1.2), HAlign::Left, &detail);
-        }
+        // the rows Desk Host's tray dropdown shows too
+        let hot = match self.hot {
+            Some(Hit::DeskLinkDisconnect(session)) => Some(session),
+            _ => None,
+        };
+        let mut hits = Vec::new();
+        makepad_desk_link_panel::draw_viewers(cx, &mut self.d, &tok, rest, &viewers, hot, &mut hits);
+        self.hits.extend(hits.into_iter().map(|(session, r)| (Hit::DeskLinkDisconnect(session), r)));
     }
 
     #[cfg(not(target_os = "linux"))]

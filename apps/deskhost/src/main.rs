@@ -2,9 +2,11 @@
 //! session, seen by a Desk Link viewer (apps/desklink) on the LAN as hardware H.264 and driven
 //! with its keyboard, mouse and wheel as local events.
 //!
-//! It runs in the user's session (a LaunchAgent / an at-logon task), has no window, and does
-//! nothing unless `~/.makepad/deskhost.conf` enables it (keys as the window manager's
-//! `desk-link.conf`). Everything network-facing is the shared server of `libs/desk_link`
+//! It runs in the user's session (a LaunchAgent / an at-logon task) as a tray app (`app`): a
+//! menu-bar / notification-area icon says whether it serves and who watches, and its dropdown
+//! (`view`) switches serving on and off, lists the viewers with their stream and the allowed
+//! peers, and quits. It serves only while `~/.makepad/deskhost.conf` says `enabled = on` (the
+//! switch writes that key; the other keys as the window manager's `desk-link.conf`). Everything network-facing is the shared server of `libs/desk_link`
 //! (LAN-only bind and peers, TLS, fleet credentials of role `lan`).
 //!
 //! The screen comes from the OS's capture service as GPU frames, only when it changed (frames
@@ -17,6 +19,10 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod settings;
+// the tray app (`app_main!` also makes a `main` there, which this file's replaces)
+#[allow(dead_code)]
+mod app;
+mod view;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "windows")]
@@ -32,6 +38,8 @@ use makepad_video::{GpuReady, StreamVideoCodec, VideoStreamEncoder, VideoStreamE
 use settings::Settings;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use std::sync::mpsc::Receiver;
 use std::sync::mpsc::Sender;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::sync::Arc;
@@ -129,6 +137,57 @@ impl Status {
     }
 }
 
+/// What the host does, for the tray and its dropdown (the host thread writes it, the app reads it).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Report {
+    pub state: HostState,
+    /// `host:port` it listens on (while serving).
+    pub addr: String,
+    pub viewers: Vec<makepad_desk_link_panel::ViewerRow>,
+    /// The settings' `allow_peers`.
+    pub allow_peers: Vec<String>,
+    /// The OS grants it is missing (macOS), empty when it has them.
+    pub grants: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum HostState {
+    /// `enabled = off`: nothing listens.
+    #[default]
+    Off,
+    /// On, but it cannot listen yet (no fleet key, no allowed peer, a bad host), and why.
+    Waiting(String),
+    Serving,
+}
+
+/// What the app asks of the host thread.
+pub enum Cmd {
+    /// The settings changed (the switch wrote `enabled`): read them again.
+    Settings,
+    Disconnect(u32),
+    Quit,
+}
+
+/// The app and the host thread: the report one way, commands the other, `wake` to make the host
+/// look now.
+pub struct HostControl {
+    pub report: std::sync::Mutex<Report>,
+    pub cmds: std::sync::Mutex<Vec<Cmd>>,
+    pub wake: Sender<()>,
+}
+
+impl HostControl {
+    pub fn send(&self, cmd: Cmd) {
+        self.cmds.lock().unwrap().push(cmd);
+        let _ = self.wake.send(());
+    }
+
+    #[allow(dead_code)]
+    fn update(&self, f: impl FnOnce(&mut Report)) {
+        f(&mut self.report.lock().unwrap());
+    }
+}
+
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 struct Viewer {
     session: u32,
@@ -142,11 +201,27 @@ struct Viewer {
     /// The viewer decodes from a key frame it got on: until then (a new viewer, a resume) it
     /// gets no picture that refers to one it never had.
     synced: bool,
+    peer: String,
+    since: Instant,
+    /// Pictures and bytes sent this second, and over the last one (the dropdown's stream line).
+    sent: (u32, u64),
+    sent_rate: (u32, u64),
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    let cli = ["--check", "--ask", "--encode-test", "--capture-test"];
+    if !args.iter().any(|a| cli.contains(&a.as_str())) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        makepad_widgets::run_app(app::app_main);
+        // Linux desktops are served by the window manager itself (its desk_link)
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        log("this desktop has no capture backend here; on Linux the window manager serves Desk Link");
+        return;
+    }
     let settings = Settings::load();
+    #[cfg(target_os = "macos")]
+    macos::cli_app();
     #[cfg(target_os = "macos")]
     let mut desktop = macos::MacDesktop::new();
     #[cfg(target_os = "windows")]
@@ -174,29 +249,65 @@ fn main() {
         let secs = args.get(i + 1).and_then(|a| a.parse().ok()).unwrap_or(10);
         let repeat = args.iter().any(|a| a == "--busy");
         capture_test(&mut desktop, secs, repeat);
-        return;
     }
-    if !settings.enabled {
-        log(&format!("off ({}); nothing listens", Settings::path().display()));
-        return;
+}
+
+/// The host thread: serves while the settings say `enabled = on`, waits while they say off,
+/// until the app quits. Commands and settings changes wake it.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub fn host_main(desktop: &mut dyn Desktop, ctl: &HostControl, wake_rx: &Receiver<()>) {
+    let mut status = Status::default();
+    loop {
+        let settings = Settings::load();
+        ctl.update(|r| r.allow_peers = settings.allow_peers.iter().map(|p| p.to_string()).collect());
+        if take_quit(ctl) {
+            return;
+        }
+        if !settings.enabled {
+            ctl.update(|r| {
+                r.state = HostState::Off;
+                r.addr.clear();
+                r.viewers.clear();
+            });
+            status.set(Some(format!("off ({})", Settings::path().display())), Some(desktop.grants()));
+            let _ = wake_rx.recv_timeout(Duration::from_secs(5));
+            continue;
+        }
+        let Some((settings, server)) = start(desktop, &mut status, ctl, wake_rx) else { continue };
+        if !run(desktop, &mut status, ctl, settings, server, wake_rx) {
+            return;
+        }
+        log("stopped serving");
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        // Linux desktops are served by the window manager itself (its desk_link)
-        log("this desktop has no capture backend here; on Linux the window manager serves Desk Link");
-    }
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    run(&mut desktop);
+}
+
+/// Takes the commands of an idle host; true for Quit (settings changes are read anyway).
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn take_quit(ctl: &HostControl) -> bool {
+    ctl.cmds.lock().unwrap().drain(..).any(|c| matches!(c, Cmd::Quit))
+}
+
+/// Whether a waiting host stops trying: Quit (kept queued for [`host_main`]); a settings change
+/// is dropped (the next try reads them).
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn take_quit_or_settings(ctl: &HostControl) -> bool {
+    let mut cmds = ctl.cmds.lock().unwrap();
+    let quit = cmds.iter().any(|c| matches!(c, Cmd::Quit));
+    cmds.retain(|c| matches!(c, Cmd::Quit));
+    quit
 }
 
 /// The server, once it can listen: until then (no fleet key installed yet, a conf being
 /// edited) it says why and tries again every 10 s, reading the settings anew each time.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn start(desktop: &mut dyn Desktop, status: &mut Status) -> (Settings, Server, std::sync::mpsc::Receiver<()>) {
+fn start(desktop: &mut dyn Desktop, status: &mut Status, ctl: &HostControl, wake_rx: &Receiver<()>) -> Option<(Settings, Server)> {
     let mut said = String::new();
     loop {
         let settings = Settings::load();
-        let (wake_tx, wake_rx) = std::sync::mpsc::channel::<()>();
+        if !settings.enabled || take_quit_or_settings(ctl) {
+            return None;
+        }
+        let wake_tx = ctl.wake.clone();
         let started = settings.listen_addr().and_then(|addr| {
             let config = ServerConfig {
                 addr,
@@ -216,7 +327,12 @@ fn start(desktop: &mut dyn Desktop, status: &mut Status) -> (Settings, Server, s
             Ok(server) => {
                 log(&format!("listens on {} for {:?} (certificate {})", server.addr, settings.allow_peers, server.fingerprint));
                 status.set(Some(format!("listens on {}", server.addr)), Some(desktop.grants()));
-                return (settings, server, wake_rx);
+                ctl.update(|r| {
+                    r.state = HostState::Serving;
+                    r.addr = server.addr.to_string();
+                    r.grants = status.grants.clone();
+                });
+                return Some((settings, server));
             }
             Err(e) => {
                 if e != said {
@@ -224,7 +340,13 @@ fn start(desktop: &mut dyn Desktop, status: &mut Status) -> (Settings, Server, s
                     said = e.clone();
                 }
                 status.set(Some(format!("waiting: {e}")), Some(desktop.grants()));
-                std::thread::sleep(Duration::from_secs(10));
+                ctl.update(|r| {
+                    r.state = HostState::Waiting(e.clone());
+                    r.addr.clear();
+                    r.grants = status.grants.clone();
+                });
+                // a changed setting or a command tries again at once
+                let _ = wake_rx.recv_timeout(Duration::from_secs(10));
             }
         }
     }
@@ -255,10 +377,10 @@ fn stream_fps(cap: u32, screen_hz: u32, stream: [u32; 2], viewers: &[Viewer]) ->
     fps
 }
 
+/// Serves until the settings say off (false: the app quit). Dropping the server says goodbye to
+/// every viewer.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn run(desktop: &mut dyn Desktop) {
-    let mut status = Status::default();
-    let (settings, server, wake_rx) = start(desktop, &mut status);
+fn run(desktop: &mut dyn Desktop, status: &mut Status, ctl: &HostControl, settings: Settings, server: Server, wake_rx: &Receiver<()>) -> bool {
     let (frame_tx, frame_rx) = std::sync::mpsc::channel::<Frame>();
     let mut viewers: Vec<Viewer> = Vec::new();
     let mut screen = 0usize;
@@ -285,9 +407,45 @@ fn run(desktop: &mut dyn Desktop) {
     let mut told_size: Option<(usize, [u32; 2])> = None;
     // the last key frame sent (scheduled ones follow `key_every` while pictures flow)
     let mut last_key = Instant::now();
+    let mut reported = Instant::now();
     loop {
         #[cfg(target_os = "macos")]
         let _pool = macos::Pool::new();
+        // the app's commands: off, quit, a viewer to disconnect
+        let cmds: Vec<Cmd> = ctl.cmds.lock().unwrap().drain(..).collect();
+        for cmd in cmds {
+            match cmd {
+                Cmd::Quit => {
+                    if capturing.is_some() {
+                        desktop.stop_capture();
+                    }
+                    return false;
+                }
+                Cmd::Settings => {
+                    if !Settings::load().enabled {
+                        log("switched off");
+                        if capturing.is_some() {
+                            desktop.stop_capture();
+                        }
+                        return true;
+                    }
+                }
+                Cmd::Disconnect(session) => {
+                    if let Some(v) = viewers.iter().find(|v| v.session == session) {
+                        log(&format!("disconnects {} ({})", v.name, v.peer));
+                        let _ = v.out.send(Out::Close("the desktop disconnected you".into()));
+                    }
+                }
+            }
+        }
+        // the dropdown's view of the viewers, once a second (and when one comes or goes)
+        if reported.elapsed() >= Duration::from_secs(1) {
+            reported = Instant::now();
+            for v in viewers.iter_mut() {
+                v.sent_rate = std::mem::take(&mut v.sent);
+            }
+            report_viewers(ctl, &viewers, fps);
+        }
         // nobody watches: sleep until a session says something (no polling while idle)
         if viewers.is_empty() {
             let _ = wake_rx.recv_timeout(Duration::from_secs(1));
@@ -298,6 +456,7 @@ fn run(desktop: &mut dyn Desktop) {
         if grants_at.elapsed() >= Duration::from_secs(5) {
             grants_at = Instant::now();
             status.set(None, Some(desktop.grants()));
+            ctl.update(|r| r.grants = status.grants.clone());
         }
         if screens_at.elapsed() >= Duration::from_secs(1) {
             screens_at = Instant::now();
@@ -325,7 +484,8 @@ fn run(desktop: &mut dyn Desktop) {
                         server: settings::host_name(),
                     };
                     let _ = out.send(Out::Msg(welcome.encode()));
-                    viewers.push(Viewer { session, name, out, backlog, paused: Arc::new(AtomicBool::new(paused)), refresh: 0, told_rate: false, synced: false });
+                    viewers.push(Viewer { session, name, out, backlog, paused: Arc::new(AtomicBool::new(paused)), refresh: 0, told_rate: false, synced: false, peer, since: Instant::now(), sent: (0, 0), sent_rate: (0, 0) });
+                    report_viewers(ctl, &viewers, fps);
                     key_wanted = true;
                     cursor = None;
                 }
@@ -369,6 +529,7 @@ fn run(desktop: &mut dyn Desktop) {
                     if let Some(i) = viewers.iter().position(|v| v.session == session) {
                         let v = viewers.remove(i);
                         log(&format!("{} left ({reason})", v.name));
+                        report_viewers(ctl, &viewers, fps);
                     }
                 }
             }
@@ -537,6 +698,8 @@ fn run(desktop: &mut dyn Desktop) {
                             continue;
                         }
                         v.backlog.fetch_add(1, Ordering::AcqRel);
+                        v.sent.0 += 1;
+                        v.sent.1 += bytes.len() as u64;
                         if v.out.send(Out::Video(bytes.clone())).is_err() {
                             v.synced = false;
                         }
@@ -557,6 +720,22 @@ fn run(desktop: &mut dyn Desktop) {
             }
         }
     }
+}
+
+/// The viewers as the dropdown shows them: who, watching or not, since when, what they get.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn report_viewers(ctl: &HostControl, viewers: &[Viewer], fps: u32) {
+    let rows = viewers
+        .iter()
+        .map(|v| {
+            // what it got over the last second (a still screen sends nothing)
+            let (pics, bytes) = v.sent_rate;
+            let base = makepad_desk_link_panel::stream_line(false, false, fps, 0, 1);
+            let stream = if pics > 0 { format!("{base} \u{b7} {:.1} Mbit/s \u{b7} {pics} sent/s", bytes as f64 * 8.0 / 1e6) } else { format!("{base} \u{b7} idle (the screen is still)") };
+            makepad_desk_link_panel::ViewerRow { session: v.session, name: v.name.clone(), peer: v.peer.clone(), paused: v.paused.load(Ordering::Acquire), secs: v.since.elapsed().as_secs(), stream }
+        })
+        .collect();
+    ctl.update(|r| r.viewers = rows);
 }
 
 /// `--capture-test SECS [--busy]`: screen 0 captured and encoded as a viewer would get it, for

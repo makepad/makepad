@@ -23,6 +23,7 @@
 use makepad_widgets::*;
 
 pub mod theme;
+pub mod tray_app;
 pub mod ui;
 #[cfg(target_os = "linux")]
 mod system_slider;

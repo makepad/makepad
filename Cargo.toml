@@ -28,6 +28,7 @@ workspace.members = [
     "libs/wayland_server",
     "libs/xkb_keymap",
     "libs/desk_link",
+    "libs/desk_link_panel",
     "libs/relax_api",
     "libs/relax_api/macro",
     "libs/relax_api/macro_impl",

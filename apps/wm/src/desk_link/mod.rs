@@ -59,19 +59,9 @@ pub struct ViewerWindow {
     pub scale: u32,
 }
 
-/// Someone viewing this desktop, for the bar's Desk Link item and its panel.
-#[derive(Clone, Debug, PartialEq)]
-pub struct DeskLinkViewer {
-    pub session: u32,
-    /// What the viewer calls itself (`desklink <user>`).
-    pub name: String,
-    /// Its address (IP only).
-    pub peer: String,
-    /// Not watching right now (the viewer shows another desktop); still connected.
-    pub paused: bool,
-    /// Seconds since it connected.
-    pub secs: u64,
-}
+/// Someone viewing this desktop, for the bar's Desk Link item and its panel (the row Desk Host's
+/// tray dropdown shows too).
+pub use makepad_desk_link_panel::ViewerRow as DeskLinkViewer;
 
 #[cfg(target_arch = "wasm32")]
 #[derive(Default)]
@@ -216,10 +206,15 @@ mod native {
     impl DeskLink {
         /// Who is connected now (the dump viewer, a dev tool, is not listed).
         pub fn viewers(&self) -> Vec<super::DeskLinkViewer> {
+            // every viewer gets the one stream the viewers were told
+            let stream = match &self.told_rate {
+                Some(ServerMsg::Rate { fps, kbps, full_chroma, codec, streams, .. }) => makepad_desk_link_panel::stream_line(*codec == proto::pref::HEVC, *full_chroma, *fps as u32, *kbps, *streams as u32),
+                _ => String::new(),
+            };
             self.viewers
                 .iter()
                 .filter(|v| v.session != 0)
-                .map(|v| super::DeskLinkViewer { session: v.session, name: v.name.clone(), peer: v.peer.clone(), paused: v.paused.load(Ordering::Acquire), secs: v.since.elapsed().as_secs() })
+                .map(|v| super::DeskLinkViewer { session: v.session, name: v.name.clone(), peer: v.peer.clone(), paused: v.paused.load(Ordering::Acquire), secs: v.since.elapsed().as_secs(), stream: stream.clone() })
                 .collect()
         }
 

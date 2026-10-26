@@ -30,6 +30,8 @@ mod tray;
 mod window;
 
 pub use app::{host_dark, run_main_loop, stop_main_loop};
+/// `crate::set_menu_bar_app`.
+pub static MENU_BAR_APP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub(crate) use app::wake_idle_main;
 use super::shell::{lock, log_enabled, Op, Shared};
 

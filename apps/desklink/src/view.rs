@@ -1,8 +1,8 @@
 //! The viewer's two widgets: `RemoteView` (the remote desktop's picture, aspect-locked and
 //! letterboxed in whatever size the window has, or 1:1 device pixels; the remote cursor; the
-//! latency line) and `ConnList` (the side panel's connections, their state and latency).
+//! latency line) and `Timeline` (the paused history's scrub bar).
 
-use crate::conn::{Latency, State};
+use crate::conn::Latency;
 use makepad_widgets::makepad_draw::shader::draw_nv12::DrawNv12;
 use crate::conn::Part;
 use makepad_widgets::makepad_platform::video_file::{DecodedPicture, PicturePlane, VideoColor};
@@ -44,31 +44,6 @@ script_mod! {
             color: #xe8e8ea
             text_style: theme.font_code{font_size: 9}
         }
-    }
-
-    mod.widgets.ConnListBase = #(ConnList::register_widget(vm))
-    mod.widgets.ConnList = set_type_default() do mod.widgets.ConnListBase {
-        width: Fill height: Fill
-        draw_row +: {
-            selected: instance(0.0)
-            hover: instance(0.0)
-            pixel: fn() {
-                let base = #x00000000
-                let hover = #xffffff14
-                let sel = #x3b82f655
-                return mix(mix(base, hover, self.hover), sel, self.selected)
-            }
-        }
-        draw_dot +: {
-            color: #x888888
-            pixel: fn() {
-                let d = length(self.pos - vec2(0.5, 0.5))
-                if d > 0.5 { discard() }
-                return vec4(self.color.xyz * self.color.w, self.color.w)
-            }
-        }
-        draw_name +: { color: #xe8e8ea text_style: theme.font_regular{font_size: 10} }
-        draw_detail +: { color: #x9a9aa2 text_style: theme.font_regular{font_size: 8} }
     }
 }
 
@@ -350,116 +325,6 @@ impl Widget for RemoteView {
 pub fn view_window_px(view: Rect, dpi: f64) -> (u32, u32, u32) {
     let d = view.device_round(dpi);
     ((d.size.x * dpi).round() as u32, (d.size.y * dpi).round() as u32, (dpi * 100.0).round() as u32)
-}
-
-/// One row of the side panel.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Row {
-    pub name: String,
-    pub detail: String,
-    pub state: State,
-}
-
-#[derive(Clone, Debug, Default)]
-pub enum ConnListAction {
-    Select(usize),
-    /// The row's "reconnect": drop the session and open it again now.
-    Reconnect(usize),
-    #[default]
-    None,
-}
-
-#[derive(Script, ScriptHook, Widget)]
-pub struct ConnList {
-    #[uid]
-    uid: WidgetUid,
-    #[walk]
-    walk: Walk,
-    #[redraw]
-    #[live]
-    draw_row: DrawQuad,
-    #[live]
-    draw_dot: DrawColor,
-    #[live]
-    draw_name: DrawText,
-    #[live]
-    draw_detail: DrawText,
-    #[rust]
-    rows: Vec<Row>,
-    #[rust]
-    pub selected: usize,
-    #[rust]
-    hover: Option<usize>,
-    #[rust]
-    rects: Vec<Rect>,
-    /// Each row's "reconnect" label.
-    #[rust]
-    reconnect_rects: Vec<Rect>,
-}
-
-const ROW_H: f64 = 44.0;
-
-impl ConnList {
-    pub fn set_rows(&mut self, cx: &mut Cx, rows: Vec<Row>) {
-        if rows != self.rows {
-            self.rows = rows;
-            self.draw_row.redraw(cx);
-        }
-    }
-}
-
-impl Widget for ConnList {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        let uid = self.uid;
-        let hit = |abs: Vec2d, rects: &[Rect]| rects.iter().position(|r| r.contains(abs));
-        match event {
-            Event::MouseMove(e) => {
-                let h = hit(e.abs, &self.rects);
-                if h != self.hover {
-                    self.hover = h;
-                    self.draw_row.redraw(cx);
-                }
-            }
-            Event::MouseDown(e) => {
-                if let Some(i) = hit(e.abs, &self.reconnect_rects) {
-                    cx.widget_action(uid, ConnListAction::Reconnect(i));
-                } else if let Some(i) = hit(e.abs, &self.rects) {
-                    self.selected = i;
-                    self.draw_row.redraw(cx);
-                    cx.widget_action(uid, ConnListAction::Select(i));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
-        let area = cx.walk_turtle(walk);
-        self.rects.clear();
-        self.reconnect_rects.clear();
-        for (i, row) in self.rows.iter().enumerate() {
-            let r = Rect { pos: dvec2(area.pos.x, area.pos.y + i as f64 * ROW_H), size: dvec2(area.size.x, ROW_H) };
-            self.rects.push(r);
-            self.draw_row.draw_vars.set_dyn_instance(cx, id!(selected), &[(i == self.selected) as u8 as f32]);
-            self.draw_row.draw_vars.set_dyn_instance(cx, id!(hover), &[(Some(i) == self.hover) as u8 as f32]);
-            self.draw_row.draw_abs(cx, r);
-            self.draw_dot.color = match row.state {
-                State::Connected => vec4(0.30, 0.85, 0.45, 1.0),
-                State::Connecting | State::Reconnecting => vec4(0.95, 0.75, 0.25, 1.0),
-                State::Offline(_) => vec4(0.55, 0.55, 0.58, 1.0),
-            };
-            self.draw_dot.draw_abs(cx, Rect { pos: r.pos + dvec2(10.0, 16.0), size: dvec2(9.0, 9.0) });
-            self.draw_name.draw_abs(cx, r.pos + dvec2(28.0, 7.0), &row.name);
-            self.draw_detail.draw_abs(cx, r.pos + dvec2(28.0, 25.0), &row.detail);
-            // "reconnect" at the row's right end (on hover or for the selected row)
-            let rr = Rect { pos: dvec2(r.pos.x + r.size.x - 62.0, r.pos.y + 4.0), size: dvec2(58.0, 18.0) };
-            if i == self.selected || Some(i) == self.hover {
-                self.draw_detail.draw_abs(cx, rr.pos + dvec2(4.0, 3.0), "reconnect");
-            }
-            self.reconnect_rects.push(rr);
-        }
-        DrawStep::done()
-    }
 }
 
 /// The overlay's one line (always shown): pictures shown a second, the rate that arrives, the

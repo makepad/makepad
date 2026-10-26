@@ -1024,6 +1024,14 @@ pub fn run_main_loop() {
     main_loop::run()
 }
 
+/// The app lives in the menu bar (macOS): it starts as an accessory app (no Dock icon, no menu
+/// bar) like a bundle whose Info.plist says `LSUIElement`, for a binary that is not such a bundle
+/// (a host a launcher bundle starts). Set before the window system starts. A host API.
+#[cfg(target_os = "macos")]
+pub fn set_menu_bar_app(on: bool) {
+    backend::apple::appkit::MENU_BAR_APP.store(on, std::sync::atomic::Ordering::Release);
+}
+
 /// A display: its extent and what is left of it after the menu bar and Dock, as x, y, w, h in the
 /// window system's global points (macOS: bottom-left origin, the space window frames are in).
 #[relax_api(plain)]

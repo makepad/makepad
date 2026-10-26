@@ -18,3 +18,6 @@ path = "src/main.rs"
 makepad-widgets = { path = "../../widgets", default-features = false }
 makepad-desk-link = { path = "../../libs/desk_link" }
 makepad-network = { path = "../../platform/network" }
+makepad-shell-kit = { path = "../../libs/shell_kit" }
+makepad-core-util = { path = "../../libs/core_util" }
+makepad-desk-link-panel = { path = "../../libs/desk_link_panel" }

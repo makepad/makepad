@@ -181,13 +181,17 @@ pub struct MacDesktop {
     standard_cursors: Vec<(&'static str, NSPoint, NSSize)>,
 }
 
+/// The command-line modes (`--check`, `--capture-test`, ...): AppKit for the cursor queries, no
+/// window, no Dock icon, no menu-bar item. The tray app has AppKit from its window system.
+pub fn cli_app() {
+    unsafe {
+        let app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+        let () = msg_send![app, setActivationPolicy: 2i64];
+    }
+}
+
 impl MacDesktop {
     pub fn new() -> MacDesktop {
-        unsafe {
-            // AppKit for the cursor queries; no window, no Dock icon
-            let app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
-            let () = msg_send![app, setActivationPolicy: 2i64];
-        }
         let mut standard_cursors = Vec::new();
         for (sel_name, shape) in [
             // the arrow first: cursors with its hot spot and size (not-allowed) cannot be told

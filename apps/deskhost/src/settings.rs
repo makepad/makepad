@@ -114,7 +114,35 @@ impl Settings {
         s
     }
 
-        pub fn listen_addr(&self) -> Result<SocketAddr, String> {
+    /// Writes `enabled = on|off` into the settings file (the tray's switch): that line is replaced,
+    /// or added; every other line stays as it is.
+    pub fn set_enabled(on: bool) -> Result<(), String> {
+        let path = Self::path();
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let value = if on { "on" } else { "off" };
+        let mut found = false;
+        let mut lines: Vec<String> = text
+            .lines()
+            .map(|l| {
+                let key = l.split('#').next().unwrap_or("").split('=').next().unwrap_or("").trim();
+                if key == "enabled" && !found {
+                    found = true;
+                    format!("enabled = {value}")
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect();
+        if !found {
+            lines.insert(0, format!("enabled = {value}"));
+        }
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        std::fs::write(&path, format!("{}\n", lines.join("\n"))).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    pub fn listen_addr(&self) -> Result<SocketAddr, String> {
         let ip: IpAddr = self.host.parse().map_err(|_| format!("host {:?} is not an IP address", self.host))?;
         if !makepad_desk_link::server::bindable(ip) {
             return Err(format!("host {ip} is not a LAN address"));
@@ -122,7 +150,7 @@ impl Settings {
         Ok(SocketAddr::new(ip, self.port))
     }
 
-        pub fn fleet_dir(&self) -> PathBuf {
+    pub fn fleet_dir(&self) -> PathBuf {
         self.fleet_dir.clone().unwrap_or_else(|| home().join("weights").join("fleet"))
     }
 }
@@ -139,5 +167,23 @@ mod tests {
         assert_eq!(Settings::parse("key_every = 0").key_every, 0);
         assert_eq!(s.allow_peers, vec!["10.0.0.222".parse::<IpAddr>().unwrap()]);
         assert!(Settings::parse("host = 1.1.1.1").listen_addr().is_err());
+    }
+
+    #[test]
+    fn the_switch_rewrites_only_the_enabled_line() {
+        let dir = std::env::temp_dir().join(format!("deskhost-conf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("deskhost.conf");
+        std::fs::write(&path, "# mine\nenabled = on   # yes\nallow_peers = 10.0.0.222\n").unwrap();
+        std::env::set_var("MAKEPAD_DESKHOST_CONF", &path);
+        Settings::set_enabled(false).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text, "# mine\nenabled = off\nallow_peers = 10.0.0.222\n");
+        assert!(!Settings::load().enabled);
+        Settings::set_enabled(true).unwrap();
+        assert!(Settings::load().enabled && Settings::load().allow_peers.len() == 1);
+        std::env::remove_var("MAKEPAD_DESKHOST_CONF");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
     }
 }

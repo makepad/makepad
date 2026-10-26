@@ -1,13 +1,19 @@
 //! Desk Link — the viewer of the window manager's remote desktop.
 //!
-//! The side panel lists the desktops it knows (saved hosts in `~/.makepad/desklink/hosts`,
-//! `--connect host[:port]`, and the fleet nodes this machine has met): each with its state and
-//! round-trip time, each kept open and paused while it is not the one shown. Click one to show
-//! it. The picture is the remote screen at its own resolution, scaled to the window
-//! (aspect-locked, letterboxed) or shown 1:1; input is mapped back through the same placement.
-//! Keyboard input goes to the desktop once the picture was clicked, until the panel is.
-//! Fullscreen hides the panel (the picture is the whole screen, 1:1); Cmd+Shift+P (Ctrl+Shift+P
-//! off macOS) shows or hides it in any window.
+//! The window is the picture alone. The desktops it knows (saved hosts in
+//! `~/.makepad/desklink/hosts`, `--connect host[:port]`; never this machine itself) are each
+//! kept open and paused while not shown; the menu-bar (tray) icon's dropdown
+//! (`menu`) lists them with whether they answer and their round trip, and a click shows one in
+//! the window (opening or raising it). Closing the window keeps the app in the menu bar (the
+//! shown desktop pauses). The picture is the remote screen at its own resolution, scaled to the
+//! window at a whole-pixel scale where it fits (aspect-locked, letterboxed); input is mapped back
+//! through the same placement. Keyboard input goes to the desktop once the picture was clicked.
+//! The stream is the desktop's choice (codec and rate auto).
+//!
+//! Shortcuts (Cmd on macOS, Ctrl+Shift elsewhere; never sent to the desktop): Cmd+1..9 shows
+//! desktop N, Cmd+R reconnects, Cmd+Shift+N the desktop's next screen, Cmd+Shift+L latency
+//! details, Cmd+Shift+H pauses into the history (the left arrow too, while the keyboard is not
+//! driving the desktop) and back to live. The tray's right-click menu has the same.
 //!
 //! Dev flags: `--connect host[:port]` (repeatable; `--connect-only`: no other desktops), `--select N`, `--stats` (latency lines on
 //! stderr once a second), `--dump-check <file.h264>` (decode an Annex-B dump with the hardware
@@ -19,11 +25,11 @@
 //! `--scrub-check SECS`: after SECS of pictures, pause, scrub the history (steps back and
 //! forward, a far jump, a saved clip), print the timings on stderr and exit.
 //!
-//! Reconnect: the panel row's "reconnect" or Cmd+R (Ctrl+Shift+R elsewhere) drops the shown
-//! desktop's session and opens it again at once.
+//! Reconnect: Cmd+R (Ctrl+Shift+R elsewhere) drops the shown desktop's session and opens it
+//! again at once.
 //!
-//! History: every connection keeps the last 30 s of its received bitstream. "Pause: history"
-//! (or the left arrow while the keyboard is not driving the desktop) freezes it into a timeline:
+//! History: every connection keeps the last 30 s of its received bitstream. Cmd+Shift+H (or the
+//! left arrow while the keyboard is not driving the desktop) freezes it into a timeline:
 //! left / right step one picture (shift: ten), Home / End, space plays, Escape goes back to live;
 //! "Save clip" writes the range (In / Out, else a second around the shown picture) to
 //! local/screencap: the bitstream as received, PNGs and frame notes.
@@ -31,6 +37,7 @@
 mod clip;
 mod conn;
 mod history;
+mod menu;
 mod scrub;
 mod view;
 
@@ -40,7 +47,10 @@ use makepad_desk_link::{self as proto, ClientMsg, GamepadState};
 use makepad_widgets::*;
 use scrub::Scrub;
 use std::sync::{Arc, Mutex};
-use view::{ConnList, ConnListAction, RemoteView, Row, Timeline, TimelineAction, TimelineData};
+use makepad_desk_link_panel::{DesktopRow, Reach};
+use makepad_shell_kit::tray_app::{DropdownChange, TrayDropdown};
+use menu::{DeskMenuAction, DeskMenuView};
+use view::{RemoteView, Timeline, TimelineAction, TimelineData};
 
 app_main!(App);
 
@@ -55,32 +65,24 @@ script_mod! {
                 pass +: {clear_color: #x101114}
                 body +: {
                     padding: 0 spacing: 0
-                    split := View{
-                        width: Fill height: Fill flow: Right
-                        panel := View{
-                            width: 250 height: Fill flow: Down spacing: 6
-                            padding: Inset{left: 8 right: 8 top: 10 bottom: 10}
-                            show_bg: true
-                            draw_bg +: { color: #x18191d }
-                            Label{text: "Desktops" draw_text +: {color: #x9a9aa2 text_style: theme.font_bold{font_size: 9}}}
-                            conn_list := ConnList{height: Fill}
-                            host_input := TextInput{width: Fill empty_text: "host:port"}
-                            add_host := Button{width: Fill text: "Connect"}
-                            one_to_one := CheckBox{text: "1:1 pixels"}
-                            integer_scale := CheckBox{text: "Whole-pixel scale" active: true}
-                            details := CheckBox{text: "Latency details"}
-                            screen_next := Button{width: Fill text: "Next screen"}
-                            codec_btn := Button{width: Fill text: "Codec: auto"}
-                            history_btn := Button{width: Fill text: "Pause: history"}
-                            rate_cap := Button{width: Fill text: "Rate: auto"}
-                        }
-                        View{
-                            width: Fill height: Fill
-                            flow: Overlay
+                    View{
+                        width: Fill height: Fill
+                        flow: Overlay
                             remote := RemoteView{}
                             timeline := Timeline{}
-                        }
                     }
+                }
+            }
+            // the menu-bar icon's dropdown: the desktops
+            menu_window := Window{
+                create_on_start: false
+                show_caption_bar: false
+                chrome: WindowChrome.None
+                window.title: "Desk Link"
+                window.dropdown: true
+                window.inner_size: vec2(360, 400)
+                body +: {
+                    menu_view := mod.widgets.DeskMenuView{card: true}
                 }
             }
         }
@@ -118,12 +120,15 @@ pub struct App {
     vsync: NextFrame,
     #[rust]
     vsync_times: Vec<f64>,
-    /// The window is fullscreen: the panel goes (the picture is the whole screen, 1:1) and comes
-    /// back on leaving fullscreen or with the panel toggle (Cmd+Shift+P).
     #[rust]
     fullscreen: bool,
+    /// The window shows (closed: the app lives in the menu bar, the shown desktop paused).
+    #[rust(true)]
+    window_shown: bool,
+    #[rust(TrayDropdown::new("desklink", TRAY, 360.0))]
+    dropdown: TrayDropdown,
     #[rust]
-    panel_shown: bool,
+    tray_key: String,
     /// The window's inner size in device pixels (fullscreen: the screen's backing size).
     #[rust]
     window_px: [u32; 2],
@@ -207,8 +212,14 @@ fn port_of(spec: &str) -> (String, u16) {
     }
 }
 
-/// The desktops to list: saved hosts, `--connect` ones, the fleet nodes this machine knows
-/// (`true`: found in `known_nodes`, maybe without a desktop: retried rarely while offline).
+/// Whether `host` (an address) is this machine.
+fn is_self(host: &str) -> bool {
+    let Ok(ip) = host.parse::<std::net::IpAddr>() else { return false };
+    ip.is_loopback() || makepad_core_util::netif::interfaces().iter().any(|i| std::net::IpAddr::V4(i.addr) == ip)
+}
+
+/// The desktops to list: `--connect` ones and saved hosts (the bool: found by discovery rather
+/// than named; retried rarely while offline).
 fn hosts() -> Vec<(String, String, u16, bool)> {
     let mut out: Vec<(String, String, u16, bool)> = Vec::new();
     let mut put = |name: String, spec: &str, discovered: bool| {
@@ -233,22 +244,12 @@ fn hosts() -> Vec<(String, String, u16, bool)> {
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
             let mut parts = line.split_whitespace();
             match (parts.next(), parts.next()) {
+                // this machine is never one of its desktops (`--connect` may still name it)
+                (Some(_), Some(spec)) | (Some(spec), None) if is_self(&port_of(spec).0) => {}
                 (Some(name), Some(spec)) => add(name.to_string(), spec),
                 (Some(spec), None) => add(spec.to_string(), spec),
                 _ => {}
             }
-        }
-    }
-    // fleet nodes met before (their AI hub's address): their desktop is on the Desk Link port
-    let known = makepad_network::fleet::auth::client_dir().join(makepad_network::fleet::auth::KNOWN_NODES);
-    if let Ok(text) = std::fs::read_to_string(known) {
-        for line in text.lines() {
-            let Some(addr) = line.split_whitespace().next() else { continue };
-            let (host, port) = port_of(addr);
-            if port == proto::DEFAULT_PORT {
-                continue;
-            }
-            put(host.clone(), &host, true);
         }
     }
     out
@@ -373,9 +374,6 @@ impl App {
         if let Some(mut v) = self.remote(cx).borrow_mut::<RemoteView>() {
             v.clear(cx);
         }
-        if let Some(mut l) = self.ui.widget(cx, ids!(conn_list)).borrow_mut::<ConnList>() {
-            l.selected = index;
-        }
         self.refresh(cx);
     }
 
@@ -388,26 +386,77 @@ impl App {
         self.refresh(cx);
     }
 
-    /// The panel rows, the picture, the cursor, the overlay lines.
-    fn refresh(&mut self, cx: &mut Cx) {
-        let rows: Vec<Row> = self
-            .conns
+    /// The desktops as the menu-bar dropdown lists them.
+    fn desktop_rows(&self) -> Vec<DesktopRow> {
+        self.conns
             .iter()
-            .map(|c| {
+            .enumerate()
+            .map(|(i, c)| {
                 let s = c.shared.lock().unwrap();
-                let state = s.state.clone().unwrap_or(State::Connecting);
-                let detail = match &state {
-                    State::Connected => format!("{}:{} · {}", c.host, c.port, s.rtt_ms.map(|r| format!("{r:.1} ms")).unwrap_or_else(|| "…".into())),
-                    State::Connecting => format!("{}:{} · connecting", c.host, c.port),
-                    State::Reconnecting => format!("{}:{} · reconnecting", c.host, c.port),
-                    State::Offline(why) => format!("offline · {why}"),
+                let reach = match s.state.clone().unwrap_or(State::Connecting) {
+                    State::Connected => Reach::Online(s.rtt_ms),
+                    State::Connecting | State::Reconnecting => Reach::Connecting,
+                    State::Offline(why) => Reach::Offline(why),
                 };
-                Row { name: c.name.clone(), detail, state }
+                DesktopRow { name: c.name.clone(), addr: format!("{}:{}", c.host, c.port), reach, shown: self.window_shown && i == self.selected }
             })
-            .collect();
-        if let Some(mut l) = self.ui.widget(cx, ids!(conn_list)).borrow_mut::<ConnList>() {
-            l.set_rows(cx, rows);
+            .collect()
+    }
+
+    /// The tray (its tooltip says how many desktops answer) and the open dropdown.
+    fn refresh_tray(&mut self, cx: &mut Cx) {
+        // a menu-bar entry where the desktop gives the icon's click to the app (macOS, Windows,
+        // the makepad WM)
+        if !cx.desktop_has_tray_dropdown() {
+            return;
         }
+        let rows = self.desktop_rows();
+        let online = rows.iter().filter(|r| matches!(r.reach, Reach::Online(_))).count();
+        let status = match self.conns.get(self.selected).filter(|_| self.window_shown) {
+            Some(c) => format!("{} of {} desktops answer \u{b7} showing {}", online, rows.len(), c.name),
+            None => format!("{} of {} desktops answer", online, rows.len()),
+        };
+        let key = format!("{status}|{}", self.details);
+        if key != self.tray_key {
+            self.tray_key = key;
+            let menu = vec![
+                TrayMenuItem::Item { id: live_id!(status), label: status.clone(), enabled: false, checked: None },
+                TrayMenuItem::Line,
+                TrayMenuItem::item(SHOW, "Show window"),
+                TrayMenuItem::item(NEXT_SCREEN, "Next screen of the desktop"),
+                TrayMenuItem::check(DETAILS, "Latency details", self.details),
+                TrayMenuItem::item(HISTORY, "Pause: history / back to live"),
+                TrayMenuItem::Line,
+                TrayMenuItem::item(QUIT, "Quit Desk Link"),
+            ];
+            cx.set_tray(TrayIcon { id: TRAY, image: makepad_desk_link_panel::tray_glyph::image(makepad_desk_link_panel::tray_glyph::Glyph::Viewer), tooltip: format!("Desk Link \u{b7} {status}"), menu, dropdown: true });
+        }
+        if self.dropdown.is_open() {
+            if let Some(mut v) = self.ui.widget(cx, ids!(menu_view)).borrow_mut::<DeskMenuView>() {
+                v.set_rows(cx, rows);
+            }
+        }
+    }
+
+    /// Shows desktop `index` in the window (made, shown and raised; the Dock icon with it).
+    fn open_desktop(&mut self, cx: &mut Cx, index: usize) {
+        if index >= self.conns.len() {
+            return;
+        }
+        self.keyboard = false;
+        if !self.window_shown {
+            self.window_shown = true;
+            cx.show_in_dock(true);
+        }
+        self.select(cx, index);
+        self.ui.window(cx, ids!(main_window)).show(cx);
+        menu::selftest(&format!("showing desktop {index} ({})", self.conns[index].name));
+        self.refresh_tray(cx);
+    }
+
+    /// The picture, the cursor, the overlay lines.
+    fn refresh(&mut self, cx: &mut Cx) {
+        self.refresh_tray(cx);
         let Some(c) = self.conns.get(self.selected) else { return };
         // paused: live pictures go on arriving (and recording) but are not shown
         let picture = c.latest.lock().unwrap().take().filter(|_| self.scrub.is_none());
@@ -546,7 +595,7 @@ impl App {
                     }
                 }
             }
-            Event::KeyDown(e) | Event::KeyUp(e) if is_panel_toggle(e) => {}
+            Event::KeyDown(e) | Event::KeyUp(e) if shortcut(e).is_some() => {}
             Event::KeyDown(e) if self.keyboard => conn.send(ClientMsg::Key { down: true, keycode: e.key_code.to_index(), mods: mods_of(&e.modifiers) }),
             Event::KeyUp(e) if self.keyboard => conn.send(ClientMsg::Key { down: false, keycode: e.key_code.to_index(), mods: mods_of(&e.modifiers) }),
             _ => {}
@@ -583,12 +632,46 @@ impl App {
     }
 }
 
-/// The rate cap button's steps (Mbit/s; 0 = auto).
-const RATE_CAPS: [u32; 6] = [0, 800, 400, 250, 150, 80];
+const TRAY: LiveId = live_id!(desklink_tray);
+const SHOW: LiveId = live_id!(show_window);
+const NEXT_SCREEN: LiveId = live_id!(next_screen);
+const DETAILS: LiveId = live_id!(latency_details);
+const HISTORY: LiveId = live_id!(history);
+const QUIT: LiveId = live_id!(quit_desklink);
 
-/// The panel toggle: Cmd+Shift+P on macOS, Ctrl+Shift+P elsewhere (never sent to the desktop).
-fn is_panel_toggle(e: &KeyEvent) -> bool {
-    e.key_code == KeyCode::KeyP && e.modifiers.shift && if cfg!(target_os = "macos") { e.modifiers.logo } else { e.modifiers.control }
+/// The viewer's own shortcuts (never sent to the desktop): Cmd (macOS) / Ctrl+Shift (elsewhere)
+/// with 1..9 (desktop N), R (reconnect); with Shift on macOS: N (next screen), L (latency
+/// details), H (history).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Shortcut {
+    Desktop(usize),
+    Reconnect,
+    NextScreen,
+    Details,
+    History,
+}
+
+fn shortcut(e: &KeyEvent) -> Option<Shortcut> {
+    let m = &e.modifiers;
+    let (plain, shifted) = if cfg!(target_vendor = "apple") { (m.logo && !m.shift, m.logo && m.shift) } else { (m.control && m.shift, m.control && m.shift) };
+    let digits = [KeyCode::Key1, KeyCode::Key2, KeyCode::Key3, KeyCode::Key4, KeyCode::Key5, KeyCode::Key6, KeyCode::Key7, KeyCode::Key8, KeyCode::Key9];
+    if plain {
+        if let Some(i) = digits.iter().position(|k| *k == e.key_code) {
+            return Some(Shortcut::Desktop(i));
+        }
+        if e.key_code == KeyCode::KeyR {
+            return Some(Shortcut::Reconnect);
+        }
+    }
+    if shifted {
+        return match e.key_code {
+            KeyCode::KeyN => Some(Shortcut::NextScreen),
+            KeyCode::KeyL => Some(Shortcut::Details),
+            KeyCode::KeyH => Some(Shortcut::History),
+            _ => None,
+        };
+    }
+    None
 }
 
 /// The history: pausing, stepping, playing, saving.
@@ -623,7 +706,6 @@ impl App {
         self.range = (None, None);
         self.playing = None;
         self.scrub = Some(Scrub::start(snap, self.cur, self.signal.clone()));
-        self.ui.button(cx, ids!(history_btn)).set_text(cx, "Back to live");
         if let Some(mut v) = self.remote(cx).borrow_mut::<RemoteView>() {
             v.inset_bottom = view::TIMELINE_H;
         }
@@ -634,7 +716,6 @@ impl App {
         self.scrub = None;
         self.playing = None;
         self.hist_shown = None;
-        self.ui.button(cx, ids!(history_btn)).set_text(cx, "Pause: history");
         if let Some(mut v) = self.remote(cx).borrow_mut::<RemoteView>() {
             v.inset_bottom = 0.0;
         }
@@ -901,12 +982,55 @@ fn report_check(check: &Check, app: &App) {
 }
 
 impl App {
-    /// The side panel shown or gone (gone: the picture has the whole window, fullscreen the
-    /// whole screen at 1:1).
-    fn show_panel(&mut self, cx: &mut Cx, on: bool) {
-        self.panel_shown = on;
-        self.ui.view(cx, ids!(panel)).set_visible(cx, on);
-        self.ui.redraw(cx);
+    fn toggle_history(&mut self, cx: &mut Cx) {
+        if self.scrub.is_some() {
+            self.leave_history(cx);
+        } else {
+            self.enter_history(cx);
+        }
+    }
+
+    fn next_screen(&mut self) {
+        if let Some(c) = self.current() {
+            let next = c.shared.lock().unwrap().welcome.as_ref().map(|w| (w.screen + 1) % w.screens.len().max(1) as u32);
+            if let Some(index) = next {
+                c.send(ClientMsg::SelectScreen { index });
+            }
+        }
+    }
+
+    fn toggle_details(&mut self, cx: &mut Cx) {
+        self.details = !self.details;
+        self.remote(cx).redraw(cx);
+        self.refresh_tray(cx);
+    }
+
+    fn do_shortcut(&mut self, cx: &mut Cx, s: Shortcut) {
+        match s {
+            Shortcut::Desktop(i) => self.open_desktop(cx, i),
+            Shortcut::Reconnect => {
+                let i = self.selected;
+                self.reconnect(cx, i);
+            }
+            Shortcut::NextScreen => self.next_screen(),
+            Shortcut::Details => self.toggle_details(cx),
+            Shortcut::History => self.toggle_history(cx),
+        }
+    }
+
+    /// The window closed into the menu bar: the shown desktop pauses, no Dock icon.
+    fn hide_window(&mut self, cx: &mut Cx) {
+        self.window_shown = false;
+        if self.scrub.is_some() {
+            self.leave_history(cx);
+        }
+        if let Some(c) = self.conns.get(self.selected) {
+            c.show(false);
+        }
+        self.ui.window(cx, ids!(main_window)).set_visible(cx, false);
+        cx.show_in_dock(false);
+        menu::selftest("window closed: hidden, Desk Link stays in the menu bar");
+        self.refresh_tray(cx);
     }
 
     /// Starts measuring the display's refresh: [`Self::vsync_frame`] over the next frames.
@@ -1109,7 +1233,6 @@ impl MatchEvent for App {
             steps.push_back(Check::SAVE);
             self.check = Some(Check { after, started: None, steps, waiting: None, times: Vec::new(), last_step: None, reconnect: None, reconnect_wanted: args.iter().any(|a| a == "--check-reconnect"), created: std::time::Instant::now(), timer: cx.start_interval(0.004) });
         }
-        self.panel_shown = true;
         if let Some(path) = args.windows(2).find(|w| w[0] == "--dump-play").map(|w| w[1].clone()) {
             let gpu = !args.iter().any(|a| a == "--cpu-decode");
             let still = args.windows(2).find(|w| w[0] == "--still").and_then(|w| w[1].parse().ok());
@@ -1130,91 +1253,14 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        for action in actions.filter_widget_actions_cast::<ConnListAction>(self.ui.widget(cx, ids!(conn_list)).widget_uid()) {
-            match action {
-                ConnListAction::Select(i) => {
-                    self.keyboard = false;
-                    self.select(cx, i);
-                }
-                ConnListAction::Reconnect(i) => self.reconnect(cx, i),
-                ConnListAction::None => {}
-            }
-        }
-        let input = self.ui.text_input(cx, ids!(host_input));
-        let typed = input.returned(actions).map(|(t, _)| t);
-        let clicked = self.ui.button(cx, ids!(add_host)).clicked(actions).then(|| input.text());
-        if let Some(spec) = typed.or(clicked).map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
-            let (host, port) = port_of(&spec);
-            match self.conns.iter().position(|c| c.host == host && c.port == port) {
-                Some(i) => self.select(cx, i),
-                None => {
-                    self.add(cx, spec.clone(), host, port, false);
-                    let last = self.conns.len() - 1;
-                    self.select(cx, last);
-                }
-            }
-        }
-        if let Some(on) = self.ui.check_box(cx, ids!(details)).changed(actions) {
-            self.details = on;
-            self.remote(cx).redraw(cx);
-        }
-        if let Some(on) = self.ui.check_box(cx, ids!(integer_scale)).changed(actions) {
-            if let Some(mut v) = self.remote(cx).borrow_mut::<RemoteView>() {
-                v.integer_scale = on;
-                v.redraw(cx);
-            }
-        }
-        if let Some(on) = self.ui.check_box(cx, ids!(one_to_one)).changed(actions) {
-            if let Some(mut v) = self.remote(cx).borrow_mut::<RemoteView>() {
-                v.one_to_one = on;
-                v.redraw(cx);
-            }
-        }
-        // the codec: auto (H.265 where the desktop's encoder and this decoder take it, else
-        // H.264) -> H.265 -> H.264; every connection tells its desktop
-        if self.ui.button(cx, ids!(codec_btn)).clicked(actions) {
-            use proto::pref;
-            use std::sync::atomic::Ordering;
-            let next = match crate::conn::CODEC_PREF.load(Ordering::Acquire) {
-                pref::AUTO => pref::HEVC,
-                pref::HEVC => pref::H264,
-                _ => pref::AUTO,
-            };
-            crate::conn::CODEC_PREF.store(next, Ordering::Release);
-            let label = match next {
-                pref::HEVC => "Codec: H.265",
-                pref::H264 => "Codec: H.264",
-                _ => "Codec: auto",
-            };
-            self.ui.button(cx, ids!(codec_btn)).set_text(cx, label);
-        }
-        if self.ui.button(cx, ids!(history_btn)).clicked(actions) {
-            if self.scrub.is_some() {
-                self.leave_history(cx);
-            } else {
-                self.enter_history(cx);
-            }
-        }
         for action in actions.filter_widget_actions_cast::<TimelineAction>(self.ui.widget(cx, ids!(timeline)).widget_uid()) {
             self.timeline_action(cx, action);
         }
-        // the stream's rate: auto (the desktop adapts it to the link and its encoder, up to its
-        // own cap) or at most a chosen rate
-        if self.ui.button(cx, ids!(rate_cap)).clicked(actions) {
-            use std::sync::atomic::Ordering;
-            let now = crate::conn::RATE_CAP_MBPS.load(Ordering::Acquire);
-            let next = RATE_CAPS.iter().position(|c| *c == now).map_or(0, |i| (i + 1) % RATE_CAPS.len());
-            let cap = RATE_CAPS[next];
-            crate::conn::RATE_CAP_MBPS.store(cap, Ordering::Release);
-            let label = if cap == 0 { "Rate: auto".to_string() } else { format!("Rate: at most {cap} Mbit/s") };
-            self.ui.button(cx, ids!(rate_cap)).set_text(cx, &label);
-        }
-        if self.ui.button(cx, ids!(screen_next)).clicked(actions) {
-            if let Some(c) = self.current() {
-                let next = c.shared.lock().unwrap().welcome.as_ref().map(|w| (w.screen + 1) % w.screens.len().max(1) as u32);
-                if let Some(index) = next {
-                    c.send(ClientMsg::SelectScreen { index });
-                }
+        for action in actions.filter_widget_actions_cast::<DeskMenuAction>(self.ui.widget(cx, ids!(menu_view)).widget_uid()) {
+            if let DeskMenuAction::Open(i) = action {
+                let window = self.ui.window(cx, ids!(menu_window));
+                self.dropdown.close(cx, &window, "desktop chosen");
+                self.open_desktop(cx, i);
             }
         }
     }
@@ -1229,7 +1275,10 @@ impl MatchEvent for App {
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         makepad_widgets::script_mod(vm);
+        makepad_shell_kit::eval_default_theme(vm);
+        makepad_shell_kit::script_mod(vm);
         view::script_mod(vm);
+        menu::script_mod(vm);
         self::script_mod(vm)
     }
 
@@ -1241,10 +1290,41 @@ impl AppMain for App {
             return;
         }
         match event {
-            // Cmd+R (Ctrl+R off macOS): reconnect the shown desktop (never sent to it)
-            Event::KeyDown(e) if e.key_code == KeyCode::KeyR && (if cfg!(target_vendor = "apple") { e.modifiers.logo } else { e.modifiers.control && e.modifiers.shift }) && !e.is_repeat => {
+            // the viewer's shortcuts (never sent to the desktop)
+            Event::KeyDown(e) if !e.is_repeat && shortcut(e).is_some() => {
+                if let Some(s) = shortcut(e) {
+                    self.do_shortcut(cx, s);
+                }
+                return;
+            }
+            Event::TrayMenu(e) if e.tray == TRAY => {
+                match e.item {
+                    id if id == SHOW => {
+                        let i = self.selected;
+                        self.open_desktop(cx, i);
+                    }
+                    id if id == NEXT_SCREEN => self.next_screen(),
+                    id if id == DETAILS => self.toggle_details(cx),
+                    id if id == HISTORY => self.toggle_history(cx),
+                    id if id == QUIT => {
+                        menu::selftest("quit from the tray");
+                        cx.remove_tray(TRAY);
+                        cx.quit();
+                    }
+                    _ => {}
+                }
+                return;
+            }
+            // a desktop whose tray click is no dropdown's: the window
+            Event::TrayClick(e) if e.tray == TRAY && !cx.has_tray_dropdown() => {
                 let i = self.selected;
-                self.reconnect(cx, i);
+                self.open_desktop(cx, i);
+                return;
+            }
+            // closing the window keeps the app in the menu bar where there is one
+            Event::WindowCloseRequested(e) if cx.has_tray() && Some(e.window_id) == self.ui.window(cx, ids!(main_window)).window_id() => {
+                e.accept_close.set(false);
+                self.hide_window(cx);
                 return;
             }
             Event::KeyDown(e) if self.scrub.is_some() => self.history_key(cx, e),
@@ -1261,12 +1341,6 @@ impl AppMain for App {
         if self.check.as_ref().is_some_and(|c| c.timer.is_event(event).is_some()) {
             self.check_tick(cx);
         }
-        if let Event::KeyDown(e) = event {
-            if is_panel_toggle(e) && !e.is_repeat {
-                let on = !self.panel_shown;
-                self.show_panel(cx, on);
-            }
-        }
         self.pointer_event(cx, event);
         if let Event::GameInputConnected(_) = event {
             self.pad_poll = cx.new_next_frame();
@@ -1279,10 +1353,7 @@ impl AppMain for App {
             self.measure_refresh(cx);
             let g = &e.new_geom;
             self.window_px = [(g.inner_size.x * g.dpi_factor).round() as u32, (g.inner_size.y * g.dpi_factor).round() as u32];
-            if g.is_fullscreen != self.fullscreen {
-                self.fullscreen = g.is_fullscreen;
-                self.show_panel(cx, !self.fullscreen);
-            }
+            self.fullscreen = g.is_fullscreen;
         }
         if self.pad_poll.is_event(event).is_some() {
             self.poll_pads(cx);
@@ -1312,8 +1383,18 @@ impl AppMain for App {
                 self.signal.set();
             }
         }
+        let window = self.ui.window(cx, ids!(menu_window));
+        let content = self.ui.widget(cx, ids!(menu_view)).borrow::<DeskMenuView>().map_or(0.0, |v| v.content_height());
+        if self.dropdown.handle_event(cx, event, &window, content) == Some(DropdownChange::Opened) {
+            self.tray_key.clear();
+            self.refresh_tray(cx);
+        }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+        if let Event::Draw(_) = event {
+            let content = self.ui.widget(cx, ids!(menu_view)).borrow::<DeskMenuView>().map_or(0.0, |v| v.content_height());
+            self.dropdown.fit(cx, &window, content);
+        }
     }
 }
 

@@ -348,9 +348,10 @@ unsafe fn init() {
     let no_open: ObjcId = msg_send![class!(NSDictionary), dictionaryWithObject: str_to_nsstring("NO") forKey: str_to_nsstring("NSTreatUnknownArgumentsAsOpen")];
     let () = msg_send![defaults, registerDefaults: no_open];
     let () = msg_send![ns_app, setDelegate: delegate];
-    // a bundle whose Info.plist says LSUIElement is an agent app (a menu-bar app): no Dock icon and
+    // a bundle whose Info.plist says LSUIElement is an agent app (a menu-bar app), as is an app that
+    // says so itself (`AppMain::menu_bar_app`, for a host a launcher bundle starts): no Dock icon and
     // no menu bar from the first moment; `ShowInDock` turns the Dock icon on while it has a window
-    let policy = if bundle_flag("LSUIElement") { NSApplicationActivationPolicy::NSApplicationActivationPolicyAccessory } else { NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular };
+    let policy = if bundle_flag("LSUIElement") || super::MENU_BAR_APP.load(Ordering::Acquire) { NSApplicationActivationPolicy::NSApplicationActivationPolicyAccessory } else { NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular };
     let () = msg_send![ns_app, setActivationPolicy: policy as i64];
     a.pulse.set(msg_send![classes.pulse, new]);
     a.menu_delegate.set(msg_send![classes.menu_delegate, new]);

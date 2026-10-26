@@ -12,58 +12,22 @@
 //! The app also records its pid in `app.pid` next to its settings while it runs from a bundle,
 //! so the installer can stop the installed copy (by that pid only) before replacing it.
 
+use makepad_shell_kit::tray_app::{bundle_exe, LoginItem};
 use std::path::PathBuf;
 
 pub const LABEL: &str = "nl.makepad.aihub";
 
-/// This bundle's executable, when the app runs from an installed `.app`.
-pub fn bundle_exe() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let in_bundle = exe.parent()?.file_name()? == "MacOS" && exe.parent()?.parent()?.file_name()? == "Contents" && exe.parent()?.parent()?.parent()?.extension()? == "app";
-    (cfg!(target_os = "macos") && in_bundle).then_some(exe)
-}
-
-/// Where the plist lives; `MAKEPAD_AIHUB_LAUNCH_AGENTS_DIR` replaces `~/Library/LaunchAgents` (tests).
-fn plist_path() -> Option<PathBuf> {
-    let dir = match std::env::var_os("MAKEPAD_AIHUB_LAUNCH_AGENTS_DIR").filter(|d| !d.is_empty()) {
-        Some(d) => PathBuf::from(d),
-        None => PathBuf::from(std::env::var_os("HOME").filter(|h| !h.is_empty())?).join("Library/LaunchAgents"),
-    };
-    Some(dir.join(format!("{LABEL}.plist")))
-}
-
-fn xml(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
-}
-
-fn plist_text(exe: &str) -> String {
-    format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n    <key>Label</key>\n    <string>{LABEL}</string>\n    <key>ProgramArguments</key>\n    <array>\n        <string>{}</string>\n    </array>\n    <key>RunAtLoad</key>\n    <true/>\n    <key>LimitLoadToSessionType</key>\n    <string>Aqua</string>\n</dict>\n</plist>\n",
-        xml(exe)
-    )
+fn item() -> Option<LoginItem> {
+    Some(LoginItem { label: LABEL, program: bundle_exe()?, extra: String::new() })
 }
 
 /// None: not offered here. Some(on): the switch's state.
 pub fn state() -> Option<bool> {
-    let exe = bundle_exe()?;
-    let text = std::fs::read_to_string(plist_path()?).unwrap_or_default();
-    Some(text.contains(&format!("<string>{}</string>", xml(&exe.to_string_lossy()))) && text.contains("<key>RunAtLoad</key>"))
+    item().map(|i| i.is_on())
 }
 
 pub fn set(on: bool) -> Result<(), String> {
-    let exe = bundle_exe().ok_or("not running from an installed bundle")?;
-    let path = plist_path().ok_or("no home folder")?;
-    if on {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        }
-        std::fs::write(&path, plist_text(&exe.to_string_lossy())).map_err(|e| format!("{}: {e}", path.display()))
-    } else {
-        match std::fs::remove_file(&path) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("{}: {e}", path.display())),
-            _ => Ok(()),
-        }
-    }
+    item().ok_or("not running from an installed bundle")?.set(on)
 }
 
 /// The pid file next to the settings (the installer reads `~/.makepad/ai-hub/app.pid`).
@@ -94,14 +58,6 @@ pub fn clear_pid() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_plist_names_the_label_the_executable_and_run_at_load() {
-        let text = plist_text("/Users/x/Applications/AI Hub.app/Contents/MacOS/makepad-app-aihub");
-        assert!(text.contains("<string>nl.makepad.aihub</string>"));
-        assert!(text.contains("<string>/Users/x/Applications/AI Hub.app/Contents/MacOS/makepad-app-aihub</string>"));
-        assert!(text.contains("<key>RunAtLoad</key>\n    <true/>"));
-    }
 
     #[test]
     fn only_an_installed_bundle_offers_the_switch() {

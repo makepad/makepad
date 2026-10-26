@@ -161,6 +161,16 @@ pub fn set_outlives_window_manager(on: bool) {
     OUTLIVES_WINDOW_MANAGER.store(on, std::sync::atomic::Ordering::Release);
 }
 
+/// `app_main!` records [`AppMain::menu_bar_app`] here before anything opens: the window system
+/// starts it without a Dock icon (macOS, a rustc build; under `makepad run` the host's window
+/// system is already up and the app turns its Dock icon off with `Cx::show_in_dock`).
+pub fn set_menu_bar_app(on: bool) {
+    #[cfg(all(target_os = "macos", not(relax)))]
+    makepad_hal::set_menu_bar_app(on);
+    #[cfg(not(all(target_os = "macos", not(relax))))]
+    let _ = on;
+}
+
 /// This process is a window manager: it never becomes a client of another one.
 pub fn is_window_manager() -> bool {
     WINDOW_MANAGER.load(std::sync::atomic::Ordering::Acquire)
@@ -475,6 +485,17 @@ pub trait AppMain {
     /// `MAKEPAD_HIDE_WINDOWS`, `--stdin-loop`) and `MAKEPAD_NEW_INSTANCE=1`
     /// always run on their own. Mobile OSes keep one instance themselves.
     fn single_instance() -> bool
+    where
+        Self: Sized,
+    {
+        false
+    }
+
+    /// Whether the app lives in the menu bar (macOS): no Dock icon from the first moment, as for a
+    /// bundle whose Info.plist says `LSUIElement`, also when the binary is not such a bundle (Desk
+    /// Host, started by its launcher bundle). Windows it shows later may turn the Dock icon on
+    /// (`Cx::show_in_dock`).
+    fn menu_bar_app() -> bool
     where
         Self: Sized,
     {
@@ -831,6 +852,7 @@ macro_rules! app_main {
             }
             $crate::set_window_manager(<$app as AppMain>::window_manager());
             $crate::set_outlives_window_manager(<$app as AppMain>::outlives_window_manager());
+            $crate::set_menu_bar_app(<$app as AppMain>::menu_bar_app());
             $crate::discover_window_manager(env!("CARGO_PKG_NAME"));
             $crate::startup_trace("pre_start (objc classes)");
 
