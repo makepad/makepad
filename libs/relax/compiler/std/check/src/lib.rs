@@ -69,6 +69,8 @@ pub mod intrinsics_mem {
     pub unsafe fn is_copy<T>() -> bool { false }
     /// rustc has no stable Freeze query: the shim takes the non-Freeze paths (sort tests force them with FORCE_FREEZE).
     pub unsafe fn is_freeze<T>() -> bool { false }
+    /// rustc cannot ask whether T: TrustedLen without specialization: the shim takes the general extend.
+    pub unsafe fn is_trusted_len<T>() -> bool { false }
     pub unsafe fn drop_in_place<T: ?Sized>(p: *mut T) { core::ptr::drop_in_place(p) }
     pub unsafe fn ptr_read<T>(p: *const T) -> T { core::ptr::read(p) }
     pub unsafe fn ptr_write<T>(p: *mut T, v: T) { core::ptr::write(p, v) }

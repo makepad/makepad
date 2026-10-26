@@ -2004,6 +2004,7 @@ impl<'a> Lcx<'a> {
         if !ret_regs {
             let p = self.f.vreg(Cls::I);
             self.f.params.push(p);
+            self.f.param_ints.push((p, self.u.ptr_bytes() as u8, false));
             self.sret = Some(p);
             self.f.sret = Some(p);
         }
@@ -2024,6 +2025,7 @@ impl<'a> Lcx<'a> {
         if self.u.tcx.fn_sig(&self.u.prog, def).map_or(false, |s| s.track_caller) {
             let p = self.f.vreg(Cls::I);
             self.f.params.push(p);
+            self.f.param_ints.push((p, self.u.ptr_bytes() as u8, false));
             self.caller_loc = Some(p);
         }
         for (li, pat, t, regs, by_ptr) in param_vals {
@@ -2154,6 +2156,7 @@ impl<'a> Lcx<'a> {
         if !ret_regs {
             let p = self.f.vreg(Cls::I);
             self.f.params.push(p);
+            self.f.param_ints.push((p, self.u.ptr_bytes() as u8, false));
             self.sret = Some(p);
             self.f.sret = Some(p);
         }
@@ -2170,6 +2173,7 @@ impl<'a> Lcx<'a> {
             } else {
                 let env = self.f.vreg(Cls::I);
                 self.f.params.push(env);
+                self.f.param_ints.push((env, self.u.ptr_bytes() as u8, false));
                 env
             };
             let up = match self.kind(ct) {
@@ -2350,6 +2354,7 @@ impl<'a> Lcx<'a> {
         if !ret_regs {
             let p = self.f.vreg(Cls::I);
             self.f.params.push(p);
+            self.f.param_ints.push((p, self.u.ptr_bytes() as u8, false));
             self.sret = Some(p);
             self.f.sret = Some(p);
         }
@@ -2681,6 +2686,7 @@ impl<'a> Lcx<'a> {
         if !ret_regs {
             let p = self.f.vreg(Cls::I);
             self.f.params.push(p);
+            self.f.param_ints.push((p, self.u.ptr_bytes() as u8, false));
             self.sret = Some(p);
             self.f.sret = Some(p);
         }
@@ -2782,6 +2788,11 @@ impl<'a> Lcx<'a> {
                 for r in &regs {
                     self.f.params.push(*r);
                 }
+                for (r, lf) in regs.iter().zip(leaves.iter()) {
+                    if let Mem::Int(n, signed) = lf.mem {
+                        self.f.param_ints.push((*r, n, signed));
+                    }
+                }
                 // rustc marks `&mut T` noalias only for T: Unpin (a !Unpin value, e.g. a
                 // self-referential future, may be aliased through itself)
                 if let TyKind::Ref(true, inner, _) = self.kind(t) {
@@ -2820,6 +2831,7 @@ impl<'a> Lcx<'a> {
             None => {
                 let p = self.f.vreg(Cls::I);
                 self.f.params.push(p);
+                self.f.param_ints.push((p, self.u.ptr_bytes() as u8, false));
                 // by-pointer aggregate params point to the caller's private copy, which this
                 // function owns (Func::owned)
                 self.f.noalias.push(p);
@@ -5728,8 +5740,10 @@ impl<'a> Lcx<'a> {
         // read-only allocation per content (rustc interns constant allocations; `&0u8` twice is
         // one address), written at compile time
         if shared && l.size > 0 && self.cur == blk0 && self.u.tcx.is_freeze(&self.u.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog), xt) {
-            if let Some(buf) = self.const_bytes(&v, l, blk0, at0) {
-                let addr = self.u.data_dedup(&buf, l.align.max(1) as u64);
+            if let Some((buf, ptrs)) = self.const_bytes(&v, l, blk0, at0) {
+                // with pointers to data objects (the `&str` pieces of `format_args!`): an object
+                // of the value's type, its pointer words found and linked by walking the type
+                let addr = if ptrs { self.u.data(&buf, l.align.max(1) as u64, crate::syms::DataKind::Typed(xt)) } else { self.u.data_dedup(&buf, l.align.max(1) as u64) };
                 let addr = self.u.data_sym(addr);
                 let p = self.f.vreg(Cls::I);
                 self.emit(Inst::Addr(p, addr));
@@ -5745,10 +5759,22 @@ impl<'a> Lcx<'a> {
 
     /// The bytes of value `v` (layout `l`) when the instructions emitted for it (block `blk`
     /// from `at`) only make constants: register leaves defined by constants, or a fresh slot
-    /// written only by stores of constants (array / aggregate literals). None otherwise.
-    fn const_bytes(&self, v: &Val, l: &Layout, blk: u32, at: usize) -> Option<Vec<u8>> {
+    /// written only by stores of constants (array / aggregate literals). None otherwise. The
+    /// constants include addresses of data objects (string literals, constant allocations):
+    /// the flag says whether a pointer-sized word holds one (the bytes then hold the address).
+    fn const_bytes(&self, v: &Val, l: &Layout, blk: u32, at: usize) -> Option<(Vec<u8>, bool)> {
         let insts = &self.f.blocks[blk as usize].insts[at..];
         let mut consts: HashMap<VReg, u64> = HashMap::default();
+        // vregs holding a data object's address (+ offset): constants only as whole pointer words
+        let mut ptr_regs: Vec<VReg> = Vec::new();
+        let mut ptrs = false;
+        let pw = self.u.ptr_bytes() as usize;
+        let data_addr = |s: &relax_backend::rir::Sym| -> Option<u64> {
+            match self.u.syms.kind(s.id) {
+                Some(crate::syms::SymKind::Data(_)) => Some(self.u.syms.addr(*s)),
+                _ => None,
+            }
+        };
         let width = |m: Mem| match m {
             Mem::Int(n, _) => n as usize,
             Mem::F32 => 4,
@@ -5773,15 +5799,27 @@ impl<'a> Lcx<'a> {
                         Inst::Fconst(d, b, _) => {
                             consts.insert(*d, *b);
                         }
+                        Inst::Addr(d, s) => {
+                            if let Some(a) = data_addr(s) {
+                                consts.insert(*d, a);
+                                ptr_regs.push(*d);
+                            }
+                        }
                         _ => {}
                     }
                 }
                 for (r, lf) in regs.iter().zip(leaves.iter()) {
                     let b = *consts.get(r)?;
                     let (o, n) = (lf.off as usize, width(lf.mem));
+                    if ptr_regs.contains(r) {
+                        if n != pw || o % pw != 0 {
+                            return None;
+                        }
+                        ptrs = true;
+                    }
                     buf.get_mut(o..o + n)?.copy_from_slice(&b.to_le_bytes()[..n]);
                 }
-                Some(buf)
+                Some((buf, ptrs))
             }
             Val::M(base, off0) => {
                 // addresses derived from the fresh slot: vreg -> offset in it
@@ -5794,6 +5832,13 @@ impl<'a> Lcx<'a> {
                         Inst::Fconst(d, b, _) => {
                             consts.insert(*d, *b);
                         }
+                        Inst::Addr(d, s) => match data_addr(s) {
+                            Some(a) => {
+                                consts.insert(*d, a);
+                                ptr_regs.push(*d);
+                            }
+                            None => return None,
+                        },
                         Inst::SlotAddr(d, _) => {
                             addrs.insert(*d, 0);
                         }
@@ -5808,6 +5853,12 @@ impl<'a> Lcx<'a> {
                             if at < 0 {
                                 return None;
                             }
+                            if ptr_regs.contains(src) {
+                                if n != pw || at as usize % pw != 0 {
+                                    return None;
+                                }
+                                ptrs = true;
+                            }
                             buf.get_mut(at as usize..at as usize + n)?.copy_from_slice(&val.to_le_bytes()[..n]);
                         }
                         // anything else touching a slot address (calls, copies, moves) or any
@@ -5818,7 +5869,7 @@ impl<'a> Lcx<'a> {
                 if !addrs.contains_key(base) {
                     return None;
                 }
-                Some(buf)
+                Some((buf, ptrs))
             }
         }
     }
@@ -10392,6 +10443,14 @@ impl<'a> Lcx<'a> {
                 };
                 Val::L(vec![self.iconst(c as i64)])
             }
+            // `T: TrustedLen` of this instance (real alloc specializes Vec's extend on it)
+            "is_trusted_len" => {
+                let c = match (g0, self.u.core_path(&["iter", "TrustedLen"])) {
+                    (Some(g), Some(td)) => self.u.tcx.type_implements_trait(&self.u.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog), TraitRef { def_id: td, args: vec![GenericArg::Type(g)] }).must_apply_modulo_regions(),
+                    _ => false,
+                };
+                Val::L(vec![self.iconst(c as i64)])
+            }
             // Primitive scalar values have no padding or inactive enum storage.
             "is_primitive_scalar" => {
                 let c = g0.is_some_and(|g| matches!(self.kind_ref(g), TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char));
@@ -12255,6 +12314,7 @@ pub fn glue_func(u: &mut Unit, kind: u8, t: TyId) -> Func {
     let entry = f.block();
     let p = f.vreg(Cls::I);
     f.params.push(p);
+    f.param_ints.push((p, u.ptr_bytes() as u8, false));
     let mut cur = entry;
     // a provided crate's opaque type: rustc's drop_in_place, through its drop shim
     let opaque_drop = match u.tcx.tys.kind(t) {

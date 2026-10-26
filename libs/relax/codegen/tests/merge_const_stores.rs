@@ -80,3 +80,39 @@ fn a_load_between_ends_the_run() {
     assert_eq!(stores(&f), vec![(2, 0, 0), (2, 2, 0)]);
     let _ = x;
 }
+
+/// stores of constants of the given widths, back to back from offset 0
+fn wide_fill(parts: &[(u8, i64)]) -> Func {
+    let mut f = Func::new("wide_fill".into(), 0);
+    let s = f.slot(16, 8);
+    f.block();
+    let p = f.vreg(Cls::I);
+    push(&mut f, 0, Inst::SlotAddr(p, s));
+    let mut off = 0;
+    for &(w, k) in parts {
+        let v = f.vreg(Cls::I);
+        push(&mut f, 0, Inst::Iconst(v, k));
+        push(&mut f, 0, Inst::Store(Mem::Int(w, false), p, off, v));
+        off += w as i32;
+    }
+    f.blocks[0].term = Term::Ret(vec![]);
+    f
+}
+
+#[test]
+fn word_stores_of_constants_combine() {
+    // two u32 zeros: one 8-byte store
+    let mut f = wide_fill(&[(4, 0), (4, 0)]);
+    assert!(loops::merge_stores(&relax_session::Options::default(), &mut f));
+    f.verify().unwrap();
+    assert_eq!(stores(&f), vec![(8, 0, 0)]);
+    // u32, u16, u8, u8 then u32 + u32: 8 + 8, little endian
+    let mut f = wide_fill(&[(4, 0x0403_0201), (2, 0x0605), (1, 7), (1, 8), (4, 1), (4, 2)]);
+    assert!(loops::merge_stores(&relax_session::Options::default(), &mut f));
+    f.verify().unwrap();
+    assert_eq!(stores(&f), vec![(8, 0, 0x0807_0605_0403_0201), (8, 8, 0x0000_0002_0000_0001)]);
+    // a u16 then a u32 at 2: a 4-byte store at 0 would cut the u32, so both stay
+    let mut f = wide_fill(&[(2, 1), (4, 2)]);
+    assert!(!loops::merge_stores(&relax_session::Options::default(), &mut f));
+    assert_eq!(stores(&f), vec![(2, 0, 1), (4, 2, 2)]);
+}

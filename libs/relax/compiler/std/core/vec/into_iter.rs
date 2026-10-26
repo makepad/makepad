@@ -76,6 +76,7 @@ impl<T> DoubleEndedIterator for IntoIter<T> {
 }
 
 impl<T> ExactSizeIterator for IntoIter<T> {}
+unsafe impl<T> crate::iter::TrustedLen for IntoIter<T> {}
 impl<T> crate::iter::FusedIterator for IntoIter<T> {}
 
 impl<T: Clone> Clone for IntoIter<T> {
@@ -103,7 +104,7 @@ unsafe impl<#[may_dangle] T> Drop for IntoIter<T> {
             self.start += 1;
         }
         if crate::mem::size_of::<T>() != 0 && self.cap != 0 {
-            heap::free(self.buf.as_ptr() as *mut u8, Vec::<T>::layout_for(self.cap));
+            heap::free(self.buf.as_ptr() as *mut u8, Vec::<T>::current_layout(self.cap));
         }
     }
 }

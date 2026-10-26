@@ -183,6 +183,7 @@ impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
 }
 
 impl<'a, T> ExactSizeIterator for Iter<'a, T> {}
+unsafe impl<'a, T> crate::iter::TrustedLen for Iter<'a, T> {}
 impl<'a, T> FusedIterator for Iter<'a, T> {}
 
 pub struct IterMut<'a, T> {
@@ -294,6 +295,7 @@ impl<'a, T> DoubleEndedIterator for IterMut<'a, T> {
 }
 
 impl<'a, T> ExactSizeIterator for IterMut<'a, T> {}
+unsafe impl<'a, T> crate::iter::TrustedLen for IterMut<'a, T> {}
 impl<'a, T> FusedIterator for IterMut<'a, T> {}
 
 // ---------------------------------------------------------------- Windows

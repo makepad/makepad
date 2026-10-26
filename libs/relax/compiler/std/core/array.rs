@@ -287,6 +287,7 @@ impl<T, const N: usize> DoubleEndedIterator for IntoIter<T, N> {
 }
 
 impl<T, const N: usize> ExactSizeIterator for IntoIter<T, N> {}
+unsafe impl<T, const N: usize> crate::iter::TrustedLen for IntoIter<T, N> {}
 impl<T, const N: usize> crate::iter::FusedIterator for IntoIter<T, N> {}
 
 impl<T: Clone, const N: usize> Clone for IntoIter<T, N> {

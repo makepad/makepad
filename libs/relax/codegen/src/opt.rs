@@ -481,6 +481,13 @@ impl InlineStats {
 /// made that room usable, max(2x, +4000) refused html_parse's and maps' hot sites for budget
 /// (html 0.66, maps 0.97) --; every other caller max(2x, +4000): Stage's lukewarm UI functions
 /// grew 3x in code with the big room and its O3 compile CPU went up 4x.
+/// The inlining room a single-caller body of `size` instructions brings when it moves into its
+/// caller: what its own (cold) growth ceiling allowed it compiled alone (MAKEPAD_RUN_OPT=-singleroom:
+/// none, the body's size only).
+pub fn single_room(options: &relax_session::Options, size: usize) -> usize {
+    if opt_off(options, "-singleroom") { 0 } else { growth_ceiling(size, false) - size }
+}
+
 pub fn growth_ceiling(size: usize, hot: bool) -> usize {
     if hot {
         size.saturating_mul(4).max(size.saturating_add(8000))
@@ -719,7 +726,8 @@ fn pgo_site_limits(lim: &InlineLimits, counted: bool, priority: u32, callee: &Fu
     }
 }
 
-fn inline_trace(name: &str) -> bool {
+/// MAKEPAD_RUN_INLINE_TRACE=<suffix>: the callers whose site decisions (and O3 snapshot) are traced
+pub fn inline_trace(name: &str) -> bool {
     static T: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     relax_session::phase::env_once(&T, "MAKEPAD_RUN_INLINE_TRACE").is_some_and(|t| name.ends_with(t))
 }
@@ -965,9 +973,13 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
         let callee = Some(callee);
         let rule = Some(rule);
         match rule.unwrap() {
-            // the body moves here (its one caller): the ceiling grows with it, so the calls
-            // around it (Vec::push in the absorbed loop) still fit
-            RULE_SINGLE => growth_limit = growth_limit.saturating_add(growth),
+            // the body moves here (its one caller): the ceiling grows by the ceiling the body
+            // had compiled alone (its size and its own room), so the calls around it (Vec::push
+            // in the absorbed loop) and in it (an absorbed VM handler's #[inline] stack pops)
+            // still fit -- moving a body in never shrinks the inlining it would have got on its
+            // own (P(DOOM)'s run_core: 25 single-caller opcode handlers moved in with their
+            // sizes only, and 47 pop_stack_resolved calls stayed calls on the growth ceiling)
+            RULE_SINGLE => growth_limit = growth_limit.saturating_add(growth).saturating_add(single_room(options, size)),
             _ if no_growth => {}
             RULE_COST => free_budget -= size,
             _ if free => free_budget -= size,
@@ -3572,6 +3584,7 @@ pub fn forward_slot_dests_x(options: &relax_session::Options, f: &mut Func, min:
     let mut any = false;
     for _round in 0..8 {
         let Some((der, esc)) = slot_derivation(f) else { return any };
+        let esc_pts = slot_escape_points(f, &der, &esc);
         let ns = f.slots.len();
         let nb = f.blocks.len();
         // values that are the result buffer plus a constant (single definitions)
@@ -3842,7 +3855,25 @@ pub fn forward_slot_dests_x(options: &relax_session::Options, f: &mut Func, min:
                     }
                 }
             }
-            let c_esc = !to_sret && esc[c as usize];
+            // C's address escapes (stored, returned): its other pointers can see C only from an
+            // escape on, so only an escape that can come before B's live region ends -- earlier in
+            // cb, in a block with a path into the region (to_cb: the blocks reaching B's accesses
+            // or the copy), or anywhere in cb when cb is in a loop -- makes unknown memory accesses
+            // in that region a clash
+            let c_esc = !to_sret && esc[c as usize] && match &esc_pts[c as usize] {
+                None => true,
+                Some(pts) => {
+                    let mut back = vec![false; nb];
+                    st.extend(preds[cb].iter().copied());
+                    while let Some(x) = st.pop() {
+                        if !back[x as usize] {
+                            back[x as usize] = true;
+                            st.extend(preds[x as usize].iter().copied());
+                        }
+                    }
+                    pts.iter().any(|&(pb, pi)| if pb as usize == cb { (pi as usize) < ci || back[cb] } else { to_cb[pb as usize] })
+                }
+            };
             let c_acc = |x: usize| if to_sret { sret_blocks[x] } else { acc[c as usize].contains(&(x as u32)) };
             let mut clash = (0..nb).any(|x| x != cb && from_b[x] && to_cb[x] && (c_acc(x) || (c_esc && unknown_mem[x])));
             if !clash && to_sret {
@@ -4110,6 +4141,86 @@ fn slot_derivation(f: &Func) -> Option<(Vec<u32>, Vec<bool>)> {
         }
     }
     Some((der, esc))
+}
+
+/// Where each escaping slot's address escapes (slot_derivation's `esc`): the instructions that
+/// store a value derived from it, and the blocks returning one, as (block, instruction; a
+/// returning block's terminator is its length). None: an escape slot_derivation found
+/// elsewhere (an ambiguous join, a parameter): everywhere.
+fn slot_escape_points(f: &Func, der: &[u32], esc: &[bool]) -> Vec<Option<Vec<(u32, u32)>>> {
+    const NONE: u32 = u32::MAX;
+    const MULTI: u32 = u32::MAX - 1;
+    let ns = f.slots.len();
+    let mut pts: Vec<Option<Vec<(u32, u32)>>> = (0..ns).map(|s| if esc[s] { Some(Vec::new()) } else { None }).collect();
+    let mut seen = vec![false; ns];
+    let dslot = |v: VReg| der[v.0 as usize];
+    let add = |pts: &mut Vec<Option<Vec<(u32, u32)>>>, seen: &mut Vec<bool>, v: VReg, b: usize, k: usize| {
+        let d = dslot(v);
+        if d != NONE && d != MULTI {
+            seen[d as usize] = true;
+            if let Some(p) = &mut pts[d as usize] {
+                p.push((b as u32, k as u32));
+            }
+        }
+    };
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for (k, i) in b.insts.iter().enumerate() {
+            match i {
+                Inst::Store(_, _, _, v) | Inst::StoreX(_, _, _, _, _, v) | Inst::AtomicStore(_, _, _, v) | Inst::AtomicRmw(_, _, _, _, _, v) => add(&mut pts, &mut seen, *v, bi, k),
+                Inst::AtomicCas(_, _, _, _, _, e, n) => {
+                    add(&mut pts, &mut seen, *e, bi, k);
+                    add(&mut pts, &mut seen, *n, bi, k);
+                }
+                _ => {}
+            }
+        }
+        if let Term::Ret(vs) = &b.term {
+            for v in vs {
+                add(&mut pts, &mut seen, *v, bi, b.insts.len());
+            }
+        }
+    }
+    // an escape these points do not explain (a join of two slots' addresses, a parameter)
+    for s in 0..ns {
+        if esc[s] && !seen[s] {
+            pts[s] = None;
+        }
+    }
+    let mut multi = vec![false; ns];
+    for b in &f.blocks {
+        for i in &b.insts {
+            let mut srcs: Vec<u32> = Vec::new();
+            for_uses(i, |v| {
+                let d = dslot(v);
+                if d != NONE && d != MULTI && !srcs.contains(&d) {
+                    srcs.push(d);
+                }
+            });
+            let mut defs_multi = false;
+            for_defs(i, |d| defs_multi |= dslot(d) == MULTI);
+            if defs_multi || srcs.len() > 1 {
+                let mut has_def = false;
+                for_defs(i, |_| has_def = true);
+                if has_def {
+                    for s in srcs {
+                        multi[s as usize] = true;
+                    }
+                }
+            }
+        }
+    }
+    for p in &f.params {
+        let d = dslot(*p);
+        if d != NONE && d != MULTI {
+            multi[d as usize] = true;
+        }
+    }
+    for s in 0..ns {
+        if multi[s] {
+            pts[s] = None;
+        }
+    }
+    pts
 }
 
 /// Sinks a pure single-definition, single-use arithmetic result into the block that uses it when
@@ -4520,6 +4631,45 @@ mod tests {
         assert!(left >= 1, "both slots were moved into the result buffer");
     }
 
+    /// `let s = format!(..); for w in s.split(' ') {..}`: the call's result buffer B is copied into
+    /// the variable C, whose address escapes only after the copy (a call result derived from it is
+    /// stored): B is built in C. With C's address stored before B's call, the call may see C
+    /// through that pointer: B stays.
+    fn dests_x_escape_fixture(escape_first: bool) -> Func {
+        let mut f = Func::new("escape_after".into(), 0);
+        let (q, g) = (f.vreg(Cls::I), f.vreg(Cls::I));
+        f.params.extend([q, g]);
+        let (b, c) = (f.slot(12, 4), f.slot(12, 4));
+        let v: Vec<VReg> = (0..8).map(|_| f.vreg(Cls::I)).collect();
+        f.block();
+        f.sret_callees.push(7);
+        let mut insts = vec![Inst::SlotAddr(v[0], b), Inst::SlotAddr(v[1], c)];
+        if escape_first {
+            insts.push(Inst::Store(Mem::Int(8, false), g, 0, v[1]));
+        }
+        insts.extend([
+            Inst::Call(Callee::Fn(7), vec![v[0], q], vec![]),
+            Inst::Copy(v[1], v[0], 12),
+            Inst::Call(Callee::Fn(8), vec![v[1]], vec![v[2]]),
+            Inst::Store(Mem::Int(8, false), g, 8, v[2]),
+            Inst::Call(Callee::Fn(9), vec![v[1]], vec![]),
+        ]);
+        f.blocks[0].insts = insts;
+        f.blocks[0].term = Term::Ret(vec![]);
+        for bl in &mut f.blocks { bl.pos = vec![0; bl.insts.len()]; }
+        f.verify().unwrap();
+        f
+    }
+
+    #[test]
+    fn dests_x_builds_in_a_variable_whose_address_escapes_after_the_copy() {
+        let mut f = dests_x_escape_fixture(false);
+        assert!(forward_slot_dests_x(&relax_session::Options::default(), &mut f, 8));
+        assert!(!f.blocks[0].insts.iter().any(|i| matches!(i, Inst::Copy(..))), "{}", f.dump());
+        let mut f = dests_x_escape_fixture(true);
+        assert!(!forward_slot_dests_x(&relax_session::Options::default(), &mut f, 8), "built in a variable a pointer already names:\n{}", f.dump());
+    }
+
     #[test]
     fn dests_x_keeps_a_slot_read_after_result_writes_out_of_the_result_buffer() {
         // Result<&T, E>::cloned: self (by value, in a slot) is copied whole into the result
@@ -4694,7 +4844,7 @@ mod tests {
     }
 
     #[test]
-    fn sroa_option_float_and_integer_payload_subfields_stay_in_memory() {
+    fn sroa_option_float_and_integer_payload_subfields_promote() {
         let (mut f, base) = sroa_fixture(16);
         let cond = f.vreg(Cls::I);
         let value = f.vreg(Cls::F64);
@@ -4717,11 +4867,15 @@ mod tests {
         f.blocks[2].term = Term::Jump(3);
         f.blocks[3].insts = vec![Inst::Load(Mem::Int(1, false), tag, base, 0), Inst::Load(Mem::F64, payload, base, 8), Inst::Load(Mem::Int(1, true), high, base, 15)];
         f.blocks[3].term = Term::Ret(vec![tag, payload, high]);
-        sroa_rejects(&mut f, SroaReject::KindMix);
+        // the payload word is one 8-byte cell: the f64 its bits, the byte at 15 a part of it
+        sroa_promote(&mut f);
+        assert!(!f.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, Inst::Load(..) | Inst::Store(..))));
+        assert!(f.blocks[3].insts.iter().any(|i| matches!(*i, Inst::Conv(Conv::BitsToF(true), d, _) if d == payload)));
+        assert!(f.blocks[3].insts.iter().any(|i| matches!(*i, Inst::Conv(Conv::IntToInt(t), d, _) if d == high && t == IntTy { bits: 8, signed: true })));
     }
 
     #[test]
-    fn sroa_u32_read_as_two_u16_halves_stays_in_memory() {
+    fn sroa_u32_read_as_two_u16_halves_promotes() {
         let (mut f, base) = sroa_fixture(4);
         let value = f.vreg(Cls::I);
         let low = f.vreg(Cls::I);
@@ -4733,7 +4887,11 @@ mod tests {
             Inst::Load(Mem::Int(2, false), low, base, 0), Inst::Load(Mem::Int(2, false), high, base, 2),
         ]);
         f.blocks[0].term = Term::Ret(vec![low, high]);
-        sroa_rejects(&mut f, SroaReject::KindMix);
+        // one 4-byte cell; the high half is the cell shifted down 16 bits, narrowed
+        sroa_promote(&mut f);
+        let insts = &f.blocks[0].insts;
+        assert!(!insts.iter().any(|i| matches!(i, Inst::Load(..) | Inst::Store(..))));
+        assert!(insts.iter().any(|i| matches!(i, Inst::IBinI(IOp::Shr, _, _, _, 16))));
     }
 
     #[test]
@@ -4763,7 +4921,7 @@ mod tests {
     }
 
     #[test]
-    fn sroa_f32_subfield_stays_in_memory() {
+    fn sroa_f32_subfield_promotes() {
         let (mut f, base) = sroa_fixture(8);
         let bits = f.vreg(Cls::I);
         let value = f.vreg(Cls::F32);
@@ -4776,7 +4934,12 @@ mod tests {
             Inst::Load(Mem::F32, result, base, 4), Inst::Load(Mem::Int(8, false), whole, base, 0),
         ]);
         f.blocks[0].term = Term::Ret(vec![result, whole]);
-        sroa_rejects(&mut f, SroaReject::Overlap);
+        // the f32 at 4 is the high half of the 8-byte cell: written as a masked merge of its bits
+        sroa_promote(&mut f);
+        let insts = &f.blocks[0].insts;
+        assert!(!insts.iter().any(|i| matches!(i, Inst::Load(..) | Inst::Store(..))));
+        assert!(insts.iter().any(|i| matches!(i, Inst::Conv(Conv::FToBits(false), ..))));
+        assert!(insts.iter().any(|i| matches!(*i, Inst::Conv(Conv::BitsToF(false), d, _) if d == result)));
     }
 
     #[test]
@@ -4908,7 +5071,7 @@ mod tests {
     }
 
     #[test]
-    fn sroa_copy_in_out_group_with_offset_members_requires_matching_sizes() {
+    fn sroa_copy_in_out_group_with_offset_members() {
         for n in [4, 8] {
             let (mut f, base) = sroa_fixture(24);
             let other = f.vreg(Cls::I);
@@ -4926,22 +5089,23 @@ mod tests {
                 Inst::Copy(part, base, 24), Inst::Load(Mem::F64, float, other, 16), Inst::Copy(dst, part, 24),
             ]);
             f.blocks[0].term = Term::Ret(vec![word, float]);
-            if n != 8 {
-                sroa_rejects(&mut f, SroaReject::KindMix);
-                continue;
-            }
+            // n == 4: the word at 8 is a part (its low half) of the cell the f64 reads whole
             sroa_promote(&mut f);
             let insts = &f.blocks[0].insts;
             assert_eq!(insts.iter().filter(|i| matches!(i, Inst::Load(Mem::Int(8, false), ..))).count(), 3);
             assert_eq!(insts.iter().filter(|i| matches!(i, Inst::Store(Mem::Int(8, false), ..))).count(), 3);
             assert!(insts.iter().any(|i| matches!(i, Inst::Conv(Conv::BitsToF(true), ..))));
-            assert!(insts.iter().any(|i| matches!(*i, Inst::Mov(d, _) if d == word)));
+            if n == 8 {
+                assert!(insts.iter().any(|i| matches!(*i, Inst::Mov(d, _) if d == word)));
+            } else {
+                assert!(insts.iter().any(|i| matches!(*i, Inst::Conv(Conv::IntToInt(t), d, _) if d == word && t == IntTy { bits: 32, signed: true })));
+            }
         }
     }
 
     #[test]
     fn sroa_partial_access_or_copy_cut_stays_in_memory() {
-        for (m, off, why) in [(Mem::Int(2, false), 2, SroaReject::Overlap), (Mem::Int(8, true), 0, SroaReject::CopyCut)] {
+        for (m, off, why) in [(Mem::Int(2, false), 2, SroaReject::CopyCut), (Mem::Int(8, true), 0, SroaReject::CopyCut)] {
             let (mut f, base) = sroa_fixture(8);
             let dst = f.vreg(Cls::I);
             let value = f.vreg(Cls::I);
@@ -4979,10 +5143,7 @@ mod tests {
             }
             f.blocks[0].insts.push(Inst::Copy(dst, other, 64));
             f.blocks[0].term = Term::Ret(rets);
-            if field_off != 0 {
-                sroa_rejects(&mut f, SroaReject::Overlap);
-                continue;
-            }
+            // field_off 2: each load is a part of its word's cell (a shift and a narrowing)
             sroa_promote(&mut f);
             assert_eq!(f.blocks[0].insts.iter().filter(|i| matches!(i, Inst::Store(Mem::Int(8, false), ..))).count(), 8);
             assert!(!f.blocks[0].insts.iter().any(|i| matches!(i, Inst::Load(..))));

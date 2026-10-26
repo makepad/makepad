@@ -1856,7 +1856,7 @@ pub fn merge_stores(options: &relax_session::Options, f: &mut Func) -> bool {
     let mut changed = false;
     for bi in 0..f.blocks.len() {
         let n = f.blocks[bi].insts.len();
-        if n < 2 || !f.blocks[bi].insts.iter().any(|i| matches!(i, Inst::Store(Mem::Int(1, _), ..))) {
+        if n < 2 || !f.blocks[bi].insts.iter().any(|i| matches!(i, Inst::Store(Mem::Int(1, _), ..)) || matches!(*i, Inst::Store(Mem::Int(2 | 4, _), _, _, v) if kconst[v.0 as usize].is_some())) {
             continue;
         }
         // single-def values defined in this block: index of their def
@@ -1893,6 +1893,28 @@ pub fn merge_stores(options: &relax_session::Options, f: &mut Func) -> bool {
         let mut ccur: Option<(Vec<usize>, VReg, i32, Vec<u8>)> = None;
         for (k, i) in insts.iter().enumerate() {
             let touches = matches!(i, Inst::Load(..) | Inst::LoadX(..) | Inst::VLoad(..) | Inst::VGather(..) | Inst::VTbl(..)) || crate::opt::is_mem_effect_pub(i);
+            // 2- and 4-byte stores of constants join a run of constant stores too (two zeroed
+            // u32 fields are one 8-byte store of 0: LLVM MergeConsecutiveStores)
+            if let Inst::Store(Mem::Int(w @ (2 | 4), _), p, off, v) = *i {
+                if let Some(c) = kconst[v.0 as usize].filter(|_| !relax_backend::stats::opt_off(options, "-cstores")) {
+                    if let Some(g) = cur.take() {
+                        groups.push(g);
+                    }
+                    let cont = matches!(&ccur, Some((ks, bp, st, _)) if *bp == p && off == st + ks.len() as i32);
+                    if !cont {
+                        if let Some(g) = ccur.take() {
+                            cgroups.push(g);
+                        }
+                        ccur = Some((Vec::new(), p, off, Vec::new()));
+                    }
+                    let g = ccur.as_mut().unwrap();
+                    for b in 0..w as usize {
+                        g.0.push(k);
+                        g.3.push((c as u64 >> (8 * b)) as u8);
+                    }
+                    continue;
+                }
+            }
             if let Inst::Store(Mem::Int(1, _), p, off, v) = *i {
                 if let Some(c) = kconst[v.0 as usize].filter(|_| !relax_backend::stats::opt_off(options, "-cstores")) {
                     if let Some(g) = cur.take() {
@@ -1972,9 +1994,19 @@ pub fn merge_stores(options: &relax_session::Options, f: &mut Func) -> bool {
             remove.extend_from_slice(&ks[..w - 1]);
         }
         for (ks, p, st, bytes) in cgroups {
+            // ks: per byte, the store that writes it; a wide store covers whole stores only
+            let boundary = |q: usize| q == 0 || q == ks.len() || ks[q] != ks[q - 1];
             let mut j = 0;
             while ks.len() - j >= 2 {
-                let w = if ks.len() - j >= 8 { 8 } else if ks.len() - j >= 4 { 4 } else { 2 };
+                let Some(w) = [8usize, 4, 2].into_iter().find(|&w| ks.len() - j >= w && boundary(j + w) && ks[j] != ks[j + w - 1]) else {
+                    // no wider store starts here: step over this store's bytes
+                    let mut e = j + 1;
+                    while !boundary(e) {
+                        e += 1;
+                    }
+                    j = e;
+                    continue;
+                };
                 let mut val = 0u64;
                 for (b, &x) in bytes[j..j + w].iter().enumerate() {
                     val |= (x as u64) << (8 * b);
@@ -1993,7 +2025,9 @@ pub fn merge_stores(options: &relax_session::Options, f: &mut Func) -> bool {
                     }
                 };
                 replace.push((ks[j + w - 1], Inst::Store(Mem::Int(w as u8, false), p, st + j as i32, kv)));
-                remove.extend_from_slice(&ks[j..j + w - 1]);
+                let mut gone: Vec<usize> = ks[j..j + w - 1].iter().copied().filter(|&x| x != ks[j + w - 1]).collect();
+                gone.dedup();
+                remove.extend_from_slice(&gone);
                 j += w;
             }
         }

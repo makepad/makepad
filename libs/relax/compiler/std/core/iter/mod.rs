@@ -674,6 +674,7 @@ impl<'a, I: DoubleEndedIterator + ?Sized> DoubleEndedIterator for &'a mut I {
 }
 
 impl<'a, I: ExactSizeIterator + ?Sized> ExactSizeIterator for &'a mut I {}
+unsafe impl<'a, I: TrustedLen + ?Sized> TrustedLen for &'a mut I {}
 
 pub trait DoubleEndedIterator: Iterator {
     fn next_back(&mut self) -> Option<Self::Item>;

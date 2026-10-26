@@ -162,6 +162,23 @@ pub fn alloc(size: usize) -> u64 {
     a
 }
 
+/// Zeroed 8-byte words in the window's misc region for the life of the process (native address):
+/// a counted body's block counters (profile::instrument), which the program's code increments
+/// through its window addressing. Carved from 64 KB `alloc` chunks (counted code is never freed).
+pub fn alloc_counters(words: usize) -> u64 {
+    static NEXT: relax_session::sync::Mutex<(u64, u64)> = relax_session::sync::Mutex::new((0, 0));
+    let len = (words.max(1) * 8) as u64;
+    let mut g = NEXT.lock().unwrap_or_else(|e| e.into_inner());
+    if g.0 + len > g.1 {
+        let chunk = len.max(64 << 10);
+        let a = alloc(chunk as usize);
+        *g = (a, a + ((chunk + 0xfff) & !0xfff));
+    }
+    let a = g.0;
+    g.0 += len;
+    a
+}
+
 /// Gives `alloc` memory back.
 pub fn free(a: u64, size: usize) {
     let len = (size as u64 + 0xfff) & !0xfff;

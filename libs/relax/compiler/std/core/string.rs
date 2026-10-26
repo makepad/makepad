@@ -92,6 +92,7 @@ fn slice_range<R: RangeBounds<usize>>(range: &R, len: usize) -> (usize, usize) {
     (start, end)
 }
 
+#[inline(never)]
 #[track_caller]
 #[cold]
 const fn slice_index_fail(start: usize, end: usize, len: usize) -> ! {

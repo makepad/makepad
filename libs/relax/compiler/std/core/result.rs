@@ -240,6 +240,8 @@ impl<'a, T: Clone, E> Result<&'a T, E> {
     }
 }
 
+#[inline(never)]
+#[cold]
 #[track_caller]
 fn unwrap_failed(msg: &str, error: &dyn fmt::Debug) -> ! {
     crate::panicking::panic_fmt(format_args!("{msg}: {error:?}"))

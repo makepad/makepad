@@ -27,6 +27,7 @@ impl<T> DoubleEndedIterator for Empty<T> {
     }
 }
 impl<T> ExactSizeIterator for Empty<T> {}
+unsafe impl<T> super::TrustedLen for Empty<T> {}
 impl<T> FusedIterator for Empty<T> {}
 impl<T> Clone for Empty<T> {
     fn clone(&self) -> Empty<T> {
@@ -64,6 +65,7 @@ impl<T> DoubleEndedIterator for Once<T> {
     }
 }
 impl<T> ExactSizeIterator for Once<T> {}
+unsafe impl<T> super::TrustedLen for Once<T> {}
 impl<T> FusedIterator for Once<T> {}
 
 pub struct OnceWith<F> {

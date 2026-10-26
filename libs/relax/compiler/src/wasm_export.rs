@@ -742,6 +742,8 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
             match n {
                 "tee" => opts.tee = on,
                 "remat" => opts.remat = on,
+                "sink" => opts.sink = on,
+                "declared" => opts.narrow_declared = on,
                 "rematslots" => opts.remat_slots = on,
                 "datafirst" => opts.data_first = on,
                 "sp0" => opts.sp0 = on,
@@ -1137,6 +1139,25 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
             aliases.push_str(&format!("{id}\t{offset}\t{len}\n"));
         }
         let _ = std::fs::write(format!("{}.aliases", fl), aliases);
+        // .ctxbytes: each body's code bytes by inline context of the module's final bodies:
+        // slot, context, depth, the context's inlined slot, its depth-1 root's inlined slot (the
+        // callee whose site brought it in; the body itself for context 0), bytes
+        let mut ctxb = String::from("slot\tctx\tdepth\tinlined\troot\tbytes\n");
+        for (id, rows) in &out.stats.fn_ctx_bytes {
+            let f = &funcs[id];
+            for (ctx, bytes) in rows {
+                let (mut c, mut depth, mut root) = (*ctx as usize, 0usize, *id);
+                let inlined = if c == 0 { *id } else { f.inl_slots.get(c - 1).copied().unwrap_or(u32::MAX) };
+                while c != 0 && depth < 256 {
+                    let Some(slot) = f.inl_slots.get(c - 1) else { root = u32::MAX; break };
+                    root = *slot;
+                    c = f.inl.get(c - 1).map_or(0, |(call, _)| relax_backend::rir::pos_ctx(*call) as usize);
+                    depth += 1;
+                }
+                ctxb.push_str(&format!("{id}\t{ctx}\t{depth}\t{inlined}\t{root}\t{bytes}\n"));
+            }
+        }
+        let _ = std::fs::write(format!("{}.ctxbytes", fl), ctxb);
         let parents = CLOSURE_PARENTS.lock().unwrap_or_else(|e| e.into_inner());
         let origins = CLOSURE_ORIGINS.lock().unwrap_or_else(|e| e.into_inner());
         let via = CLOSURE_VIA.lock().unwrap_or_else(|e| e.into_inner());
@@ -1382,6 +1403,29 @@ pub(crate) enum O3Policy {
 pub(crate) fn full_o1() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_WASM_EXPORT_FULL").map_or(true, |v| v != "0"))
+}
+
+/// MAKEPAD_RUN_WASM_EXPORT_O1_INLINE=hint,leaf,leaf_blocks,chain (A/B): a shipping O1 body's
+/// inline limits for `#[inline]` callees, small leaves and closure-chain adapters (RIR
+/// instructions); unset: the JIT's O1 limits
+pub(crate) fn o1_inline_limits(lim: relax_codegen::opt::InlineLimits, var: &'static str) -> relax_codegen::opt::InlineLimits {
+    static L: std::sync::OnceLock<std::sync::Mutex<HashMap<&'static str, Option<[usize; 4]>>>> = std::sync::OnceLock::new();
+    let l = *L.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).entry(var).or_insert_with(|| {
+        let v = std::env::var(var).ok()?;
+        let n: Vec<usize> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        (n.len() == 4).then(|| [n[0], n[1], n[2], n[3]])
+    });
+    match l {
+        Some([hint, leaf, leaf_blocks, chain]) => relax_codegen::opt::InlineLimits { hint_insts: hint, leaf_insts: leaf, leaf_blocks, chain_insts: chain, ..lim },
+        None => lim,
+    }
+}
+
+/// MAKEPAD_RUN_WASM_EXPORT_O1_FOLDS (default on; `0` off): shipping O1 bodies also take the O3
+/// folds that only remove code (value-range compares, small-set compares)
+pub(crate) fn o1_folds() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_WASM_EXPORT_O1_FOLDS").map_or(true, |v| v != "0"))
 }
 
 /// MAKEPAD_RUN_WASM_EXPORT_O3_LTO (default on; `0` off): shipping O3 bodies inline as a fat-LTO
@@ -1653,6 +1697,22 @@ pub(crate) fn shipping_fn_addresses(u: &Unit, f: &mut Func) -> bool {
     changed
 }
 
+thread_local! {
+    /// keep_closure's first pass: Some(ids) while O3 builds wait (export_rir notes them here)
+    static DEFERRED_O3: std::cell::RefCell<Option<Vec<u32>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Whether export_rir's O3 build of `id` waits for the whole closure (noting `id`).
+pub(crate) fn defer_o3(id: u32) -> bool {
+    DEFERRED_O3.with(|d| match d.borrow_mut().as_mut() {
+        Some(v) => {
+            v.push(id);
+            true
+        }
+        None => false,
+    })
+}
+
 /// Shipping closes all captured roots. Size mode closes only annotated roots.
 /// Shipping upgrades every body to normal O1, then follows only edges in that
 /// exact emitted body. Lowering registers monomorphic calls and vtables on demand;
@@ -1734,6 +1794,20 @@ fn keep_closure(funcs: &mut BTreeMap<u32, Func>, u: &Unit, whole: bool) -> Resul
         }, data_seen);
     };
     let up = crate::jit::current_unit();
+    // pass 1: O1 bodies for the whole closure (O3 candidates noted); pass 2: their O3 builds,
+    // then whatever new callees those reach
+    struct ClearDeferred;
+    impl Drop for ClearDeferred {
+        fn drop(&mut self) {
+            DEFERRED_O3.with(|d| *d.borrow_mut() = None);
+        }
+    }
+    let _clear = ClearDeferred;
+    if whole {
+        DEFERRED_O3.with(|d| *d.borrow_mut() = Some(Vec::new()));
+    }
+    let mut deferred_done = !whole;
+    loop {
     while let Some(id) = work.pop() {
         if !visited.insert(id) {
             continue;
@@ -1774,6 +1848,24 @@ fn keep_closure(funcs: &mut BTreeMap<u32, Func>, u: &Unit, whole: bool) -> Resul
                 failed += 1;
             }
         }
+    }
+    if deferred_done {
+        break;
+    }
+    deferred_done = true;
+    let ids = DEFERRED_O3.with(|d| d.borrow_mut().take()).unwrap_or_default();
+    for id in ids {
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+            crate::owner::call(crate::owner::Class::Program, || crate::zone_alloc::kept_with(|| unsafe { crate::jit::export_rir(up, id, true) }))
+        )).unwrap_or_else(|_| Err("compiler panicked".into()));
+        match r {
+            Ok(f) => {
+                expand(id, &f, &mut work, &mut data_seen);
+                funcs.insert(id, f);
+            }
+            Err(error) => return Err(format!("shipping closure cannot compile {} at export O3: {error}", crate::jit::slot_key(u, id))),
+        }
+    }
     }
     let mut vtables = CLOSURE_VTABLES.lock().unwrap_or_else(|e| e.into_inner());
     vtables.clear();

@@ -64,14 +64,14 @@ impl<T> Option<T> {
     pub const fn expect(self, msg: &str) -> T {
         match self {
             Some(x) => x,
-            None => crate::panicking::panic_display(&msg),
+            None => expect_failed(msg),
         }
     }
     #[track_caller]
     pub const fn unwrap(self) -> T {
         match self {
             Some(x) => x,
-            None => crate::panicking::panic_str("called `Option::unwrap()` on a `None` value"),
+            None => unwrap_failed(),
         }
     }
     pub const fn unwrap_or(self, default: T) -> T {
@@ -432,6 +432,7 @@ impl<T> DoubleEndedIterator for IntoIter<T> {
 }
 
 impl<T> ExactSizeIterator for IntoIter<T> {}
+unsafe impl<T> crate::iter::TrustedLen for IntoIter<T> {}
 impl<T> crate::iter::FusedIterator for IntoIter<T> {}
 
 impl<T> IntoIterator for Option<T> {
@@ -491,4 +492,20 @@ impl<'a, A, I: Iterator<Item = Option<A>>> Iterator for OptionShunt<'a, I> {
             None => None,
         }
     }
+}
+
+// real core's out-of-line failure paths (option.rs `unwrap_failed` / `expect_failed`): a call per
+// site instead of the panic's message and formatting built at each one
+#[inline(never)]
+#[cold]
+#[track_caller]
+const fn unwrap_failed() -> ! {
+    crate::panicking::panic_str("called `Option::unwrap()` on a `None` value")
+}
+
+#[inline(never)]
+#[cold]
+#[track_caller]
+const fn expect_failed(msg: &str) -> ! {
+    crate::panicking::panic_display(&msg)
 }

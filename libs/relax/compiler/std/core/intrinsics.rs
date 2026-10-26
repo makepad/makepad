@@ -146,6 +146,9 @@ pub mod intrinsics_mem {
         /// `T: Freeze` for this instantiation: no UnsafeCell outside indirection (rustc's auto
         /// trait)
         pub fn is_freeze<T>() -> bool;
+        /// `T: TrustedLen` for this instantiation (a constant per instance): Vec's extend takes
+        /// one loop per iterator type, as real alloc's SpecExtend specialization picks one
+        pub fn is_trusted_len<T>() -> bool;
         pub fn drop_in_place<T: crate::marker::PointeeSized>(p: *mut T);
         pub fn ptr_read<T>(p: *const T) -> T;
         pub fn ptr_write<T>(p: *mut T, v: T);

@@ -271,12 +271,14 @@ impl crate::error::Error for BorrowError {}
 #[cfg(not(relax_check))]
 impl crate::error::Error for BorrowMutError {}
 
+#[inline(never)]
 #[cold]
 #[track_caller]
 fn panic_already_borrowed() -> ! {
     crate::panicking::panic_str("RefCell already borrowed")
 }
 
+#[inline(never)]
 #[cold]
 #[track_caller]
 const fn panic_already_mutably_borrowed() -> ! {

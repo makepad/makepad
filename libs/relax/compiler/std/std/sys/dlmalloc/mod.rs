@@ -95,26 +95,31 @@ mod lock {
 #[cfg(not(target_feature = "atomics"))]
 mod lock { pub fn lock() {} }
 
-/// System allocation, with the program allocator lock.
+/// System allocation, with the program allocator lock. These four are the allocator's entry
+/// points as real std's `__rdl_*` symbols are: a call at each site, the allocator's body once.
 #[relax(keep_reachable)]
+#[inline(never)]
 pub unsafe fn relax_alloc(size: usize, align: usize) -> *mut u8 {
     let _lock = lock::lock();
     (*ALLOCATOR.0.get()).malloc(size, align)
 }
 /// System zeroed allocation.
 #[relax(keep_reachable)]
+#[inline(never)]
 pub unsafe fn relax_alloc_zeroed(size: usize, align: usize) -> *mut u8 {
     let _lock = lock::lock();
     (*ALLOCATOR.0.get()).calloc(size, align)
 }
 /// Return a block to the program allocator.
 #[relax(keep_reachable)]
+#[inline(never)]
 pub unsafe fn relax_dealloc(ptr: *mut u8, size: usize, align: usize) {
     let _lock = lock::lock();
     (*ALLOCATOR.0.get()).free(ptr, size, align)
 }
 /// Resize a program allocation, preserving its prefix.
 #[relax(keep_reachable)]
+#[inline(never)]
 pub unsafe fn relax_realloc(ptr: *mut u8, old: usize, align: usize, size: usize) -> *mut u8 {
     let _lock = lock::lock();
     (*ALLOCATOR.0.get()).realloc(ptr, old, align, size)

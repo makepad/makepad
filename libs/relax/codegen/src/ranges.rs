@@ -77,6 +77,51 @@ struct State {
 
 impl State {
     fn kill(&mut self, v: u32) {
+        // what is known of v stays known of an exact copy of it (`t = i; i = i + 1`: the step's
+        // `i + 1` is `t + 1` afterwards, and t's facts reach the next iteration's i)
+        let copy = self.lin.iter().find_map(|&(d, x, k, b)| {
+            if k != 0 || b < 64 {
+                None
+            } else if x == v && d != v {
+                Some(d)
+            } else if d == v && x != v {
+                Some(x)
+            } else {
+                None
+            }
+        });
+        if let Some(w) = copy {
+            let sub = |x: u32| if x == v { w } else { x };
+            let subo = |o: Opnd| if o == Opnd::V(v) { Opnd::V(w) } else { o };
+            let mut lin: Vec<(u32, u32, i64, u8)> = Vec::new();
+            for &(d, x, k, b) in &self.lin {
+                let e = (sub(d), sub(x), k, b);
+                if e.0 != e.1 && !lin.contains(&e) {
+                    lin.push(e);
+                }
+            }
+            self.lin = lin;
+            let mut rel: Vec<(Cond, bool, u32, Opnd)> = Vec::new();
+            for &(c, sg, x, y) in &self.rel {
+                let e = (c, sg, sub(x), subo(y));
+                if Opnd::V(e.2) != e.3 && !rel.contains(&e) {
+                    rel.push(e);
+                }
+            }
+            self.rel = rel;
+            for e in self.le.iter_mut() {
+                *e = (e.0, sub(e.1), sub(e.2));
+            }
+            self.le.retain(|e| e.1 != e.2);
+            for e in self.cmp.iter_mut() {
+                if e.0 != v {
+                    *e = (e.0, e.1, e.2, sub(e.3), subo(e.4));
+                }
+            }
+            if let Some(r) = self.rng.get(&v).copied() {
+                self.narrow(w, r);
+            }
+        }
         self.rng.remove(&v);
         self.cmp.retain(|(d, _, _, x, y)| *d != v && *x != v && *y != Opnd::V(v));
         self.lin.retain(|(d, x, _, _)| *d != v && *x != v);
@@ -328,7 +373,8 @@ fn refine(st: &mut State, c: u32, taken: bool) {
     }
 }
 
-/// x narrowed to b, and through `x = y + k` (no wrap over the interval) y too.
+/// x narrowed to b, and through `x = y + k` (no wrap over the interval) y too; through
+/// `d = x + k` the sums of x (and their copies) too, a few links deep.
 fn narrow_lin(st: &mut State, x: u32, b: R) {
     st.narrow(x, b);
     let Some(r) = st.get(x) else { return };
@@ -340,6 +386,26 @@ fn narrow_lin(st: &mut State, x: u32, b: R) {
         let max = if bits >= 64 { u64::MAX as i128 } else { (1i128 << bits) - 1 };
         if lo >= 0 && hi <= max {
             st.narrow(y, R { lo: lo as u64, hi: hi as u64 });
+        }
+    }
+    let mut work: Vec<(u32, u8)> = vec![(x, 0)];
+    let mut seen: Vec<u32> = vec![x];
+    while let Some((s0, depth)) = work.pop() {
+        if depth >= 3 {
+            continue;
+        }
+        let Some(r) = st.get(s0) else { continue };
+        let fwd: Vec<(u32, i64, u8)> = st.lin.iter().filter(|l| l.1 == s0 && l.0 != s0).map(|l| (l.0, l.2, l.3)).collect();
+        for (d, k, bits) in fwd {
+            // d = s0 + k exactly when the sum stays within d's type over s0's interval
+            let lo = r.lo as i128 + k as i128;
+            let hi = r.hi as i128 + k as i128;
+            let max = if bits >= 64 { u64::MAX as i128 } else { (1i128 << bits) - 1 };
+            if lo >= 0 && hi <= max && !seen.contains(&d) {
+                st.narrow(d, R { lo: lo as u64, hi: hi as u64 });
+                seen.push(d);
+                work.push((d, depth + 1));
+            }
         }
     }
 }
@@ -482,6 +548,53 @@ fn decide_rel(st: &State, c: Cond, signed: bool, x: u32, y: Opnd) -> Option<bool
             }
         }
     }
+    // an offset on either side of a known order: x = s + k (k <= 0, no wrap: x <= s) with
+    // s < y / s <= y, or y = t + k (k >= 0, no wrap: y >= t) with x < t / x <= t -- `out[i - 1]`
+    // in a loop that tested `i < out.len()` (i >= 1)
+    {
+        let order = |a: &[u32], bs: &[Opnd], strict: bool| -> Option<bool> {
+            // x <= (or <) an a-value, a b-value <= y: an order of a-value and b-value decides x vs y
+            for &(rc, rs, rx, ry) in &st.rel {
+                if rs != signed || !a.contains(&rx) || !bs.contains(&ry) {
+                    continue;
+                }
+                let held = match rc {
+                    Cond::Lt => Some(Cond::Lt),
+                    Cond::Le => Some(if strict { Cond::Lt } else { Cond::Le }),
+                    _ => None,
+                };
+                match (held, c) {
+                    (Some(_), Cond::Le) | (Some(Cond::Lt), Cond::Lt) => return Some(true),
+                    (Some(_), Cond::Gt) | (Some(Cond::Lt), Cond::Ge) => return Some(false),
+                    _ => {}
+                }
+            }
+            None
+        };
+        let no_wrap_down = |s0: u32, k: i64| -> bool {
+            st.get(s0).is_some_and(|r| r.lo as i128 + k as i128 >= 0 && (!signed || r.hi <= i64::MAX as u64))
+        };
+        for &(d, s0, k, _) in &st.lin {
+            if k <= 0 && xs.contains(&d) && no_wrap_down(s0, k) {
+                if let Some(v) = order(&same_as(st, s0), &ys, k < 0) {
+                    return Some(v);
+                }
+            }
+        }
+        for &(d, t0, k, b) in &st.lin {
+            if k < 0 || !ys.contains(&Opnd::V(d)) {
+                continue;
+            }
+            let max = if b >= 64 { u64::MAX as i128 } else { (1i128 << b) - 1 };
+            let fits = st.get(t0).is_some_and(|r| r.hi as i128 + k as i128 <= max && (!signed || r.hi as i128 + k as i128 <= i64::MAX as i128));
+            if fits {
+                let ts: Vec<Opnd> = same_as(st, t0).into_iter().map(Opnd::V).collect();
+                if let Some(v) = order(&xs, &ts, k > 0) {
+                    return Some(v);
+                }
+            }
+        }
+    }
     // y = x + k or x = y + k, the sum not wrapping over x's (y's) interval
     for &(d, s, k, b) in &st.lin {
         let (lhs_is_x, base) = if d == yv && s == x {
@@ -555,7 +668,7 @@ pub fn fold_ranges(options: &relax_session::Options, f: &mut Func) -> bool {
     }
     // hypotheses found not to hold, per (header, vreg): left out of the next round
     let mut off: HashMap<(u32, u32), u8> = HashMap::default();
-    for round in 0..3 {
+    for round in 0..4 {
         let mut g = f.clone();
         res.clear();
         let mut ed = Edges::default();
@@ -567,12 +680,16 @@ pub fn fold_ranges(options: &relax_session::Options, f: &mut Func) -> bool {
             *f = g;
             return thread_decided(f, &ed) | ch;
         }
+        let mut weaker = false;
         for (key, ok) in &res {
             if !ok {
-                off.insert(*key, 1);
+                // a failed hypothesis gets the next weaker one next round (the test bound, then
+                // max - step, then max); the weakest that fails goes
+                let e = off.entry(*key).or_insert(0);
+                *e = match *e { 0 => { weaker = true; 3 } 3 => { weaker = true; 2 } _ => 1 };
             }
         }
-        if res.iter().all(|r| !r.1) {
+        if res.iter().all(|r| !r.1) && !weaker {
             break;
         }
     }
@@ -712,6 +829,8 @@ fn run(f: &mut Func, lv: &HashMap<(u32, u32), u8>, spec: bool, res: &mut Vec<((u
             // loop variables: v -> (type, largest step); `bad`: some other definition
             let mut ivk: HashMap<u32, (IntTy, i64)> = HashMap::default();
             let mut bad: Vec<u32> = Vec::new();
+            let mut copies: Vec<(u32, u32)> = Vec::new();
+            let mut loop_defs: HashMap<u32, u32> = HashMap::default();
             for (x, blk) in f.blocks.iter().enumerate() {
                 if inl[x] {
                     for (k, i) in blk.insts.iter().enumerate() {
@@ -734,17 +853,37 @@ fn run(f: &mut Func, lv: &HashMap<(u32, u32), u8>, spec: bool, res: &mut Vec<((u
                                     e.1 = e.1.max(c);
                                 }
                             }
+                            Inst::Mov(d, s0) => {
+                                copies.push((d.0, s0.0));
+                                bad.push(d.0);
+                            }
                             _ => for_defs(i, |d| bad.push(d.0)),
                         }
+                        for_defs(i, |d| *loop_defs.entry(d.0).or_insert(0) += 1);
                     }
                 }
             }
+            // copies of a loop variable taken before its step (`t = i; i += 1` with the latch's
+            // `i < n`, the body's `t < n` check): each a variable of the same range, when the loop
+            // defines it only by such copies
+            let mut derived: HashMap<u32, u32> = HashMap::default();
+            for &(d, s0) in &copies {
+                if ivk.contains_key(&s0) && !ivk.contains_key(&d) {
+                    derived.insert(d, s0);
+                }
+            }
+            derived.retain(|d, _| copies.iter().filter(|c| c.0 == *d && ivk.contains_key(&c.1)).count() == loop_defs.get(d).copied().unwrap_or(0) as usize);
+            bad.retain(|d| !derived.contains_key(d));
             let mut add: Vec<(u32, R)> = Vec::new();
             if spec && !ivk.is_empty() {
                 // a loop variable is bounded when the loop compares it (or its sum v + k) with a
                 // constant or with a value the loop does not define and whose interval is known
                 // on entry; others would fail the check and cost a round
                 let mut bounded: Vec<u32> = Vec::new();
+                // per variable: the largest value an unsigned `v < y` / `v <= y` test in the loop lets
+                // through (y a constant or a value the loop does not define): the first hypothesis
+                // tried, [entry minimum, that]
+                let mut test_hi: HashMap<u32, u64> = HashMap::default();
                 for (x, blk) in f.blocks.iter().enumerate() {
                     if !inl[x] {
                         continue;
@@ -758,21 +897,46 @@ fn run(f: &mut Func, lv: &HashMap<(u32, u32), u8>, spec: bool, res: &mut Vec<((u
                         if !ok {
                             continue;
                         }
+                        let lim = match *i {
+                            Inst::ICmpI(Cond::Lt, false, _, _, c) if c > 0 => Some(c as u64 - 1),
+                            Inst::ICmpI(Cond::Le, false, _, _, c) if c >= 0 => Some(c as u64),
+                            Inst::ICmp(Cond::Lt, false, _, _, y) => st.get(y.0).and_then(|r| r.hi.checked_sub(1)),
+                            Inst::ICmp(Cond::Le, false, _, _, y) => st.get(y.0).map(|r| r.hi),
+                            _ => None,
+                        };
+                        if let Some(h) = lim {
+                            let e = test_hi.entry(a.0).or_insert(h);
+                            *e = (*e).max(h);
+                        }
                         if ivk.contains_key(&a.0) {
                             bounded.push(a.0);
-                        } else if let Some(Inst::IBinI(IOp::Add, _, t, v, c)) = blk.insts[..k].iter().rev().find(|j| {
-                            let mut d = false;
-                            for_defs(j, |w| d |= w == a);
-                            d
-                        }) {
-                            if *t == a && *c >= 1 && ivk.contains_key(&v.0) {
-                                bounded.push(v.0);
+                        } else if let Some(&s0) = derived.get(&a.0) {
+                            // the copy and the variable it copies: both bounded by the test
+                            bounded.push(a.0);
+                            bounded.push(s0);
+                            if let Some(h) = lim {
+                                let e = test_hi.entry(s0).or_insert(h);
+                                *e = (*e).max(h);
+                            }
+                        } else {
+                            // its sum v + k, or a copy of v taken before the step (the Range
+                            // iterator's `t = i; i = i + 1; t < n`)
+                            match blk.insts[..k].iter().rev().find(|j| {
+                                let mut d = false;
+                                for_defs(j, |w| d |= w == a);
+                                d
+                            }) {
+                                Some(Inst::IBinI(IOp::Add, _, t, v, c)) if *t == a && *c >= 1 && ivk.contains_key(&v.0) => bounded.push(v.0),
+                                Some(Inst::Mov(t, v)) if *t == a && ivk.contains_key(&v.0) => bounded.push(v.0),
+                                _ => {}
                             }
                         }
                     }
                 }
-                for (&v, &(it, kmax)) in &ivk {
-                    if bad.contains(&v) || !bounded.contains(&v) || lv.contains_key(&(b, v)) || f.vregs.get(v as usize) != Some(&Cls::I) {
+                let cands: Vec<(u32, (IntTy, i64))> = ivk.iter().map(|(v, k)| (*v, *k)).chain(derived.iter().filter_map(|(d, s0)| ivk.get(s0).map(|k| (*d, *k)))).collect();
+                for &(v, (it, kmax)) in &cands {
+                    let level = lv.get(&(b, v)).copied().unwrap_or(0);
+                    if bad.contains(&v) || !bounded.contains(&v) || level == 1 || f.vregs.get(v as usize) != Some(&Cls::I) {
                         continue;
                     }
                     let Some(e) = st.get(v) else { continue };
@@ -780,7 +944,15 @@ fn run(f: &mut Func, lv: &HashMap<(u32, u32), u8>, spec: bool, res: &mut Vec<((u
                     if m < kmax as u64 {
                         continue;
                     }
-                    let hi = m - kmax as u64;
+                    // first [entry minimum, the loop's own test bound]; then [entry minimum, max -
+                    // step] (the step never wraps); when that fails (the loop tests the value before
+                    // its step: `t = i; i += 1; t < n` leaves i at most n), the weaker [entry
+                    // minimum, max]: the lower bound alone
+                    let hi = match level {
+                        0 => test_hi.get(&v).copied().filter(|h| *h >= e.lo && *h <= m - kmax as u64).unwrap_or(m - kmax as u64),
+                        2 => m,
+                        _ => m - kmax as u64,
+                    };
                     if e.hi > hi {
                         continue;
                     }
@@ -981,6 +1153,22 @@ fn step(st: &mut State, i: &mut Inst, marks: &HashMap<u32, (u8, R)>) -> bool {
         *i = Inst::Iconst(d, k);
         changed = true;
     }
+    // `x = x + k` in place: afterwards x is its old value's copy plus k (`t = i; i = i + 1`: the
+    // step's result relates to t), when an exact copy of the old value survives the redefinition
+    let step_of_copy = match &*i {
+        Inst::IBinI(IOp::Add, it, d, x, k) if d == x && (bits(*it) == 64 || !it.signed) => st.lin.iter().find_map(|&(a, b, k0, w)| {
+            if k0 != 0 || w < 64 {
+                None
+            } else if b == x.0 && a != x.0 {
+                Some(a)
+            } else if a == x.0 && b != x.0 {
+                Some(b)
+            } else {
+                None
+            }
+        }).map(|w| (d.0, w, *k, bits(*it) as u8)),
+        _ => None,
+    };
     let mut ds: Vec<u32> = Vec::new();
     for_defs(i, |d| ds.push(d.0));
     // a copy `d = s` holds what is known of s's order against other values: a later
@@ -1007,6 +1195,9 @@ fn step(st: &mut State, i: &mut Inst, marks: &HashMap<u32, (u8, R)>) -> bool {
     }
     for c in copied {
         push_capped(&mut st.rel, c);
+    }
+    if let Some(l) = step_of_copy {
+        push_capped(&mut st.lin, l);
     }
     if let [d] = ds[..] {
         if let Some(l) = sel_min {
@@ -1116,6 +1307,35 @@ mod tests {
         assert_eq!(arith(IOp::Add, IntTy { bits: 8, signed: false }, R { lo: 0, hi: 200 }, R { lo: 0, hi: 100 }), None);
         // sub that may go below zero: none
         assert_eq!(arith(IOp::Sub, U64, R { lo: 0, hi: 5 }, konst(1)), None);
+    }
+
+    #[test]
+    fn offset_orders() {
+        // i in [1, ..], i < n known: i - 1 < n (x = s + k, k < 0, no wrap)
+        let mut st = State::default();
+        st.rng.insert(1, R { lo: 1, hi: u32::MAX as u64 - 1 });
+        st.rel.push((Cond::Lt, false, 1, Opnd::V(2)));
+        st.lin.push((3, 1, -1, 32));
+        assert_eq!(decide_rel(&st, Cond::Lt, false, 3, Opnd::V(2)), Some(true));
+        assert_eq!(decide_rel(&st, Cond::Ge, false, 3, Opnd::V(2)), Some(false));
+        // i - 2 may wrap when i may be 1: nothing
+        st.lin.push((4, 1, -2, 32));
+        assert_eq!(decide_rel(&st, Cond::Lt, false, 4, Opnd::V(2)), None);
+        // i <= n only: i - 1 < n, but i itself not
+        let mut st = State::default();
+        st.rng.insert(1, R { lo: 1, hi: 100 });
+        st.rel.push((Cond::Le, false, 1, Opnd::V(2)));
+        st.lin.push((3, 1, -1, 64));
+        assert_eq!(decide_rel(&st, Cond::Lt, false, 3, Opnd::V(2)), Some(true));
+        assert_eq!(decide_rel(&st, Cond::Lt, false, 1, Opnd::V(2)), None);
+        // x < t, y = t + 1 (no wrap): x < y; with t possibly at the top of its type: nothing
+        let mut st = State::default();
+        st.rng.insert(5, R { lo: 0, hi: 1000 });
+        st.rel.push((Cond::Lt, false, 6, Opnd::V(5)));
+        st.lin.push((7, 5, 1, 32));
+        assert_eq!(decide_rel(&st, Cond::Lt, false, 6, Opnd::V(7)), Some(true));
+        st.rng.insert(5, R { lo: 0, hi: u32::MAX as u64 });
+        assert_eq!(decide_rel(&st, Cond::Lt, false, 6, Opnd::V(7)), None);
     }
 
     #[test]

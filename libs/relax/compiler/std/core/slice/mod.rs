@@ -180,6 +180,7 @@ pub fn clone_from_slice<T: Clone>(dst: &mut [T], src: &[T]) {
     }
 }
 
+#[inline(never)]
 #[cold]
 #[track_caller]
 const fn len_mismatch_fail(dst_len: usize, src_len: usize) -> ! {

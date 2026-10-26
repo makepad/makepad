@@ -211,6 +211,11 @@ pub struct Options {
     pub tee: bool,
     /// cheap single-definition constants are recomputed at each use instead of living in a local
     pub remat: bool,
+    /// single-use values move down to their reader (`sink_trees`): pushed there, not via a local
+    pub sink: bool,
+    /// parameters of a declared narrow integer or pointer type (Func::param_ints) are i32
+    /// whatever their callers pass (else only when every direct call passes a narrow value)
+    pub narrow_declared: bool,
     /// the same for frame addresses used mostly as memory bases (the frame offset folds into
     /// the access)
     pub remat_slots: bool,
@@ -230,7 +235,7 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { memory64: false, shared_max_pages: None, stack_size: 1 << 20, heap_pages: 16, untraced_import: true, names: false, export_tag: true, exnref: false, data_first: false, tee: true, remat: true, remat_slots: true, sp0: false, panic_abort: false, order_by_name: true, fold_identical: true, order_by_bytes: true }
+        Options { memory64: false, shared_max_pages: None, stack_size: 1 << 20, heap_pages: 16, untraced_import: true, names: false, export_tag: true, exnref: false, data_first: false, tee: true, remat: true, sink: true, narrow_declared: true, remat_slots: true, sp0: false, panic_abort: false, order_by_name: true, fold_identical: true, order_by_bytes: true }
     }
 }
 
@@ -258,6 +263,8 @@ pub struct Stats {
     pub n_folded: usize,
     /// (slot id, function name, body bytes) of every chosen function
     pub fn_sizes: Vec<(u32, String, usize)>,
+    /// MAKEPAD_RUN_WASM_EXPORT_FNLIST: (slot id, [(inline context, code bytes)]) of every chosen body
+    pub fn_ctx_bytes: Vec<(u32, Vec<(u64, i64)>)>,
     /// (slot id, absolute module offset, encoded body length), including final
     /// relocation encodings. Folded aliases own no bytes: (slot, 0, 0).
     pub fn_ranges: Vec<(u32, usize, usize)>,
@@ -308,6 +315,8 @@ struct Body {
     bytes: Vec<u8>,
     fix: Vec<(u32, Fix)>,
     ty: u32,
+    /// (inline context, code bytes) when ctx_bytes_on
+    ctx: Vec<(u64, i64)>,
 }
 
 struct DataSeg {
@@ -511,6 +520,11 @@ impl<'a> Module<'a> {
                         0
                     } else if f.nonnull.contains(p) || f.deref.iter().any(|(d, _)| d == p) {
                         KZ
+                    } else if let Some(&(_, _, signed)) = f.param_ints.iter().find(|x| x.0 == *p).filter(|x| x.1 <= 4 && self.opts.narrow_declared) {
+                        // a declared integer or pointer of at most 32 bits (a wasm32 usize, u32,
+                        // i32, bool, pointer): an i32 as rustc's wasm32 ABI passes it, whatever the
+                        // callers computed it from (a wide value is wrapped at the call)
+                        if signed { KS } else { KZ }
                     } else if passed[u][i] != UNSET && passed[u][i] & (KZ | KS) != 0 {
                         passed[u][i] & (KZ | KS)
                     } else {
@@ -569,7 +583,7 @@ impl<'a> Module<'a> {
                 Err(e) => {
                     failed.push((*id, e));
                     let ty = func_type_sig(f, &sigs[u]).map(|t| self.sh.ty(t)).unwrap_or_else(|_| self.sh.ty(FnType { params: vec![], results: vec![] }));
-                    bodies.push(Body { bytes: vec![0, 0x00, 0x0B], fix: vec![], ty });
+                    bodies.push(Body { bytes: vec![0, 0x00, 0x0B], fix: vec![], ty, ctx: vec![] });
                 }
             }
         }
@@ -608,7 +622,7 @@ impl<'a> Module<'a> {
                     if t.results == [Val::I32] { bytes.push(0xA7); }
                     bytes.push(0x0B);
                     export_ix.insert(*id, bodies.len() as u32);
-                    bodies.push(Body { bytes, fix, ty: self.sh.ty(t) });
+                    bodies.push(Body { bytes, fix, ty: self.sh.ty(t), ctx: vec![] });
                 }
                 Err(e) => { failed.push((*id, e)); export_ix.insert(*id, u); }
             }
@@ -981,6 +995,9 @@ impl<'a> Module<'a> {
         st.untraced_calls = untraced_calls;
         // a folded copy emits no body: 0 bytes
         st.fn_sizes = funcs.iter().zip(bodies.iter()).enumerate().map(|(k, ((id, f), b))| (*id, f.name.clone(), if canon[ni + k] == ni + k { b.bytes.len() } else { 0 })).collect();
+        if ctx_bytes_on() {
+            st.fn_ctx_bytes = funcs.iter().zip(bodies.iter_mut()).enumerate().filter(|(k, _)| canon[ni + k] == ni + k).map(|(_, ((id, _), b))| (*id, std::mem::take(&mut b.ctx))).collect();
+        }
         let imports = self.sh.imports.iter().map(|(module, name, _)| (module.clone(), name.clone())).collect();
         Output { bytes: out, stats: st, imports }
     }
@@ -1568,6 +1585,272 @@ struct Fx<'a> {
     me: usize,
     /// per vreg: every definition is below 32 (a 5-bit mask or such a constant): a shift count
     small5: Vec<bool>,
+    /// MAKEPAD_RUN_WASM_EXPORT_FNLIST: code bytes per inline context (rir::pos_ctx of the
+    /// statement's position; a block's terminator counts with its last statement)
+    ctx_bytes: Option<HashMap<u64, i64>>,
+    /// bytes attributed so far (a terminator emits its nested blocks: they claim their own)
+    ctx_claimed: i64,
+}
+
+/// Whether bodies attribute their bytes to inline contexts (size analysis only).
+fn ctx_bytes_on() -> bool {
+    static T: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    relax_session::phase::env_once(&T, "MAKEPAD_RUN_WASM_EXPORT_FNLIST").is_some()
+}
+
+/// Whether a call's arguments are pushed for the call itself (a direct call of a module
+/// function, a bound host symbol, an indirect call): only then may they be expression trees.
+fn direct_callee(c: &Callee, fn_ix: &HashMap<u32, u32>, link: &dyn Link) -> bool {
+    match c {
+        Callee::Fn(id) | Callee::CFn(id, _) => fn_ix.contains_key(id),
+        Callee::Host(s) | Callee::CHost(s, _) => !matches!(link.host(s.id), HostBind::Trap),
+        Callee::Indirect(_) | Callee::CIndirect(..) => true,
+        Callee::Asm(_) => false,
+    }
+}
+
+/// An instruction's operands in wasm push order, for the ones an expression tree may supply
+/// (`invoke_call`: the call an invoke block ends with, whose arguments are not trees).
+fn push_operands(i: &Inst, invoke_call: bool, direct: &dyn Fn(&Callee) -> bool) -> Vec<VReg> {
+    match i {
+        Inst::Mov(_, a) | Inst::INeg(_, _, a) | Inst::INot(_, _, a) | Inst::IBit(_, _, a) | Inst::IBinI(_, _, _, a, _) | Inst::ICmpI(_, _, _, a, _) | Inst::FUnary(_, _, _, a) | Inst::Conv(_, _, a) | Inst::Load(_, _, a, _) | Inst::AtomicLoad(_, _, _, a) => vec![*a],
+        Inst::IBin(_, _, _, a, b) | Inst::ICmp(_, _, _, a, b) | Inst::FBin(_, _, _, a, b) | Inst::FCmp(_, _, _, a, b) => vec![*a, *b],
+        Inst::Store(_, a, _, s) | Inst::AtomicStore(_, _, a, s) => vec![*a, *s],
+        Inst::Copy(d, s, _) => vec![*d, *s],
+        Inst::LoadX(_, _, a, x, _, _) => vec![*a, *x],
+        Inst::StoreX(_, a, x, _, _, s) => vec![*a, *x, *s],
+        Inst::Sel(_, c, a, b) => vec![*b, *a, *c],
+        Inst::FMulAdd(_, _, _, _, a, b, c) => vec![*a, *b, *c],
+        Inst::VSplat(_, a) | Inst::VExtract(_, a, _) | Inst::VLoad(_, a, _) | Inst::VAny(_, a) => vec![*a],
+        Inst::VInsert(_, v, _, s) => vec![*v, *s],
+        Inst::VStore(a, _, s) => vec![*a, *s],
+        Inst::VLoadX(_, a, x, _, _) => vec![*a, *x],
+        Inst::VStoreX(a, x, _, _, s) => vec![*a, *x, *s],
+        Inst::VSel(_, m, a, b) => vec![*a, *b, *m],
+        Inst::VShuffle(_, a, b, _) => vec![*a, *b],
+        Inst::VX(op, _, a, b) => match op {
+            VX::Splat(_) | VX::Extract(..) | VX::FromLo64 => vec![*a],
+            _ if simd_op(*op).is_some() || matches!(op, VX::Insert(..)) => vec![*a, *b],
+            _ => vec![],
+        },
+        Inst::Call(c, args, _) if !invoke_call => {
+            if !direct(c) {
+                return vec![];
+            }
+            let mut v = args.clone();
+            if let Callee::Indirect(x) | Callee::CIndirect(x, _) = c {
+                v.push(*x);
+            }
+            v
+        }
+        _ => vec![],
+    }
+}
+
+/// The terminator operands an expression tree may supply.
+fn term_operands(t: &Term) -> Vec<VReg> {
+    match t {
+        Term::Branch(c, ..) => vec![*c],
+        Term::Ret(v) => v.clone(),
+        _ => vec![],
+    }
+}
+
+/// How far back (instructions) `sink_trees` looks for an operand's definition.
+const SINK_WINDOW: usize = 256;
+
+/// Expression-tree scheduling (the stackifier's step before `plan_folds`, as LLVM's
+/// WebAssemblyRegStackify): in each block, a value defined once and read once -- by a later
+/// instruction of the same block -- moves down to just before its reader's other tree operands,
+/// so it is pushed where it is read instead of going through a local. Readers are taken from the
+/// block's end, operands in reverse push order (the tree's last operand sits right before its
+/// reader). A definition moves past an instruction only when that one writes none of its
+/// operands; a load, an integer division or remainder (wasm traps) moves past no call, store or
+/// other memory effect; calls, TLS addresses and memory effects never move. Order of effects
+/// is unchanged. None: nothing moved.
+fn sink_trees(f: &Func, direct: &dyn Fn(&Callee) -> bool) -> Option<Func> {
+    let nv = f.vregs.len();
+    let mut defs = vec![0u32; nv];
+    let mut uses = vec![0u32; nv];
+    for p in &f.params {
+        defs[p.0 as usize] += 2;
+    }
+    let mut rd: Vec<VReg> = Vec::new();
+    for b in &f.blocks {
+        for i in &b.insts {
+            i.defs(|d| defs[d.0 as usize] += 1);
+            reads(i, &mut rd);
+            for u in &rd {
+                uses[u.0 as usize] += 1;
+            }
+        }
+        match &b.term {
+            Term::Branch(c, ..) | Term::Switch(c, _) => uses[c.0 as usize] += 1,
+            Term::Ret(v) => v.iter().for_each(|r| uses[r.0 as usize] += 1),
+            _ => {}
+        }
+    }
+    let movable = |i: &Inst| -> Option<bool> {
+        // Some(barrier-sensitive): may move; true: not past a memory effect
+        match i {
+            Inst::Call(..) | Inst::TlsAddr(..) | Inst::TlsStatic(..) | Inst::AtomicLoad(..) | Inst::Coverage { .. } => None,
+            _ if crate::passes::is_mem_effect(i) => None,
+            Inst::Load(..) | Inst::LoadX(..) | Inst::VLoad(..) | Inst::VLoadX(..) | Inst::VGather(..) => Some(true),
+            Inst::IBin(IOp::Div | IOp::Rem, ..) | Inst::IBinI(IOp::Div | IOp::Rem, ..) => Some(true),
+            _ => Some(false),
+        }
+    };
+    let mut out: Option<Func> = None;
+    for bi in 0..f.blocks.len() {
+        let blk = &f.blocks[bi];
+        let n = blk.insts.len();
+        if n < 2 {
+            continue;
+        }
+        let invoke = matches!(blk.term, Term::Invoke(..));
+        let mut insts: Vec<Inst> = blk.insts.clone();
+        let has_pos = blk.pos.len() == n;
+        let mut pos: Vec<u64> = if has_pos { blk.pos.clone() } else { Vec::new() };
+        let mut moved = false;
+        struct S<'a> {
+            insts: &'a mut Vec<Inst>,
+            pos: &'a mut Vec<u64>,
+            defs: &'a [u32],
+            uses: &'a [u32],
+            n: usize,
+            invoke: bool,
+            moved: &'a mut bool,
+        }
+        /// `first`: op is the first value the root statement pushes (the first operand of a
+        /// chain of first operands): a value read again later moves right before the statement,
+        /// so its `local.set` and this read become one `local.tee`
+        fn place(s: &mut S, op: VReg, first: bool, ip: &mut usize, direct: &dyn Fn(&Callee) -> bool, movable: &dyn Fn(&Inst) -> Option<bool>) {
+            let multi = s.uses[op.0 as usize] > 1;
+            if s.defs[op.0 as usize] != 1 || (multi && !first) || *ip == 0 {
+                return;
+            }
+            let lo = ip.saturating_sub(SINK_WINDOW);
+            let Some(j) = (lo..*ip).rev().find(|&k| tree_def(&s.insts[k]) == Some(op)) else { return };
+            let movable_j = movable(&s.insts[j]);
+            if multi {
+                // stays a statement of its own: only moved, never part of this tree
+                let Some(barrier) = movable_j else { return };
+                if j + 1 == *ip {
+                    return;
+                }
+                let mut ops: Vec<VReg> = Vec::new();
+                reads(&s.insts[j], &mut ops);
+                let mut rd: Vec<VReg> = Vec::new();
+                for k in j + 1..*ip {
+                    let x = &s.insts[k];
+                    if barrier && crate::passes::is_mem_effect(x) {
+                        return;
+                    }
+                    let mut clash = false;
+                    x.defs(|d| clash |= ops.contains(&d));
+                    reads(x, &mut rd);
+                    if clash || rd.contains(&op) {
+                        return;
+                    }
+                }
+                let i = s.insts.remove(j);
+                s.insts.insert(*ip - 1, i);
+                if !s.pos.is_empty() {
+                    let p = s.pos.remove(j);
+                    s.pos.insert(*ip - 1, p);
+                }
+                *s.moved = true;
+                return;
+            }
+            let Some(barrier) = movable_j else {
+                if j + 1 != *ip {
+                    return;
+                }
+                // a call (or other effect) right before its reader is a tree as it stands
+                *ip = j;
+                let sub = push_operands(&s.insts[j], s.invoke && j + 1 == s.n, direct);
+                let mut ip2 = j;
+                for (k, o) in sub.iter().enumerate().rev() {
+                    place(s, *o, first && k == 0, &mut ip2, direct, movable);
+                }
+                *ip = ip2;
+                return;
+            };
+            if j + 1 != *ip {
+                let mut ops: Vec<VReg> = Vec::new();
+                reads(&s.insts[j], &mut ops);
+                for k in j + 1..*ip {
+                    let x = &s.insts[k];
+                    if barrier && crate::passes::is_mem_effect(x) {
+                        return;
+                    }
+                    let mut clash = false;
+                    x.defs(|d| clash |= ops.contains(&d));
+                    if clash {
+                        return;
+                    }
+                }
+                let i = s.insts.remove(j);
+                s.insts.insert(*ip - 1, i);
+                if !s.pos.is_empty() {
+                    let p = s.pos.remove(j);
+                    s.pos.insert(*ip - 1, p);
+                }
+                *s.moved = true;
+            }
+            *ip -= 1;
+            let at = *ip;
+            let sub = push_operands(&s.insts[at], false, direct);
+            let mut ip2 = at;
+            for (k, o) in sub.iter().enumerate().rev() {
+                place(s, *o, first && k == 0, &mut ip2, direct, movable);
+            }
+            *ip = ip2;
+        }
+        let mut s = S { insts: &mut insts, pos: &mut pos, defs: &defs, uses: &uses, n, invoke, moved: &mut moved };
+        let mut ip = n;
+        if !invoke {
+            for (k, op) in term_operands(&blk.term).iter().enumerate().rev() {
+                place(&mut s, *op, k == 0, &mut ip, direct, &movable);
+            }
+        }
+        while ip > 0 {
+            let c = ip - 1;
+            let ops = push_operands(&s.insts[c], invoke && c + 1 == n, direct);
+            let mut ip2 = c;
+            for (k, op) in ops.iter().enumerate().rev() {
+                place(&mut s, *op, k == 0, &mut ip2, direct, &movable);
+            }
+            ip = ip2;
+        }
+        if moved {
+            let g = out.get_or_insert_with(|| f.clone());
+            g.blocks[bi].insts = insts;
+            if has_pos {
+                g.blocks[bi].pos = pos;
+            }
+        }
+    }
+    out
+}
+
+/// The vregs instruction `i` reads (its operands; a vector lane insert reads its vector too).
+fn reads(i: &Inst, out: &mut Vec<VReg>) {
+    out.clear();
+    let mut ds: Vec<VReg> = Vec::new();
+    i.defs(|d| ds.push(d));
+    let mut x = i.clone();
+    x.vregs_mut(|v| out.push(*v));
+    for d in &ds {
+        if let Some(p) = out.iter().position(|v| v == d) {
+            out.remove(p);
+        }
+    }
+    if let Inst::VInsert(_, v, _, _) = i {
+        if !out.contains(v) {
+            out.push(*v);
+        }
+    }
 }
 
 /// The body a function is emitted from: untraced/trap calls end their blocks, vector ops wasm has
@@ -1584,10 +1867,15 @@ fn prepare(o: &Options, options: &relax_session::Options, f0: &Func, fn_ix: &Has
     let f2: &Func = legal.as_ref().unwrap_or(f1);
     // shipping O1 (`full`: the code outside a wasm export's hot set) keeps sparse chains: their
     // binary search is more compares than the chain
-    match crate::switch::lower_switches_sized(options, f2, crate::switch::MIN_TABLE_CLUSTERS, f2.full) {
+    let f3: Option<Func> = match crate::switch::lower_switches_sized(options, f2, crate::switch::MIN_TABLE_CLUSTERS, f2.full) {
         Some(s) => Some(s.0),
         None => legal.or(pruned),
+    };
+    if !o.sink {
+        return f3;
     }
+    let base: &Func = f3.as_ref().unwrap_or(f0);
+    sink_trees(base, &|c| direct_callee(c, fn_ix, link)).or(f3)
 }
 
 /// A function's wasm signature facts: per parameter its narrow kind (0: i64; KZ: an i32 the
@@ -1665,6 +1953,8 @@ fn lower_func(o: &Options, options: &relax_session::Options, f: &Func, me: usize
         sigs,
         me,
         small5: Vec::new(),
+        ctx_bytes: ctx_bytes_on().then(HashMap::new),
+        ctx_claimed: 0,
     };
     fx.check()?;
     {
@@ -1770,7 +2060,9 @@ fn lower_func(o: &Options, options: &relax_session::Options, f: &Func, me: usize
     fx.out.push(END);
     body.extend_from_slice(&fx.out);
     let fix = fx.fix.iter().map(|(p, x)| (p + hdr, *x)).collect();
-    Ok(Body { bytes: body, fix, ty })
+    let mut ctx: Vec<(u64, i64)> = fx.ctx_bytes.take().map_or_else(Vec::new, |m| m.into_iter().collect());
+    ctx.sort();
+    Ok(Body { bytes: body, fix, ty, ctx })
 }
 
 /// A call that never returns here (untraced, or bound to a trap) ends its block; with
@@ -1922,45 +2214,7 @@ impl<'a> Fx<'a> {
     /// Operands in wasm push order, for the ones an expression tree may supply.
     fn push_order(&self, b: u32, i: &Inst, last: bool) -> Vec<VReg> {
         let invoke_call = last && matches!(self.f.blocks[b as usize].term, Term::Invoke(..));
-        match i {
-            Inst::Mov(_, a) | Inst::INeg(_, _, a) | Inst::INot(_, _, a) | Inst::IBit(_, _, a) | Inst::IBinI(_, _, _, a, _) | Inst::ICmpI(_, _, _, a, _) | Inst::FUnary(_, _, _, a) | Inst::Conv(_, _, a) | Inst::Load(_, _, a, _) | Inst::AtomicLoad(_, _, _, a) => vec![*a],
-            Inst::IBin(_, _, _, a, b) | Inst::ICmp(_, _, _, a, b) | Inst::FBin(_, _, _, a, b) | Inst::FCmp(_, _, _, a, b) => vec![*a, *b],
-            Inst::Store(_, a, _, s) | Inst::AtomicStore(_, _, a, s) => vec![*a, *s],
-            Inst::Copy(d, s, _) => vec![*d, *s],
-            Inst::LoadX(_, _, a, x, _, _) => vec![*a, *x],
-            Inst::StoreX(_, a, x, _, _, s) => vec![*a, *x, *s],
-            Inst::Sel(_, c, a, b) => vec![*b, *a, *c],
-            Inst::FMulAdd(_, _, _, _, a, b, c) => vec![*a, *b, *c],
-            Inst::VSplat(_, a) | Inst::VExtract(_, a, _) | Inst::VLoad(_, a, _) | Inst::VAny(_, a) => vec![*a],
-            Inst::VInsert(_, v, _, s) => vec![*v, *s],
-            Inst::VStore(a, _, s) => vec![*a, *s],
-            Inst::VLoadX(_, a, x, _, _) => vec![*a, *x],
-            Inst::VStoreX(a, x, _, _, s) => vec![*a, *x, *s],
-            Inst::VSel(_, m, a, b) => vec![*a, *b, *m],
-            Inst::VShuffle(_, a, b, _) => vec![*a, *b],
-            Inst::VX(op, _, a, b) => match op {
-                VX::Splat(_) | VX::Extract(..) | VX::FromLo64 => vec![*a],
-                _ if simd_op(*op).is_some() || matches!(op, VX::Insert(..)) => vec![*a, *b],
-                _ => vec![],
-            },
-            Inst::Call(c, args, _) if !invoke_call => {
-                let direct = match c {
-                    Callee::Fn(id) | Callee::CFn(id, _) => self.fn_ix.contains_key(id),
-                    Callee::Host(s) | Callee::CHost(s, _) => !matches!(self.link.host(s.id), HostBind::Trap),
-                    Callee::Indirect(_) | Callee::CIndirect(..) => true,
-                    Callee::Asm(_) => false,
-                };
-                if !direct {
-                    return vec![];
-                }
-                let mut v = args.clone();
-                if let Callee::Indirect(x) | Callee::CIndirect(x, _) = c {
-                    v.push(*x);
-                }
-                v
-            }
-            _ => vec![],
-        }
+        push_operands(i, invoke_call, &|c| direct_callee(c, self.fn_ix, self.link))
     }
 
     fn term_order(&self, t: &Term) -> Vec<VReg> {
@@ -2749,6 +3003,10 @@ impl<'a> Fx<'a> {
             if k != 0 {
                 // a compare's i32 is its narrow value; branch forms keep their inverted compares
                 if matches!(inst, Inst::ICmp(..) | Inst::ICmpI(..) | Inst::FCmp(..)) && matches!(want, Want::Truthy | Want::Inverted) {
+                    return self.expr_wide(b, i, want);
+                }
+                // a narrow constant wanted whole: its i64 form directly, not an i32 extended
+                if let (Inst::Iconst(..), Want::Nat) = (inst, want) {
                     return self.expr_wide(b, i, want);
                 }
                 self.expr32(b, i)?;
@@ -3590,6 +3848,21 @@ impl<'a> Fx<'a> {
                         self.op(if cs.and_then(|s| s.ret_narrow).is_some_and(|it| it.signed) { EXT_S } else { EXT_U });
                     }
                 }
+                // a memcpy / memmove / memset whose result goes unused: the bulk instruction at the
+                // call (memory.copy / memory.fill), its operands at the address width, instead of a
+                // call of the helper taking 64-bit arguments
+                HostBind::Builtin(bi @ (Builtin::Memcpy | Builtin::Memmove | Builtin::Memset)) if rets.is_empty() && args.len() == 3 => {
+                    let aw = if self.o.memory64 { Want::Nat } else { Want::Low };
+                    self.value(b, args[0], aw)?;
+                    self.value(b, args[1], if bi == Builtin::Memset { Want::Low } else { aw })?;
+                    self.value(b, args[2], aw)?;
+                    self.out.push(0xFC);
+                    if bi == Builtin::Memset {
+                        self.out.extend_from_slice(&[11, 0]);
+                    } else {
+                        self.out.extend_from_slice(&[10, 0, 0]);
+                    }
+                }
                 HostBind::Builtin(bi) => {
                     let t = sig(self)?;
                     let ty = self.sh.ty(t);
@@ -3864,10 +4137,26 @@ impl<'a> Fx<'a> {
                 break;
             }
             if !self.folded[b as usize][i] {
+                let at = (self.out.len(), self.ctx_claimed);
                 self.stmt(b, i)?;
+                self.note_ctx(b, i, at);
             }
         }
-        self.term(b)
+        let at = (self.out.len(), self.ctx_claimed);
+        let r = self.term(b);
+        self.note_ctx(b, n.saturating_sub(1), at);
+        r
+    }
+
+    /// Attributes the bytes emitted since `at` (output length, bytes claimed then), less what
+    /// nested blocks claimed meanwhile, to the inline context of statement `i` of block `b`.
+    fn note_ctx(&mut self, b: u32, i: usize, at: (usize, i64)) {
+        if let Some(m) = self.ctx_bytes.as_mut() {
+            let ctx = self.f.blocks[b as usize].pos.get(i).map_or(0, |p| crate::rir::pos_ctx(*p));
+            let own = (self.out.len() as i64 - at.0 as i64) - (self.ctx_claimed - at.1);
+            *m.entry(ctx).or_insert(0) += own;
+            self.ctx_claimed += own;
+        }
     }
 
     fn restore_sp(&mut self) {
@@ -4665,5 +4954,5 @@ fn helper_body(o: &Options, h: Helper, sh: &mut Shared, fn_ix: &HashMap<u32, u32
     }
     let hdr = body.len() as u32;
     body.extend_from_slice(&c);
-    Body { bytes: body, fix: fix.into_iter().map(|(p, x)| (p + hdr, x)).collect(), ty }
+    Body { bytes: body, fix: fix.into_iter().map(|(p, x)| (p + hdr, x)).collect(), ty, ctx: vec![] }
 }

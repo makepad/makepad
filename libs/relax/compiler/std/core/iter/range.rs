@@ -139,6 +139,8 @@ impl<A: Step> DoubleEndedIterator for Range<A> {
 }
 
 impl<A: Step> ExactSizeIterator for Range<A> {}
+// real core: TrustedLen for Range<A: TrustedStep> (Step here is only the integers and char: TrustedStep's set)
+unsafe impl<A: Step> super::TrustedLen for Range<A> {}
 impl<A: Step> FusedIterator for Range<A> {}
 
 impl<A: Step> Iterator for RangeFrom<A> {
@@ -242,4 +244,5 @@ impl<A: Step> DoubleEndedIterator for RangeInclusive<A> {
 }
 
 impl<A: Step> ExactSizeIterator for RangeInclusive<A> {}
+unsafe impl<A: Step> super::TrustedLen for RangeInclusive<A> {}
 impl<A: Step> FusedIterator for RangeInclusive<A> {}

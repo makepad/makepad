@@ -8523,8 +8523,14 @@ pub unsafe fn export_rir(up: *mut Unit, id: u32, optimized: bool) -> Result<rela
         crate::wasm_export::O3Policy::All => true,
         crate::wasm_export::O3Policy::Hot => (trace_o3(&*up, id) || crate::wasm_export::o3_crate(&*up, id)) && crate::wasm_export::sampled_hot(id),
     };
+    // the closure's first pass ships O1 everywhere and notes the O3 candidates: their O3 builds
+    // wait until every shipped body is lowered (wasm_export::keep_closure), so the inliner's
+    // single-caller rule sees the module's references, not the trace's (a 74 KB parser step
+    // copied into its one traced caller while two O1 callers kept calling it)
+    let o3 = o3 && !crate::wasm_export::defer_o3(id);
     let o3_body = if o3 { export_o3_rir(up, id) } else { None };
-    if o3_body.is_some() {
+    let shipped_o3 = o3_body.is_some();
+    if shipped_o3 {
         crate::wasm_export::note_o3_body(id);
     }
     let u = &*up;
@@ -8544,12 +8550,33 @@ pub unsafe fn export_rir(up: *mut Unit, id: u32, optimized: bool) -> Result<rela
         while crate::wasm_export::shipping_fn_addresses(u, &mut f) {
             relax_backend::passes::simplify(&session.options, &mut f, ro, true, true);
         }
+        // an O1 body ships as the module's only code for it: the O3 folds that only remove
+        // code -- compares the value ranges decide (bounds checks of a loop's own index, a
+        // check a dominating one implies), compares of small value sets, adjacent constant
+        // stores merged -- run on it too
+        // (LLVM -Oz runs its correlated value propagation and InstCombine everywhere)
+        if !shipped_o3 && crate::wasm_export::o1_folds() {
+            if relax_codegen::ranges::fold_ranges(&session.options, &mut f) {
+                relax_backend::passes::simplify(&session.options, &mut f, ro, true, true);
+            }
+            if relax_codegen::opt::fold_small_sets(&mut f) {
+                relax_backend::passes::simplify(&session.options, &mut f, ro, true, true);
+            }
+            // constant stores side by side (zeroed fields, a tag and its payload's zeros): fewer, wider stores
+            relax_codegen::loops::merge_stores(&session.options, &mut f);
+        }
         relax_backend::passes::live_dce(&mut f);
         relax_backend::passes::dce(&mut f);
         // DCE ignores unreachable blocks; relayout physically removes them so
         // neither the linker nor the closure sees their residual instructions.
         relax_backend::passes::relayout(&mut f);
         f.verify().map_err(|e| format!("shipping RIR: {e}"))?;
+        // MAKEPAD_RUN_DUMP_SHIP=<name suffix | ~text>: the shipping RIR (what the module emits)
+        if let Ok(w) = std::env::var("MAKEPAD_RUN_DUMP_SHIP") {
+            if dump_rir_match(&f.name, &w) {
+                eprintln!("shipping {}", f.dump());
+            }
+        }
     }
     Ok(f)
 }
@@ -8646,6 +8673,21 @@ thread_local! {
     /// without O3 (`Func::full`: the whole O1 pipeline, Relax core's helpers inlined everywhere),
     /// its inline candidates too -- an AOT build, not a tier below a JIT's O3
     static EXPORT_FULL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The O1 inliner's limits: a wasm export's shipping build takes its own (wasm_export::o1_inline_limits);
+/// MAKEPAD_RUN_O1_INLINE=hint,leaf,leaf_blocks,chain overrides every O1 build (tests of the inliner's
+/// callers under other limits: diff_fast, the tier fuzzer)
+/// (MAKEPAD_RUN_O1_INLINE_FN=a,b: ... only in callers whose name contains one of them: bisection)
+fn o1_inline_limits(options: &crate::options::Options, caller: &str) -> relax_codegen::opt::InlineLimits {
+    let lim = relax_codegen::opt::InlineLimits::tier0(options);
+    let lim = if export_full() { crate::wasm_export::o1_inline_limits(lim, "MAKEPAD_RUN_WASM_EXPORT_O1_INLINE") } else { lim };
+    static FNS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let fns = FNS.get_or_init(|| std::env::var("MAKEPAD_RUN_O1_INLINE_FN").map(|v| v.split(',').filter(|x| !x.is_empty()).map(String::from).collect()).unwrap_or_default());
+    if !fns.is_empty() && !fns.iter().any(|p| caller.contains(p.as_str())) {
+        return lim;
+    }
+    crate::wasm_export::o1_inline_limits(lim, "MAKEPAD_RUN_O1_INLINE")
 }
 
 fn export_full() -> bool {
@@ -10354,7 +10396,7 @@ unsafe fn tail_nocapture_facts(up: *mut Unit, id: u32, func: &mut relax_backend:
     if inline && !snap.is_empty() {
         let options = &(&*up).prog.session.options;
         let get = |c: u32| -> Option<(*const relax_backend::rir::Func, u8)> { snap.iter().find(|x| x.0 == c).map(|x| (&*x.1 as *const relax_backend::rir::Func, x.2)) };
-        let lim = if mode == RirMode::Baseline { relax_codegen::opt::InlineLimits::baseline() } else { relax_codegen::opt::InlineLimits::tier0(options) };
+        let lim = if mode == RirMode::Baseline { relax_codegen::opt::InlineLimits::baseline() } else { o1_inline_limits(options, &f.name) };
         relax_codegen::opt::inline_calls(options, f, id, &get, &|c| nounwind.iter().any(|x| x.0 == c && x.1), &lim);
     }
     relax_codegen::opt::demote_invokes(f, &|c| nounwind.iter().any(|x| x.0 == c && x.1));
@@ -10745,7 +10787,7 @@ fn optimize_rir_inner(options: &crate::options::Options, id: u32, prep: Prep) ->
         if cfg.inline {
             let get = |c: u32| -> Option<(*const relax_backend::rir::Func, u8)> { callees.iter().find(|x| x.0 == c).map(|x| (&*x.1 as *const relax_backend::rir::Func, x.2)) };
             let ti = relax_backend::stats::pass_clock();
-            inlined = relax_codegen::opt::inline_calls(options, func, id, &get, nounwind, &relax_codegen::opt::InlineLimits::tier0(options));
+            inlined = relax_codegen::opt::inline_calls(options, func, id, &get, nounwind, &o1_inline_limits(options, &func.name));
             relax_backend::stats::pass_time(5, ti);
         }
         static HIST_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -12658,9 +12700,11 @@ fn tier1_simplify(options: &crate::options::Options, func: &mut relax_backend::r
         let freqs = frequencies(0, func);
         for (c, rule) in relax_codegen::opt::inline_calls_ordered(options, func, id, get, prepared, single, nounwind, &limits, freqs.as_deref(), inline_stats.as_deref_mut()) {
             // a single-caller body moved into this fn: the second round's ceiling includes it
+            // and its own room (opt::single_room)
             if rule == relax_codegen::opt::RULE_SINGLE {
                 if let (Some(g), Some((p, _))) = (limits.growth_limit.as_mut(), get(c)) {
-                    *g = g.saturating_add(relax_codegen::opt::inst_count(unsafe { &*p }));
+                    let n = relax_codegen::opt::inst_count(unsafe { &*p });
+                    *g = g.saturating_add(n).saturating_add(relax_codegen::opt::single_room(options, n));
                 }
             }
             if !inlined.iter().any(|x| x.0 == c) {
@@ -15501,12 +15545,11 @@ impl Unit {
 // block weights. Counts live in this process only (no profile files).
 
 /// MAKEPAD_RUN_PGO=0: no counted tier (hot slots go straight to O3 with static frequencies; A/B).
-/// Never for a W32 web program (codegen web32.rs): it addresses only its window, and the block
-/// counters (profile::instrument) are host memory its masked loads/stores would miss.
+/// A W32 web program (codegen web32.rs) addresses only its window: its block counters live there
+/// (web32::alloc_counters), so a wasm export's O3 bodies are built from the trace's counts.
 fn pgo_on(options: &crate::options::Options) -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_PGO").map_or(true, |v| v != "0")) && !options.no_block_freq && !t1prof_replay(options)
-        && relax_codegen::web32::cfg().is_none()
 }
 
 /// MAKEPAD_RUN_PGO_HOLD=1: counted code stays installed (no counting window ends): with
@@ -15743,7 +15786,12 @@ unsafe fn counted_build(up: *mut Unit, id: u32, lukewarm: bool) -> bool {
         return false;
     };
     let n = rir.blocks.len();
-    let counters: &'static [AtomicU64] = crate::zone_alloc::kept_with(|| Box::leak((0..n).map(|_| AtomicU64::new(0)).collect::<Vec<_>>().into_boxed_slice()));
+    // (a W32 program's code reaches only its window: its counters are window words)
+    let counters: &'static [AtomicU64] = if relax_codegen::web32::cfg().is_some() {
+        unsafe { std::slice::from_raw_parts(crate::web32::alloc_counters(n) as *const AtomicU64, n) }
+    } else {
+        crate::zone_alloc::kept_with(|| Box::leak((0..n).map(|_| AtomicU64::new(0)).collect::<Vec<_>>().into_boxed_slice()))
+    };
     let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _arena = crate::zone_alloc::job("counted codegen", session.runtime.burst_arena);
         let mut func = (*rir).clone();
@@ -19009,6 +19057,9 @@ unsafe fn o3_next_level(up: *mut Unit, (prog, tcx): (&Program, &Tcx), options: &
                         relax_backend::rir::Inst::Call(relax_backend::rir::Callee::Fn(x), _, _) | relax_backend::rir::Inst::FnAddr(_, x) => x,
                         _ => continue,
                     };
+                    if *x != id && callees.len() >= 1024 && !seen.contains(x) && relax_codegen::opt::inline_trace(&fns[id as usize].name) {
+                        eprintln!("inline-trace-snap {}: out fn#{} {} (1024 candidates)", fns[id as usize].name, x, fns[*x as usize].name);
+                    }
                     if *x != id && callees.len() < 1024 && seen.insert(*x) {
                         callees.push(*x);
                         next.push(*x);
@@ -19076,17 +19127,30 @@ unsafe fn o3_assemble(up: *mut Unit, (prog, tcx): (&Program, &Tcx), options: &cr
         t1prof_dump(&format!("root:{}", k), rir, 255);
         rir_hashes.push((String::new(), t1_norm_hash(rir) ^ root_unverified as u64));
     }
+    // MAKEPAD_RUN_INLINE_TRACE: the candidates this snapshot leaves out, and why (the inliner's
+    // trace names them only as fn#<slot>)
+    let trace = relax_codegen::opt::inline_trace(&fns[id as usize].name);
+    if trace {
+        eprintln!("inline-trace-snap {}: {} candidates", fns[id as usize].name, callees.len());
+    }
     for &c in callees {
-        let Some(v) = views.get(&c) else { continue };
+        let Some(v) = views.get(&c) else {
+            if trace { eprintln!("inline-trace-snap {}: out fn#{} {} (no view)", fns[id as usize].name, c, fns[c as usize].name); }
+            continue;
+        };
         let attrs = match callee_attrs(prog, tcx, fns, core, c, inline_all, true, root_unverified) {
             Some(a) if xcrate_unavailable(prog, fns, core, id, c) => (a & !relax_codegen::opt::ATTR_HINT) | relax_codegen::opt::ATTR_XCRATE,
             Some(a) => a,
             None => {
+                if trace { eprintln!("inline-trace-snap {}: out fn#{} {} (not inlinable)", fns[id as usize].name, c, fns[c as usize].name); }
                 if fns[c as usize].unverified.load(Ordering::Relaxed) { unverified_left.push(c); }
                 continue;
             }
         };
         let live_cold = !v.ran && v.uninlined;
+        if trace && v.rir.is_none() {
+            eprintln!("inline-trace-snap {}: out fn#{} {} (no RIR)", fns[id as usize].name, c, fns[c as usize].name);
+        }
         if let Some(r) = &v.rir {
             let cold = match t1key {
                 Some(k) => {
