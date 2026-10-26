@@ -58,9 +58,10 @@ impl Reader {
         Arc::ptr_eq(&self.dev, dev)
     }
 
-    /// The `src` rectangle ([x, y, w, h]) of `frame` scaled to this reader's size, as tightly
-    /// packed RGBA8. Returns once the GPU is done with `frame`.
-    pub fn read(&mut self, frame: &Image, src: [u32; 4]) -> Result<Vec<u8>, String> {
+    /// `frame` blitted part by part (`crate::frame_tap::parts`: a rectangle of an array layer into
+    /// a rectangle of the picture) into this reader's size, as tightly packed RGBA8. Returns once
+    /// the GPU is done with `frame`.
+    pub fn read(&mut self, frame: &Image, parts: &[crate::frame_tap::Part]) -> Result<Vec<u8>, String> {
         if !Arc::ptr_eq(&frame.dev, &self.dev) {
             return Err("the frame is on another device".into());
         }
@@ -74,8 +75,6 @@ impl Reader {
         let barrier = |image: vk::Image, old, new, src_access, dst_access| vk::ImageMemoryBarrier::default().image(image).old_layout(old).new_layout(new)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED).dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .src_access_mask(src_access).dst_access_mask(dst_access).subresource_range(color);
-        let x1 = (src[0] + src[2]).min(frame.desc.w);
-        let y1 = (src[1] + src[3]).min(frame.desc.h);
         unsafe {
             dev.raw.reset_command_buffer(self.cb, vk::CommandBufferResetFlags::empty()).map_err(error)?;
             dev.raw.begin_command_buffer(self.cb, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).map_err(error)?;
@@ -84,10 +83,15 @@ impl Reader {
             dev.raw.cmd_pipeline_barrier(self.cb, vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(),
                 &[vk::MemoryBarrier::default().src_access_mask(vk::AccessFlags::MEMORY_WRITE).dst_access_mask(vk::AccessFlags::TRANSFER_READ)], &[],
                 &[barrier(self.scaled.image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::AccessFlags::empty(), vk::AccessFlags::TRANSFER_WRITE)]);
-            let blit = vk::ImageBlit::default().src_subresource(layers).dst_subresource(layers)
-                .src_offsets([vk::Offset3D { x: src[0] as i32, y: src[1] as i32, z: 0 }, vk::Offset3D { x: x1 as i32, y: y1 as i32, z: 1 }])
-                .dst_offsets([vk::Offset3D::default(), vk::Offset3D { x: w as i32, y: h as i32, z: 1 }]);
-            dev.raw.cmd_blit_image(self.cb, frame.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, self.scaled.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[blit], vk::Filter::LINEAR);
+            let blits: Vec<vk::ImageBlit> = parts.iter().filter(|p| p.layer < frame.desc.depth.max(1)).map(|p| {
+                let (src, dst) = (p.src, p.dst);
+                let x1 = (src[0] + src[2]).min(frame.desc.w);
+                let y1 = (src[1] + src[3]).min(frame.desc.h);
+                vk::ImageBlit::default().src_subresource(layers.base_array_layer(p.layer)).dst_subresource(layers)
+                    .src_offsets([vk::Offset3D { x: src[0] as i32, y: src[1] as i32, z: 0 }, vk::Offset3D { x: x1 as i32, y: y1 as i32, z: 1 }])
+                    .dst_offsets([vk::Offset3D { x: dst[0].min(w) as i32, y: dst[1].min(h) as i32, z: 0 }, vk::Offset3D { x: (dst[0] + dst[2]).min(w) as i32, y: (dst[1] + dst[3]).min(h) as i32, z: 1 }])
+            }).collect();
+            dev.raw.cmd_blit_image(self.cb, frame.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, self.scaled.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &blits, vk::Filter::LINEAR);
             dev.raw.cmd_pipeline_barrier(self.cb, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[],
                 &[barrier(self.scaled.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::AccessFlags::TRANSFER_WRITE, vk::AccessFlags::TRANSFER_READ)]);
             let copy = vk::BufferImageCopy::default().image_subresource(layers).image_extent(vk::Extent3D { width: w, height: h, depth: 1 });

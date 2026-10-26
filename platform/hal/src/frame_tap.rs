@@ -34,6 +34,28 @@ pub enum Region {
     LeftHalf,
 }
 
+/// One blit of a tap: from array `layer` of the frame, its `src` rectangle ([x, y, w, h]) into the
+/// `dst` rectangle of the stream picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Part { pub layer: u32, pub src: [u32; 4], pub dst: [u32; 4] }
+
+/// The blits that make a tap's picture (`size`) of a frame `px` wide and high with `layers` array
+/// layers. A stereo window's eyes are side by side in one layer, or (multiview) one layer each:
+/// the whole frame is then the layers side by side and the left half is layer 0.
+pub fn parts(region: Region, px: [u32; 2], layers: u32, size: [u32; 2]) -> Vec<Part> {
+    let [w, h] = px;
+    let whole = [0, 0, size[0], size[1]];
+    match (region, layers >= 2) {
+        (Region::Whole, false) => vec![Part { layer: 0, src: [0, 0, w, h], dst: whole }],
+        (Region::LeftHalf, false) => vec![Part { layer: 0, src: [0, 0, w / 2, h], dst: whole }],
+        (Region::Whole, true) => {
+            let half = size[0] / 2;
+            vec![Part { layer: 0, src: [0, 0, w, h], dst: [0, 0, half, size[1]] }, Part { layer: 1, src: [0, 0, w, h], dst: [half, 0, size[0] - half, size[1]] }]
+        }
+        (Region::LeftHalf, true) => vec![Part { layer: 0, src: [0, 0, w, h], dst: whole }],
+    }
+}
+
 /// One tapped frame: `width` x `height` RGBA8 (sRGB-encoded, as the window shows it), tightly
 /// packed, and when the frame finished on the GPU (HAL clock, ns).
 pub struct TapFrame {
@@ -201,13 +223,9 @@ fn run(sub: Arc<Sub>, tx: SyncSender<TapFrame>) {
             std::thread::sleep(Duration::from_millis(500));
             continue;
         };
-        let w = image.desc.w;
-        let src = match sub.region {
-            Region::Whole => [0, 0, w, image.desc.h],
-            Region::LeftHalf => [0, 0, w / 2, image.desc.h],
-        };
+        let parts = parts(sub.region, [image.desc.w, image.desc.h], image.desc.depth, sub.size);
         // the image is held until the copy's fence, then given back
-        let read = r.read(&image, src);
+        let read = r.read(&image, &parts);
         drop(image);
         match read {
             Ok(rgba) => match tx.try_send(TapFrame { rgba, width: sub.size[0], height: sub.size[1], captured_ns }) {
@@ -274,5 +292,15 @@ mod tests {
     fn no_tap_wants_nothing() {
         assert!(!wanted(0, Id { index: 1, gen: 1 }));
         assert!(subscribe(0, Id { index: 1, gen: 1 }, Region::Whole, [3, 2], 30).is_err(), "odd sizes are refused");
+    }
+
+    #[test]
+    fn multiview_frames_are_tapped_per_layer() {
+        // eyes side by side in one layer
+        assert_eq!(parts(Region::LeftHalf, [3360, 1760], 1, [1440, 1440]), vec![Part { layer: 0, src: [0, 0, 1680, 1760], dst: [0, 0, 1440, 1440] }]);
+        // multiview: one eye per layer
+        assert_eq!(parts(Region::LeftHalf, [1680, 1760], 2, [1440, 1440]), vec![Part { layer: 0, src: [0, 0, 1680, 1760], dst: [0, 0, 1440, 1440] }]);
+        assert_eq!(parts(Region::Whole, [1680, 1760], 2, [2880, 1440]),
+            vec![Part { layer: 0, src: [0, 0, 1680, 1760], dst: [0, 0, 1440, 1440] }, Part { layer: 1, src: [0, 0, 1680, 1760], dst: [1440, 0, 1440, 1440] }]);
     }
 }

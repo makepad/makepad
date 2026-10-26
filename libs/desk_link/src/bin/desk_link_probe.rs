@@ -1,4 +1,4 @@
-//! desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--codec auto|h264|hevc] [--chroma auto|444|420] [--preset auto|sharp|fast] [--mbps N] [--fps N] [--h264only] [--stall MS,EVERY_MS] [--window WxH[@SCALE] [--drive]] [--hz N] [--dump DIR] [--420] [--keyreq MS] [--decode MS[,serial]]: a headless Desk Link viewer for
+//! desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--codec auto|h264|hevc] [--chroma auto|444|420] [--preset auto|sharp|fast] [--mbps N] [--fps N] [--h264only] [--stall MS,EVERY_MS] [--window WxH[@SCALE] [--drive]] [--hz N] [--dump DIR] [--420] [--keyreq MS] [--decode MS[,serial]] [--key CODE@AT_MS+HOLD_MS]... [--screen N]: a headless Desk Link viewer for
 //! checks. It connects with this machine's fleet credential, prints the Welcome, counts the
 //! pictures and bytes, pings once a second (RTT), and with `--input` moves the desktop's pointer
 //! between two points twice a second, timing each move until the desktop's own Cursor message
@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let Some(target) = args.get(1).filter(|a| !a.starts_with("--")) else {
-        eprintln!("usage: desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--codec auto|h264|hevc] [--chroma auto|444|420] [--preset auto|sharp|fast] [--mbps N] [--fps N] [--h264only] [--stall MS,EVERY_MS] [--window WxH[@SCALE] [--drive]] [--hz N] [--dump DIR] [--420] [--keyreq MS] [--decode MS[,serial]]");
+        eprintln!("usage: desk-link-probe <host[:port]> [--secs N] [--input] [--paused] [--flap MS] [--codec auto|h264|hevc] [--chroma auto|444|420] [--preset auto|sharp|fast] [--mbps N] [--fps N] [--h264only] [--stall MS,EVERY_MS] [--window WxH[@SCALE] [--drive]] [--hz N] [--dump DIR] [--420] [--keyreq MS] [--decode MS[,serial]] [--key CODE@AT_MS+HOLD_MS]... [--screen N]");
         std::process::exit(2);
     };
     let secs: u64 = args.windows(2).find(|w| w[0] == "--secs").and_then(|w| w[1].parse().ok()).unwrap_or(10);
@@ -75,7 +75,16 @@ fn main() {
         let (ms, serial) = w[1].split_once(',').map_or((w[1].as_str(), false), |(a, b)| (a, b == "serial"));
         Some((ms.parse().ok()?, serial))
     });
-    let opts = Opts { window, hz, dump, caps, keyreq, decode };
+    // --key CODE@AT_MS+HOLD_MS (repeatable): holds makepad KeyCode index CODE down from AT_MS after
+    // the Welcome for HOLD_MS (e.g. 18@2000+3000: W for 3 s), to drive an app from a script
+    let keys: Vec<(u32, u64, u64)> = args.windows(2).filter(|w| w[0] == "--key").filter_map(|w| {
+        let (code, rest) = w[1].split_once('@')?;
+        let (at, hold) = rest.split_once('+')?;
+        Some((code.parse().ok()?, at.parse().ok()?, hold.parse().ok()?))
+    }).collect();
+    // --screen N: the screen (a JIT host: its source) to watch, as the Hello asks
+    let screen: i32 = args.windows(2).find(|w| w[0] == "--screen").and_then(|w| w[1].parse().ok()).unwrap_or(-1);
+    let opts = Opts { window, hz, dump, caps, keyreq, decode, keys, screen };
     let (host, port) = match target.rsplit_once(':') {
         Some((h, p)) if p.parse::<u16>().is_ok() => (h.to_string(), p.to_string()),
         _ => (target.clone(), proto::DEFAULT_PORT.to_string()),
@@ -93,6 +102,8 @@ struct Opts {
     caps: u32,
     keyreq: Option<u64>,
     decode: Option<(f64, bool)>,
+    keys: Vec<(u32, u64, u64)>,
+    screen: i32,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -111,7 +122,7 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
     let keyreq = opts.keyreq;
     let (mut stream, server, authorization) = makepad_network::fleet::id::connect(host, port).map_err(|e| format!("connect: {e}"))?;
     println!("probe: desktop {} ({})", server.name, server.role.as_str());
-    let hello = ClientMsg::Hello { version: proto::VERSION, name: "probe".into(), authorization, screen: -1, paused, caps: opts.caps };
+    let hello = ClientMsg::Hello { version: proto::VERSION, name: "probe".into(), authorization, screen: opts.screen, paused, caps: opts.caps };
     proto::write_all(&mut stream, &hello.encode()).map_err(|e| e.to_string())?;
     stream.set_read_timeout(Some(Duration::from_millis(1))).map_err(|e| e.to_string())?;
     stream.set_write_timeout(Some(Duration::from_millis(5))).map_err(|e| e.to_string())?;
@@ -127,6 +138,9 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
     // --input: the point the pointer was sent to and when
     let mut moving: Option<((u16, u16), Instant)> = None;
     let mut next_move = Instant::now();
+    // --key: when the Welcome came, and per key 0 not sent, 1 down, 2 down and up
+    let mut welcomed_at: Option<Instant> = None;
+    let mut keys_sent = vec![0u8; opts.keys.len()];
     let mut toggle = false;
     let mut latencies: Vec<f64> = Vec::new();
     // the desktop's frame submit to its bitstream, per picture (ms), and the encoder streams seen
@@ -171,6 +185,19 @@ fn run(host: &str, port: &str, secs: u64, input: bool, paused: bool, flap: Optio
                 let decode_ms = if serial { ms } else { ms / parts.max(1) as f64 };
                 proto::write_all(&mut stream, &ClientMsg::Stats { frame, decode_us: (decode_ms * 1000.0) as u32, present_us: 0 }.encode()).map_err(|e| e.to_string())?;
             }
+        }
+        if let Some(at) = welcomed_at {
+            let ms = at.elapsed().as_millis() as u64;
+            for (i, &(code, from, hold)) in opts.keys.iter().enumerate() {
+                let want = if ms >= from + hold { 2 } else if ms >= from { 1 } else { 0 };
+                if want > keys_sent[i] {
+                    if keys_sent[i] == 0 { proto::write_all(&mut stream, &ClientMsg::Key { down: true, keycode: code, mods: 0 }.encode()).map_err(|e| e.to_string())?; println!("probe: key {code} down"); }
+                    if want == 2 { proto::write_all(&mut stream, &ClientMsg::Key { down: false, keycode: code, mods: 0 }.encode()).map_err(|e| e.to_string())?; println!("probe: key {code} up"); }
+                    keys_sent[i] = want;
+                }
+            }
+        } else if welcomed {
+            welcomed_at = Some(Instant::now());
         }
         if input && welcomed && Instant::now() >= next_move {
             next_move = Instant::now() + Duration::from_millis(500);
