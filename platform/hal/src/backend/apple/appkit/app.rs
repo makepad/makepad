@@ -1227,10 +1227,15 @@ fn command(sid: u32, cmd: OsCmd) {
     }
 }
 
-/// The Dock icon of an unbundled app (RGBA8 rows).
+/// The Dock icon of an unbundled app (RGBA8 rows). A bundle that names its own icon
+/// (CFBundleIconFile / CFBundleIconName) keeps it: the runtime icon is ignored there.
 fn set_application_icon(w: u32, h: u32, rgba: &[u8]) {
     let (width, height) = (w as usize, h as usize);
     if width == 0 || height == 0 || rgba.len() < width * height * 4 {
+        return;
+    }
+    if bundle_has_icon() {
+        eprintln!("makepad-hal: the bundle's own icon stays (runtime app icon ignored)");
         return;
     }
     unsafe {
@@ -1394,6 +1399,21 @@ fn bundle_flag(key: &str) -> bool {
         }
         let on: BOOL = msg_send![value, boolValue];
         on != NO
+    }
+}
+
+/// Whether the running bundle's Info.plist names an icon of its own (an unbundled binary's
+/// embedded plist names none).
+fn bundle_has_icon() -> bool {
+    unsafe {
+        let bundle: ObjcId = msg_send![class!(NSBundle), mainBundle];
+        if bundle == nil {
+            return false;
+        }
+        ["CFBundleIconFile", "CFBundleIconName"].iter().any(|key| {
+            let value: ObjcId = msg_send![bundle, objectForInfoDictionaryKey: str_to_nsstring(key)];
+            value != nil
+        })
     }
 }
 

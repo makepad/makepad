@@ -269,6 +269,7 @@ script_mod! {
     mod.widgets.Window = set_type_default() do mod.widgets.WindowBase{
         demo: false
         show_caption_bar: true
+        fullscreen_caption: true
         // The window chrome the theme declares (`WindowChrome`): the host's (follow), traffic
         // lights, the Windows buttons, or the app's own drawn chrome. A theme sets it as
         // `mod.widgets.Window.chrome = mod.widgets.WindowChrome.Lights`.
@@ -489,6 +490,11 @@ pub struct Window {
     demo: bool,
     #[live]
     show_caption_bar: bool,
+    /// Whether the caption (with the app's controls in it) stays while the window is
+    /// fullscreen. False: fullscreen is the content alone (a remote desktop's picture); the app
+    /// keeps its keyboard shortcuts as the way around.
+    #[live]
+    fullscreen_caption: bool,
     /// The chrome the theme declares (`resolve_chrome`).
     #[live]
     chrome: WindowChrome,
@@ -1173,6 +1179,15 @@ impl Window {
     }
 
     fn sync_caption_bar_state(&mut self, cx: &mut Cx) {
+        self.sync_caption_bar_visibility(cx);
+        if !self.fullscreen_caption
+            && (self.window.handle.is_fullscreen(cx) || cx.hosted_fullscreen(self.window.window_id()))
+        {
+            self.view(cx, ids!(caption_bar)).set_visible(cx, false);
+        }
+    }
+
+    fn sync_caption_bar_visibility(&mut self, cx: &mut Cx) {
         let has_content = self.caption_contains_app_content(cx);
         self.sync_jit_ring_gap(cx, has_content);
         if cx.in_makepad_studio() || under_wm() {

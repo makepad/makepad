@@ -72,11 +72,13 @@ script_mod! {
     use mod.widgets.*
     use mod.draw.KeyCode
 
-    // One viewer window: the caption (the room of the window buttons, the stats, the machines
-    // as tabs, the history toggle) over the picture, with the scrubber and the menus floating
-    // on it. New windows are made from it (`App::new_window`).
+    // One viewer window: the caption (the room of the window buttons, the machines as tabs,
+    // the stats, the history toggle) over the picture, with the scrubber and the menus floating
+    // on it. New windows are made from it (`App::new_window`). Fullscreen is the picture alone
+    // (the shortcuts stay).
     mod.widgets.DeskWindow = Window{
         window.title: "Desk Link" window.inner_size: vec2(1400, 860)
+        fullscreen_caption: false
         // a video player's dark around the picture (letterbox), whatever the theme
         pass +: {clear_color: #x101114}
         caption_bar +: {
@@ -86,10 +88,16 @@ script_mod! {
                 label +: {visible: false}
                 // the traffic lights' room (shown only where the OS draws them over the caption)
                 caption_window_gap := View{width: 78 height: 1}
-                stats := Label{text: "" margin: Inset{left: 6 right: 10}}
-                tabs := DeskTabs{}
-                history_toggle := CaptionToggle{margin: Inset{left: 4}}
+                // the tabs start at a fixed place: nothing left of them changes width
+                tabs := DeskTabs{margin: Inset{left: 6}}
                 View{width: Fill height: Fill}
+                // the stats right-aligned in a fixed room, fixed-width digits: changing
+                // numbers move nothing
+                View{
+                    width: 360 height: Fill align: Align{x: 1.0 y: 0.5}
+                    stats := Label{text: "" draw_text +: {text_style: theme.font_code{}}}
+                }
+                history_toggle := CaptionToggle{margin: Inset{left: 8 right: 8}}
             }
         }
         // the menu bar (macOS): New Window also in the Dock icon's menu (the system lists the
@@ -98,8 +106,9 @@ script_mod! {
             main := MenuItem.Main{items:[@app_menu, @file_menu, @window_menu]}
             app_menu := MenuItem.Sub{name:"Desk Link" items:[@quit]}
             quit := MenuItem.Item{name:"Quit Desk Link" key: KeyCode.KeyQ enabled: true}
-            file_menu := MenuItem.Sub{name:"File" items:[@new_window]}
+            file_menu := MenuItem.Sub{name:"File" items:[@new_window, @close_tab]}
             new_window := MenuItem.Item{name:"New Window" key: KeyCode.KeyN enabled: true dock: true}
+            close_tab := MenuItem.Item{name:"Close Tab" key: KeyCode.KeyW enabled: true}
         }
         body +: {
             padding: 0 spacing: 0
@@ -357,13 +366,22 @@ fn pad_of(s: &makepad_widgets::makepad_platform::event::game_input::GamepadState
 }
 
 /// The viewer's own shortcuts (never sent to the desktop): Cmd (macOS) / Ctrl+Shift (elsewhere)
-/// with 1..9 (tab N), R (reconnect); with Shift on macOS: S (the desktop's next screen), L
-/// (latency details), H (history); Ctrl+Shift+N a new window (macOS: Cmd+N, the menu's).
+/// with 1..9 (tab N), R (reconnect), W (close the tab; the last one its window); with Shift on
+/// macOS: S (the desktop's next screen), L (latency details), H (history); Ctrl+Shift+N a new
+/// window (macOS: Cmd+N, the menu's); Ctrl+Tab / Ctrl+Shift+Tab the next / previous tab;
+/// fullscreen on and off: Cmd+Ctrl+F (macOS), F11 elsewhere. All of them work in fullscreen,
+/// where the caption is hidden.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Shortcut {
     Desktop(usize),
     /// A new window (Cmd+N; Ctrl+Shift+N elsewhere).
     NewWindow,
+    /// Closes the shown tab; the last tab closes the window (Cmd+W; Ctrl+Shift+W elsewhere).
+    CloseTab,
+    /// The next (+1) or previous (-1) tab, round (Ctrl+Tab, Ctrl+Shift+Tab).
+    NextTab(i32),
+    /// Fullscreen on / off (Cmd+Ctrl+F on macOS, F11 elsewhere).
+    Fullscreen,
     Reconnect,
     NextScreen,
     Details,
@@ -373,6 +391,17 @@ pub enum Shortcut {
 pub(crate) fn shortcut(e: &KeyEvent) -> Option<Shortcut> {
     let m = &e.modifiers;
     let (plain, shifted) = if cfg!(target_vendor = "apple") { (m.logo && !m.shift, m.logo && m.shift) } else { (m.control && m.shift, m.control && m.shift) };
+    if e.key_code == KeyCode::Tab && m.control && !m.logo && !m.alt {
+        return Some(Shortcut::NextTab(if m.shift { -1 } else { 1 }));
+    }
+    let fullscreen = if cfg!(target_vendor = "apple") {
+        e.key_code == KeyCode::KeyF && m.logo && m.control && !m.shift && !m.alt
+    } else {
+        e.key_code == KeyCode::F11 && !m.logo && !m.control && !m.shift && !m.alt
+    };
+    if fullscreen {
+        return Some(Shortcut::Fullscreen);
+    }
     let digits = [KeyCode::Key1, KeyCode::Key2, KeyCode::Key3, KeyCode::Key4, KeyCode::Key5, KeyCode::Key6, KeyCode::Key7, KeyCode::Key8, KeyCode::Key9];
     if plain {
         if let Some(i) = digits.iter().position(|k| *k == e.key_code) {
@@ -385,10 +414,14 @@ pub(crate) fn shortcut(e: &KeyEvent) -> Option<Shortcut> {
         if e.key_code == KeyCode::KeyN && cfg!(target_vendor = "apple") {
             return Some(Shortcut::NewWindow);
         }
+        if e.key_code == KeyCode::KeyW && cfg!(target_vendor = "apple") {
+            return Some(Shortcut::CloseTab);
+        }
     }
     if shifted {
         return match e.key_code {
             KeyCode::KeyN if !cfg!(target_vendor = "apple") => Some(Shortcut::NewWindow),
+            KeyCode::KeyW if !cfg!(target_vendor = "apple") => Some(Shortcut::CloseTab),
             KeyCode::KeyS => Some(Shortcut::NextScreen),
             KeyCode::KeyL => Some(Shortcut::Details),
             KeyCode::KeyH => Some(Shortcut::History),
@@ -870,6 +903,12 @@ impl AppMain for App {
                 self.new_empty_window(cx);
                 return;
             }
+            // File → Close Tab (Cmd-W): the focused window's shown tab
+            Event::MacosMenuCommand(id) if *id == live_id!(close_tab) => {
+                let vi = self.focused.min(self.viewers.len() - 1);
+                self.do_shortcut(cx, vi, Shortcut::CloseTab);
+                return;
+            }
             Event::WindowGotFocus(id) => {
                 if let Some(vi) = self.viewer_of_window(*id) {
                     self.focused = vi;
@@ -912,6 +951,9 @@ impl AppMain for App {
                 let g = &e.new_geom;
                 let v = &mut self.viewers[vi];
                 v.window_px = [(g.inner_size.x * g.dpi_factor).round() as u32, (g.inner_size.y * g.dpi_factor).round() as u32];
+                if v.fullscreen != g.is_fullscreen {
+                    viewer::selftest(&format!("window {vi} fullscreen {}", g.is_fullscreen));
+                }
                 v.fullscreen = g.is_fullscreen;
             }
         }

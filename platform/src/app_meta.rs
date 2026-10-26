@@ -23,6 +23,9 @@ pub struct AppBuildMeta {
     /// that replace the ones platform's build script found in the
     /// workspace's `resources/`. Read when the first window opens.
     pub icon_paths: [Option<&'static str>; 6],
+    /// The app crate's directory (`CARGO_MANIFEST_DIR`): an unbundled run with no
+    /// `MAKEPAD_APP_ICON_*` shows the crate's own `resources/icon_1024.png` when it is there.
+    pub crate_dir: Option<&'static str>,
 }
 
 static APP_BUILD_META: OnceLock<AppBuildMeta> = OnceLock::new();
@@ -38,6 +41,11 @@ pub fn set_app_build_meta(meta: AppBuildMeta) {
 /// from its source checkout (or does not start through `app_main!`).
 pub fn package_dir() -> Option<&'static str> {
     APP_BUILD_META.get().and_then(|meta| meta.package_dir)
+}
+
+#[allow(dead_code)]
+pub(crate) fn crate_dir() -> Option<&'static str> {
+    APP_BUILD_META.get().and_then(|meta| meta.crate_dir)
 }
 
 #[allow(dead_code)]
@@ -60,6 +68,7 @@ macro_rules! _app_build_meta {
                 option_env!("MAKEPAD_APP_ICON_512"),
                 option_env!("MAKEPAD_APP_ICON_1024"),
             ],
+            crate_dir: option_env!("CARGO_MANIFEST_DIR"),
         }
     };
 }

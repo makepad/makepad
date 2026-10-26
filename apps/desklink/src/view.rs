@@ -314,7 +314,8 @@ pub fn view_window_px(view: Rect, dpi: f64) -> (u32, u32, u32) {
 /// does (dropped pictures only when there are any).
 pub fn summary_line(shown: (u32, u32), mbps: f64, stream_rate: Option<&crate::conn::StreamRate>) -> String {
     use makepad_desk_link::limit;
-    let mut line = format!("{} fps · {:.0} Mbit/s", shown.0.min(999), mbps.clamp(0.0, 9999.0));
+    // padded: the caption shows it in fixed-width digits, so changing numbers keep its width
+    let mut line = format!("{:>3} fps · {:>3.0} Mbit/s", shown.0.min(999), mbps.clamp(0.0, 9999.0));
     if let Some(r) = stream_rate {
         line.push_str(&format!(" · {} {}", r.codec_name(), if r.full_chroma { "4:4:4" } else { "4:2:0" }));
         let why = match r.limit {

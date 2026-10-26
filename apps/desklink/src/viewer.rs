@@ -228,6 +228,24 @@ impl App {
         self.refresh_viewer(cx, vi);
     }
 
+    /// The user closes a tab (Cmd+W, the tab's "Close Tab"): the last one closes its window too.
+    pub fn close_tab_closing_window(&mut self, cx: &mut Cx, vi: usize, conn: usize) {
+        self.close_tab(cx, vi, conn);
+        if self.viewers[vi].tabs.is_empty() && !self.viewers[vi].extra {
+            self.close_window(cx, vi);
+        }
+    }
+
+    /// Closes window `vi` as its caption's close button does: the first window hides when
+    /// `keep_on_close` says so, else it closes.
+    pub fn close_window(&mut self, cx: &mut Cx, vi: usize) {
+        if self.keep_on_close(vi) {
+            self.hide_main(cx);
+        } else {
+            self.viewers[vi].window.as_window().close(cx);
+        }
+    }
+
     /// A new window showing connection `conn` (taken from the window that had it), at `at`
     /// (screen points; else beside the window it came from).
     pub fn new_window(&mut self, cx: &mut Cx, conn: usize, at: Option<Vec2d>) -> usize {
@@ -396,6 +414,27 @@ impl App {
                 }
             }
             Shortcut::NewWindow => self.new_empty_window(cx),
+            Shortcut::NextTab(d) => {
+                let v = &self.viewers[vi];
+                let n = v.tabs.len() as i32;
+                if n > 0 {
+                    let at = v.selected.and_then(|c| v.tabs.iter().position(|t| *t == c)).map_or(0, |k| k as i32 + d);
+                    let conn = v.tabs[at.rem_euclid(n) as usize];
+                    self.open_desktop(cx, conn);
+                }
+            }
+            Shortcut::Fullscreen => {
+                let w = self.viewers[vi].window.as_window();
+                if w.is_fullscreen(cx) {
+                    w.restore(cx);
+                } else {
+                    w.maximize(cx);
+                }
+            }
+            Shortcut::CloseTab => match self.viewers[vi].selected.or_else(|| self.viewers[vi].tabs.last().copied()) {
+                Some(conn) => self.close_tab_closing_window(cx, vi, conn),
+                None => self.close_window(cx, vi),
+            },
             Shortcut::NextScreen => self.next_screen(vi),
             Shortcut::Details => {
                 self.details = !self.details;
@@ -525,7 +564,7 @@ impl App {
         // the caption's stats: the stream, and what the user must know (no input, a warning)
         let mut stats = match (&state, paused) {
             // paused: the stream goes on arriving (and recording), nothing is shown live
-            (State::Connected, true) => format!("paused \u{b7} {:.0} Mbit/s", mbps.clamp(0.0, 9999.0)),
+            (State::Connected, true) => format!("paused \u{b7} {:>3.0} Mbit/s", mbps.clamp(0.0, 9999.0)),
             (State::Connected, false) => crate::view::summary_line(v.shown_rate, mbps, stream_rate.as_ref()),
             _ => String::new(),
         };
@@ -1077,7 +1116,8 @@ impl App {
         if self.conns.get(conn).is_some_and(|c| c.state() != State::Connected) {
             items.push(MenuItem::new("Reconnect", RECONNECT).hint(key));
         }
-        items.push(MenuItem::new("Close tab", CLOSE_TAB));
+        let key = if cfg!(target_vendor = "apple") { "\u{2318}W" } else { "Ctrl+Shift+W" };
+        items.push(MenuItem::new("Close Tab", CLOSE_TAB).hint(key));
         self.open_menu(cx, vi, MenuFor::Tab(conn), anchor, false, items);
     }
 
@@ -1090,7 +1130,7 @@ impl App {
                     self.new_window(cx, conn, None);
                 }
                 RECONNECT => self.reconnect(cx, conn),
-                CLOSE_TAB => self.close_tab(cx, vi, conn),
+                CLOSE_TAB => self.close_tab_closing_window(cx, vi, conn),
                 _ => {}
             },
             MenuFor::Save => self.save(cx, vi, id == SAVE_FRAME),
@@ -1107,7 +1147,6 @@ impl App {
                 self.viewers[vi].keyboard = false;
                 self.select(cx, vi, conn);
             }
-            TabsAction::Close(conn) => self.close_tab(cx, vi, conn),
             TabsAction::Menu(conn, r) => self.tab_menu(cx, vi, conn, r),
             TabsAction::Plus(r) => self.plus_menu(cx, vi, r),
             TabsAction::DragOut(conn, abs) => {

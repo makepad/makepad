@@ -32,7 +32,6 @@ script_mod! {
         width: Fit height: Fill
         draw_text +: { text_style: theme.font_regular{} }
         icon_plus +: { svg: crate_resource("self:resources/icons/plus.svg") }
-        icon_close +: { svg: crate_resource("self:resources/icons/close.svg") }
         color_text: theme.color_label_outer
         color_dim: theme.color_label_outer_off
         color_tab: theme.color_bg_highlight
@@ -139,7 +138,6 @@ pub struct TabInfo {
 #[derive(Clone, Debug, Default)]
 pub enum TabsAction {
     Select(usize),
-    Close(usize),
     /// A right click: the tab's menu under `Rect` (window coordinates).
     Menu(usize, Rect),
     /// The "+": the desktops to open, under `Rect`.
@@ -153,14 +151,12 @@ pub enum TabsAction {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum TabHit {
     Tab(usize),
-    Close(usize),
     Plus,
 }
 
 const TAB_H: f64 = 24.0;
 const TAB_PAD: f64 = 10.0;
 const DOT: f64 = 7.0;
-const CLOSE: f64 = 16.0;
 /// A tab let go this far below the strip (or outside the window) leaves it.
 const DRAG_OUT: f64 = 36.0;
 
@@ -177,8 +173,6 @@ pub struct DeskTabs {
     draw_text: DrawText,
     #[live]
     icon_plus: DrawSvg,
-    #[live]
-    icon_close: DrawSvg,
     #[live]
     color_text: Vec4f,
     #[live]
@@ -226,8 +220,7 @@ impl DeskTabs {
     }
 
     fn hit(&self, p: Vec2d) -> Option<TabHit> {
-        // the close glyph first: it sits on its tab
-        self.hits.iter().filter(|(r, _)| contains(*r, p)).map(|(_, h)| *h).min_by_key(|h| !matches!(h, TabHit::Close(_)))
+        self.hits.iter().find(|(r, _)| contains(*r, p)).map(|(_, h)| *h)
     }
 
     fn rect_of(&self, h: TabHit) -> Rect {
@@ -247,7 +240,9 @@ impl Widget for DeskTabs {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.window = cx.get_current_window_id();
         let widths: Vec<f64> = self.tabs.iter().map(|t| text_width(&mut self.draw_text, cx, &t.name)).collect();
-        let tab_w = |w: f64| TAB_PAD + DOT + 6.0 + w + 4.0 + CLOSE + TAB_PAD * 0.5;
+        // a tab is the live dot and the short name, nothing else (no close glyph: Cmd+W or the
+        // tab's menu closes it)
+        let tab_w = |w: f64| TAB_PAD + DOT + 6.0 + w + TAB_PAD;
         let total: f64 = widths.iter().map(|w| tab_w(*w) + 2.0).sum::<f64>() + TAB_H + 4.0;
         let area = cx.walk_turtle(Walk { width: Size::Fixed(total), ..walk });
         self.strip = area;
@@ -262,7 +257,7 @@ impl Widget for DeskTabs {
             if let Some((_, dx)) = dragging.filter(|(d, _)| *d == i) {
                 r.pos.x += dx;
             }
-            let hot = matches!(self.hot, Some(TabHit::Tab(h)) | Some(TabHit::Close(h)) if h == i);
+            let hot = self.hot == Some(TabHit::Tab(i));
             let bg = if t.selected { self.color_tab } else if hot { self.color_hover } else { vec4(0.0, 0.0, 0.0, 0.0) };
             self.draw_bg.fill(cx, r, bg, 7.0);
             let dot = Rect { pos: dvec2(r.pos.x + TAB_PAD, r.pos.y + (TAB_H - DOT) * 0.5), size: dvec2(DOT, DOT) };
@@ -271,17 +266,7 @@ impl Widget for DeskTabs {
             let label = Rect { pos: dvec2(dot.pos.x + DOT + 6.0, r.pos.y), size: dvec2(*w, TAB_H) };
             let fg = if t.selected || hot { self.color_text } else { self.color_dim };
             text_in(&mut self.draw_text, cx, label, &t.name, fg, 0.0);
-            let close = Rect { pos: dvec2(label.pos.x + w + 4.0, r.pos.y + (TAB_H - CLOSE) * 0.5), size: dvec2(CLOSE, CLOSE) };
-            if hot || t.selected {
-                let close_hot = self.hot == Some(TabHit::Close(i));
-                if close_hot {
-                    self.draw_bg.fill(cx, close, self.color_hover, 4.0);
-                }
-                self.icon_close.color = fade(fg, if close_hot { 1.0 } else { 0.55 });
-                self.icon_close.draw_abs(cx, Rect { pos: close.pos + dvec2(4.0, 4.0), size: close.size - dvec2(8.0, 8.0) });
-            }
             self.hits.push((r, TabHit::Tab(i)));
-            self.hits.push((close, TabHit::Close(i)));
             notes.push(format!("{}@({:.0},{:.0})", t.name, r.pos.x + r.size.x * 0.5, r.pos.y + r.size.y * 0.5));
             x += tw + 2.0;
         }
@@ -322,7 +307,7 @@ impl Widget for DeskTabs {
             Event::MouseDown(e) if mine(e.window_id) => {
                 let Some(h) = self.hit(e.abs) else { return };
                 if e.button.is_secondary() {
-                    if let TabHit::Tab(i) | TabHit::Close(i) = h {
+                    if let TabHit::Tab(i) = h {
                         cx.widget_action(uid, TabsAction::Menu(self.tabs[i].conn, self.rect_of(TabHit::Tab(i))));
                     }
                     return;
@@ -333,7 +318,6 @@ impl Widget for DeskTabs {
                         self.shown_before = self.tabs.iter().find(|t| t.selected).map(|t| t.conn);
                         cx.widget_action(uid, TabsAction::Select(self.tabs[i].conn));
                     }
-                    TabHit::Close(i) => cx.widget_action(uid, TabsAction::Close(self.tabs[i].conn)),
                     TabHit::Plus => cx.widget_action(uid, TabsAction::Plus(self.rect_of(TabHit::Plus))),
                 }
             }
