@@ -190,7 +190,12 @@ mod os {
         let mut load = [0f64; 3];
         unsafe { getloadavg(load.as_mut_ptr(), 3) };
         let total = sysctl_u64("hw.memsize") >> 20;
-        Machine { os: "macos", load1: load[0], mem_total_mb: total, mem_avail_mb: 0, uptime_s: 0, cpus: std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1), battery: None }
+        // free + speculative + purgeable pages: memory the kernel hands out without paging (a 0 here
+        // made the lease scheduler see a Mac as full and queue every lease as "node busy")
+        let page = sysctl_u64("hw.pagesize").max(4096);
+        let pages = sysctl_u64("vm.page_free_count") + sysctl_u64("vm.page_speculative_count") + sysctl_u64("vm.page_purgeable_count");
+        let avail = (pages * page) >> 20;
+        Machine { os: "macos", load1: load[0], mem_total_mb: total, mem_avail_mb: avail, uptime_s: 0, cpus: std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1), battery: None }
     }
 }
 
