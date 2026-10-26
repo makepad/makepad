@@ -20,6 +20,10 @@ pub const HELP: &str = "  lease <kind> [--node N|--needs k=v,..] [--lane L] [--p
                                           hold a lease (kinds: build test screen long timed gpu inspect gate);
                                           with a cmd: run it there and exit with its code
   run <lane> <kind> [--node N|--needs ..] -- cmd...   ship this worktree to the node, run the cmd under a lease
+  get <lane> <rel> <local-dir> [--node N] [--lease L]
+                                          copy results back from the lane's dir on its node (`src/..`: the tree
+                                          `run` ships, `target/..`: its target; with --lease: that live lease's
+                                          work, `target/..`, `tmp/..`)
   release <id>                            end a lease (says how its node cleaned up)
   override <node> [--to <lane>]           take the node now: its leases end; to the user (dev off) or a lane
   evict <lane|agent>                      end every lease of it, clean up, block new ones; unblock <lane|agent>
@@ -154,6 +158,8 @@ struct Held {
     id: String,
     node: String,
     addr: String,
+    /// the node's login for the ssh ship
+    user: String,
     work: String,
     env: Vec<(String, String)>,
 }
@@ -185,7 +191,8 @@ fn acquire(c: &Client, req: &Req) -> Result<Held, i32> {
                     Some(Value::Obj(pairs)) => pairs.iter().map(|(k, x)| (k.clone(), x.as_str().unwrap_or("").to_string())).collect(),
                     _ => Vec::new(),
                 };
-                return Ok(Held { id, node: s(&v, "node"), addr: s(&v, "addr"), work: start.map(|st| s(st, "work")).unwrap_or_default(), env });
+                let user = start.map(|st| s(st, "user")).unwrap_or_default();
+                return Ok(Held { id, node: s(&v, "node"), addr: s(&v, "addr"), user, work: start.map(|st| s(st, "work")).unwrap_or_default(), env });
             }
             _ => {
                 let how = s(&v, "how");
@@ -344,41 +351,60 @@ fn shell_quote(v: &str) -> String {
     }
 }
 
-/// The ssh login on the nodes (`DEVHUB_SSH_USER`, default `arch`).
-fn ssh_user() -> String {
-    std::env::var("DEVHUB_SSH_USER").ok().filter(|u| !u.is_empty()).unwrap_or_else(|| "arch".into())
-}
-
-/// Ships the worktree (tracked + untracked-not-ignored, + apps/commercial, + DEVHUB_ALSO) to
-/// the lease's work dir, content-checksummed.
-fn ship(root: &Path, held: &Held) -> Result<(), String> {
-    if held.addr.is_empty() || held.work.is_empty() {
-        return Err(format!("{}: no node address or work dir to ship to", held.id));
+/// Ships the worktree (tracked + untracked-not-ignored files that exist, + apps/commercial, +
+/// DEVHUB_ALSO) to the lease's work dir, content-checksummed, with its file list; the node then
+/// prunes the files the previous ship had and this one has not (deleted on the lane's side).
+fn ship(c: &Client, root: &Path, held: &Held) -> Result<(), String> {
+    if held.addr.is_empty() || held.work.is_empty() || held.user.is_empty() {
+        return Err(format!("{}: no node address, login or work dir to ship to", held.id));
     }
-    let mut files = git(root, &["ls-files", "-co", "--exclude-standard"]).ok_or("git ls-files failed")?;
+    let mut files: Vec<String> = git(root, &["ls-files", "-co", "--exclude-standard"]).ok_or("git ls-files failed")?.lines().map(str::to_string).collect();
     if root.join("apps/commercial/.git").exists() {
         if let Some(com) = git(&root.join("apps/commercial"), &["ls-files", "-co", "--exclude-standard"]) {
-            for f in com.lines() {
-                files.push_str(&format!("\napps/commercial/{f}"));
-            }
+            files.extend(com.lines().map(|f| format!("apps/commercial/{f}")));
         }
     }
+    // only what is there: deleted-but-unstaged files, dangling links and gitlinks are not shipped
+    files.retain(|f| {
+        let p = root.join(f);
+        p.exists() && std::fs::symlink_metadata(&p).is_ok_and(|m| !m.is_dir())
+    });
+    files.sort();
+    files.dedup();
+    let mut all = files.clone();
     for p in std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace() {
         if !root.join(p).exists() {
             return Err(format!("DEVHUB_ALSO path missing: {p}"));
         }
-        files.push_str(&format!("\n{p}"));
+        // shipped, never in the prune list: two runs with different DEVHUB_ALSO keep each other's files
+        all.push(p.to_string());
     }
-    let man = std::env::temp_dir().join(format!("devhub-ship-{}-{}.files", held.id, std::process::id()));
-    std::fs::write(&man, format!("{files}\n")).map_err(|e| e.to_string())?;
-    let dst = format!("{}@{}:{}/", ssh_user(), held.addr, held.work.trim_end_matches('/'));
-    let st = Command::new("rsync").arg("-rlp").arg("--checksum").arg(format!("--files-from={}", man.display())).arg(format!("{}/", root.display())).arg(&dst).status();
+    let tmp = std::env::temp_dir();
+    let man = tmp.join(format!("devhub-ship-{}-{}.all", held.id, std::process::id()));
+    let list = tmp.join(format!("devhub-ship-{}-{}.files", held.id, std::process::id()));
+    std::fs::write(&man, format!("{}\n", all.join("\n"))).map_err(|e| e.to_string())?;
+    std::fs::write(&list, format!("{}\n", files.join("\n"))).map_err(|e| e.to_string())?;
+    let dst = format!("{}@{}:{}/", held.user, held.addr, held.work.trim_end_matches('/'));
+    let rsync = |args: &[&std::ffi::OsStr]| Command::new("rsync").args(args).status();
+    let st = rsync(&["-rlp".as_ref(), "--checksum".as_ref(), format!("--files-from={}", man.display()).as_ref(), format!("{}/", root.display()).as_ref(), dst.as_ref()]).and_then(|st| {
+        if !st.success() {
+            return Ok(st);
+        }
+        rsync(&["-p".as_ref(), list.as_os_str(), format!("{dst}.devhub-files.new").as_ref()])
+    });
     let _ = std::fs::remove_file(&man);
+    let _ = std::fs::remove_file(&list);
     match st {
-        Ok(s) if s.success() => Ok(()),
-        Ok(s) => Err(format!("rsync to {dst} failed ({s})")),
-        Err(e) => Err(format!("rsync: {e}")),
+        Ok(s) if s.success() => {}
+        Ok(s) => return Err(format!("rsync to {dst} failed ({s})")),
+        Err(e) => return Err(format!("rsync: {e}")),
     }
+    let v = node_one(c, &held.node, "lease-prune", &format!("lease-prune {}", held.id))?;
+    let n = n(&v, "pruned");
+    if n > 0.0 {
+        eprintln!("{} {}: {n} file(s) deleted on the lane's side removed", held.id, held.node);
+    }
+    Ok(())
 }
 
 /// `run <lane> <kind> … -- cmd`: lease, ship, run, release.
@@ -408,12 +434,112 @@ fn run(lane: &str, kind: &str, rest: &[&str]) -> i32 {
         Err(code) => return code,
     };
     eprintln!("{} {}@{}: shipping {}", held.id, o.req.kind.as_str(), held.node, root.display());
-    if let Err(e) = ship(&root, &held) {
+    if let Err(e) = ship(&c, &root, &held) {
         release(&c, &held.id, None);
         return fail(e);
     }
     let r = run_there(&c, &held, rel.trim_end_matches('/'), &o.cmd);
     finish(&c, &held, r)
+}
+
+/// The node a lane's dir lives on: the node of its newest lease (the scheduler keeps a lane on
+/// its node while the target there is warm), or of lease `lease`; from the master's live and
+/// recent leases and its ledger (this runs on the master's machine).
+fn lane_node(c: &Client, lane: &str, lease: Option<&str>) -> Result<String, String> {
+    let mut lines = ask(c, None, "leases", "leases all")?;
+    lines.extend(std::fs::read_to_string(crate::proto::home().join("leases.jsonl")).unwrap_or_default().lines().map(str::to_string));
+    let mut best: Option<(u64, String)> = None;
+    for l in lines {
+        let Some(v) = json(&l) else { continue };
+        let (id, node) = (s(&v, "id"), s(&v, "node"));
+        let hit = match lease {
+            Some(want) => id == want,
+            None => s(&v, "lane") == lane && s(&v, "kind") != "inspect",
+        };
+        let num = id.trim_start_matches('L').parse::<u64>().unwrap_or(0);
+        if hit && !node.is_empty() && best.as_ref().is_none_or(|(b, _)| num > *b) {
+            best = Some((num, node));
+        }
+    }
+    best.map(|(_, n)| n).ok_or_else(|| match lease {
+        Some(id) => format!("no lease {id}"),
+        None => format!("lane {lane} has had no lease on any node: give --node"),
+    })
+}
+
+/// `get <lane> <rel> <local-dir> [--node N] [--lease L]`: copies a file or folder from the lane's
+/// dir on its node (or a live lease's) into <local-dir>, over the devhub link (no ssh).
+fn get(lane: &str, rel: &str, dst: &str, rest: &[&str]) -> i32 {
+    let (mut node, mut lease) = (None, None);
+    let mut i = 0;
+    while i < rest.len() {
+        match (rest[i], rest.get(i + 1)) {
+            ("--node", Some(n)) => node = Some(n.to_string()),
+            ("--lease", Some(l)) => lease = Some(l.to_string()),
+            _ => {
+                eprintln!("makepad devhub get <lane> <rel> <local-dir> [--node N] [--lease L]");
+                return 2;
+            }
+        }
+        i += 2;
+    }
+    if !crate::trust::valid_name(lane) || rel.is_empty() || rel.contains(' ') {
+        eprintln!("makepad devhub get <lane> <rel> <local-dir> [--node N] [--lease L] (rel: a path relative to the lane's dir, no spaces)");
+        return 2;
+    }
+    let c = match master() {
+        Ok(c) => c,
+        Err(e) => return fail(e),
+    };
+    let node = match node.map_or_else(|| lane_node(&c, lane, lease.as_deref()), Ok) {
+        Ok(n) => n,
+        Err(e) => return fail(e),
+    };
+    let lid = lease.as_deref().unwrap_or("-");
+    let list = match ask(&c, Some(&node), "get-ls", &format!("get-ls {lane} {lid} {rel}")) {
+        Ok(l) => l,
+        Err(e) => return fail(format!("{node}: {e}")),
+    };
+    let dst = PathBuf::from(dst);
+    let (mut count, mut bytes) = (0usize, 0u64);
+    for l in list {
+        let Some(v) = json(&l) else { continue };
+        if let Some(e) = v.get("err").and_then(|e| e.as_str()) {
+            return fail(format!("{node}: {e}"));
+        }
+        let (p, r) = (s(&v, "p"), s(&v, "r"));
+        let out = dst.join(&p);
+        if Path::new(&p).components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+            return fail(format!("{node}: bad path {p}"));
+        }
+        if let Some(dir) = out.parent() {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                return fail(format!("{}: {e}", dir.display()));
+            }
+        }
+        let mut data = Vec::new();
+        loop {
+            let v = match node_one(&c, &node, "get-read", &format!("get-read {lane} {lid} {} {r}", data.len())) {
+                Ok(v) => v,
+                Err(e) => return fail(e),
+            };
+            let Some(chunk) = b64_decode(&s(&v, "data")) else { return fail("get-read: bad data") };
+            data.extend_from_slice(&chunk);
+            if v.get("eof").and_then(|e| e.as_bool()) != Some(false) || chunk.is_empty() {
+                break;
+            }
+        }
+        if let Err(e) = std::fs::write(&out, &data) {
+            return fail(format!("{}: {e}", out.display()));
+        }
+        count += 1;
+        bytes += data.len() as u64;
+    }
+    if count == 0 {
+        return fail(format!("{node}: nothing under {rel} for lane {lane}"));
+    }
+    eprintln!("got {} ({:.1} MB) from {node} into {}", super::master::plural(count, "file", "files"), bytes as f64 / 1048576.0, dst.display());
+    0
 }
 
 fn queue(c: &Client, all: bool) -> i32 {
@@ -619,12 +745,13 @@ pub fn cli(args: &[&str]) -> Option<i32> {
         }
         return inspect(args.get(1)?, &args[2..]);
     }
-    if !matches!(word, "lease" | "run" | "release" | "queue" | "leases" | "nodes" | "node" | "disk" | "landed" | "clean" | "evict" | "unblock" | "override" | "blocked") {
+    if !matches!(word, "lease" | "run" | "get" | "release" | "queue" | "leases" | "nodes" | "node" | "disk" | "landed" | "clean" | "evict" | "unblock" | "override" | "blocked") {
         return None;
     }
     match args {
         ["lease", rest @ ..] => return Some(lease(rest)),
         ["run", lane, kind, rest @ ..] => return Some(run(lane, kind, rest)),
+        ["get", lane, rel, dst, rest @ ..] => return Some(get(lane, rel, dst, rest)),
         _ => {}
     }
     let c = match master() {

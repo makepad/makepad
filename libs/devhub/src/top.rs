@@ -154,9 +154,9 @@ fn sample() -> (f64, Vec<ProcRow>) {
 
 /// `makepad run makepad-app-calculator` rather than the kernel's 15-byte `makepad`: the
 /// program's file name and its first words.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn label(pid: u32) -> Option<String> {
-    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let raw = argv_bytes(pid)?;
     let mut words = raw.split(|b| *b == 0).filter(|w| !w.is_empty()).map(|w| String::from_utf8_lossy(w).into_owned());
     let exe = words.next()?;
     let mut out = exe.rsplit('/').next().unwrap_or(&exe).to_string();
@@ -170,7 +170,40 @@ pub fn label(pid: u32) -> Option<String> {
     Some(out)
 }
 
-#[cfg(not(target_os = "linux"))]
+/// The process's argv, NUL-separated.
+#[cfg(target_os = "linux")]
+fn argv_bytes(pid: u32) -> Option<Vec<u8>> {
+    std::fs::read(format!("/proc/{pid}/cmdline")).ok()
+}
+
+/// The process's argv, NUL-separated: sysctl KERN_PROCARGS2 is `argc`, the exec path, NUL padding,
+/// then argv (and the environment, which is cut off after argc words).
+#[cfg(target_os = "macos")]
+fn argv_bytes(pid: u32) -> Option<Vec<u8>> {
+    extern "C" {
+        fn sysctl(name: *const i32, namelen: u32, oldp: *mut u8, oldlenp: *mut usize, newp: *const u8, newlen: usize) -> i32;
+    }
+    // CTL_KERN 1, KERN_PROCARGS2 49
+    let mib = [1i32, 49, pid as i32];
+    let mut buf = vec![0u8; 64 << 10];
+    let mut len = buf.len();
+    if unsafe { sysctl(mib.as_ptr(), 3, buf.as_mut_ptr(), &mut len, std::ptr::null(), 0) } != 0 || len < 4 {
+        return None;
+    }
+    let argc = i32::from_ne_bytes(buf[..4].try_into().ok()?).max(0) as usize;
+    let rest = &buf[4..len];
+    // skip the exec path and its NUL padding
+    let path_end = rest.iter().position(|b| *b == 0)?;
+    let start = path_end + rest[path_end..].iter().position(|b| *b != 0)?;
+    let mut out = Vec::new();
+    for w in rest[start..].split(|b| *b == 0).take(argc) {
+        out.extend_from_slice(w);
+        out.push(0);
+    }
+    Some(out)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn label(_pid: u32) -> Option<String> {
     None
 }

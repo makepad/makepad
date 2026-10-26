@@ -1,6 +1,6 @@
 #!/bin/sh
 # x64_gate.sh: the landing gate's x64 leg (JITSAFE fix 5), run from the tree root on an x86_64 node
-# (relax-campaign/x64gate.sh ships the exact tree there through pool.sh). The Mac leg of land.sh is
+# (a lane runs it with `makepad devhub run <lane> test --needs arch=x86_64 -- tools/run/fixture/x64_gate.sh`). The Mac leg of land.sh is
 # arm64; x64-only regressions (O1 switch, X64RACE, AVX-512 checksums) reached work through it.
 #   1. cargo build --release -p makepad-run: 0 warnings
 #   2. cargo test --release -p relax-backend -p relax-codegen (every x64 test)

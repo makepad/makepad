@@ -70,6 +70,7 @@ cat > "$AGENT.new" <<PLIST
   <key>ProgramArguments</key><array><string>$BIN</string></array>
   <key>EnvironmentVariables</key><dict>
     <key>MAKEPAD_DEVHUB_NODE_CONF</key><string>$CONF</string>
+    <key>PATH</key><string>$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # sbstage.py <snapdir> <workload> [--rounds 3] [--settle 60] : ONE scoreboard stage = every launch of one workload,
 # interleaved per round: native-cpu, native-ship, JIT. JIT launch 1 is cold (fresh MAKEPAD_RUN_HOME), launches 2..n
-# are warm (same home). Run it as one timing ticket (tq.sh on the bench box / the mini's bench queue).
+# are warm (same home). Run it as one timing stage: `makepad devhub run <lane> timed --node <n> -- python3 tools/run/scoreboard/sbstage.py ...`.
 # Results append to <snapdir>/results.jsonl (sb.py lines + variant/commit/run). App and game workloads get a
 # private headless weston (Linux) and a private GL shader cache per variant.
 import argparse, os, subprocess, sys, time, shutil, signal

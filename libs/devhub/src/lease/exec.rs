@@ -33,10 +33,15 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 /// The services this module adds to the node's master endpoint.
-pub const WORDS: &[&str] = &["lease-start", "lease-run", "lease-log", "lease-end", "lease-beat", "policy", "lease-conf", "caps", "disk", "recover-get", "recover-del"];
+pub const WORDS: &[&str] = &["lease-start", "lease-run", "lease-log", "lease-end", "lease-beat", "lease-prune", "get-ls", "get-read", "policy", "lease-conf", "caps", "disk", "recover-get", "recover-del"];
 
 const LOG_CHUNK: usize = 64 << 10;
 const RECOVER_CHUNK: usize = 256 << 10;
+/// `get-read` chunk and `get-ls` limit (results, not trees: big artifacts stay on the node)
+const GET_CHUNK: usize = 256 << 10;
+const GET_MAX_FILES: usize = 20_000;
+/// what `devhub run` ships with the tree: the list of shipped files (the next ship prunes the rest)
+const SHIP_LIST: &str = ".devhub-files";
 
 /// Timing knobs (tests shorten them).
 #[derive(Clone, Debug)]
@@ -93,7 +98,8 @@ impl Lease {
     fn answer(&self) -> String {
         let env: Vec<String> = self.env.iter().map(|(k, v)| format!("{}:{}", json_str(k), json_str(v))).collect();
         format!(
-            "{{\"ok\":1,\"work\":{},\"target\":{},\"tmp\":{},\"env\":{{{}}}}}",
+            "{{\"ok\":1,\"user\":{},\"work\":{},\"target\":{},\"tmp\":{},\"env\":{{{}}}}}",
+            json_str(&login()),
             json_str(&self.work.to_string_lossy()),
             json_str(&self.target.to_string_lossy()),
             json_str(&self.tmp.to_string_lossy()),
@@ -170,6 +176,35 @@ fn err(e: impl AsRef<str>) -> String {
     format!("{{\"err\":{}}}", json_str(e.as_ref()))
 }
 
+/// This node's login (what `devhub run` / `get` ship with over ssh).
+fn login() -> String {
+    std::env::var("USER").ok().filter(|u| valid_name(u)).or_else(|| caps::home_dir().file_name().map(|f| f.to_string_lossy().into_owned())).unwrap_or_default()
+}
+
+/// A relative path that stays inside its root: no `..`, not absolute, not empty.
+fn inside(rel: &str) -> bool {
+    let p = Path::new(rel);
+    !rel.is_empty() && !p.is_absolute() && p.components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir))
+}
+
+/// Files under `p` (itself when it is one), as paths relative to `base`, at most `max`.
+fn files_under(base: &Path, p: &Path, max: usize, out: &mut Vec<(String, u64)>) -> Result<(), String> {
+    let md = std::fs::symlink_metadata(p).map_err(|e| format!("{}: {e}", p.display()))?;
+    if md.is_dir() {
+        let mut kids: Vec<PathBuf> = std::fs::read_dir(p).map_err(|e| format!("{}: {e}", p.display()))?.flatten().map(|e| e.path()).collect();
+        kids.sort();
+        for k in kids {
+            files_under(base, &k, max, out)?;
+        }
+    } else if md.is_file() {
+        if out.len() >= max {
+            return Err(format!("more than {max} files: get a narrower path"));
+        }
+        out.push((p.strip_prefix(base).unwrap_or(p).to_string_lossy().into_owned(), md.len()));
+    }
+    Ok(())
+}
+
 fn user_bus() -> bool {
     let rt = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
     let on_path = |tool: &str| std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(tool).is_file()));
@@ -193,6 +228,14 @@ impl Exec {
                 }
             }
         }
+        // quiet marks of leases this hub no longer has (it stopped while one ran)
+        for e in std::fs::read_dir(x.quiet()).into_iter().flatten().flatten() {
+            let p = e.path();
+            let id = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            if p.extension().is_some_and(|e| e == "cmd") && !back.contains(&id) {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
         if !back.is_empty() {
             x.emit("lease", Sev::Info, format!("lease: hub on {} took back {} lease(s) from its ledger: {}", x.machine, back.len(), back.join(" ")));
         }
@@ -202,6 +245,13 @@ impl Exec {
         let w = Arc::downgrade(&x);
         let _ = std::thread::Builder::new().name("devhub-disk".into()).spawn(move || disk_loop(w));
         x
+    }
+
+    /// The folder a timed lease marks while it lives (`<id>.cmd`), next to the ledger
+    /// (`~/.makepad/devhub/quiet`): other tenants of the machine (the mini's CI: `yield_to` in its
+    /// ci.toml) pause while it holds one.
+    fn quiet(&self) -> PathBuf {
+        self.state.parent().unwrap_or(&self.state).join("quiet")
     }
 
     /// The lease policy now (`lease-conf set` changes it while the hub runs).
@@ -276,6 +326,9 @@ impl Exec {
             "lease-log" => vec![self.log(rest)],
             "lease-end" => vec![self.end_cmd(rest)],
             "lease-beat" => vec![self.beat(rest)],
+            "lease-prune" => vec![self.prune(rest)],
+            "get-ls" => self.get_ls(rest),
+            "get-read" => vec![self.get_read(rest)],
             "policy" => vec![self.policy(rest)],
             "lease-conf" => vec![self.lease_conf(rest)],
             "caps" => {
@@ -361,6 +414,10 @@ impl Exec {
             Some(sha) => format!("worktree at {}", &sha[..12.min(sha.len())]),
             None => "lane dir".into(),
         };
+        if kind == Kind::Timed {
+            let _ = std::fs::create_dir_all(self.quiet());
+            let _ = std::fs::write(self.quiet().join(format!("{id}.cmd")), format!("timed lease {id} of {lane}\n"));
+        }
         self.leases.lock().unwrap().insert(id.clone(), l);
         self.guard.touch();
         self.emit("ws", Sev::Info, format!("ws_create: {id} {} for {lane} on {}: {what} {}", kind.as_str(), self.machine, work.display()));
@@ -588,6 +645,7 @@ impl Exec {
     /// Ends a lease taken out of the table: processes, scratch, workspace; the answer line.
     fn end(&self, l: Lease, how: &str) -> String {
         let (killed, leak) = stop_runs(&l.runs, self.opts.grace);
+        let _ = std::fs::remove_file(self.quiet().join(format!("{}.cmd", l.id)));
         let mut freed = 0u64;
         if l.tmp.exists() {
             freed += disk::dir_size(&l.tmp).0;
@@ -694,6 +752,106 @@ impl Exec {
             if f.seek(SeekFrom::Start(off)).is_ok() {
                 let _ = f.take(RECOVER_CHUNK as u64).read_to_end(&mut buf);
             }
+        }
+        let end = off + buf.len() as u64;
+        format!("{{\"data\":\"{}\",\"off\":{end},\"eof\":{}}}", makepad_network::digest::base64_encode(&buf), end >= len)
+    }
+
+    /// `lease-prune <id>`: `devhub run` shipped the tree with its file list (`.devhub-files.new`);
+    /// files the previous list had and this one does not (deleted on the lane's side) go.
+    fn prune(&self, id: &str) -> String {
+        let work = match self.leases.lock().unwrap().get(id) {
+            Some(l) => l.work.clone(),
+            None => return err(format!("no lease {id} on {}", self.machine)),
+        };
+        let new = work.join(format!("{SHIP_LIST}.new"));
+        let Ok(now) = std::fs::read_to_string(&new) else { return err(format!("{}: no file list shipped", new.display())) };
+        let keep: std::collections::HashSet<&str> = now.lines().collect();
+        let mut pruned = 0;
+        for f in std::fs::read_to_string(work.join(SHIP_LIST)).unwrap_or_default().lines() {
+            if keep.contains(f) || !inside(f) {
+                continue;
+            }
+            let p = work.join(f);
+            if std::fs::symlink_metadata(&p).is_ok_and(|m| !m.is_dir()) && std::fs::remove_file(&p).is_ok() {
+                pruned += 1;
+            }
+        }
+        if let Err(e) = std::fs::rename(&new, work.join(SHIP_LIST)) {
+            return err(format!("{}: {e}", new.display()));
+        }
+        format!("{{\"pruned\":{pruned}}}")
+    }
+
+    /// The folder `devhub get` reads and the prefix that names it: a live lease's work
+    /// (`target/`, `tmp/`: its target and scratch), else the lane's dir (`src/`: the tree `run`
+    /// ships and runs in; `target/`: the lane's warm target). Returns (root, prefix, path under root).
+    fn get_root(&self, lane: &str, lease: &str, rel: &str) -> Result<(PathBuf, &'static str, String), String> {
+        if !valid_name(lane) || !inside(rel) {
+            return Err("usage: <lane> <lease|-> <relative path inside the lane's dir>".into());
+        }
+        let under = |pre: &str| if rel == pre { Some(".".to_string()) } else { rel.strip_prefix(pre).and_then(|r| r.strip_prefix('/')).map(str::to_string) };
+        if lease != "-" {
+            let leases = self.leases.lock().unwrap();
+            let l = leases.get(lease).filter(|l| l.lane == lane).ok_or_else(|| format!("no live lease {lease} of lane {lane} on {}", self.machine))?;
+            return Ok(match (under("target"), under("tmp")) {
+                (Some(r), _) => (l.target.clone(), "target/", r),
+                (_, Some(r)) => (l.tmp.clone(), "tmp/", r),
+                _ => (l.work.clone(), "", rel.to_string()),
+            });
+        }
+        let w = self.conf().work;
+        Ok(match under("target") {
+            Some(r) => (w.join("target").join(format!("lane-{lane}")), "target/", r),
+            None => (w.join("lane").join(lane), "", rel.to_string()),
+        })
+    }
+
+    /// `get-ls <lane> <lease|-> <rel>`: one `{"p":..,"n":..,"r":..}` line per file under it; `p`
+    /// starts with the last component of <rel> (where rsync would put it in the target folder),
+    /// `r` is what `get-read` takes.
+    fn get_ls(&self, rest: &str) -> Vec<String> {
+        let w: Vec<&str> = rest.splitn(3, ' ').collect();
+        let [lane, lease, rel] = w[..] else { return vec![err("usage: get-ls <lane> <lease|-> <rel>")] };
+        let (root, pre, sub) = match self.get_root(lane, lease, rel.trim()) {
+            Ok(x) => x,
+            Err(e) => return vec![err(e)],
+        };
+        let p = root.join(&sub);
+        let base = if sub == "." { p.clone() } else { p.parent().map(Path::to_path_buf).unwrap_or_else(|| root.clone()) };
+        let mut files = Vec::new();
+        if let Err(e) = files_under(&base, &p, GET_MAX_FILES, &mut files) {
+            return vec![err(e)];
+        }
+        files
+            .into_iter()
+            .map(|(f, n)| {
+                let under_root = base.join(&f);
+                let r = format!("{pre}{}", under_root.strip_prefix(&root).unwrap_or(&under_root).to_string_lossy());
+                format!("{{\"p\":{},\"n\":{n},\"r\":{}}}", json_str(&f), json_str(&r))
+            })
+            .collect()
+    }
+
+    /// `get-read <lane> <lease|-> <off> <r>`: a chunk of one file `get-ls` listed.
+    fn get_read(&self, rest: &str) -> String {
+        let w: Vec<&str> = rest.splitn(4, ' ').collect();
+        let [lane, lease, off, rel] = w[..] else { return err("usage: get-read <lane> <lease|-> <offset> <rel>") };
+        let Ok(off) = off.parse::<u64>() else { return err("get-read: bad offset") };
+        let (root, _, sub) = match self.get_root(lane, lease, rel.trim()) {
+            Ok(x) => x,
+            Err(e) => return err(e),
+        };
+        let p = root.join(sub);
+        use std::io::{Read, Seek, SeekFrom};
+        let mut f = match std::fs::File::open(&p) {
+            Ok(f) => f,
+            Err(e) => return err(format!("{}: {e}", p.display())),
+        };
+        let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+        let mut buf = Vec::new();
+        if f.seek(SeekFrom::Start(off)).is_ok() {
+            let _ = f.take(GET_CHUNK as u64).read_to_end(&mut buf);
         }
         let end = off + buf.len() as u64;
         format!("{{\"data\":\"{}\",\"off\":{end},\"eof\":{}}}", makepad_network::digest::base64_encode(&buf), end >= len)
@@ -1171,6 +1329,44 @@ mod tests {
         assert!(work.exists(), "a lane dir stays warm");
         assert!(x.handle("lease-end", "L1 released")[0].contains("\"unknown\":true"));
         assert!(events.lock().unwrap().iter().any(|l| l.contains("ws_create")) && events.lock().unwrap().iter().any(|l| l.contains("ended on t (released)")));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn ship_prune_get_and_quiet_marks() {
+        let (x, base, _) = test_exec("get", Opts::default());
+        let a = x.handle("lease-start", r#"{"id":"L2","lane":"getx","kind":"timed","rev":null}"#);
+        assert!(field(&a[0], "user").and_then(|u| u.as_str().map(|u| !u.is_empty())).unwrap_or(false), "{a:?}");
+        let work = PathBuf::from(field(&a[0], "work").unwrap().as_str().unwrap());
+        let tmp = PathBuf::from(field(&a[0], "tmp").unwrap().as_str().unwrap());
+        assert!(base.join("quiet/L2.cmd").exists(), "a timed lease marks the machine quiet");
+        // two ships: the second list drops b.txt, which goes; files never listed stay
+        std::fs::create_dir_all(work.join("out/deep")).unwrap();
+        for f in ["a.txt", "b.txt", "out/r.txt", "out/deep/s.bin", "local.txt"] {
+            std::fs::write(work.join(f), f).unwrap();
+        }
+        std::fs::write(work.join(".devhub-files.new"), "a.txt\nb.txt\nout/r.txt\n").unwrap();
+        assert_eq!(x.handle("lease-prune", "L2"), vec![r#"{"pruned":0}"#.to_string()]);
+        std::fs::write(work.join(".devhub-files.new"), "a.txt\nout/r.txt\n../escape\n").unwrap();
+        assert_eq!(x.handle("lease-prune", "L2"), vec![r#"{"pruned":1}"#.to_string()]);
+        assert!(!work.join("b.txt").exists() && work.join("a.txt").exists() && work.join("local.txt").exists());
+        // get: a folder lists with its own name first, `r` reads it back; a lease's tmp/ too
+        let ls = x.handle("get-ls", "getx - src/out");
+        assert_eq!(ls.len(), 2, "{ls:?}");
+        assert!(ls[0].contains(r#""p":"out/deep/s.bin","n":14,"r":"src/out/deep/s.bin""#), "{ls:?}");
+        let r = x.handle("get-read", "getx - 0 src/out/r.txt");
+        assert_eq!(field(&r[0], "data").and_then(|d| d.as_str().and_then(b64_decode)), Some(b"out/r.txt".to_vec()));
+        assert_eq!(field(&r[0], "eof").and_then(|e| e.as_bool()), Some(true));
+        std::fs::write(tmp.join("result.jsonl"), "{}").unwrap();
+        let ls = x.handle("get-ls", "getx L2 tmp/result.jsonl");
+        assert!(ls[0].contains(r#""p":"result.jsonl","n":2,"r":"tmp/result.jsonl""#), "{ls:?}");
+        assert!(x.handle("get-read", "getx L2 0 tmp/result.jsonl")[0].contains("\"eof\":true"));
+        assert!(x.handle("get-ls", "getx - ../x")[0].contains("err"));
+        assert!(x.handle("get-ls", "other L2 tmp")[0].contains("err"), "a lease answers only for its lane");
+        // ended: the quiet mark goes, the lane dir stays readable
+        x.handle("lease-end", "L2 released");
+        assert!(!base.join("quiet/L2.cmd").exists());
+        assert!(x.handle("get-ls", "getx - src/a.txt")[0].contains(r#""p":"a.txt""#));
         let _ = std::fs::remove_dir_all(&base);
     }
 
