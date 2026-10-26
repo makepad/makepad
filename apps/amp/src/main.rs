@@ -31,6 +31,7 @@ mod audio;
 mod cache;
 mod drag_out;
 mod drop_video;
+mod lyric_video;
 mod columns;
 mod connection;
 mod eq;
@@ -1283,7 +1284,7 @@ impl App {
     /// Songs dragged out of a list (drag_out.rs); a refusal or a partial
     /// drag says why in the status line.
     fn drag_out(&mut self, cx: &mut Cx, window: WindowId, paths: Vec<Option<String>>) {
-        if let Some(message) = drag_out::start(cx, window, paths) {
+        if let Some(message) = drag_out::start(cx, window, paths, &self.model.theme) {
             self.model.error = Some(message);
             self.model.changed();
         }

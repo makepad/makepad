@@ -1,6 +1,6 @@
 //! Dragging songs out of Amp into other apps (a chat, a mail, the file
 //! manager). By default a song goes as a video, `<title>.mp4`: its audio as
-//! AAC with a still title card (drop_video.rs), the one kind of file chat apps
+//! AAC with its lyric video (or title card) in Amp's style (drop_video.rs), the one kind of file chat apps
 //! (WhatsApp and the like) take and play inline with its sound. It is a file
 //! promise whose producer starts with the drag, so the file is usually done
 //! before the pointer reaches the chat; the receiver gets it only once it is
@@ -34,14 +34,14 @@ pub const NOT_LOCAL: &str = "Not a local file: streamed songs can't be dragged o
 /// Start dragging `paths` out of `window` (`None` entries are songs that are
 /// not local files). Returns a message for the person when some or all of
 /// them could not go.
-pub fn start(cx: &mut Cx, window: WindowId, paths: Vec<Option<String>>) -> Option<String> {
+pub fn start(cx: &mut Cx, window: WindowId, paths: Vec<Option<String>>, theme: &crate::Theme) -> Option<String> {
     let total = paths.len();
     let local: Vec<String> = paths.into_iter().flatten().collect();
     if local.is_empty() {
         return (total > 0).then(|| NOT_LOCAL.to_string());
     }
     let left_out = total - local.len();
-    let format = if cx.keyboard.modifiers().alt { DropFormat::Files } else { DropFormat::Video(card_fonts(cx)) };
+    let format = if cx.keyboard.modifiers().alt { DropFormat::Files } else { DropFormat::Video(video_kit(cx, theme)) };
     let items = local.into_iter().map(|path| item(path, &format)).collect();
     cx.start_external_dragging(window, DragOut { items, image: None });
     (left_out > 0).then(|| format!("{left_out} streamed song{} left out: only local files can be dragged", if left_out == 1 { "" } else { "s" }))
@@ -49,19 +49,25 @@ pub fn start(cx: &mut Cx, window: WindowId, paths: Vec<Option<String>>) -> Optio
 
 /// What a drag sends.
 pub enum DropFormat {
-    /// Each song as `<title>.mp4` (AAC + title card), drawn with these fonts.
-    Video(drop_video::CardFonts),
+    /// Each song as `<title>.mp4` (AAC + lyric video), drawn with these fonts and colours.
+    Video(drop_video::Kit),
     /// The files themselves; Ogg Vorbis as a tagged MP3.
     Files,
 }
 
-/// The UI's fonts for the title card, as file paths the producer thread reads.
-fn card_fonts(cx: &mut Cx) -> drop_video::CardFonts {
+/// The UI's fonts (as file paths the producer thread reads) and the style's colours.
+fn video_kit(cx: &mut Cx, theme: &crate::Theme) -> drop_video::Kit {
+    use crate::lyric_video::{Fonts, Look, BOLD_FONTS, ITALIC_FONTS, REGULAR_FONTS};
     use makepad_widgets::makepad_platform::script::res::crate_resource_abs_path;
-    let paths = cx
-        .try_with_vm(|vm| drop_video::CARD_FONTS.iter().filter_map(|logical| crate_resource_abs_path(vm, logical)).collect::<Vec<_>>())
+    let fonts = cx
+        .try_with_vm(|vm| {
+            let mut paths = |logical: &[&str]| logical.iter().filter_map(|l| crate_resource_abs_path(vm, l)).map(Into::into).collect::<Vec<_>>();
+            Fonts { bold: paths(&BOLD_FONTS), regular: paths(&REGULAR_FONTS), italic: paths(&ITALIC_FONTS) }
+        })
         .unwrap_or_default();
-    drop_video::CardFonts { paths: paths.into_iter().map(Into::into).collect() }
+    let c = |v: Vec4f| [v.x, v.y, v.z];
+    let look = Look { background: c(theme.background), text: c(theme.foreground), muted: c(theme.muted), accent: c(theme.accent), caps: theme.caps };
+    drop_video::Kit { fonts, look }
 }
 
 /// A file the in-tree decoders read (and so can turn into a video or an MP3).
@@ -81,12 +87,21 @@ pub fn item(path: String, format: &DropFormat) -> DragOutItem {
     }
     let name = display_name(&path);
     match format {
-        DropFormat::Video(fonts) => {
-            let fonts = fonts.clone();
+        DropFormat::Video(kit) => {
+            let kit = kit.clone();
             DragOutItem::Promise(FilePromise {
                 name: format!("{name}.mp4"),
                 mime: "video/mp4".into(),
-                produce: Box::new(move |dest| drop_video::write_song_video(Path::new(&path), dest, &name, &fonts)),
+                produce: Box::new(move |dest| {
+                    let made = drop_video::write_song_video(Path::new(&path), dest, &name, &kit)?;
+                    if !made.cached {
+                        log!(
+                            "amp drop video: {name}.mp4 in {:.0} ms (decode {:.0}, {} lines, {} frames of which {} drawn in {:.0} ms, encode {:.0} ms)",
+                            made.total_ms, made.decode_ms, made.lyric_lines, made.frames, made.drawn, made.paint_ms, made.encode_ms
+                        );
+                    }
+                    Ok(())
+                }),
             })
         }
         DropFormat::Files => {
@@ -164,29 +179,34 @@ mod tests {
     }
 
     fn tagged_ogg(dir: &Path, secs: f32) -> std::path::PathBuf {
+        tagged_ogg_with(dir, secs, "Night Drive", &[])
+    }
+
+    fn tagged_ogg_with(dir: &Path, secs: f32, title: &str, extra: &[(&str, &str)]) -> std::path::PathBuf {
         let rate = 44_100usize;
         let pcm: Vec<f32> = (0..(rate as f32 * secs) as usize).flat_map(|i| {
             let t = i as f32 / rate as f32;
             [(t * 440.0 * std::f32::consts::TAU).sin() * 0.3, (t * 660.0 * std::f32::consts::TAU).sin() * 0.3]
         }).collect();
-        let comments = vec![
-            ("TITLE".to_string(), "Night Drive".to_string()),
+        let mut comments = vec![
+            ("TITLE".to_string(), title.to_string()),
             ("ARTIST".to_string(), "AI · model".to_string()),
             ("ALBUM".to_string(), "AI music".to_string()),
         ];
+        comments.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
         let opts = makepad_audio_encode::EncodeOptions { tags: comments, ..Default::default() };
         let ogg = makepad_audio_encode::encode_vorbis(rate as u32, 2, &pcm, &opts).unwrap();
-        let src = dir.join("Night Drive - 1792872851.ogg");
+        let src = dir.join(format!("{title} - 1792872851.ogg"));
         std::fs::write(&src, &ogg).unwrap();
         src
     }
 
-    /// The UI fonts from the checkout, as `card_fonts` resolves them in the app.
-    fn test_fonts() -> drop_video::CardFonts {
+    /// The UI fonts from the checkout, as `video_kit` resolves them in the app, and Amp's colours.
+    fn test_kit() -> drop_video::Kit {
+        use crate::lyric_video::{Fonts, Look, BOLD_FONTS, ITALIC_FONTS, REGULAR_FONTS};
         let widgets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../widgets");
-        drop_video::CardFonts {
-            paths: drop_video::CARD_FONTS.iter().map(|l| widgets.join(l.strip_prefix("makepad_widgets/").unwrap())).collect(),
-        }
+        let paths = |logical: &[&str]| logical.iter().map(|l| widgets.join(l.strip_prefix("makepad_widgets/").unwrap())).collect();
+        drop_video::Kit { fonts: Fonts { bold: paths(&BOLD_FONTS), regular: paths(&REGULAR_FONTS), italic: paths(&ITALIC_FONTS) }, look: Look::default() }
     }
 
     /// The whole drop of a song as video: the promise's producer, the platform's completion
@@ -202,7 +222,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("receiver")).unwrap();
         let secs = 5.5;
         let src = tagged_ogg(&dir, secs);
-        let DragOutItem::Promise(promise) = item(src.to_string_lossy().into_owned(), &DropFormat::Video(test_fonts())) else {
+        let DragOutItem::Promise(promise) = item(src.to_string_lossy().into_owned(), &DropFormat::Video(test_kit())) else {
             panic!("an Ogg song drops as a promise")
         };
         assert_eq!(promise.name, "Night Drive.mp4");
@@ -293,8 +313,8 @@ mod tests {
         let m4a = dir.join("x.m4a");
         std::fs::write(&m4a, b"....ftypM4A ").unwrap();
         // no in-tree decoder: the file itself, whatever the format
-        assert!(matches!(item(m4a.to_string_lossy().into_owned(), &DropFormat::Video(test_fonts())), DragOutItem::File(_)));
-        assert!(matches!(item(mp3.to_string_lossy().into_owned(), &DropFormat::Video(test_fonts())), DragOutItem::Promise(_)));
+        assert!(matches!(item(m4a.to_string_lossy().into_owned(), &DropFormat::Video(test_kit())), DragOutItem::File(_)));
+        assert!(matches!(item(mp3.to_string_lossy().into_owned(), &DropFormat::Video(test_kit())), DragOutItem::Promise(_)));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -331,5 +351,189 @@ mod tests {
         let utf16: Vec<u8> = lyrics.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
         assert!(mp3.windows(utf16.len()).any(|w| w == utf16.as_slice()));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Latin lyrics timed by the score, with an English translation: the tags Amp's AI songs carry.
+    const LATIN_LRC: &str = "[00:00.00][Intro]\n[00:02.00][Verse]\n[00:02.00]<00:02.00>Alea <00:02.60>iacta <00:03.20>lux <00:03.80>est<00:04.60>\n[00:05.00]<00:05.00>Carpe <00:05.70>noctem <00:06.40>aeternam<00:07.40>\n[00:10.00][Chorus]\n[00:10.00]<00:10.00>Ad <00:10.40>astra <00:11.00>per <00:11.40>aspera<00:12.40>\n";
+    const LATIN_EN: &str = "[Intro]\n\n[Verse]\nThe die is cast, the light is\nSeize the eternal night\n\n[Chorus]\nTo the stars through hardships\n";
+
+    #[test]
+    fn the_timeline_lights_words_and_returns_to_the_title() {
+        use crate::lyric_video::{timeline, Scene, Song, FPS};
+        let tags = vec![
+            ("TITLE".to_string(), "Alea Iacta Lux Est".to_string()),
+            ("SYNCEDLYRICS".to_string(), LATIN_LRC.to_string()),
+            ("LYRICS_TIMING".to_string(), "from the model's score".to_string()),
+            ("TRANSLATION".to_string(), LATIN_EN.to_string()),
+        ];
+        let song = Song::from_tags(&tags, "x");
+        let keys = timeline(&song);
+        let at = |t: f64| keys.iter().rev().find(|k| k.0 <= (t * FPS as f64) as i64).unwrap().1;
+        assert_eq!(at(0.5), Scene::Title);
+        assert_eq!(at(1.6), Scene::Line { line: 0, lit: 0 }, "a line shows before it is sung");
+        assert_eq!(at(2.7), Scene::Line { line: 0, lit: 2 });
+        assert_eq!(at(4.0), Scene::Line { line: 0, lit: 4 });
+        assert_eq!(at(9.2), Scene::Gap { next: 2 }, "a long rest shows the coming line");
+        assert_eq!(at(11.1), Scene::Line { line: 2, lit: 3 });
+        assert_eq!(at(16.0), Scene::Title, "the title card closes it");
+        let l = song.lyrics.as_ref().unwrap();
+        assert_eq!(l.lines().nth(1).unwrap().1.translation, "Seize the eternal night");
+        // estimated times light the whole line as it starts, not word by word
+        let mut tags = tags;
+        tags[2].1 = "estimated".into();
+        let keys = timeline(&Song::from_tags(&tags, "x"));
+        assert!(keys.iter().all(|k| !matches!(k.1, Scene::Line { line: 0, lit: 1..=3 })), "{keys:?}");
+    }
+
+    /// Frames of a decoded movie nearest to these times (s), as RGB.
+    fn frames_at(path: &Path, times: &[f64]) -> Vec<(f64, Vec<u8>, u32, u32)> {
+        let mut video = makepad_video::VideoFileDecoder::open(&path.to_string_lossy()).expect("the mp4 opens");
+        let mut best: Vec<Option<(f64, Vec<u8>, u32, u32)>> = vec![None; times.len()];
+        while let Ok(Some(frame)) = video.next_frame() {
+            let t = frame.pts_100ns as f64 / 1e7;
+            for (i, &want) in times.iter().enumerate() {
+                // the picture shown at `want`: the last frame at or before it
+                if t <= want + 1e-3 && best[i].as_ref().map_or(true, |b| t >= b.0) {
+                    best[i] = Some((t, frame.to_rgb8(), frame.width, frame.height));
+                }
+            }
+        }
+        best.into_iter().map(|b| b.expect("a frame")).collect()
+    }
+
+    fn save_png(dir: &Path, name: &str, rgb: &[u8], w: u32, h: u32) {
+        let png = makepad_ai_hub::testpattern::encode_png_rgb8(rgb, w as usize, h as usize).unwrap();
+        std::fs::write(dir.join(name), png).unwrap();
+    }
+
+    /// Pixels close to the accent (Amp's green): the lit words.
+    fn accent_px(rgb: &[u8]) -> usize {
+        rgb.chunks(3).filter(|p| p[1] > 150 && p[0] < 110 && p[2] < 140).count()
+    }
+
+    /// A song with timed Latin lyrics drops as a lyric video: the title, then the lines with their
+    /// words lit as they are sung, the translation under them; made again it comes from the cache.
+    #[test]
+    fn a_song_with_timed_lyrics_drops_as_a_lyric_video() {
+        let dir = std::env::temp_dir().join(format!("amp-lyric-video-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let secs = 15.0;
+        let src = tagged_ogg_with(&dir, secs, "Alea Iacta Lux Est", &[
+            ("SYNCEDLYRICS", LATIN_LRC),
+            ("LYRICS_TIMING", "from the model's score"),
+            ("TRANSLATION", LATIN_EN),
+            ("TRANSLATION_LANGUAGE", "English"),
+        ]);
+        let kit = test_kit();
+        let dest = dir.join("out.mp4");
+        let made = match drop_video::write_song_video(&src, &dest, "Alea Iacta Lux Est", &kit) {
+            Ok(made) => made,
+            Err(e) if !cfg!(target_vendor = "apple") && e.starts_with("video encoder") => {
+                eprintln!("LYRIC-MP4: skipped, {e}");
+                return;
+            }
+            Err(e) => panic!("making the video: {e}"),
+        };
+        assert!(!made.cached && made.lyric_lines == 3, "{made:?}");
+        let info = makepad_video::VideoFileDecoder::open(&dest.to_string_lossy()).unwrap().info().clone();
+        assert_eq!((info.width, info.height), (drop_video::WIDTH, drop_video::HEIGHT));
+        if cfg!(target_vendor = "apple") {
+            let duration = info.duration_100ns as f64 / 1e7;
+            assert!(info.has_audio && (duration - secs as f64).abs() < 0.2, "{duration} s {info:?}");
+        }
+        if !cfg!(target_vendor = "apple") {
+            // the GStreamer reader's frames are not checked here: the full check is the Apple one
+            std::fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+        let shots = frames_at(&dest, &[0.5, 1.8, 2.7, 4.2, 9.3, 11.2]);
+        let [title, coming, two_lit, all_lit, gap, chorus] = [0, 1, 2, 3, 4, 5].map(|i| &shots[i].1);
+        assert!(accent_px(coming) < 1000, "nothing lit before it is sung (the header's mark only): {}", accent_px(coming));
+        assert!(accent_px(two_lit) > accent_px(coming) + 1500, "two words lit: {}", accent_px(two_lit));
+        assert!(accent_px(all_lit) > accent_px(two_lit) + 1000, "{} vs {}", accent_px(all_lit), accent_px(two_lit));
+        let differ = |a: &[u8], b: &[u8]| a.iter().zip(b).filter(|(x, y)| x.abs_diff(**y) > 40).count();
+        assert!(differ(title, coming) > 10_000 && differ(gap, chorus) > 10_000);
+        let again = drop_video::write_song_video(&src, &dir.join("again.mp4"), "Alea Iacta Lux Est", &kit).unwrap();
+        assert!(again.cached, "{again:?}");
+        assert_eq!(std::fs::read(&dest).unwrap(), std::fs::read(dir.join("again.mp4")).unwrap());
+        eprintln!("LYRIC-MP4: {made:?}; cached again in {:.1} ms", again.total_ms);
+        if let Ok(keep) = std::env::var("AMP_DROP_TEST_OUT") {
+            let keep = Path::new(&keep);
+            std::fs::create_dir_all(keep).unwrap();
+            for (name, shot) in ["title", "coming", "lit2", "lit4", "gap", "chorus"].iter().zip(&shots) {
+                save_png(keep, &format!("synthetic-{name}.png"), &shot.1, shot.2, shot.3);
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The sample for the report: a real AI song (`AMP_LYRIC_SONG`, a path from this crate) made
+    /// cold and then from the cache, its tracks checked, frames at `AMP_LYRIC_AT` (s, comma
+    /// separated) kept as PNGs with the MP4 in `AMP_DROP_TEST_OUT`. Without the song: nothing.
+    #[test]
+    fn sample_lyric_video_of_a_real_song() {
+        let Ok(song) = std::env::var("AMP_LYRIC_SONG") else { return };
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join(song);
+        let out = std::path::PathBuf::from(std::env::var("AMP_DROP_TEST_OUT").unwrap_or_else(|_| std::env::temp_dir().join("amp-lyric-sample").to_string_lossy().into_owned()));
+        std::fs::create_dir_all(&out).unwrap();
+        let _ = std::fs::remove_dir_all(drop_video::cache_dir());
+        let name = display_name(&src.to_string_lossy());
+        let dest = out.join(format!("{name}.mp4"));
+        let kit = test_kit();
+        let cold = drop_video::write_song_video(&src, &dest, &name, &kit).expect("the video");
+        let warm = drop_video::write_song_video(&src, &out.join("cached.mp4"), &name, &kit).expect("the cached video");
+        assert!(!cold.cached && warm.cached);
+        let _ = std::fs::remove_file(out.join("cached.mp4"));
+        let video = makepad_video::VideoFileDecoder::open(&dest.to_string_lossy()).unwrap();
+        let info = video.info().clone();
+        drop(video);
+        let size = std::fs::metadata(&dest).unwrap().len();
+        let mut audio_frames = 0usize;
+        if let Ok(mut audio) = makepad_video::VideoFileDecoder::open_audio(&dest.to_string_lossy()) {
+            while let Ok(Some(chunk)) = audio.next_audio() {
+                audio_frames += chunk.samples.len() / chunk.channels as usize;
+            }
+        }
+        eprintln!(
+            "LYRIC-SAMPLE: {name}: {size} bytes, {:.2} s, {:?} {}x{}, audio {} Hz x{} ({:.2} s decoded); cold {cold:?}; cached {:.1} ms",
+            info.duration_100ns as f64 / 1e7, info.video_codec, info.width, info.height, info.audio_sample_rate, info.audio_channels,
+            audio_frames as f64 / info.audio_sample_rate.max(1) as f64, warm.total_ms
+        );
+        let times: Vec<f64> = std::env::var("AMP_LYRIC_AT").unwrap_or_else(|_| "1,20,40,60".into()).split(',').filter_map(|t| t.trim().parse().ok()).collect();
+        for (t, shot) in times.iter().zip(frames_at(&dest, &times)) {
+            save_png(&out, &format!("frame-{t:05.1}s.png"), &shot.1, shot.2, shot.3);
+        }
+    }
+
+    /// The painter alone (no encoder): its scenes as PNGs in `AMP_DROP_TEST_OUT`, for a look.
+    #[test]
+    fn paints_the_scenes() {
+        use crate::lyric_video::{Painter, Scene, Song, SIZE};
+        let tags = vec![
+            ("TITLE".to_string(), "Alea Iacta Lux Est".to_string()),
+            ("ARTIST".to_string(), "AI · yue2-3b".to_string()),
+            ("SYNCEDLYRICS".to_string(), LATIN_LRC.to_string()),
+            ("LYRICS_TIMING".to_string(), "from the model's score".to_string()),
+            ("TRANSLATION".to_string(), LATIN_EN.to_string()),
+        ];
+        let song = Song::from_tags(&tags, "x");
+        let kit = test_kit();
+        let mut painter = Painter::new(&song, &kit.look, &kit.fonts);
+        let mut nv12 = Vec::new();
+        let started = std::time::Instant::now();
+        let scenes = [Scene::Title, Scene::Line { line: 0, lit: 2 }, Scene::Line { line: 1, lit: 3 }, Scene::Gap { next: 2 }];
+        for (n, scene) in scenes.iter().enumerate() {
+            painter.paint(*scene, &mut nv12);
+            assert_eq!(nv12.len(), (SIZE * SIZE * 3 / 2) as usize);
+            if let Ok(keep) = std::env::var("AMP_DROP_TEST_OUT") {
+                let keep = Path::new(&keep);
+                std::fs::create_dir_all(keep).unwrap();
+                let mut rgb = Vec::new();
+                makepad_video::nv12::nv12_to_rgb8(&nv12, SIZE, SIZE, crate::lyric_video::COLOR, &mut rgb);
+                save_png(keep, &format!("scene-{n}.png"), &rgb, SIZE, SIZE);
+            }
+        }
+        eprintln!("PAINT: 4 scenes in {:.1} ms", started.elapsed().as_secs_f64() * 1000.0);
     }
 }

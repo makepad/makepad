@@ -116,7 +116,8 @@ pub struct FnEntry {
     pub spec_state: u8,
     /// speculation depth this slot was queued at (u8::MAX: not queued)
     pub spec_depth: u8,
-    /// Explicit trace/hint seed: use baseline even if its build starts after present.
+    /// Explicit trace/hint seed (spec_seed): use baseline even if its build starts after present;
+    /// its result built ahead never expires (note_spec_built).
     pub baseline_hint: AtomicBool,
     /// a Relax core fn called by `// relax: hot` code: compiled like it (marked_hot)
     pub hot_hint: AtomicBool,
@@ -10533,7 +10534,7 @@ unsafe fn prepare_rir_from(up: *mut Unit, id: u32, defer: bool, lowered: Option<
     if unverified { note_unverified(&*up, id); }
     let baseline = unverified || mode == RirMode::Baseline || mode == RirMode::Tier0 && !o2_build() && !RT_KEEP.with(|k| k.get()) && match options.t0_baseline {
         crate::options::Tier0Baseline::Off => false,
-        crate::options::Tier0Baseline::Startup => startup_phase() || warmup_foreground() || (&*up).fns[id as usize].baseline_hint.load(Ordering::Relaxed),
+        crate::options::Tier0Baseline::Startup => startup_phase() || ahead_foreground() || (&*up).fns[id as usize].baseline_hint.load(Ordering::Relaxed),
         crate::options::Tier0Baseline::Always => true,
     };
     let from_ahead = lowered.is_none();
@@ -18571,36 +18572,14 @@ fn startup_phase() -> bool {
     STARTUP_PHASE.load(Ordering::Acquire) == 1
 }
 
-/// The warm-up after the first present: the burst of lazy compiles the first frames make (a cold
-/// Stage: thousands in the first seconds, one at a time on the UI thread). It ends once the UI
-/// thread has gone WARMUP_QUIET_NS without waiting on the JIT, or WARMUP_MAX_NS after the present.
-const WARMUP_QUIET_NS: u64 = AHEAD_BURST_QUIET_NS;
-const WARMUP_MAX_NS: u64 = 30_000_000_000;
-static WARMUP_OVER: AtomicBool = AtomicBool::new(false);
-
-fn warmup() -> bool {
-    if !FIRST_PRESENT.load(Ordering::Acquire) || WARMUP_OVER.load(Ordering::Relaxed) {
-        return false;
-    }
-    let since = wall_ns().saturating_sub(FIRST_PRESENT_NS.load(Ordering::Relaxed));
-    if since >= WARMUP_MAX_NS || crate::postframe::ui_idle_ns() >= WARMUP_QUIET_NS {
-        WARMUP_OVER.store(true, Ordering::Relaxed);
-        return false;
-    }
-    true
-}
-
 /// A build for a program thread (not a speculative or tier-up worker's) after the first present.
+/// Its lazy compiles are built as the startup's are (baseline code, no inline candidates but Relax
+/// core's tiniest; hot code tiers up as startup code does): the cheapest code that runs, so a
+/// first call -- a cold load's burst, or code a warm launch never ran before -- costs the least
+/// wait (JITLOOP-B: the warm start hides such compiles, it does not chase them to zero).
 fn ahead_foreground() -> bool {
     let class = if owner::is_owner() { owner::serving().0 } else { owner::Class::Program };
     FIRST_PRESENT.load(Ordering::Acquire) && class == owner::Class::Program && !IS_WORKER.try_with(|w| w.get()).unwrap_or(false)
-}
-
-/// A program thread's lazy compile in the warm-up: built as the startup's are (baseline code, no
-/// inline candidates; hot code tiers up as startup code does), the cheapest code that runs.
-fn warmup_foreground() -> bool {
-    let class = if owner::is_owner() { owner::serving().0 } else { owner::Class::Program };
-    class == owner::Class::Program && !IS_WORKER.try_with(|w| w.get()).unwrap_or(false) && warmup()
 }
 
 fn startup_holds_tier1() -> bool {
@@ -19979,7 +19958,15 @@ static SPEC_BUILT: relax_session::sync::Mutex<Vec<(u32, u64)>> = relax_session::
 /// (results dropped, bytes of code + RIR freed)
 pub static SPEC_EXPIRED: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 
-fn note_spec_built(options: &crate::options::Options, id: u32) {
+/// A speculative result of slot `id` is ready: it expires if not called within the TTL -- unless
+/// the slot was seeded (`spec_seed`: the previous run's post-present manifest, a live edit's
+/// pending slots): that code ran before and is kept until its call, however late (JITLOOP-B: a
+/// warm Sandbox's Play 30 s after the launch re-linked ~16k expired manifest slots on the UI
+/// thread, 0.5-0.9 s blocks).
+fn note_spec_built(options: &crate::options::Options, u: &Unit, id: u32) {
+    if u.fns[id as usize].baseline_hint.load(Ordering::Relaxed) {
+        return;
+    }
     if spec_ttl_ns(options) != 0 && ahead_policy().spec_expire {
         SPEC_BUILT.lock().unwrap().push((id, wall_ns()));
     }
@@ -20880,11 +20867,23 @@ unsafe fn split_begin(up: *mut Unit, id: u32, spec: bool) -> Begin {
                     cached_tier1(up, id, inl);
                 }
                 let u = &mut *up;
+                // a seeded slot (spec_seed: the previous run's manifest -- code that ran there)
+                // is installed now, as its first call would: that call then finds it ready instead
+                // of installing it on the UI thread (JITLOOP-B: a warm Sandbox's Play installed
+                // ~24k staged links there, 1.2 s of UI blocks)
+                if u.fns[id as usize].baseline_hint.load(Ordering::Relaxed) {
+                    u.exec_note(id, crate::exec_profile::SPEC);
+                    install_compiled(up, id, &code, map, &crelocs, false);
+                    let u = &mut *up;
+                    let d = u.fns[id as usize].spec_depth;
+                    spec_enqueue_cached(up, &callees, d);
+                    return Begin::Done(Split::Spec);
+                }
                 u.reload_specs.insert(id);
                 u.fns[id as usize].spec = Some(Box::new(SpecCode { code, map, relocs: crelocs, record: false }));
                 u.fns[id as usize].spec_state = 1;
                 u.exec_note(id, crate::exec_profile::SPEC);
-                note_spec_built(options, id);
+                note_spec_built(options, &*up, id);
             }
             let u = &mut *up;
             let d = u.fns[id as usize].spec_depth;
@@ -21102,7 +21101,7 @@ unsafe fn split_finish(up: *mut Unit, d: BackDone) -> Split {
                     u.fns[id as usize].spec = Some(Box::new(SpecCode { code, map, relocs, record: true }));
                     u.fns[id as usize].spec_state = 1;
                     u.exec_note(id, crate::exec_profile::SPEC);
-                    note_spec_built(options, id);
+                    note_spec_built(options, &*up, id);
                     let d = u.fns[id as usize].spec_depth;
                     spec_enqueue(up, id, d);
                 }
@@ -22745,7 +22744,7 @@ fn typeck_ahead(f: &FrontShared, d: DefId, args: Vec<TyId>, depth: u32, queued: 
             let it = prog.files[cd.file as usize].ast.item(cd.item);
             let toks = &prog.files[cd.file as usize].toks;
             let src = (toks.partition_point(|t| t.lo < it.hi) - toks.partition_point(|t| t.lo < it.lo)) as u32;
-            let baseline = !normal && (startup_phase() || warmup_foreground()) && f.session.options.t0_baseline != crate::options::Tier0Baseline::Off;
+            let baseline = !normal && (startup_phase() || ahead_foreground()) && f.session.options.t0_baseline != crate::options::Tier0Baseline::Off;
             let want = if baseline { src <= BASE_INLINE_SRC_TOKS } else {
                 attr & relax_codegen::opt::ATTR_ALWAYS != 0 || src <= src_toks || (attr & relax_codegen::opt::ATTR_HINT != 0 && src <= INLINE_HINT_SRC_TOKS)
             };

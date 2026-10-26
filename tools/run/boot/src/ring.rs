@@ -1,7 +1,9 @@
-//! The JIT ring: a small ring in the running app's caption that answers "is the JIT doing
-//! something right now?". No text in it. While the JIT builds anything (lazy compiles, builds
-//! ahead, O2/O3 tier-up, the settle rebuild, warm-cache links) a bright head with a fading tail
-//! turns around it, faster the more builds finish a second; work the program waits for (lazy
+//! The JIT ring: a small ring in the running app's caption that answers "is the UI waiting on
+//! the JIT?". No text in it. The run shows it only past a real wait -- the UI blocked on the JIT
+//! for 100 ms (postframe::BLOCK_SHOW_NS), or makepad rebuilding itself -- never for short first
+//! compiles or background work alone (hal_run `Watch`). While it shows and the JIT builds anything
+//! (lazy compiles, builds ahead, O2/O3 tier-up, the settle rebuild, warm-cache links) a bright
+//! head with a fading tail turns around it, faster the more builds finish a second; work the program waits for (lazy
 //! compiles, builds ahead, a UI block) turns bright and fast, background tier-up slower and dimmer,
 //! but it always moves: nothing static means busy. Under the head a progress arc from the top
 //! covers the builds finished of those queued since the JIT got busy (when a queue says). Once

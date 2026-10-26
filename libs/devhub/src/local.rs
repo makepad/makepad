@@ -51,7 +51,7 @@ pub struct Jit {
 pub struct Detail {
     /// `idle` / `busy …`, what runs, the queues
     pub state: String,
-    /// `session: compiled … first, O2 n, O3 n; warm links n`
+    /// `session: compiled … first, O2 n, O3 n; warm links n; UI blocked …`
     pub session: String,
     pub fps: Option<f64>,
     /// started from stored code (warm links) or compiled everything (cold)
@@ -342,7 +342,7 @@ impl Local {
         d.state = jit.first().map(|l| proto::clean(l, 400)).unwrap_or_default();
         if let Some(sess) = jit.iter().find(|l| l.starts_with("session:")) {
             d.session = proto::clean(sess, 300);
-            d.warm = sess.rsplit("warm links ").next().and_then(|n| n.trim().parse::<u64>().ok()).map(|n| n > 0);
+            d.warm = sess.split("warm links ").nth(1).and_then(|n| n.split(';').next()?.trim().parse::<u64>().ok()).map(|n| n > 0);
         }
         d.fps = jit.iter().find_map(|l| l.strip_prefix("frames: ")).and_then(|r| r.split_whitespace().next()).and_then(|f| f.parse().ok());
         d.code_mb = ask("code n=0").iter().find_map(|l| l.strip_prefix("code installed ")).and_then(|r| r.split_whitespace().next()).and_then(|m| m.parse().ok());

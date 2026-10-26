@@ -754,7 +754,12 @@ impl Win {
     /// files the app is still making as promises (`super::drag_out`), under `image` when given
     /// (pixels at the window's backing scale), else the file type's icon.
     pub fn start_external_drag(&self, items: &[(u32, String)], image: Option<&crate::backend::exec::DragImage>) -> bool {
-        if self.retired.get() || items.is_empty() {
+        if self.retired.get() {
+            eprintln!("[hal] external drag: the window is retired");
+            return false;
+        }
+        if items.is_empty() {
+            eprintln!("[hal] external drag: no items");
             return false;
         }
         for (kind, s) in items {
@@ -772,12 +777,20 @@ impl Win {
             }
         }
         unsafe {
-            let event = self.last_press.get();
+            // AppKit starts a session from the press's own event: the last left/right press or
+            // press motion this window saw, else the event AppKit is handling right now. The
+            // command can arrive after the button went up (an app behind a pipe, a lazy compile):
+            // AppKit then runs a session that drops at once, which is fine; only the event matters.
+            let mut event = self.last_press.get();
             if event == nil {
-                return false;
+                let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+                let current: ObjcId = msg_send![ns_app, currentEvent];
+                if current != nil && event_is_press_motion(current) {
+                    event = current;
+                }
             }
-            let pressed: u64 = msg_send![class!(NSEvent), pressedMouseButtons];
-            if pressed == 0 {
+            if event == nil {
+                eprintln!("[hal] external drag: this window has seen no mouse press to start a drag from");
                 return false;
             }
             let window_point: NSPoint = msg_send![event, locationInWindow];
@@ -800,12 +813,14 @@ impl Win {
                     (url, s.as_str())
                 };
                 if writer == nil {
+                    eprintln!("[hal] external drag: no pasteboard writer for {s:?}");
                     continue;
                 }
                 let item: ObjcId = msg_send![class!(NSDraggingItem), alloc];
                 let item: ObjcId = msg_send![item, initWithPasteboardWriter: writer];
                 let () = msg_send![writer, release];
                 if item == nil {
+                    eprintln!("[hal] external drag: no dragging item for {s:?}");
                     continue;
                 }
                 let offset = index as f64 * 3.0;
@@ -840,12 +855,17 @@ impl Win {
                 let () = msg_send![img, release];
             }
             if dragging_items.is_empty() {
+                eprintln!("[hal] external drag: none of the {} items could go on the pasteboard", items.len());
                 return false;
             }
             let array: ObjcId = msg_send![class!(NSArray), arrayWithObjects: dragging_items.as_ptr() count: dragging_items.len()];
             let session: ObjcId = msg_send![self.view, beginDraggingSessionWithItems: array event: event source: self.view];
             if session != nil {
                 let _: () = msg_send![session, setAnimatesToStartingPositionsOnCancelOrFail: NO];
+            } else {
+                let kind: NSEventType = msg_send![event, type];
+                let pressed: u64 = msg_send![class!(NSEvent), pressedMouseButtons];
+                eprintln!("[hal] external drag: AppKit refused the session (event type {}, buttons down {pressed:#x})", kind as u64);
             }
             for item in dragging_items {
                 let _: () = msg_send![item, release];

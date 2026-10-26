@@ -43,10 +43,11 @@ makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false }
 # The AI list's Created column on the local wall clock.
 makepad-civil-time = { path = "../../libs/civil_time" }
 makepad-audio-encode = { path = "../../libs/audio_encode" }
-# Songs dragged out as video (drop_video.rs): the OS H.264 + AAC encoders, and the title card's
-# glyphs drawn on the CPU from the UI's own fonts.
+# Songs dragged out as video (drop_video.rs, lyric_video.rs): the OS H.264 + AAC encoders, and the
+# lyric video's text drawn on the CPU with the UI's own text stack (font tables, shaping, outlines)
+# and the coverage rasteriser the draw crate uses.
 makepad-video = { package = "makepad-platform-video", path = "../../platform/video" }
-ttf-parser = { path = "../../libs/ttf-parser" }
+makepad-font-core = { path = "../../libs/font_core" }
 ab_glyph_rasterizer = { path = "../../libs/ab_glyph_rasterizer" }
 
 [dev-dependencies]

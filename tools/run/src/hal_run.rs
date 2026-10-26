@@ -72,11 +72,11 @@ static ENVIRONMENT: Mutex<Option<Environment>> = Mutex::new(None);
 /// The UI thread began a JIT wait since the window last looked (postframe's hook): the window
 /// wakes, and shows the UI block on the JIT ring once the waiting is sustained (BLOCK_AFTER).
 static UI_WAIT_ARMED: AtomicBool = AtomicBool::new(false);
-/// A true UI block: no frame for this long with the UI thread in JIT waits most of it (one long
-/// lazy compile, or a load's thousands of short ones; never a short hiccup).
-const BLOCK_AFTER: Duration = Duration::from_millis(200);
-/// The UI thread has not waited on the JIT for this long (and nothing is left to build ahead):
-/// the warm-up is over.
+/// A true UI block: one episode of UI-thread JIT waits this long (postframe::BLOCK_SHOW_NS: one
+/// long lazy compile, or a load's thousands of short ones; never a short hiccup). The JIT ring
+/// shows only past one.
+const BLOCK_AFTER: Duration = Duration::from_nanos(relax_compiler::postframe::BLOCK_SHOW_NS);
+/// The UI has not been blocked on the JIT for this long: the warm-up is over.
 const READY_QUIET_NS: u64 = 300_000_000;
 
 fn ui_wait_began() {
@@ -85,11 +85,10 @@ fn ui_wait_began() {
     }
 }
 
-/// The JIT ring shows once the JIT has been building this long (one short build shows
-/// nothing)...
-const RING_SHOW_AFTER: Duration = Duration::from_millis(600);
-/// ...and settles (fades out) once nothing has been built or run for this long (queued builds
-/// nobody works on are not work).
+/// The JIT ring shows only past a real wait: a UI block (BLOCK_AFTER), or makepad rebuilding
+/// itself; first compiles and background tier-up alone never show it (JITLOOP-B). Once shown it
+/// stays while the JIT works, and settles (fades out) once nothing has been built or run for
+/// this long (queued builds nobody works on are not work).
 const RING_SETTLE_AFTER: Duration = Duration::from_millis(500);
 /// the build rate's smoothing (s)
 const RATE_TAU: f32 = 0.5;
@@ -162,7 +161,7 @@ impl Watch {
     /// The ring's wish now (`None`: the JIT is settled). `clock`: the frame dump's clock (ms),
     /// for the trace.
     fn look(&mut self, clock: Option<u128>) -> Option<RingWant> {
-        use relax_compiler::postframe::{activity, ui_hang_ns, ui_stall_ns};
+        use relax_compiler::postframe::{activity, ui_blocked_ns};
         let now = Instant::now();
         let dt = now.duration_since(self.looked).as_secs_f32();
         if dt >= WATCH_EVERY.as_secs_f32() {
@@ -181,7 +180,7 @@ impl Watch {
             self.looked = now;
         }
         let a = self.a;
-        let stalled = Duration::from_nanos(ui_hang_ns().max(ui_stall_ns()));
+        let stalled = Duration::from_nanos(ui_blocked_ns());
         let block = stalled >= BLOCK_AFTER;
         // a program thread compiles lazily: the UI thread's JIT duty is up, or other threads'
         // first compiles finished
@@ -198,8 +197,8 @@ impl Watch {
         let busy = self.worked.is_some_and(|t| now.duration_since(t) < RING_SETTLE_AFTER);
         if busy {
             self.done_from.get_or_insert(a.queue_done());
-            let since = *self.busy_since.get_or_insert(now);
-            self.shown |= block || now.duration_since(since) >= RING_SHOW_AFTER;
+            self.busy_since.get_or_insert(now);
+            self.shown |= block || rebuild != 0;
         } else {
             self.shown = false;
             self.busy_since = None;
@@ -251,7 +250,7 @@ impl Watch {
 
     /// How soon to look again while the UI thread may be heading into a block (its JIT wait began).
     fn block_wake(&self) -> Option<Duration> {
-        use relax_compiler::postframe::{ui_hang_ns, ui_idle_ns, ui_stall_ns};
+        use relax_compiler::postframe::{ui_blocked_ns, ui_idle_ns};
         if !UI_WAIT_ARMED.load(Ordering::Acquire) {
             return None;
         }
@@ -260,7 +259,7 @@ impl Watch {
             UI_WAIT_ARMED.store(false, Ordering::Release);
             return None;
         }
-        let stalled = Duration::from_nanos(ui_hang_ns().max(ui_stall_ns()));
+        let stalled = Duration::from_nanos(ui_blocked_ns());
         Some(BLOCK_AFTER.saturating_sub(stalled).max(Duration::from_millis(20)))
     }
 }

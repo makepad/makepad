@@ -4,7 +4,7 @@
 # tools/run/fixture/land_gate.sh full`). The tree is work + the branch being landed + the nested apps/commercial.
 #   full  : build (0 warnings), rustc-check, relax-compiler libtest build, x64 relax tests, tier fuzzer (fixed
 #           seeds block, random batch never), makepad check of the 7 gate packages + Stage, headless Calc+Stage
-#           present, diff_fast, zone leg
+#           present, warm_zero (Calculator: the warm launch shows no JIT spinner), diff_fast, zone leg
 #   stage : build, makepad check makepad-stage, headless Stage present (commercial-only branches)
 # Prints "NODEGATE-OK <summary>" or "NODEGATE-FAIL: <steps>"; exit 0 / 1. Every step is a function named step_*;
 # the zone leg is the ONE function step_zone (settle_stress.sh).
@@ -91,9 +91,15 @@ step_zone() { # THE memory leg: settle_stress.sh (MEMSAFE: settles + settle rebu
     echo "zone_swap: $zs"; echo "$zs" | grep -q FAIL && fail="$fail zone_swap"
   fi
 }
+step_warm_zero() { # JITLOOP-B: after one normal session the next Calculator launch shows no JIT spinner and no UI
+  # block >= 100 ms (first compiles of never-run code are reported, not failed); Sandbox + Play stays a lane measurement
+  wz=$(TARGET=$T/release WAIT=200 tools/run/fixture/warm_zero.sh 2>&1 | tail -1 | cut -c1-400)
+  echo "$wz"; echo "$wz" | grep -q "^warm_zero: OK" || fail="$fail warm_zero"
+  sum="$sum warm_zero:$(echo "$wz" | sed -n 's/.*warm: spinner \([0-9]*\), UI blocked max \([0-9]*\) ms.*/spinner\1.max\2ms/p')"
+}
 if step_build; then
   case $mode in
-    full) step_rustc_check; step_libtest_build; step_x64_tests; step_fuzz; step_checks; step_present_calc; step_present_stage; step_diff; step_zone;;
+    full) step_rustc_check; step_libtest_build; step_x64_tests; step_fuzz; step_checks; step_present_calc; step_present_stage; step_warm_zero; step_diff; step_zone;;
     stage) step_check_stage; step_present_stage;;
     *) fail="$fail bad-mode";;
   esac
