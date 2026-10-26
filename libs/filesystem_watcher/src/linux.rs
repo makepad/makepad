@@ -42,10 +42,24 @@ unsafe extern "C" {
     fn inotify_rm_watch(fd: c_int, wd: c_int) -> c_int;
     fn close(fd: c_int) -> c_int;
     fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize;
+    fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
+    fn eventfd(initval: u32, flags: c_int) -> c_int;
+    fn poll(fds: *mut PollFd, nfds: std::os::raw::c_ulong, timeout: c_int) -> c_int;
 }
+
+#[repr(C)]
+struct PollFd {
+    fd: c_int,
+    events: i16,
+    revents: i16,
+}
+const POLLIN: i16 = 1;
 
 pub struct PlatformWatcher {
     stop: Arc<AtomicBool>,
+    /// an eventfd `stop` writes to: the watcher thread sleeps in poll() on it and the inotify fd
+    /// (-1: none could be made, the thread looks at `stop` every 80 ms)
+    wake: RawFd,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -61,13 +75,20 @@ impl PlatformWatcher {
             let _ = table.rescan_mount(&mount);
         }
 
+        let wake = unsafe { eventfd(0, O_NONBLOCK | O_CLOEXEC) };
         let thread = thread::Builder::new()
             .name("fswatch-linux".to_string())
-            .spawn(move || run_loop(table, stop_thread, emitter))
-            .map_err(|err| format!("failed to spawn linux watcher thread: {}", err))?;
+            .spawn(move || run_loop(table, stop_thread, wake, emitter))
+            .map_err(|err| {
+                if wake >= 0 {
+                    unsafe { close(wake) };
+                }
+                format!("failed to spawn linux watcher thread: {}", err)
+            })?;
 
         Ok(Self {
             stop,
+            wake,
             thread: Some(thread),
         })
     }
@@ -76,14 +97,23 @@ impl PlatformWatcher {
     pub fn idle() -> Self {
         Self {
             stop: Arc::new(AtomicBool::new(true)),
+            wake: -1,
             thread: None,
         }
     }
 
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        if self.wake >= 0 {
+            let one = 1u64;
+            let _ = unsafe { write(self.wake, &one as *const u64 as *const c_void, 8) };
+        }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
+        }
+        if self.wake >= 0 {
+            let _ = unsafe { close(self.wake) };
+            self.wake = -1;
         }
     }
 }
@@ -275,7 +305,7 @@ fn classify(records: &[Decoded]) -> Vec<(String, PathBuf, FileSystemEventKind, O
     out
 }
 
-fn run_loop(mut table: WatchTable, stop: Arc<AtomicBool>, emitter: Arc<Emitter>) {
+fn run_loop(mut table: WatchTable, stop: Arc<AtomicBool>, wake: RawFd, emitter: Arc<Emitter>) {
     let mut buffer = vec![0u8; 64 * 1024];
     // Wall-clock of the last successful read: the lower bound of the
     // interval an overflow may have lost.
@@ -287,7 +317,13 @@ fn run_loop(mut table: WatchTable, stop: Arc<AtomicBool>, emitter: Arc<Emitter>)
             if err.kind() != std::io::ErrorKind::WouldBlock {
                 thread::sleep(Duration::from_millis(20));
             } else {
-                thread::sleep(Duration::from_millis(80));
+                // nothing to read: sleep until there is (or `stop` wakes it), no polling
+                let mut fds = [
+                    PollFd { fd: table.fd, events: POLLIN, revents: 0 },
+                    PollFd { fd: wake, events: POLLIN, revents: 0 },
+                ];
+                let n = if wake >= 0 { 2 } else { 1 };
+                let _ = unsafe { poll(fds.as_mut_ptr(), n, if wake >= 0 { -1 } else { 80 }) };
             }
             continue;
         }

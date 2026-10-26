@@ -1990,7 +1990,15 @@ fn flush_errors(block: bool) {
     if up.is_null() {
         return;
     }
+    // errors come from unit work, which the owner serves: no request served since the last
+    // flush (its own), nothing new to print -- no owner request from an idle run's monitor
+    static FLUSHED: AtomicU64 = AtomicU64::new(u64::MAX);
+    if !block && FLUSHED.load(Ordering::Relaxed) == crate::owner::SERVED.load(Ordering::Relaxed) {
+        return;
+    }
     let body = || {
+        // (on the owner, this request already counted: later ones make the next flush look)
+        FLUSHED.store(crate::owner::SERVED.load(Ordering::Relaxed), Ordering::Relaxed);
         let u = unsafe { &mut *up };
         u.flush_query_errors(false);
         let seen = ERRORS_SEEN.load(Ordering::Relaxed) as usize;
@@ -2023,6 +2031,13 @@ fn spill_cache() {
     let lim = *LIM.get_or_init(|| std::env::var("MAKEPAD_RUN_CACHE_SPILL_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(16) << 20);
     let up = unsafe { RUN_UNIT };
     if lim == 0 || up.is_null() {
+        return;
+    }
+    // nothing recorded since the last look: no owner request (an idle run's monitor asked the
+    // owner ten times a second)
+    static SEEN: AtomicU64 = AtomicU64::new(u64::MAX);
+    let records = crate::cache::RECORDS.load(Ordering::Relaxed);
+    if SEEN.swap(records, Ordering::Relaxed) == records {
         return;
     }
     let Some(spill) = Some(crate::owner::publish(|| {
@@ -2083,6 +2098,36 @@ fn remove_present_report() {
 /// disables explicit requests too. This applies to the unit launched by run::cmd_run.
 pub fn settle() {
     SETTLE_REQUESTED.store(true, Ordering::Release);
+    monitor_wake();
+}
+
+/// The run monitor's thread, for `monitor_wake`.
+static MONITOR: std::sync::OnceLock<std::thread::Thread> = std::sync::OnceLock::new();
+
+/// The run monitor looks now (a settle request; it may be in its idle period).
+fn monitor_wake() {
+    if let Some(t) = MONITOR.get() { t.unpark(); }
+}
+
+/// The run monitor's period: 100 ms while anything moves (compiles, installs, cache records,
+/// verdicts, a present), MONITOR_IDLE once nothing has moved for MONITOR_QUIET ticks after the
+/// first present. Every duty of the loop is either driven by those counters or time-based at
+/// a second or more, so an idle app's monitor wakes once a second, not ten times.
+const MONITOR_TICK: std::time::Duration = std::time::Duration::from_millis(100);
+const MONITOR_IDLE: std::time::Duration = std::time::Duration::from_secs(1);
+const MONITOR_QUIET: u32 = 50;
+
+/// What the monitor's duties follow: when none of it changes, there is nothing to do soon.
+fn monitor_activity() -> [u64; 7] {
+    [
+        jit::COMPILED_FNS.load(Ordering::Relaxed) + jit::TIER1_INSTALLS.load(Ordering::Relaxed),
+        jit::reclaim_generation(),
+        jit::demand_compiled(),
+        FIRST_PRESENT_WALL.load(Ordering::Relaxed),
+        DOMAIN_PRESENT_WALL.load(Ordering::Relaxed),
+        crate::cache::RECORDS.load(Ordering::Relaxed),
+        crate::borrowck::lazy::checked(),
+    ]
 }
 
 /// A run that goes on reaching new code a few fns at a time (a game played: the Sandbox race
@@ -2259,8 +2304,15 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
         let (mut mid_quiet, mut mid_seen, mut mid_flushed, mut mid_last) = (0u32, u64::MAX, 0u64, 0u64);
         let mid_busy = std::sync::Arc::new(AtomicBool::new(false));
         let mut teardown_started = false;
+        let _ = MONITOR.set(std::thread::current());
+        let (mut activity, mut still) = (monitor_activity(), 0u32);
         loop {
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            // idle: one look a second (a settle request wakes it at once)
+            let idle = still >= MONITOR_QUIET && present.is_none() && mem_snapshot.is_none() && settle_stress.is_none()
+                && !mid_busy.load(Ordering::Relaxed) && FIRST_PRESENT_WALL.load(Ordering::Relaxed) != 0;
+            if idle { std::thread::park_timeout(MONITOR_IDLE) } else { std::thread::sleep(MONITOR_TICK) }
+            let now = monitor_activity();
+            if now == activity { still = still.saturating_add(1) } else { (activity, still) = (now, 0) }
             crate::lifeline::beat();
             if let Some(file) = present.as_mut() {
                 use std::io::{Read, Write};

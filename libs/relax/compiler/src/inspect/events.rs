@@ -621,9 +621,12 @@ pub fn start() {
         let mut base_rss = 0u64;
         let mut tick = 0u64;
         let (mut marked_main, mut marked_present) = (false, false);
+        // the main thread outside any registry wait, no wait cycle, the resident size unchanged:
+        // one look a second (the tick counts quarter seconds: it moves to the next whole second)
+        let (mut idle, mut last_rss) = (false, 0u64);
         loop {
-            std::thread::sleep(std::time::Duration::from_millis(250));
-            tick += 1;
+            std::thread::sleep(std::time::Duration::from_millis(if idle { 1000 } else { 250 }));
+            tick = if idle { (tick / 4 + 1) * 4 } else { tick + 1 };
             let waits = crate::waits::snapshot();
             let main = crate::jit::MAIN_TID.load(Relaxed);
             let now = crate::clock::wall_ns();
@@ -659,6 +662,8 @@ pub fn start() {
             super::heap::expire();
             // the memory timeline and its phase markers
             let rss = crate::memstat::resident();
+            idle = last_cycle.is_empty() && rss == last_rss && crate::jit::FIRST_PRESENT.load(Relaxed) && !waits.iter().any(|w| w.thread == main);
+            last_rss = rss;
             super::mem::tick(tick, rss);
             if !marked_main && main != 0 {
                 marked_main = true;

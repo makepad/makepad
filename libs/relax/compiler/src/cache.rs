@@ -1208,10 +1208,12 @@ impl Cache {
 
     fn push_pending(&mut self, krate: u32, e: NewEntry) {
         self.pending_bytes += e.payload.len() + 32;
+        RECORDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.pending.push((krate, e.into()));
     }
 
-    /// Payload bytes recorded but not yet written to the store files.
+    /// Payload bytes recorded but not yet written to the store files (`RECORDS` counts the
+    /// records: a reader that saw no new one need not look again).
     pub fn pending_bytes(&self) -> usize {
         self.pending_bytes
     }
@@ -7732,3 +7734,7 @@ mod prune_tests {
 /// (trace) thunk symbols whose fn key was not an image key: decoded, and the time
 pub(crate) static THUNK_DECODED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub(crate) static THUNK_DECODE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Entries recorded so far, in every store (a reader that saw no new one need not ask the owner
+/// for `pending_bytes` again: run.rs spill_cache).
+pub static RECORDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

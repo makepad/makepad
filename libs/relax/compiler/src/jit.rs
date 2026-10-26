@@ -8777,6 +8777,9 @@ fn note_slow_base(u: &Unit, id: u32) {
     if let Ok(mut g) = SLOW_BASE.try_lock() {
         if !g.contains(&id) {
             crate::zone_alloc::kept_with(|| g.push(id));
+            drop(g);
+            // an idle first worker polls once a second: it builds this now
+            w0_wake();
         }
     }
     TIER_THREAD.call_once(|| spawn_tier1_threads(&u.prog.session.runtime, &u.prog.session.options));
@@ -8792,8 +8795,16 @@ fn drain_slow_base() {
     }
     let ids = std::mem::take(&mut *SLOW_BASE.lock().unwrap_or_else(|e| e.into_inner()));
     let now = wall_ns();
+    // (counted code goes only with an install, a patch or a reclaim: none since the last look, no
+    // owner request)
+    static FORGET_SEEN: AtomicU64 = AtomicU64::new(u64::MAX);
+    let code = COMPILED_FNS.load(Ordering::Relaxed) + TIER1_INSTALLS.load(Ordering::Relaxed) + PATCH_EPOCH.load(Ordering::Relaxed) + reclaim_generation();
     let forget = now.saturating_sub(LAST_FORGET.load(Ordering::Relaxed)) >= PGO_WORK_NS
+        && FORGET_SEEN.load(Ordering::Relaxed) != code
         && COUNTING.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|e| e.parked);
+    if forget {
+        FORGET_SEEN.store(code, Ordering::Relaxed);
+    }
     let up = TIER_UNIT.load(Ordering::Acquire);
     let twins = !TWIN_PENDING.lock().unwrap_or_else(|e| e.into_inner()).is_empty();
     if ids.is_empty() && !forget && !twins || up.is_null() {
@@ -11341,6 +11352,8 @@ unsafe fn load_modules(up: *mut Unit, mods: &[u32], why: &str) {
         if !f.compiled { f.build_err = None; }
     }
     DEFERRED_LOADS.fetch_add(loaded as u64, Ordering::Relaxed);
+    // the live watcher watches the new files from now on
+    crate::reload::watch_kick();
     if std::env::var_os("MAKEPAD_RUN_DEFERRED_TRACE").is_some() {
         eprintln!("makepad-run deferred: {} loaded {} module(s) ({} defs, {} errored signatures reset) in {:.1} ms on {}{}: {}", why, loaded, defs.len(), resigned,
             (wall_ns() - t) as f64 / 1e6, if MAIN_TID.load(Ordering::Relaxed) == me() { "main" } else { "worker" },
@@ -13139,9 +13152,11 @@ fn progress_start() {
         let _k = crate::zone_alloc::kept();
         let _ = std::thread::Builder::new().name("run-progress".to_string()).spawn(|| {
             let mut last = std::time::Instant::now();
+            // every 100 ms while the state moves, once a second after 5 s without a change
+            let mut still = 0u32;
             while !TIER_STOP.load(Ordering::SeqCst) {
-                o3_progress_write(&mut last);
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                if o3_progress_write(&mut last) { still = 0 } else { still = still.saturating_add(1) }
+                std::thread::sleep(std::time::Duration::from_millis(if still >= 50 { 1000 } else { 100 }));
             }
         });
     });
@@ -13164,21 +13179,30 @@ pub(crate) fn o3_finished() -> u64 {
     TIER1_FINISHED.load(Ordering::Relaxed)
 }
 
-fn o3_progress_write(last: &mut std::time::Instant) {
+/// True when it wrote a changed state.
+fn o3_progress_write(last: &mut std::time::Instant) -> bool {
     static PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    let Some(path) = relax_session::phase::env_once(&PATH, "MAKEPAD_RUN_O3_PROGRESS") else { return };
+    let Some(path) = relax_session::phase::env_once(&PATH, "MAKEPAD_RUN_O3_PROGRESS") else { return false };
     if last.elapsed() < std::time::Duration::from_millis(100) {
-        return;
+        return false;
     }
     *last = std::time::Instant::now();
     // (PGO: slots in their counting window are O3 builds to come)
     let pending = tier_queue().map_or(0, |q| q.len()) + TIER_ACTIVE.lock().map_or(0, |a| a.len()) + usize::from(startup_holds_tier1())
         + COUNTING.lock().map_or(0, |c| c.iter().filter(|e| !e.parked).count());
     let line = format!("{} {}\n", pending, TIER1_INSTALLS.load(Ordering::Relaxed));
+    // an unchanged state is not written again (a reader sees the same file)
+    static WRITTEN: relax_session::sync::Mutex<String> = relax_session::sync::Mutex::new(String::new());
+    let mut written = WRITTEN.lock().unwrap_or_else(|e| e.into_inner());
+    if *written == line {
+        return false;
+    }
     let tmp = format!("{}.tmp", path);
-    if std::fs::write(&tmp, line).is_ok() {
+    if std::fs::write(&tmp, &line).is_ok() {
         let _ = std::fs::rename(&tmp, path);
     }
+    crate::zone_alloc::kept_with(|| *written = line);
+    true
 }
 
 fn sampler_thread() {
@@ -15203,6 +15227,35 @@ impl Drop for StartupCompile {
 // Recheck for every job: renewed foreground compilation immediately throttles new builds
 // back to worker zero. In-flight builds always finish and install, even during startup.
 const TIER1_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+/// The first O3 worker's poll once W0_QUIET polls in a row saw nothing move (w0_activity): its
+/// duties (verdict sweep, slow baseline, PGO windows, record encoding) have nothing new, and a
+/// queue push still wakes it at once. Parked PGO entries are looked at once a second anyway.
+const W0_IDLE: std::time::Duration = std::time::Duration::from_secs(1);
+const W0_QUIET: u32 = 40;
+
+/// The first O3 worker is in its once-a-second polls (w0_wake wakes it; a busy one is not woken
+/// per entry: its 50 ms polls take the entries in batches).
+static W0_IDLING: AtomicBool = AtomicBool::new(false);
+
+fn w0_wake() {
+    if W0_IDLING.swap(false, Ordering::SeqCst) {
+        TIER_SLEEPERS.wake_one();
+    }
+}
+
+/// What the first O3 worker's polls serve: when none of it moves, they find nothing to do.
+fn w0_activity() -> [u64; 8] {
+    [
+        TIER_GEN.load(Ordering::Relaxed),
+        TIER1_FINISHED.load(Ordering::Relaxed),
+        crate::borrowck::lazy::RECORDED.load(Ordering::Relaxed),
+        PATCH_EPOCH.load(Ordering::Relaxed),
+        crate::reload::UNVERIFIED_PATCHES.load(Ordering::Relaxed) as u64,
+        SPECV_RELEASES.load(Ordering::Relaxed),
+        PENDING_RECORDS.load(Ordering::Relaxed) as u64,
+        (SLOW_BASE.lock().unwrap_or_else(|e| e.into_inner()).len() + TWIN_PENDING.lock().unwrap_or_else(|e| e.into_inner()).len() + COUNTING.lock().unwrap_or_else(|e| e.into_inner()).len()) as u64,
+    ]
+}
 fn tier1_workers_ready() -> bool {
     DEMAND_COMPILES.load(Ordering::SeqCst) == 0
         && wall_ns().saturating_sub(DEMAND_LAST.load(Ordering::SeqCst)) >= TIER1_POLL.as_nanos() as u64
@@ -15745,6 +15798,8 @@ unsafe fn counted_build(up: *mut Unit, id: u32, lukewarm: bool) -> bool {
                     let at = wall_ns();
                     COUNTING.lock().unwrap_or_else(|e| e.into_inner()).push(Counting { id, counters, weights, at, lukewarm, mark: (0, at), parked: false, credited: false });
                 });
+                // the counted window starts: an idle first worker goes back to its PGO polls
+                w0_wake();
                 true
             }
             Err(_) => false,
@@ -15883,6 +15938,8 @@ fn tier1_thread(runtime: &crate::options::RuntimeOptions, k: usize, normal: usiz
     ensure_altstack();
     lower_worker_priority(runtime);
     TIER_SLEEPERS.register(k);
+    // the first worker's idle look: what its polls serve, and polls in a row it stayed the same
+    let (mut w0_seen, mut w0_still) = (w0_activity(), 0u32);
     loop {
         if k == 0 {
             crate::lifeline::beat();
@@ -15922,13 +15979,24 @@ fn tier1_thread(runtime: &crate::options::RuntimeOptions, k: usize, normal: usiz
                 // worker): the next push wakes it, no 50 ms polls of an idle app; the first worker
                 // polls on for the verdict sweep below
                 let parked = k != 0 && (q.is_empty() || k >= normal && !tier1_burst_admits(k - normal, q.len()));
-                // the first worker polls faster while the PGO counted window is open
-                let poll = if k == 0 && pgo_counting() { PGO_POLL } else { TIER1_POLL };
+                // the first worker polls faster while the PGO counted window is open, and once a
+                // second when nothing its polls serve has moved for W0_QUIET polls (an idle app)
+                let counting = k == 0 && pgo_counting();
                 // (the queue counter read under the lock: a push after it wakes this worker)
                 let seen = TIER_GEN.load(Ordering::SeqCst);
                 drop(q);
                 crate::zone_alloc::compiler_hand_back_idle();
                 let ready = || TIER_GEN.load(Ordering::SeqCst) != seen || TIER_STOP.load(Ordering::SeqCst);
+                // (the activity read takes other locks: after the queue's is dropped)
+                let poll = if counting {
+                    PGO_POLL
+                } else if k == 0 {
+                    let now = w0_activity();
+                    if now == w0_seen { w0_still = w0_still.saturating_add(1) } else { (w0_seen, w0_still) = (now, 0) }
+                    let idle = w0_still >= W0_QUIET;
+                    W0_IDLING.store(idle, Ordering::SeqCst);
+                    if idle { W0_IDLE } else { TIER1_POLL }
+                } else { TIER1_POLL };
                 if parked { TIER_SLEEPERS.sleep(k, ready) } else { TIER_SLEEPERS.sleep_timeout(k, poll, ready) }
                 if k == 0 {
                     crate::lifeline::beat();

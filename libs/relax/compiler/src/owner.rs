@@ -1146,8 +1146,13 @@ fn pick(q: &mut Queue, mode: Mode) -> Option<usize> {
     None
 }
 
+/// Requests the owner has begun serving (a reader that saw no new one knows no unit state moved:
+/// run.rs flush_errors).
+pub static SERVED: AtomicU64 = AtomicU64::new(0);
+
 fn serve(r: usize) {
     let req = unsafe { &*(r as *const Req) };
+    SERVED.fetch_add(1, Ordering::Relaxed);
     req.state.store(RUNNING, Ordering::Release);
     let was_serving = OWNER_SERVING.swap(true, Ordering::Relaxed);
     let t0 = crate::jit::wall_ns();

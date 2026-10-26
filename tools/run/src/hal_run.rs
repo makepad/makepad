@@ -820,10 +820,19 @@ fn work(rx: std::sync::mpsc::Receiver<Work>, package_dir: PathBuf, document: Doc
         for error in editor.poll() {
             post(Update::Message(error));
         }
-        let work = match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(work) => work,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        // the Studio connection is polled every 100 ms while there is one; without it the
+        // worker sleeps until there is work
+        let work = if editor.has_network() {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(work) => work,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            match rx.recv() {
+                Ok(work) => work,
+                Err(_) => break,
+            }
         };
         match work {
             Work::Save(path, text) => {

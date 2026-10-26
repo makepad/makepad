@@ -350,6 +350,17 @@ mod unix {
                 return;
             }
             drain_now();
+            kick_forward();
+        }
+    }
+
+    /// The display worker (`forward`), woken by new output and the ready line: with no progress bar
+    /// it sleeps until there is something to show (an idle run's log display does not poll).
+    static FORWARD: std::sync::OnceLock<std::thread::Thread> = std::sync::OnceLock::new();
+
+    fn kick_forward() {
+        if let Some(t) = FORWARD.get() {
+            t.unpark();
         }
     }
 
@@ -547,7 +558,16 @@ mod unix {
     }
 
     fn forward() {
+        let _ = FORWARD.set(std::thread::current());
+        let mut first = true;
         loop {
+            // the bar redraws every 50 ms; without it, output wakes this thread (tee, finish).
+            // (The first round looks without a wake: output from before FORWARD was set.)
+            if !first && !ACTIVE.load(Ordering::Relaxed) {
+                std::thread::park();
+            }
+            first = false;
+            // (a burst of output is shown together, as before)
             std::thread::sleep(std::time::Duration::from_millis(50));
             let mut g = STATE.lock().unwrap();
             let Some(st) = g.as_mut() else { return };
@@ -607,6 +627,7 @@ mod unix {
         // wait for log I/O or a terminal reader; the display worker owns both.
         if summary {
             READY_LINE.store(true, Ordering::Release);
+            kick_forward();
             return;
         }
         let mut g = STATE.lock().unwrap();

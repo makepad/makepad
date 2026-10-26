@@ -3447,6 +3447,12 @@ pub(crate) fn domain_loaded(inputs: Option<Inputs>) {
     *DOMAIN_INPUTS.lock().unwrap_or_else(|e| e.into_inner()) = inputs;
     DOMAIN_REVISION.fetch_add(1, std::sync::atomic::Ordering::Release);
     DOMAIN_LOADING.store(false, std::sync::atomic::Ordering::Release);
+    watch_events::kick();
+}
+
+/// The live watcher looks now (it sleeps on file events while nothing else is in flight).
+pub(crate) fn watch_kick() {
+    watch_events::kick();
 }
 
 
@@ -3991,6 +3997,8 @@ unsafe fn apply_stream_target(up: *mut Unit, target: StreamTarget, text: Vec<u8>
         state.text = text.clone();
     }
     state.pending = Some(text);
+    // the watcher drains a coalesced prefix and reports a stalled stream: it polls while one is open
+    watch_events::kick();
     if state.last.is_some_and(|t| t.elapsed().as_millis() < 16) {
         let mut o = idle_outcome(None, "incomplete: awaiting coalesced prefix");
         o.pending = true;
@@ -4028,6 +4036,12 @@ pub(crate) unsafe fn finish_module_stream(up: *mut Unit, h: u64, text: Vec<u8>) 
 
 pub(crate) fn forget_module_stream(up: *mut Unit, h: u64) {
     STREAMS.lock().unwrap_or_else(|e| e.into_inner()).retain(|s| !(s.0 == up as usize && s.1 == StreamTarget::Module(h)));
+}
+
+/// A stream of `up` has a coalesced prefix to feed or a stall still to report (drain_streams
+/// has work in the next rounds).
+fn streams_busy(up: *mut Unit) -> bool {
+    STREAMS.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|s| s.0 == up as usize && (s.2.pending.is_some() || !s.2.reported && s.2.changed.is_some()))
 }
 
 unsafe fn drain_streams(up: *mut Unit) {
@@ -4131,6 +4145,9 @@ fn gate_note(g: u8) {
     }
 }
 
+/// The live watcher's longest sleep on file events (a backstop: every input wakes it).
+const LIVE_IDLE: std::time::Duration = std::time::Duration::from_secs(1);
+
 unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
     inputs.add_runner();
     let std_dir = std::env::var("MAKEPAD_RUN_STD").unwrap_or_default();
@@ -4194,7 +4211,18 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
     let mut restart_required = false;
     let mut revision = 0;
     loop {
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        // native file events: sleep on them while nothing else is in flight (startup, a domain
+        // loading, verdicts pending, a refused edit to retry, an open stream); else the 5 ms
+        // poll. Other inputs wake it (watch_events::kick); one look a second regardless.
+        let quiet = jit::live_startup_done() && !DOMAIN_LOADING.load(std::sync::atomic::Ordering::Acquire)
+            && pending.is_empty() && !streams_busy(up);
+        match events.as_mut() {
+            Some(w) if quiet => {
+                let next = stalled.values().map(|(t, _, _)| std::time::Duration::from_secs(1).saturating_sub(t.elapsed())).min();
+                w.wait(next.unwrap_or(LIVE_IDLE).min(LIVE_IDLE).max(std::time::Duration::from_millis(5)));
+            }
+            _ => std::thread::sleep(std::time::Duration::from_millis(5)),
+        }
         if DOMAIN_LOADING.load(std::sync::atomic::Ordering::Acquire) { gate_note(1); continue; }
         let latest = DOMAIN_REVISION.load(std::sync::atomic::Ordering::Acquire);
         if latest != revision {

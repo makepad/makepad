@@ -21,7 +21,7 @@
 use makepad_prof_stream as ps;
 use relax_session::sync::Mutex;
 use std::cell::UnsafeCell;
-use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering::{Acquire, Relaxed, Release}};
+use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering::{Acquire, Relaxed, Release, SeqCst}};
 
 static ON: AtomicBool = AtomicBool::new(false);
 
@@ -338,6 +338,24 @@ static UI_BUSY_SINCE: AtomicU64 = AtomicU64::new(0);
 pub fn ui_root(t: u64) {
     if crate::jit::current_thread_id() == crate::jit::MAIN_TID.load(Relaxed) {
         UI_BUSY_SINCE.store(t, Relaxed);
+        if t != 0 {
+            ui_busy();
+        }
+    }
+}
+
+/// The recorder's thread sleeps without its 50 ms stall polls while the UI thread is idle (no root
+/// phase, no JIT wait): an idle app wakes it once a second, not 20 times.
+static IDLE_PARK: AtomicBool = AtomicBool::new(false);
+
+/// The UI thread got busy (a root phase, a JIT wait): an idle-parked recorder watches for stalls
+/// again. One relaxed load when it is not parked.
+#[inline]
+pub(crate) fn ui_busy() {
+    if IDLE_PARK.load(Relaxed) && IDLE_PARK.swap(false, Relaxed) {
+        if let Some(t) = THREAD.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            t.unpark();
+        }
     }
 }
 
@@ -462,8 +480,23 @@ fn watch() {
     let _k = crate::zone_alloc::kept();
     super::heap::exclude_this_thread();
     let mut last_heap = std::time::Instant::now();
+    let mut last_heap_seen = None;
+    // (frames, inputs, events and JIT work recorded, polls in a row without any)
+    let (mut seen, mut quiet) = (0u64, 0u32);
     loop {
-        std::thread::park_timeout(std::time::Duration::from_millis(50));
+        // the app idle (half a second without a frame, an input, an event or JIT work, and the
+        // UI thread outside any root phase and JIT wait): nothing can stall until the UI thread
+        // gets busy, which wakes this thread (ui_busy); the heap counters still go once a second.
+        // (A busy app keeps the 50 ms polls: no wake per frame.)
+        let moved = frames().head.load(Relaxed) + inputs().head.load(Relaxed) + app_events().head.load(Relaxed) + events().head.load(Relaxed) + jits().head.load(Relaxed);
+        if moved == seen { quiet = quiet.saturating_add(1) } else { (seen, quiet) = (moved, 0) }
+        IDLE_PARK.store(true, SeqCst);
+        let idle = quiet >= 10 && UI_BUSY_SINCE.load(SeqCst) == 0 && crate::postframe::ui_stall_ns() == 0 && PENDING.load(SeqCst) == 0;
+        if !idle {
+            IDLE_PARK.store(false, Relaxed);
+        }
+        std::thread::park_timeout(std::time::Duration::from_millis(if idle { 1000 } else { 50 }));
+        IDLE_PARK.store(false, Relaxed);
         if !on() {
             continue;
         }
@@ -491,7 +524,10 @@ fn watch() {
         // the app's heap once a second (live and committed bytes)
         if last_heap.elapsed().as_secs() >= 1 {
             last_heap = std::time::Instant::now();
-            if let Some((live, committed)) = crate::domain::app_heap_stats() {
+            // (an unchanged heap is recorded again only every 30 s: a recording's window still
+            // holds a value)
+            if let Some((live, committed)) = crate::domain::app_heap_stats().filter(|&h| last_heap_seen.is_none_or(|(v, t): ((usize, usize), std::time::Instant)| v != h || t.elapsed().as_secs() >= 30)) {
+                last_heap_seen = Some(((live, committed), std::time::Instant::now()));
                 counter("app_heap", live as i64);
                 counter("app_heap_committed", committed as i64);
             }

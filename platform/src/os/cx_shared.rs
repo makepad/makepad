@@ -1277,6 +1277,8 @@ impl Cx {
             #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             self.queue_patched_script_mod_files();
             self.redraw_all();
+            // the wake may be a restart request (std::relax::restart_requested)
+            crate::restart::poll_requested();
         }
     }
 

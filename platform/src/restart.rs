@@ -277,24 +277,31 @@ pub(crate) fn stop_workers() {
 static STOP_WAKER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Tells Relax this app restarts with its state (called once at startup).
-/// Relax only sets a flag when it wants a restart; an idle app sees no event, so a watcher
-/// thread (a 20 ms sleep loop, one atomic load each; under Relax only) sends the app an
-/// `Event::Signal` then.
 pub fn announce() {
     #[cfg(relax)]
-    {
-        std::relax::restart_supported();
-        use std::sync::atomic::{AtomicBool, Ordering};
-        static WAKER: AtomicBool = AtomicBool::new(false);
-        if !WAKER.swap(true, Ordering::Relaxed) {
-            let _ = std::thread::Builder::new().name("restart-waker".into()).spawn(|| while !STOP_WAKER.load(Ordering::Acquire) {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-                if std::relax::restart_requested() {
-                    crate::thread::SignalToUI::set_ui_signal();
-                    std::thread::sleep(std::time::Duration::from_millis(400));
-                }
-            });
+    std::relax::restart_supported();
+}
+
+/// Relax asks for a restart: it wakes the event loop (`std::relax::on_patch`, which runs this from
+/// `poll_control_channel`), and this sends the app `Event::Signal`s until the restart happens, so
+/// `after_event` asks again while it is postponed (every 420 ms, `try_restart` throttles to 1 s).
+/// The watcher thread lives only while a restart is requested: an idle app has no poller.
+#[cfg(relax)]
+pub(crate) fn poll_requested() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WAKER: AtomicBool = AtomicBool::new(false);
+    if !requested() || STOP_WAKER.load(Ordering::Acquire) || WAKER.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let spawned = std::thread::Builder::new().name("restart-waker".into()).spawn(|| {
+        while requested() && !STOP_WAKER.load(Ordering::Acquire) {
+            crate::thread::SignalToUI::set_ui_signal();
+            std::thread::sleep(std::time::Duration::from_millis(420));
         }
+        WAKER.store(false, Ordering::Release);
+    });
+    if spawned.is_err() {
+        WAKER.store(false, Ordering::Release);
     }
 }
 

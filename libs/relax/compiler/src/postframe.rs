@@ -57,6 +57,9 @@ pub(crate) fn ui_wait_begin() {
         UI_WAIT_START.store(wall_ns(), Relaxed);
     }
     UI_WAITING.fetch_add(1, Relaxed);
+    if outer {
+        crate::inspect::flightrec::ui_busy();
+    }
     if outer && present_ns() != 0 {
         let hook = UI_WAIT_HOOK.load(Relaxed);
         if !hook.is_null() {
