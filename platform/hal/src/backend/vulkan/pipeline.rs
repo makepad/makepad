@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 pub(super) const ABSENT: u32 = u32::MAX;
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
-pub(super) struct PassKey { pub colors: [u32; 4], pub depth: u32, pub load: [u8; 5] }
+pub(super) struct PassKey { pub colors: [u32; 4], pub depth: u32, pub load: [u8; 5], /** 1, or 2: a multiview pass */ pub views: u8 }
 
 pub(super) struct RenderPass { pub dev: Arc<Device>, pub raw: vk::RenderPass, pub key: PassKey }
 
@@ -49,7 +49,14 @@ impl RenderPass {
         let mut subpass = vk::SubpassDescription::default().pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS).color_attachments(&colors);
         if key.depth != ABSENT { subpass = subpass.depth_stencil_attachment(&depth); }
         let subpasses = [subpass];
-        let raw = unsafe { dev.raw.create_render_pass(&vk::RenderPassCreateInfo::default().attachments(&attachments).subpasses(&subpasses), None) }.map_err(error)?;
+        let mut info = vk::RenderPassCreateInfo::default().attachments(&attachments).subpasses(&subpasses);
+        // a multiview pass renders every view's layer (view mask: the low `views` bits); the
+        // views are correlated (the eyes see nearly the same scene)
+        let mask = [(1u32 << key.views.max(1)) - 1];
+        let mut multiview = vk::RenderPassMultiviewCreateInfo { subpass_count: 1, p_view_masks: mask.as_ptr(), correlation_mask_count: 1,
+            p_correlation_masks: mask.as_ptr(), ..Default::default() };
+        if key.views > 1 { info = info.next_render_pass_multiview_create_info(&mut multiview); }
+        let raw = unsafe { dev.raw.create_render_pass(&info, None) }.map_err(error)?;
         Ok(Arc::new(Self { dev, raw, key }))
     }
 }
@@ -68,6 +75,9 @@ pub(super) struct Program {
     pub samplers: Vec<vk::Sampler>,
     vertex: vk::ShaderModule,
     fragment: vk::ShaderModule,
+    /// the multiview stages (null without them)
+    xr_vertex: vk::ShaderModule,
+    xr_fragment: vk::ShaderModule,
 }
 
 impl Program {
@@ -78,7 +88,8 @@ impl Program {
         }
         let mut out = Self { dev, desc, code, bindings, vertex_stride, layout: vk::PipelineLayout::null(),
             descriptors: vk::DescriptorSetLayout::null(), descriptor_types: Vec::new(), samplers: Vec::new(),
-            vertex: vk::ShaderModule::null(), fragment: vk::ShaderModule::null() };
+            vertex: vk::ShaderModule::null(), fragment: vk::ShaderModule::null(),
+            xr_vertex: vk::ShaderModule::null(), xr_fragment: vk::ShaderModule::null() };
         for (i, slot) in out.bindings.iter().enumerate() {
             if i != pipeline_binding::TEXTURES && *slot != pipeline_binding::NONE {
                 out.descriptor_types.push((*slot, vk::DescriptorType::UNIFORM_BUFFER));
@@ -119,6 +130,10 @@ impl Program {
             out.layout = out.dev.raw.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&layouts), None).map_err(error)?;
             out.vertex = out.dev.raw.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&out.code.vertex), None).map_err(error)?;
             out.fragment = out.dev.raw.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&out.code.fragment), None).map_err(error)?;
+            if out.dev.multiview && !out.code.xr_vertex.is_empty() {
+                out.xr_vertex = out.dev.raw.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&out.code.xr_vertex), None).map_err(error)?;
+                out.xr_fragment = out.dev.raw.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&out.code.xr_fragment), None).map_err(error)?;
+            }
             for s in &out.code.samplers {
                 let filter = if s.filter == 0 { vk::Filter::NEAREST } else { vk::Filter::LINEAR };
                 let address = match s.address { 0 => vk::SamplerAddressMode::REPEAT, 1 => vk::SamplerAddressMode::CLAMP_TO_EDGE,
@@ -141,6 +156,8 @@ impl Drop for Program {
         for s in self.samplers.drain(..) { self.dev.raw.destroy_sampler(s, None); }
         self.dev.raw.destroy_shader_module(self.vertex, None);
         self.dev.raw.destroy_shader_module(self.fragment, None);
+        if self.xr_vertex != vk::ShaderModule::null() { self.dev.raw.destroy_shader_module(self.xr_vertex, None); }
+        if self.xr_fragment != vk::ShaderModule::null() { self.dev.raw.destroy_shader_module(self.xr_fragment, None); }
         self.dev.raw.destroy_pipeline_layout(self.layout, None);
         self.dev.raw.destroy_descriptor_set_layout(self.descriptors, None);
     } }
@@ -150,13 +167,13 @@ pub(super) struct Pipeline { pub program: Arc<Program>, pub raw: vk::Pipeline }
 impl Drop for Pipeline { fn drop(&mut self) { unsafe { self.program.dev.raw.destroy_pipeline(self.raw, None); } } }
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
-struct VariantKey { colors: [u32; 4], depth: u32, flags: u32 }
+struct VariantKey { colors: [u32; 4], depth: u32, flags: u32, views: u8 }
 
 impl VariantKey {
     fn new(pass: PassKey, flags: u32) -> Self {
         let mut flags = flags & (Draw::BLEND | Draw::CULL | Draw::DEPTH_WRITE | Draw::WIREFRAME);
         if pass.depth == ABSENT { flags &= !Draw::DEPTH_WRITE; } // no depth attachment: the bit changes nothing
-        Self { colors: pass.colors, depth: pass.depth, flags }
+        Self { colors: pass.colors, depth: pass.depth, flags, views: pass.views }
     }
 }
 
@@ -218,7 +235,7 @@ impl State {
         if program.desc.blend & pipeline_blend::RAW != 0 { return; }
         let mut colors = [ABSENT; 4];
         for i in 0..4 { if program.desc.outputs & (1 << i) != 0 { colors[i] = program.desc.color_formats[i]; } }
-        let key = PassKey { colors, depth: format::DEPTH32F, load: [pass_load::DONT_CARE; 5] };
+        let key = PassKey { colors, depth: format::DEPTH32F, load: [pass_load::DONT_CARE; 5], views: 1 };
         // a data target (R32F depth/shadow values, ids) is drawn without blending
         let blends = matches!(colors[0], format::BGRA8 | format::RGBA8 | format::RGBA16F);
         let flags = Draw::DEPTH_WRITE | if blends { Draw::BLEND } else { 0 };
@@ -258,8 +275,13 @@ impl State {
 
 fn create_variant(program: Arc<Program>, pass: &RenderPass, flags: u32) -> Result<Arc<Pipeline>, String> {
     let dev = &program.dev;
-    let stages = [vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(program.vertex).name(c"vertex_main"),
-        vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(program.fragment).name(c"fragment_main")];
+    // a multiview pass runs the multiview stages (each view's matrices by view index)
+    let (vertex_module, fragment_module) = if pass.key.views > 1 {
+        if program.xr_vertex == vk::ShaderModule::null() { return Err("the shader has no multiview stages for a multiview pass".into()); }
+        (program.xr_vertex, program.xr_fragment)
+    } else { (program.vertex, program.fragment) };
+    let stages = [vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(vertex_module).name(c"vertex_main"),
+        vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(fragment_module).name(c"fragment_main")];
     let words = program.vertex_stride / 4;
     let bindings = [vk::VertexInputBindingDescription::default().binding(0).stride(program.vertex_stride).input_rate(vk::VertexInputRate::VERTEX)];
     let attrs: Vec<_> = (0..words.div_ceil(4)).map(|i| vk::VertexInputAttributeDescription::default().location(i).binding(0).offset(i * 16)

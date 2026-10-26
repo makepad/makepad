@@ -91,7 +91,7 @@ fn shader() -> Vec<u8> {
     ir.functions.extend([vertex, fragment]);
     SpirvPipeline { vertex: ir_to_spirv(&ir, 0, false).unwrap(), fragment: ir_to_spirv(&ir, 1, false).unwrap(),
         texture_base: 0, sampler_base: 0, depth_binding: u32::MAX, instance_binding: u32::MAX,
-        pick_binding: u32::MAX, pick_texture_base: u32::MAX, textures: Vec::new(), samplers: Vec::new() }.encode()
+        pick_binding: u32::MAX, pick_texture_base: u32::MAX, textures: Vec::new(), samplers: Vec::new(), xr_vertex: Vec::new(), xr_fragment: Vec::new() }.encode()
 }
 
 fn resources(hal: &Hal, sid: u32) {
@@ -204,7 +204,7 @@ fn sampled_shader() -> Vec<u8> {
     SpirvPipeline { vertex: ir_to_spirv(&ir, 0, false).unwrap(), fragment: ir_to_spirv(&ir, 1, false).unwrap(),
         texture_base: 0, sampler_base: 1, depth_binding: u32::MAX, instance_binding: u32::MAX,
         pick_binding: u32::MAX, pick_texture_base: u32::MAX, textures: vec![0],
-        samplers: vec![makepad_hal::spirv::SpirvSampler { filter: 0, address: 1, compare: false, pixel: false }] }.encode()
+        samplers: vec![makepad_hal::spirv::SpirvSampler { filter: 0, address: 1, compare: false, pixel: false }], xr_vertex: Vec::new(), xr_fragment: Vec::new() }.encode()
 }
 
 #[cfg(target_os = "linux")]

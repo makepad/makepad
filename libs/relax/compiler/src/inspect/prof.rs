@@ -5,8 +5,8 @@
 //!   top of the stack (PERF_SAMPLE_REGS_USER | PERF_SAMPLE_STACK_USER, as `perf --call-graph
 //!   dwarf` does); the walk (CFI for host frames, frame records for JIT frames) runs here on the
 //!   copy. No signal reaches the program.
-//! - macOS: the threads whose CPU time moved are suspended one at a time and walked (os capture),
-//!   at most `hz` times a second.
+//! - macOS and Android (perf_event is closed to apps there): the threads whose CPU time moved are
+//!   suspended one at a time and walked (os capture), at most `hz` times a second.
 //!
 //! Samples are CPU time only: waiting threads do not show (why-hung and the wait registry say what
 //! they wait for).
@@ -446,9 +446,17 @@ mod imp {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "android"))]
 mod imp {
     use super::{Run, Sample};
+
+    /// On a CPU right now (macOS: the Mach run state; Android: /proc's `R`).
+    fn on_cpu(t: &crate::inspect::threads::Thread) -> bool {
+        #[cfg(target_os = "macos")]
+        { crate::inspect::threads::running(t) }
+        #[cfg(target_os = "android")]
+        { t.state == "running" }
+    }
 
     /// Each round suspends the picked threads that are on a CPU, one at a time, walks it into a
     /// fixed array and resumes it before anything is allocated or locked (a suspended thread may
@@ -459,6 +467,11 @@ mod imp {
         if wall {
             notes.push("wall=1: waiting threads sampled too (bucket `off CPU (waiting)`)".into());
         }
+        #[cfg(target_os = "android")]
+        if ev != super::Ev::Cpu {
+            notes.push(format!("{} cannot be sampled in an Android app (perf_event is closed to apps); CPU time instead", ev.name()));
+        }
+        #[cfg(target_os = "macos")]
         if ev != super::Ev::Cpu {
             notes.push(format!("{} cannot be sampled on macOS without root (per-thread hardware sampling is privileged); CPU time instead -- `counters` gives this process's total instructions and cycles", ev.name()));
         }
@@ -501,7 +514,7 @@ mod imp {
             for (k, t) in threads.iter().enumerate() {
                 let Some(now) = live.iter().find(|x| x.os_id == t.os_id) else { continue };
                 // CPU samples: a thread that ran lately and is on a CPU right now (`wall`: any)
-                let on = crate::inspect::threads::running(now);
+                let on = on_cpu(now);
                 if !wall && (!ran[k] || !on) {
                     continue;
                 }
@@ -525,7 +538,7 @@ mod imp {
     }
 }
 
-#[cfg(any(windows, target_os = "android"))]
+#[cfg(windows)]
 mod imp {
     use super::Run;
     pub fn collect(threads: Vec<crate::inspect::threads::Thread>, secs: f64, hz: u64, _ev: super::Ev, _wall: bool, _cancel: &dyn Fn() -> bool) -> Run {

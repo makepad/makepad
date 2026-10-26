@@ -2,7 +2,8 @@
 //! headset's stereo view, both eyes side by side). Each `XrFrame` the HAL sends becomes an
 //! `Event::XrUpdate` and the eyes the next frame of that window is drawn with; the app's XR
 //! pass (`DrawPass::set_as_xr_pass`) paints into it once per eye, the camera matrices of each
-//! pass being that eye's view and projection.
+//! pass being that eye's view and projection -- or, on a backend with `info_flags::MULTIVIEW`,
+//! once for both eyes (one multiview pass, both cameras in its uniforms).
 use super::super::super::{
     cx::Cx,
     draw_pass::{CxDrawPassParent, DrawPassUniforms},
@@ -23,7 +24,8 @@ pub(crate) struct HalXr {
     /// the newest `XrFrame`: the eyes of the next frame
     pub(crate) frame: Option<XrFrame>,
     pub(crate) last: Rc<XrState>,
-    /// the pass uniforms of the frame being built, one per eye (alive until the batch is sent)
+    /// the pass uniforms of the frame being built, one per eye (alive until the batch is sent);
+    /// a multiview pass uses the first, with both eyes in it
     pub(crate) eye_uniforms: [DrawPassUniforms; 2],
 }
 
@@ -123,5 +125,22 @@ impl Cx {
         u.depth_projection = projection; u.depth_projection_r = projection;
         u.camera_inv = inv; u.camera_inv_r = inv;
         Some(&xr.eye_uniforms[i])
+    }
+
+    /// The uniforms of a multiview XR pass: the left eye's camera in the plain fields, the
+    /// right eye's in the `_r` ones (the multiview stages pick them by view index).
+    pub(crate) fn hal_xr_stereo_uniforms(&mut self, base: &DrawPassUniforms) -> Option<&DrawPassUniforms> {
+        let xr = self.hal.xr.as_mut()?;
+        let frame = xr.frame?;
+        let (view, projection) = eye_matrices(&frame, 0);
+        let (view_r, projection_r) = eye_matrices(&frame, 1);
+        let u = &mut xr.eye_uniforms[0];
+        *u = *base;
+        u.camera_view = view; u.camera_view_r = view_r;
+        u.camera_projection = projection; u.camera_projection_r = projection_r;
+        u.depth_view = view; u.depth_view_r = view_r;
+        u.depth_projection = projection; u.depth_projection_r = projection_r;
+        u.camera_inv = view.invert(); u.camera_inv_r = view_r.invert();
+        Some(&xr.eye_uniforms[0])
     }
 }

@@ -328,11 +328,28 @@ impl Chain {
     fn new(xr: &LibOpenXr, dev: &Arc<Device>, session: XrSession, format: vk::Format, size: [u32; 2], layers: u32, flags: XrSwapchainCreateFlags, swizzle: bool) -> Result<Chain, String> {
         let (handle, images) = vulkan::create_swapchain(xr, session, format, size[0], size[1], layers, flags)?;
         let slots = images.iter().map(|_| Slot::new(dev)).collect::<Result<_, _>>()?;
-        let staging = if swizzle {
-            Some(Image::new(dev.clone(), crate::session::TextureObj { format: crate::format::RGBA8, w: size[0] * layers, h: size[1], depth: 1, mips: 1,
-                usage: crate::usage::RENDER_TARGET | crate::usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None })?)
-        } else { None };
+        let staging = if swizzle { Some(Self::staging(dev, size, layers, false)?) } else { None };
         Ok(Chain { handle, images, slots, size, layers, staging })
+    }
+
+    /// The swizzle staging image for frames of this chain: `layers` side by side, or (a
+    /// multiview frame) one array layer each.
+    fn staging(dev: &Arc<Device>, size: [u32; 2], layers: u32, layered: bool) -> Result<Arc<Image>, String> {
+        Image::new(dev.clone(), crate::session::TextureObj { format: crate::format::RGBA8, w: size[0] * if layered { 1 } else { layers }, h: size[1],
+            depth: if layered { layers } else { 1 }, mips: 1, usage: crate::usage::RENDER_TARGET | crate::usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None })
+    }
+
+    /// The staging image (when the chain swizzles) for a frame laid out as `frame`.
+    fn staging_for(&mut self, dev: &Arc<Device>, frame: &Image) -> Result<Option<Arc<Image>>, String> {
+        let Some(staging) = &self.staging else { return Ok(None) };
+        let layered = frame.desc.depth >= self.layers && self.layers > 1;
+        if (staging.desc.depth > 1) != layered {
+            // (once, when the frames change layout: the copies in flight still read the old one)
+            let _queue = lock(&dev.queue_lock);
+            unsafe { let _ = dev.raw.device_wait_idle(); }
+            self.staging = Some(Self::staging(dev, self.size, self.layers, layered)?);
+        }
+        Ok(self.staging.clone())
     }
 
     /// Acquires the chain's next image, records `body` into it (between the barriers that make it
@@ -428,21 +445,29 @@ impl Slot {
 /// `staging` (RGBA8 UNORM): a blit there only swaps the channels, then the copy.
 fn copy_frame(dev: &Device, cb: vk::CommandBuffer, src: &Image, dst: vk::Image, size: [u32; 2], layers: u32, staging: Option<&Image>) {
     let sub = |layer| vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).base_array_layer(layer).layer_count(1);
-    let copies: Vec<vk::ImageCopy> = (0..layers).map(|l| vk::ImageCopy::default().src_subresource(sub(0)).dst_subresource(sub(l))
-        .src_offset(vk::Offset3D { x: (l * size[0]) as i32, y: 0, z: 0 }).extent(vk::Extent3D { width: size[0], height: size[1], depth: 1 })).collect();
+    // a multiview frame holds the views as layers, else side by side in layer 0
+    let layered = src.desc.depth >= layers && layers > 1;
+    let copies: Vec<vk::ImageCopy> = (0..layers).map(|l| if layered {
+        vk::ImageCopy::default().src_subresource(sub(l)).dst_subresource(sub(l)).extent(vk::Extent3D { width: size[0], height: size[1], depth: 1 })
+    } else {
+        vk::ImageCopy::default().src_subresource(sub(0)).dst_subresource(sub(l))
+            .src_offset(vk::Offset3D { x: (l * size[0]) as i32, y: 0, z: 0 }).extent(vk::Extent3D { width: size[0], height: size[1], depth: 1 })
+    }).collect();
     unsafe {
         let Some(staging) = staging else {
             dev.raw.cmd_copy_image(cb, src.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, dst, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &copies);
             return;
         };
-        let range = vk::ImageSubresourceRange::default().aspect_mask(vk::ImageAspectFlags::COLOR).level_count(1).layer_count(1);
+        let range = vk::ImageSubresourceRange::default().aspect_mask(vk::ImageAspectFlags::COLOR).level_count(1).layer_count(staging.desc.depth);
         let barrier = |old, new, src_access, dst_access| vk::ImageMemoryBarrier::default().image(staging.image).old_layout(old).new_layout(new)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED).dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .src_access_mask(src_access).dst_access_mask(dst_access).subresource_range(range);
         dev.raw.cmd_pipeline_barrier(cb, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[],
             &[barrier(vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::AccessFlags::TRANSFER_READ, vk::AccessFlags::TRANSFER_WRITE)]);
-        let corner = vk::Offset3D { x: (size[0] * layers) as i32, y: size[1] as i32, z: 1 };
-        let region = vk::ImageBlit::default().src_subresource(sub(0)).dst_subresource(sub(0))
+        // (the staging image has the frame's layout: `Chain::staging_for`)
+        let corner = vk::Offset3D { x: (size[0] * if layered { 1 } else { layers }) as i32, y: size[1] as i32, z: 1 };
+        let all = vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(if layered { layers } else { 1 });
+        let region = vk::ImageBlit::default().src_subresource(all).dst_subresource(all)
             .src_offsets([vk::Offset3D::default(), corner]).dst_offsets([vk::Offset3D::default(), corner]);
         dev.raw.cmd_blit_image(cb, src.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, staging.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[region], vk::Filter::NEAREST);
         dev.raw.cmd_pipeline_barrier(cb, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[],
@@ -881,9 +906,11 @@ impl CxOpenXrSession {
         self.stats[1] += 1;
         self.stats[3] += started.elapsed().as_nanos() as u64;
         let chain = self.stereo.as_mut().expect("stereo chain");
-        let size = [(image.desc.w / 2).min(chain.size[0]), image.desc.h.min(chain.size[1])];
+        // a multiview frame: an eye per layer; else both side by side
+        let eye_w = if image.desc.depth >= 2 { image.desc.w } else { image.desc.w / 2 };
+        let size = [eye_w.min(chain.size[0]), image.desc.h.min(chain.size[1])];
         let src = image.clone();
-        let staging = chain.staging.clone();
+        let staging = chain.staging_for(&self.dev, &image)?;
         chain.write(&self.rt.xr, &self.dev, Some(image), |dev, cb, dst| copy_frame(dev, cb, &src, dst, size, 2, staging.as_deref()))?;
         if self.stereo_shown.is_none() { xr_log!("first stereo frame ({}x{} px per eye)", size[0], size[1]); }
         self.stereo_shown = self.stereo_asked.take();

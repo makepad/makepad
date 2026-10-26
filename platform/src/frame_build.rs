@@ -36,6 +36,8 @@ struct TexRec {
     id: Id,
     gen: u64,
     shared: Option<u64>,
+    /// array layers it was made with (a multiview pass's depth has one per view)
+    layers: usize,
 }
 
 struct GeoRec {
@@ -316,7 +318,7 @@ impl FrameBuilder {
         }
         self.texture_destroy(slot);
         let id = self.next_tex_id(slot);
-        self.tex.insert(slot, TexRec { id, gen, shared: None });
+        self.tex.insert(slot, TexRec { id, gen, shared: None, layers: 1 });
         id
     }
 
@@ -359,7 +361,7 @@ impl FrameBuilder {
         let id = self.next_tex_id(slot);
         let attr = self.attr(origin, 0);
         self.w.texture_create(id, usage, fmt, w.max(1) as u32, h.max(1) as u32, [layers.max(1) as u16, mips.max(1) as u16], attr);
-        self.tex.insert(slot, TexRec { id, gen, shared: None });
+        self.tex.insert(slot, TexRec { id, gen, shared: None, layers: layers.max(1) });
         self.stats.texture_creates += 1;
         id
     }
@@ -781,6 +783,11 @@ impl Cx {
 
     /// The HAL texture a pass renders into, (re)created at `w` x `h` when its allocation changed.
     pub(crate) fn fb_attachment(&mut self, fb: &mut FrameBuilder, id: TextureId, w: usize, h: usize, depth: bool) -> Id {
+        self.fb_attachment_views(fb, id, w, h, depth, 1)
+    }
+
+    /// `fb_attachment` of a pass with `views` views (a multiview pass: one array layer per view).
+    pub(crate) fn fb_attachment_views(&mut self, fb: &mut FrameBuilder, id: TextureId, w: usize, h: usize, depth: bool, views: usize) -> Id {
         // zero-size targets cannot exist (a hosted child can draw before its geometry lands)
         let (w, h) = (w.max(1), h.max(1));
         let slot = id.0;
@@ -794,7 +801,7 @@ impl Cx {
         };
         let Some(alloc) = tex.alloc.clone() else { return Id::NONE };
         let Some(fmt) = hal_format(&alloc.pixel) else { return Id::NONE };
-        let layers = if matches!(alloc.category, TextureCategory::RenderCube) { 6 } else { 1 };
+        let layers = if matches!(alloc.category, TextureCategory::RenderCube) { 6 } else { views.max(1) };
         let mut flags = usage::RENDER_TARGET;
         if !depth || matches!(alloc.category, TextureCategory::DepthBufferSampled) {
             flags |= usage::SAMPLED;
@@ -802,7 +809,7 @@ impl Cx {
         if tex.transient {
             flags |= usage::TRANSIENT;
         }
-        let known = fb.tex.get(&slot).is_some_and(|r| r.gen == gen);
+        let known = fb.tex.get(&slot).is_some_and(|r| r.gen == gen && r.layers == layers);
         if changed || !known {
             let origin = tex.origin.clone();
             fb.texture_create(slot, gen, flags, fmt, alloc.width, alloc.height, layers, mips, &origin);
@@ -1116,7 +1123,9 @@ impl Cx {
             return None;
         };
         // an XR pass paints into the XR window, once per eye, when the eyes of its next frame came
+        // (on a multiview backend once for both eyes)
         let stereo = matches!(self.passes[pass_id].parent, CxDrawPassParent::Xr);
+        let multiview = stereo && !picking && self.hal.info.is_some_and(|i| i.flags & makepad_hal::info_flags::MULTIVIEW != 0);
         let (window, is_window) = match self.passes[pass_id].parent {
             CxDrawPassParent::Window(w) => (Some(w), true),
             CxDrawPassParent::Xr => match self.hal.xr.as_ref() {
@@ -1264,7 +1273,7 @@ impl Cx {
         }
         if let Some(depth) = self.passes[pass_id].depth_texture.clone() {
             let tid = if picking { self.pick.twin(&mut self.textures, depth.texture_id(), true).texture_id() } else { depth.texture_id() };
-            pass.depth = self.fb_attachment(fb, tid, tw, th, true);
+            pass.depth = if multiview { self.fb_attachment_views(fb, tid, tw / 2, th, true, 2) } else { self.fb_attachment(fb, tid, tw, th, true) };
             let initial = self.textures[tid].take_initial() || picking;
             match self.passes[pass_id].clear_depth {
                 DrawPassClearDepth::InitWith(d) => {
@@ -1288,7 +1297,21 @@ impl Cx {
         let sploded = self.passes[pass_id].sploded.is_some();
         let step = self.passes[pass_id].zbias_step;
         fb.pass_whole = true;
-        if stereo {
+        if multiview {
+            // both eyes in one pass: the draws are built once, the GPU renders each eye's layer
+            // with its camera (the uniforms' `_r` matrices are the right eye's)
+            let base = self.passes[pass_id].pass_uniforms;
+            if let Some(uniforms) = self.hal_xr_stereo_uniforms(&base) {
+                let mut p = pass;
+                p.uniforms = Slice::of(uniforms.as_slice());
+                p.viewport = [0.0, 0.0, (tw / 2) as f32, th as f32];
+                p.views = 2;
+                if !p.depth.is_none() { p.load[4] = load::CLEAR; }
+                fb.w.pass(p);
+                let mut zbias = 0.0f32;
+                self.fb_list(fb, pass_id, list_id, sploded, &mut zbias, step, serial);
+            }
+        } else if stereo {
             // both eyes side by side: a pass per eye with that eye's camera, each clearing its half
             let base = self.passes[pass_id].pass_uniforms;
             let half = (tw / 2) as f32;

@@ -179,7 +179,7 @@ impl Vulkan {
                 ty.heap_index as usize == *heap && ty.property_flags.contains(makepad_vulkan::vk::MemoryPropertyFlags::DEVICE_LOCAL)))
             .map(|(_, h)| h.size).sum();
         let info = HalInfo { backend: backend_id::VULKAN, dialect: dialect::SPIRV, formats, msaa: 1, dpi: 1.0,
-            flags: if dev.timestamp_bits > 0 { info_flags::GPU_TIMESTAMPS } else { 0 },
+            flags: if dev.timestamp_bits > 0 { info_flags::GPU_TIMESTAMPS } else { 0 } | if dev.multiview { info_flags::MULTIVIEW } else { 0 },
             max_texture: dev.properties.limits.max_image_dimension2_d,
             max_window: [dev.properties.limits.max_framebuffer_width, dev.properties.limits.max_framebuffer_height],
             max_buffer: dev.properties.limits.max_storage_buffer_range as u64, working_set,
@@ -411,7 +411,7 @@ impl Backend for Vulkan {
             let Some(passes) = frame::slice(packet.passes, view.passes.len()) else { continue };
             let is_window = kind & !target::FLAGS == target::WINDOW;
             'pass: for pass in &view.passes[passes] {
-                let mut key = PassKey { colors: [pipeline::ABSENT; 4], depth: pipeline::ABSENT, load: pass.load };
+                let mut key = PassKey { colors: [pipeline::ABSENT; 4], depth: pipeline::ABSENT, load: pass.load, views: frame::pass_views(pass) };
                 for (i, id) in pass.color.iter().enumerate().filter(|(_, id)| !id.is_none()) {
                     let Some(format) = format_of(*id) else { continue 'pass };
                     key.colors[i] = format;
@@ -430,7 +430,7 @@ impl Backend for Vulkan {
                 let Some(draws) = frame::slice(pass.draws, view.draws.len()) else { continue };
                 for d in &view.draws[draws] {
                     let Some(p) = self.pipe.get(&(sid, d.pipeline.index)).filter(|p| p.gen == d.pipeline.gen) else { continue };
-                    if p.state.lacks(key, d.flags) && !needed.iter().any(|(state, k, f)| Arc::ptr_eq(state, &p.state) && k.colors == key.colors && k.depth == key.depth && *f == d.flags) {
+                    if p.state.lacks(key, d.flags) && !needed.iter().any(|(state, k, f)| Arc::ptr_eq(state, &p.state) && k.colors == key.colors && k.depth == key.depth && k.views == key.views && *f == d.flags) {
                         needed.push((p.state.clone(), key, d.flags));
                     }
                 }

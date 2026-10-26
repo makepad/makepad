@@ -185,6 +185,9 @@ impl Image {
         }
     }
 
+    /// The view of every array layer (one mip): a multiview pass's attachment.
+    pub(super) fn array_view(&self) -> vk::ImageView { self.array_view }
+
     pub(super) fn release_external(&self, cb: vk::CommandBuffer) {
         self.transition(cb, vk::ImageLayout::GENERAL);
         let barrier = vk::ImageMemoryBarrier::default().image(self.image)

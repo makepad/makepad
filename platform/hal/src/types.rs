@@ -237,10 +237,13 @@ pub mod info_flags {
     /// A head-mounted display runs the session: `window_kind::XR` windows show in it, and the
     /// host window is a panel the person points at.
     pub const XR: u32 = 512;
+    /// The backend renders multiview passes (`Pass::views` 2): an app draws a stereo view in one
+    /// pass instead of one per eye.
+    pub const MULTIVIEW: u32 = 1024;
 
     #[test]
     fn the_flags_are_distinct_bits() {
-        let all = [PRIVILEGED, EMBEDDED, DISPLAY_CLOCK, GPU_TIMESTAMPS, CLIENT_CHROME, DIRECT_DISPLAY, WINDOW_LAYERS, WINDOW_BADGES, WM_HOSTED, XR];
+        let all = [PRIVILEGED, EMBEDDED, DISPLAY_CLOCK, GPU_TIMESTAMPS, CLIENT_CHROME, DIRECT_DISPLAY, WINDOW_LAYERS, WINDOW_BADGES, WM_HOSTED, XR, MULTIVIEW];
         for (i, a) in all.iter().enumerate() {
             assert!(a.is_power_of_two());
             assert!(all[i + 1..].iter().all(|b| a & b == 0), "flag {a} shares a bit");
@@ -1026,6 +1029,11 @@ pub struct Pass {
     /// (an eye of a side-by-side stereo target) the pass clears and stores from the origin on.
     pub viewport: [f32; 4],
     pub dpi: f32,
+    /// 0 or 1: one view. 2 (`info_flags::MULTIVIEW` only): multiview, both views in one pass --
+    /// a window target is a two-layer image (one layer per view, each the viewport's size), the
+    /// draws run their pipelines' multiview stages once and the GPU renders every layer, the
+    /// pass uniforms' `_r` matrices being the second view's.
+    pub views: u32,
     pub uniforms: Slice,
     pub draws: Range,
     pub name: StrId,

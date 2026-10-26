@@ -321,6 +321,9 @@ impl Pipeline {
                 instance_binding: info.instance_binding().unwrap_or(u32::MAX),
                 pick_binding: info.pick_binding().unwrap_or(u32::MAX),
                 pick_texture_base: info.pick_texture_base().unwrap_or(u32::MAX),
+                // the boot screen never draws into a multiview pass
+                xr_vertex: Vec::new(),
+                xr_fragment: Vec::new(),
                 // the boot document samples at most one 2D texture (checked above)
                 textures: vec![0; textures],
                 samplers: desc

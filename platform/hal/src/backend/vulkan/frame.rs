@@ -43,6 +43,9 @@ struct Prepared {
     first_instance: u32,
 }
 
+/// A pass's view count: 2 for a multiview pass (`Pass::views`), else 1.
+pub(super) fn pass_views(pass: &Pass) -> u8 { if pass.views >= 2 { 2 } else { 1 } }
+
 pub(super) fn slice(range: Range, len: usize) -> Option<std::ops::Range<usize>> {
     let start = range.off as usize;
     start.checked_add(range.len as usize).filter(|end| *end <= len).map(|end| start..end)
@@ -100,12 +103,17 @@ mod scanout_tests {
 
 impl Vulkan {
     fn offscreen(&mut self, s: &mut Session, target: Id, size: [u32; 2], now: u64) -> Result<Arc<Image>, String> {
+        self.offscreen_layers(s, target, size, 1, now)
+    }
+
+    /// `offscreen` with `layers` array layers (a multiview window: one per view).
+    fn offscreen_layers(&mut self, s: &mut Session, target: Id, size: [u32; 2], layers: u32, now: u64) -> Result<Arc<Image>, String> {
         let (sid, id) = self.window_key(s.id, target);
-        if let Some(t) = self.win.get(&(sid, id.index)).filter(|t| t.gen == id.gen && [t.image.desc.w, t.image.desc.h] == size) {
+        if let Some(t) = self.win.get(&(sid, id.index)).filter(|t| t.gen == id.gen && [t.image.desc.w, t.image.desc.h] == size && t.image.desc.depth == layers) {
             if sid == s.id { s.ledger.touch(Kind::Window, id.index, id.gen, s.frame, now); }
             return Ok(t.image.clone());
         }
-        let image = Image::new(self.dev.clone(), TextureObj { format: format::BGRA8, w: size[0], h: size[1], depth: 1, mips: 1,
+        let image = Image::new(self.dev.clone(), TextureObj { format: format::BGRA8, w: size[0], h: size[1], depth: layers, mips: 1,
             usage: usage::RENDER_TARGET | usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None })?;
         // The host row is reconciled in step; a borrower never owns this allocation.
         if sid == s.id { s.ledger.add(window_row(id, &image, now, s.frame)); }
@@ -120,7 +128,8 @@ impl Vulkan {
         timed_copy(batch, name, w, h, w as u64 * h as u64 * format::texel_bytes(image.desc.format) * 2, |batch| {
             source.transition(batch.cb, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
             image.transition(batch.cb, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
-            let layers = vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1);
+            // every common layer (a multiview frame's views)
+            let layers = vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(source.desc.depth.min(image.desc.depth));
             let copy = vk::ImageCopy::default().src_subresource(layers).dst_subresource(layers).extent(vk::Extent3D { width: w, height: h, depth: 1 });
             unsafe { self.dev.raw.cmd_copy_image(batch.cb, source.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                 image.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[copy]); }
@@ -207,12 +216,12 @@ impl Vulkan {
     /// keep using the ordinary window target, so their layout changes cannot race scanout.
     fn scanout_image(&mut self, key: (u32, Id), source: &Arc<Image>, batch: &mut Batch) -> Result<Arc<Image>, String> {
         let pool = self.scanout_images.entry(key).or_default();
-        pool.retain(|image| image.desc.w == source.desc.w && image.desc.h == source.desc.h);
+        pool.retain(|image| image.desc.w == source.desc.w && image.desc.h == source.desc.h && image.desc.depth == source.desc.depth);
         let image = if let Some(image) = pool.iter().find(|image| Arc::strong_count(image) == 1) {
             image.clone()
         } else {
             let image = Image::new(self.dev.clone(), TextureObj { format: format::BGRA8, w: source.desc.w, h: source.desc.h,
-                depth: 1, mips: 1, usage: usage::RENDER_TARGET | usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None })?;
+                depth: source.desc.depth, mips: 1, usage: usage::RENDER_TARGET | usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None })?;
             pool.push(image.clone()); image
         };
         // An output that held its frames a while (a mode change, a slow flip) grew the pool;
@@ -464,6 +473,8 @@ impl Vulkan {
         batch: &mut Batch, now: u64, deps: &mut Vec<LentRef>) -> Result<Option<Arc<Image>>, String> {
         let v = pass.viewport;
         if v.iter().any(|v| !v.is_finite() || *v < 0.0) || v[2] <= 0.0 || v[3] <= 0.0 { return Err(format!("invalid pass viewport {v:?} (target {target:?}, window {is_window})")); }
+        let views = pass_views(pass);
+        if views > 1 && (!self.dev.multiview || pick) { return Err("a multiview pass on a device without multiview (or a pick pass)".into()); }
         let mut size = [(v[0] + v[2]).ceil() as u32, (v[1] + v[3]).ceil() as u32];
         if is_window { size = [size[0].max(frame_size[0]), size[1].max(frame_size[1])]; }
         // a badge layer is drawn over what the window has (a resize may be landing)
@@ -490,6 +501,8 @@ impl Vulkan {
                         Some(composed) => composed,
                         // the retained image a badge layer is composed over
                         None if layered => { self.retained_stale.remove(&key.1.index); self.offscreen(s, target, size, now)? }
+                        // a multiview window: its own image, a layer per view
+                        None if views > 1 => self.offscreen_layers(s, target, size, views as u32, now)?,
                         None => match self.windows.source.target(key.0, key.1, size) {
                             // the retained image no longer holds the newest frame
                             Some(image) => { if key.0 == HOST { self.retained_stale.insert(key.1.index); } image }
@@ -503,16 +516,17 @@ impl Vulkan {
         let depth = if pass.depth.is_none() { None } else { Some(self.resolve(s, pass.depth).ok_or("missing depth texture")?) };
         if colors.is_empty() && depth.is_none() { return Err("pass has no attachments".into()); }
         for (i, color) in &colors {
-            if color.desc.usage & usage::RENDER_TARGET == 0 || format::is_depth(color.desc.format) || pass.layer[*i] >= color.desc.depth {
+            if color.desc.usage & usage::RENDER_TARGET == 0 || format::is_depth(color.desc.format) || pass.layer[*i] >= color.desc.depth
+                || (views > 1 && (color.desc.depth != views as u32 || color.desc.mips != 1)) {
                 return Err(format!("invalid color attachment {i}: pass size {size:?} viewport {v:?} dpi {} layer {} target {}x{}x{} format {} usage {:#x}", pass.dpi, pass.layer[*i], color.desc.w, color.desc.h, color.desc.depth, color.desc.format, color.desc.usage));
             }
             if pick && !matches!(color.desc.format, format::RGBA8 | format::BGRA8) { return Err("pick targets require RGBA8/BGRA8".into()); }
         }
-        if depth.as_ref().is_some_and(|d| !format::is_depth(d.desc.format) || d.desc.usage & usage::RENDER_TARGET == 0) {
+        if depth.as_ref().is_some_and(|d| !format::is_depth(d.desc.format) || d.desc.usage & usage::RENDER_TARGET == 0 || (views > 1 && d.desc.depth != views as u32)) {
             let d = depth.as_ref().unwrap();
             return Err(format!("invalid depth attachment: format {} usage {:#x} size {}x{} for a {}x{} pass", d.desc.format, d.desc.usage, d.desc.w, d.desc.h, size[0], size[1]));
         }
-        let mut key = PassKey { colors: [ABSENT; 4], depth: depth.as_ref().map_or(ABSENT, |d| d.desc.format), load: pass.load };
+        let mut key = PassKey { colors: [ABSENT; 4], depth: depth.as_ref().map_or(ABSENT, |d| d.desc.format), load: pass.load, views };
         for (i, c) in &colors { key.colors[*i] = c.desc.format; }
         let render_pass = if let Some(pass) = self.passes.get(&key) { pass.clone() } else {
             let pass = RenderPass::new(self.dev.clone(), key)?; self.passes.insert(key, pass.clone()); pass
@@ -542,22 +556,24 @@ impl Vulkan {
                 }
             }
         }
-        let mut views = Vec::new();
+        let mut attachment_views = Vec::new();
         let mut clear = Vec::new();
         batch.images.extend(attachments);
         for (i, color) in &colors {
             color.transition(batch.cb, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
-            views.push(color.layers[pass.layer[*i] as usize]);
+            // a multiview pass renders into every layer: the attachment is the whole array
+            attachment_views.push(if views > 1 { color.array_view() } else { color.layers[pass.layer[*i] as usize] });
             clear.push(vk::ClearValue { color: if color.desc.format == format::R32UINT { vk::ClearColorValue { uint32: pass.clear[*i].map(|f| f as u32) } }
                 else { vk::ClearColorValue { float32: pass.clear[*i] } } });
         }
         if let Some(depth) = &depth {
-            depth.transition(batch.cb, vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL); views.push(depth.layers[0]);
+            depth.transition(batch.cb, vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+            attachment_views.push(if views > 1 { depth.array_view() } else { depth.layers[0] });
             clear.push(vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: pass.clear_depth, stencil: 0 } });
             s.ledger.touch(Kind::Texture, pass.depth.index, pass.depth.gen, s.frame, now);
         }
         let framebuffer = unsafe { self.dev.raw.create_framebuffer(&vk::FramebufferCreateInfo::default().render_pass(render_pass.raw)
-            .attachments(&views).width(target_size[0]).height(target_size[1]).layers(1), None) }.map_err(error)?;
+            .attachments(&attachment_views).width(target_size[0]).height(target_size[1]).layers(1), None) }.map_err(error)?;
         batch.framebuffers.push(framebuffer); batch.passes.push(render_pass.clone());
         // a viewport origin (one eye of a side-by-side stereo target) starts the render area: what
         // lies before it is neither cleared nor stored over
@@ -789,8 +805,10 @@ impl Vulkan {
             }
         }
         if p.code.depth_binding != ABSENT {
-            let image = self.fallback_image(3, batch)?;
-            images.push((p.code.depth_binding, vk::DescriptorType::SAMPLED_IMAGE, vk::DescriptorImageInfo::default().image_view(image.view).image_layout(image.sampled_layout())));
+            // the multiview stages declare the XR depth as an array (a layer per view)
+            let shape = if pass_views(pass) > 1 { 4 } else { 3 };
+            let image = self.fallback_image(shape, batch)?;
+            images.push((p.code.depth_binding, vk::DescriptorType::SAMPLED_IMAGE, vk::DescriptorImageInfo::default().image_view(image.sample_view(shape)?).image_layout(image.sampled_layout())));
             batch.images.push(image);
         }
         for (i, sampler) in p.samplers.iter().enumerate() {

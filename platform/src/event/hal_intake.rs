@@ -871,7 +871,11 @@ impl Cx {
                 }
                 // (the first frame the HAL finished is the first one on the glass; once per app)
                 crate::startup_trace_first_present();
-                crate::cx::relax_frame_done();
+                // the JIT's fps (devhub, `jit`): under XR the frames on the glass are the stereo
+                // window's; the panel's and offscreen frames do not count
+                if self.hal.xr.as_ref().map_or(true, |xr| hal_window_id(xr.window) == window) {
+                    crate::cx::relax_frame_done();
+                }
             }
             HalEvent::PipelineReady { pipeline } => {
                 // a draw built before the pipeline was ready was skipped by the HAL: paint again

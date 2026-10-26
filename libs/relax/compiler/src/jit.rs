@@ -9057,7 +9057,44 @@ unsafe fn o2_hot(up: *mut Unit, id: u32) {
         return;
     }
     u.fns[id as usize].hot_hint.store(true, Ordering::Relaxed);
-    o2_enqueue(up, id);
+    o2_enqueue_front(up, id);
+}
+
+/// `o2_enqueue` at the front of the queue: a hot slot's O2 build goes before the marked fns'
+/// builds queued at their first calls (a game start queues a thousand of those; on a headset's
+/// starved worker a hot audio loop waited minutes behind them in baseline code).
+unsafe fn o2_enqueue_front(up: *mut Unit, id: u32) {
+    if !o2_on() {
+        return;
+    }
+    {
+        let mut seen = O2_SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        if !seen.get_or_insert_with(Default::default).insert((up as usize, id)) {
+            return;
+        }
+    }
+    O2_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).insert(0, (up as usize, id));
+    crate::inspect::tierlog::note(id, crate::inspect::tierlog::ev::O2_QUEUED, 1, 0, 0);
+    O2_WAKE.notify_one();
+    o2_start(up);
+}
+
+/// The hottest slot queued for O3 by its calls or a loop that has no O2 build yet: the O2
+/// worker builds it first (`o2_hot`), so hot code leaves baseline/O1 at once instead of when an
+/// O3 worker takes it (O3 builds are slow and their queue long while a game starts: on a
+/// 3-core headset the hottest slot waited 136 s in it, running baseline code all along).
+fn o2_hottest_queued(offered: &std::collections::HashSet<(usize, u32)>) -> Option<(*mut Unit, u32)> {
+    let up = TIER_UNIT.load(Ordering::Acquire);
+    if up.is_null() {
+        return None;
+    }
+    // (the queue's lock is not held while O2_SEEN is taken)
+    let mut hot: Vec<(u64, u32)> = tier_queue().unwrap_or_else(|e| e.into_inner()).iter()
+        .filter(|e| matches!(e.1, Q_CALLS | Q_LOOP) && !offered.contains(&(up as usize, e.0))).map(|e| (e.3, e.0)).collect();
+    hot.sort_unstable_by(|a, b| b.cmp(a));
+    let seen = O2_SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    let id = hot.into_iter().map(|(_, id)| id).find(|id| !seen.as_ref().is_some_and(|m| m.contains(&(up as usize, *id))))?;
+    Some((up, id))
 }
 
 /// Queues slot `id` (marked O2 or higher) for its O2 build on the O2 worker, once.
@@ -9095,7 +9132,7 @@ unsafe fn o2_start(up: *mut Unit) {
 
 /// Baseline slots that keep running (a cost check under the threshold found a quarter of it: rt_hot): their
 /// O2 builds -- `hit` until the startup releases its workers after the first present
-/// (startup_main), at once after. (Hot ones get theirs with their O3 queueing: o2_hot.)
+/// (startup_main), at once after. (Hot ones get theirs first, from the O3 queue: o2_hottest_queued.)
 struct BaseSlots {
     released: bool,
     hit: Vec<(usize, u32)>,
@@ -9672,30 +9709,43 @@ unsafe fn o1v_begin(up: *mut Unit, id: u32) -> Option<O2Work> {
 fn o2_thread(runtime: &crate::options::RuntimeOptions) {
     ensure_altstack();
     lower_worker_priority(runtime);
+    // the O3-queued slots offered to `o2_hot` (one that gets no O2 build -- glue, no cache -- is
+    // not offered again)
+    let mut offered: std::collections::HashSet<(usize, u32)> = std::collections::HashSet::new();
     loop {
-        let ((unit, id), o1, borrowed) = {
+        if let Some((up, id)) = o2_hottest_queued(&offered) {
+            offered.insert((up as usize, id));
+            // (`o2_hot` on the owner, as an O3 worker does: it goes to the front of the queue)
+            owner::publish(|| unsafe { o2_hot(up, id) });
+        }
+        let next = {
             let mut q = O2_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-            loop {
-                if !q.is_empty() {
-                    break (q.remove(0), false, false);
-                }
+            // each pop is its own statement: a lock guard in an `if let` chain's condition
+            // lives to the end of the chain (it was held across the wait below, and the owner
+            // waited for BORROW_QUEUE forever)
+            let borrowed = if q.is_empty() { BORROW_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).pop_front() } else { None };
+            let base = if q.is_empty() && borrowed.is_none() { O2_BASE.lock().unwrap_or_else(|e| e.into_inner()).pop_front() } else { None };
+            let o1v = if q.is_empty() && borrowed.is_none() && base.is_none() && FIRST_PRESENT.load(Ordering::Acquire) {
+                O1V_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).pop_front()
+            } else { None };
+            if !q.is_empty() {
+                Some((q.remove(0), false, false))
+            } else if let Some(x) = borrowed {
                 // (SPEC-V: base slots running their twins' code get their own)
-                if let Some(x) = BORROW_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).pop_front() {
-                    break (x, false, true);
-                }
-                if let Some(x) = O2_BASE.lock().unwrap_or_else(|e| e.into_inner()).pop_front() {
-                    break (x, false, false);
-                }
+                Some((x, false, true))
+            } else if let Some(x) = base {
+                Some((x, false, false))
+            } else if let Some(x) = o1v {
                 // verified O1 rebuilds last, and never before the first frame
-                if FIRST_PRESENT.load(Ordering::Acquire) {
-                    if let Some(x) = O1V_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).pop_front() {
-                        break (x, true, false);
-                    }
-                }
+                Some((x, true, false))
+            } else {
+                // a wake (a push here, or an O3 queue push: its hottest slot is looked at first)
                 crate::zone_alloc::compiler_hand_back_idle();
-                q = O2_WAKE.wait(q).unwrap_or_else(|e| e.into_inner());
+                drop(O2_WAKE.wait(q).unwrap_or_else(|e| e.into_inner()));
+                None
             }
         };
+        let Some(((unit, id), o1, borrowed)) = next else { continue };
         let _job = compile_job();
         if !o1 {
             O2_TAKEN.fetch_add(1, Ordering::Relaxed);
@@ -14770,6 +14820,8 @@ fn tier_drain(q: &mut Vec<(u32, u8, u64, u64)>) {
 fn tier_wake() {
     TIER_GEN.fetch_add(1, Ordering::SeqCst);
     TIER_SLEEPERS.wake_one();
+    // the O2 worker builds the hottest queued slots first (`o2_hottest_queued`)
+    O2_WAKE.notify_one();
 }
 
 /// Every parked worker looks (stop, admission changes).

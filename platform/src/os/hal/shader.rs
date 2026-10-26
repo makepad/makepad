@@ -77,7 +77,7 @@ impl DrawVars {
         let mut mapping = CxDrawShaderMapping::from_shader_output(source, code.clone(), vm, &output, geometry_id);
         mapping.pick_code = output.pick_code().map(str::to_owned);
         if vulkan {
-            let payload = |result: &crate::makepad_script::shader_ir_draw::IrDrawSpirvResult| -> Result<Vec<u8>, String> {
+            let payload = |result: &crate::makepad_script::shader_ir_draw::IrDrawSpirvResult, multiview: bool| -> Result<Vec<u8>, String> {
                 use crate::makepad_script::shader::{SamplerAddress, SamplerCoord, SamplerFilter, TextureType};
                 let view = result.view();
                 if let Some(error) = view.error { return Err(error.to_owned()); }
@@ -92,16 +92,27 @@ impl DrawVars {
                     address: match s.address { SamplerAddress::Repeat => 0, SamplerAddress::ClampToEdge => 1, SamplerAddress::ClampToZero => 2, SamplerAddress::MirroredRepeat => 3 },
                     compare: s.compare, pixel: s.coord == SamplerCoord::Pixel,
                 }).collect();
-                Ok(makepad_hal::spirv::SpirvPipeline { vertex: stage.vertex.to_vec(), fragment: stage.fragment.to_vec(),
+                // the XR variant: the multiview stages, when its bindings are the window variant's
+                // (the HAL binds one descriptor layout for both)
+                let xr = &view.stages[1];
+                let same = |a: &crate::makepad_script::shader_ir_draw::DrawSpirvView, b: &crate::makepad_script::shader_ir_draw::DrawSpirvView| {
+                    a.info.texture_binding_base() == b.info.texture_binding_base() && a.info.sampler_binding_base() == b.info.sampler_binding_base()
+                        && a.info.xr_depth_binding() == b.info.xr_depth_binding() && a.info.instance_binding() == b.info.instance_binding()
+                        && a.info.pick_binding() == b.info.pick_binding() && a.info.pick_texture_base() == b.info.pick_texture_base()
+                };
+                let (xr_vertex, xr_fragment) = if multiview && !xr.vertex.is_empty() && same(stage, xr) { (xr.vertex.to_vec(), xr.fragment.to_vec()) } else { (Vec::new(), Vec::new()) };
+                Ok(makepad_hal::spirv::SpirvPipeline { xr_vertex, xr_fragment, vertex: stage.vertex.to_vec(), fragment: stage.fragment.to_vec(),
                     texture_base: stage.info.texture_binding_base(), sampler_base: stage.info.sampler_binding_base(),
                     depth_binding: stage.info.xr_depth_binding(), instance_binding: stage.info.instance_binding().unwrap_or(u32::MAX),
                     pick_binding: stage.info.pick_binding().unwrap_or(u32::MAX), pick_texture_base: stage.info.pick_texture_base().unwrap_or(u32::MAX),
                     textures, samplers }.encode())
             };
             let Some(spirv) = output.spirv() else { return };
-            let normal = match payload(spirv) { Ok(bytes) => bytes, Err(e) => { crate::error!("Vulkan shader: {e}"); return; } };
+            // the multiview stages where the HAL renders multiview passes
+            let multiview = vm.host.cx().hal.info.is_some_and(|i| i.flags & makepad_hal::info_flags::MULTIVIEW != 0);
+            let normal = match payload(spirv, multiview) { Ok(bytes) => bytes, Err(e) => { crate::error!("Vulkan shader: {e}"); return; } };
             let pick = match output.view().pick_spirv {
-                Some(result) => match payload(result) { Ok(bytes) => Some(bytes), Err(e) => { crate::error!("Vulkan pick shader: {e}"); return; } },
+                Some(result) => match payload(result, false) { Ok(bytes) => Some(bytes), Err(e) => { crate::error!("Vulkan pick shader: {e}"); return; } },
                 None => None,
             };
             mapping.hal_code = Some(normal); mapping.hal_pick_code = pick;

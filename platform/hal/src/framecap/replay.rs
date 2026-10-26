@@ -257,6 +257,8 @@ impl Replayer {
                     layer: p.layer,
                     viewport: p.viewport,
                     dpi: p.dpi,
+                    // a multiview pass replays its first view (the target is one image)
+                    views: 1,
                     uniforms: Slice::from_bytes(&p.uniforms),
                     draws: Range::default(),
                     name: 0,

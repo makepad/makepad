@@ -37,7 +37,7 @@ pub fn physical_memory_bytes() -> Option<u64> {
     {
         crate::cx::apple_physical_memory_bytes()
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         crate::cx::linux_physical_memory_bytes()
     }
@@ -45,7 +45,7 @@ pub fn physical_memory_bytes() -> Option<u64> {
     {
         crate::cx::windows_physical_memory_bytes()
     }
-    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "android", target_os = "windows")))]
     {
         None
     }

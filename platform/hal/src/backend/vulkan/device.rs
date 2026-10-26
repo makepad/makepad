@@ -48,6 +48,8 @@ pub struct Device {
     pub calibrated: bool,
     pub extensions: HashSet<String>,
     pub present_wait: bool,
+    /// Multiview render passes (Vulkan 1.1 `multiview`, enabled when the device has it).
+    pub multiview: bool,
     /// The queue of the GPU's hardware video encoder (VK_KHR_video_encode_queue + H.264), when
     /// it has one: `video_encode::Stream` submits there. Its own lock: video submits never wait
     /// for the graphics queue's.
@@ -307,6 +309,15 @@ impl Device {
         if log_enabled() { eprintln!("[hal-vulkan] vkCreateDevice device={name:?} queue_family={family} extensions={wanted:?}"); }
         let extensions = wanted.iter().map(|n| n.to_string_lossy().into_owned()).collect();
         let wanted: Vec<_> = wanted.iter().map(|n| n.as_ptr()).collect();
+        // multiview (core in 1.1): a stereo view renders both eyes in one pass
+        let mut multiview = vk::PhysicalDeviceMultiviewFeatures::default();
+        {
+            let mut query = vk::PhysicalDeviceFeatures2::default().next_physical_device_multiview_features(&mut multiview);
+            unsafe { instance.get_physical_device_features2(physical, &mut query); }
+        }
+        multiview.p_next = std::ptr::null_mut();
+        let has_multiview = multiview.multiview != 0;
+        let mut multiview = vk::PhysicalDeviceMultiviewFeatures::default().multiview(has_multiview);
         let supported_features = unsafe { instance.get_physical_device_features(physical) };
         let features = vk::PhysicalDeviceFeatures::default()
             .independent_blend(supported_features.independent_blend == vk::TRUE)
@@ -329,6 +340,7 @@ impl Device {
         if pacing { create = create.next_physical_device_present_id_features_khr(&mut present_id)
             .next_physical_device_present_wait_features_khr(&mut present_wait); }
         if plane444.ycbcr2plane444_formats != 0 { create = create.next_physical_device_ycbcr2_plane444_formats_features_ext(&mut plane444); }
+        if has_multiview { create = create.next_physical_device_multiview_features(&mut multiview); }
         // A GPU full of other work (an AI model) has no room for a device yet: the app waits
         // for room -- the desktop's owner asks the hub to yield on the sustained shortage --
         // instead of falling back to another renderer. It never fails for want of memory.
@@ -372,7 +384,7 @@ impl Device {
         Ok(Some(Arc::new(Self {
             queue: unsafe { raw.get_device_queue(family as u32, 0) }, queue_lock: Mutex::new(()), raw, instance: instance.clone(),
             physical, family: family as u32, properties, memory, features, formats,
-            timestamp_bits: queue.timestamp_valid_bits, calibrated, extensions, present_wait: pacing, life: life.clone(),
+            timestamp_bits: queue.timestamp_valid_bits, calibrated, extensions, present_wait: pacing, multiview: has_multiview, life: life.clone(),
             video_encode,
             allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), budget: Mutex::new(None),
         })))
@@ -489,7 +501,7 @@ impl Device {
         Ok(Arc::new(Self { instance: instance.clone(), queue: unsafe { raw.get_device_queue(family as u32, 0) },
             raw, physical, queue_lock: Mutex::new(()), family: family as u32, properties, memory, features, formats,
             // a display peer only scans out: the GPU profiler times the rendering device
-            timestamp_bits: queue.timestamp_valid_bits, calibrated: false, extensions, present_wait: pacing, life: owner.life.clone(), video_encode: None,
+            timestamp_bits: queue.timestamp_valid_bits, calibrated: false, extensions, present_wait: pacing, multiview: false, life: owner.life.clone(), video_encode: None,
             allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), budget: Mutex::new(None) }))
     }
 }
