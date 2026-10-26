@@ -25,15 +25,46 @@ struct Entry {
     glyph: Option<Texture>,
 }
 
+/// A service the WM supervises whose tray it keeps while the service is off (its Quit).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Service {
+    AiHub,
+    Devhub,
+}
+
+impl Service {
+    fn tooltip(self) -> &'static str {
+        match self {
+            Service::AiHub => "AI Hub \u{b7} off \u{2014} click to start",
+            Service::Devhub => "devhub \u{b7} off \u{2014} click to start",
+        }
+    }
+
+    /// The service's own dim "off" glyph.
+    fn glyph(self, cx: &mut Cx) -> Option<Texture> {
+        match self {
+            Service::AiHub => {
+                let img = makepad_ai_hub_panel::tray_glyph::image(makepad_ai_hub_panel::tray_glyph::Glyph::Off);
+                makepad_shell_kit::ui::glyph_texture(cx, img.width, img.height, &img.alpha)
+            }
+            Service::Devhub => {
+                // the app's Off glyph (hollow pupil) at half strength: dim like the AI Hub's
+                use makepad_devhub::tray_glyph::{alpha, Glyph, SIZE};
+                let dim: Vec<u8> = alpha(Glyph::Off).iter().map(|a| a / 2).collect();
+                makepad_shell_kit::ui::glyph_texture(cx, SIZE, SIZE, &dim)
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct WmTrays {
     entries: Vec<Entry>,
-    /// The WM's own slot for the AI Hub while it is off (Quit, `enabled = off`): the app's dim
-    /// "off" glyph after the apps' trays. A click starts the hub. The app's own tray replaces it.
-    hub_off: Option<Texture>,
+    /// The WM's own slots for its services while they are off (Quit, `enabled = off`): each
+    /// one's dim "off" glyph after the apps' trays, AI Hub first. A click starts the service; its
+    /// own tray replaces the slot.
+    off: Vec<(Service, Option<Texture>)>,
 }
-
-pub const HUB_OFF_TOOLTIP: &str = "AI Hub \u{b7} off \u{2014} click to start";
 
 impl WmTrays {
     /// `client` set (or updated) a tray. The glyph texture is made again only when the mask
@@ -68,34 +99,33 @@ impl WmTrays {
         before != self.entries.len()
     }
 
-    /// What the bar shows, in tray order; the hub's off slot last.
+    /// What the bar shows, in tray order; the services' off slots last.
     pub fn bar(&self) -> Vec<BarTray> {
         let mut bar: Vec<BarTray> = self.entries.iter().map(|e| BarTray { glyph: e.glyph.clone(), tooltip: e.relay.tooltip.clone() }).collect();
-        if self.hub_off.is_some() {
-            bar.push(BarTray { glyph: self.hub_off.clone(), tooltip: HUB_OFF_TOOLTIP.to_string() });
-        }
+        bar.extend(self.off.iter().map(|(service, glyph)| BarTray { glyph: glyph.clone(), tooltip: service.tooltip().to_string() }));
         bar
     }
 
-    /// The hub is off (`off`) and no tray of its own shows: the WM keeps the off slot. True when
-    /// the bar changes.
-    pub fn set_hub_off(&mut self, cx: &mut Cx, off: bool, hub_client_has_tray: bool) -> bool {
-        let want = off && !hub_client_has_tray;
-        if want == self.hub_off.is_some() {
+    /// `service` is off (`off`) and no tray of its own shows: the WM keeps its off slot. True
+    /// when the bar changes.
+    pub fn set_off(&mut self, cx: &mut Cx, service: Service, off: bool, service_has_tray: bool) -> bool {
+        let want = off && !service_has_tray;
+        if want == self.off.iter().any(|(s, _)| *s == service) {
             return false;
         }
-        self.hub_off = if want {
-            let img = makepad_ai_hub_panel::tray_glyph::image(makepad_ai_hub_panel::tray_glyph::Glyph::Off);
-            makepad_shell_kit::ui::glyph_texture(cx, img.width, img.height, &img.alpha)
+        if want {
+            let glyph = service.glyph(cx);
+            self.off.push((service, glyph));
+            self.off.sort_by_key(|(s, _)| *s as u8);
         } else {
-            None
-        };
+            self.off.retain(|(s, _)| *s != service);
+        }
         true
     }
 
-    /// Whether the bar's `index`th item is the WM's own hub off slot.
-    pub fn is_hub_off(&self, index: usize) -> bool {
-        self.hub_off.is_some() && index == self.entries.len()
+    /// The service whose off slot is the bar's `index`th item.
+    pub fn off_at(&self, index: usize) -> Option<Service> {
+        index.checked_sub(self.entries.len()).and_then(|i| self.off.get(i)).map(|(s, _)| *s)
     }
 
     /// Whether `client` shows a tray.
@@ -139,10 +169,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_hub_off_slot_is_last_and_goes_when_the_hub_has_a_tray() {
-        let t = WmTrays::default();
-        // no GL context in a unit test: the slot's presence is what is tested via the flag path
-        assert!(!t.is_hub_off(0));
+    fn the_off_slots_are_last_in_service_order() {
+        let mut t = WmTrays::default();
+        assert_eq!(t.off_at(0), None);
         assert!(t.bar().is_empty());
+        // no GL context in a unit test: the slots without their textures
+        t.off.push((Service::Devhub, None));
+        t.off.push((Service::AiHub, None));
+        t.off.sort_by_key(|(s, _)| *s as u8);
+        assert_eq!(t.off_at(0), Some(Service::AiHub));
+        assert_eq!(t.off_at(1), Some(Service::Devhub));
+        assert_eq!(t.off_at(2), None);
+        assert_eq!(t.bar()[1].tooltip, "devhub \u{b7} off \u{2014} click to start");
     }
 }

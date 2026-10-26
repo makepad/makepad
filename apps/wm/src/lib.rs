@@ -4256,9 +4256,11 @@ impl App {
         self.hub_link.tick(processes, host::now(), &pool);
         self.devhub_link.tick(processes, host::now());
         // Off (its Quit): the bar keeps a dim slot to start it again, until its own tray is back.
-        let off = self.hub_link.is_off(processes);
-        let hub_tray = self.state.as_ref().is_some_and(|s| s.clients.iter().any(|(id, c)| c.service && c.app == clients::HUB_SERVICE_APP && self.trays.has_tray(*id as u64)));
-        if self.trays.set_hub_off(cx, off, hub_tray) {
+        let has_tray = |app: &str| self.state.as_ref().is_some_and(|s| s.clients.iter().any(|(id, c)| c.service && c.app == app && self.trays.has_tray(*id as u64)));
+        let (hub_tray, devhub_tray) = (has_tray(clients::HUB_SERVICE_APP), has_tray(clients::DEVHUB_SERVICE_APP));
+        let hub = self.trays.set_off(cx, trays::Service::AiHub, self.hub_link.is_off(processes), hub_tray);
+        let devhub = self.trays.set_off(cx, trays::Service::Devhub, self.devhub_link.is_off(processes), devhub_tray);
+        if hub || devhub {
             self.trays_changed(cx);
         }
         self.gpu_yield_report(cx);

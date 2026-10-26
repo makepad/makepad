@@ -1,9 +1,10 @@
 //! This node's devhub (apps/devhub): the JIT observer the user's master reaches, kept by the WM
 //! with the same supervisor as the AI Hub (`hub_app::Supervised`): `cargo run --release -p
 //! makepad-app-devhub` in the checkout (never a stale binary), restarted with backoff after an
-//! exit, kept across WM restarts, off after its Quit until the launcher starts it again. Its
+//! exit, kept across WM restarts, off after its Quit until its dim off slot in the tray area starts it again. Its
 //! settings are `~/.makepad/wm/devhub.conf` (`MAKEPAD_WM_DEVHUB_CONF`; a hidden WM without one
-//! starts none). Its tray icon sits in the WM's tray area; it has no tile.
+//! starts none). Its tray icon sits in the WM's tray area; it has no tile, no dock item and no
+//! launcher row.
 
 #[derive(Default)]
 pub struct DevhubLink {
@@ -36,7 +37,7 @@ impl DevhubLink {
         None
     }
 
-    /// The launcher asked for devhub: on again in its settings, and started.
+    /// Its off slot was pressed: on again in its settings, and started.
     pub fn start_from_launcher(&mut self, processes: bool, now: f64) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -64,6 +65,23 @@ impl DevhubLink {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = (processes, now);
+            false
+        }
+    }
+
+    /// devhub is off by its settings (its Quit): the bar keeps a dim slot to start it again. A
+    /// hidden WM without its own settings file runs none and shows no slot.
+    pub fn is_off(&self, processes: bool) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if !processes || std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() && std::env::var_os("MAKEPAD_WM_DEVHUB_CONF").is_none() {
+                return false;
+            }
+            !crate::hub_app::load_devhub_conf().1.enabled
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = processes;
             false
         }
     }

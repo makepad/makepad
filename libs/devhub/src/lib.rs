@@ -36,6 +36,7 @@ pub mod sync;
 #[cfg(unix)]
 pub mod cluster;
 pub mod trust;
+pub mod tray_glyph;
 #[cfg(unix)]
 pub mod explorer;
 #[cfg(unix)]

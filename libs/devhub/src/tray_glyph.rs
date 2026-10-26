@@ -1,10 +1,8 @@
-//! The tray glyph, drawn from geometry as a monochrome template (it follows a light or dark bar,
-//! and is the node's icon in the Linux WM's bar too): the app icon's mark
+//! devhub's tray glyph (shared by the app and the makepad WM's "off" slot), drawn from geometry as
+//! a monochrome alpha mask (it follows a light or dark bar): the app icon's mark
 //! (apps/devhub/resources/icon.svg), an eye with three nodes linked into it. Quiet: a small
 //! pupil. Attention (new inbox entries): a solid larger pupil and the right node grown into a
 //! badge. Off (no network identity): a hollow pupil.
-
-use makepad_widgets::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Glyph {
@@ -27,7 +25,8 @@ fn segment(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
     ((p.0 - a.0 - t * dx).powi(2) + (p.1 - a.1 - t * dy).powi(2)).sqrt()
 }
 
-pub fn image(glyph: Glyph) -> TrayImage {
+/// The alpha mask of `glyph`, `SIZE` x `SIZE`, row by row.
+pub fn alpha(glyph: Glyph) -> Vec<u8> {
     let n = SIZE as usize;
     let (cx, cy, w, h) = EYE;
     // the lens = the overlap of two circles through both corners
@@ -59,7 +58,7 @@ pub fn image(glyph: Glyph) -> TrayImage {
             alpha[y * n + x] = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
         }
     }
-    TrayImage { width: SIZE, height: SIZE, alpha }
+    alpha
 }
 
 #[cfg(test)]
@@ -67,12 +66,12 @@ mod tests {
     #[test]
     fn glyphs_are_distinct_full_size_masks() {
         use super::*;
-        let all = [Glyph::Quiet, Glyph::Attention, Glyph::Off].map(image);
+        let all = [Glyph::Quiet, Glyph::Attention, Glyph::Off].map(alpha);
         for g in &all {
-            assert_eq!(g.alpha.len(), (SIZE * SIZE) as usize);
-            assert_eq!(g.alpha[0], 0);
+            assert_eq!(g.len(), (SIZE * SIZE) as usize);
+            assert_eq!(g[0], 0);
         }
-        assert_ne!(all[0].alpha, all[1].alpha);
-        assert_ne!(all[0].alpha, all[2].alpha);
+        assert_ne!(all[0], all[1]);
+        assert_ne!(all[0], all[2]);
     }
 }

@@ -14,7 +14,7 @@
 
 pub use makepad_widgets;
 
-mod glyph;
+use makepad_devhub::tray_glyph as glyph;
 mod installed;
 mod view;
 
@@ -296,7 +296,7 @@ impl App {
                 }
             }
             menu.push(TrayMenuItem::item(QUIT, "Quit devhub"));
-            cx.set_tray(TrayIcon { id: TRAY, image: glyph::image(g), tooltip: format!("devhub \u{b7} {status}"), menu, dropdown: matches!(self.core, Some(Core::Master(_))) });
+            cx.set_tray(TrayIcon { id: TRAY, image: TrayImage { width: glyph::SIZE, height: glyph::SIZE, alpha: glyph::alpha(g) }, tooltip: format!("devhub \u{b7} {status}"), menu, dropdown: matches!(self.core, Some(Core::Master(_))) });
         }
         let Some(Core::Master(m)) = &self.core else { return };
         if !(self.open || self.window_shown) {

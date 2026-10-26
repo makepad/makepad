@@ -167,7 +167,8 @@ fn registry_app(entry: &makepad_app_registry::AppEntry) -> AppDef {
 /// The registry id of the supervised service the WM keeps (the node's AI Hub, `hub_app.rs`): the
 /// launcher offers it (starting it again after its Quit), the dock never shows it.
 pub const HUB_SERVICE_APP: &str = "aihub";
-/// The registry id of the node's devhub, the other supervised service (`devhub_link.rs`).
+/// The registry id of the node's devhub, the other supervised service (`devhub_link.rs`): tray
+/// only (no launcher row, no dock item); its off slot in the tray area starts it after its Quit.
 pub const DEVHUB_SERVICE_APP: &str = "devhub";
 
 /// The curated applications, in menu order: the menu rows of the shared
@@ -1218,7 +1219,6 @@ mod tests {
                 "Makepad Story",
                 "Sandbox",
                 "AI Hub",
-                "devhub",
             ]
             .map(str::to_string)
         );
