@@ -5,10 +5,12 @@
 //!
 //! 1. Parse every edited file as a new version (nothing the running program reads changes).
 //! 2. Classify each item against the running version: body edits (class B), const value
-//!    edits (B, with the readers recompiled) and static initializer edits (the value is kept,
-//!    said so) apply; everything else takes the restart rung with a one-line reason, never a
-//!    silent stale result (signature, layout, item set, macro, declarative edits until their
-//!    mechanisms exist).
+//!    edits (B, with the readers recompiled) and initializer edits of statics not placed yet
+//!    apply; everything else takes the restart rung with a one-line reason, never a silent
+//!    stale result (a static or `thread_local!` that already holds its value, signature,
+//!    layout, item set, macro, declarative edits until their mechanisms exist). The restart
+//!    rung restarts the program in place on its own (restart_in_place), and a patch whose old
+//!    code keeps running in a frame that never returns takes it too (the landing check).
 //! 3. Freeze: closures of the functions about to be rebuilt that were never compiled are
 //!    compiled now, from the version their stored values were made by.
 //! 4. Commit the versions (each a new file index: old code, closure and coroutine types and
@@ -288,6 +290,12 @@ fn ctfe_relevant_bodies(prog: &Program, file: u32, changed: &[DefId]) -> bool {
         if prog.opaque_types_defined_by.get(&owner).is_some_and(|defs| !defs.is_empty()) { return true; }
     }
     false
+}
+
+/// The running storage an edited const or static initializer made, once placed: `d` itself (a
+/// static) or a static defined inside its initializer (a `thread_local!` key's).
+fn placed_storage(u: &Unit, d: DefId) -> Option<DefId> {
+    u.statics.keys().chain(u.tls_places.keys()).copied().find(|&s| changed_body_owner(&u.prog, s, &[d]))
 }
 
 fn changed_body_owner(prog: &Program, mut def: DefId, changed: &[DefId]) -> bool {
@@ -2167,6 +2175,15 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             }
         }
     }
+    // an initializer runs once: a static (or the storage a `thread_local!` key keeps) that holds
+    // its running value never sees the new initializer, so the edit lands by a restart
+    for c in &changes {
+        if let Change::Const(d) | Change::StaticInit(d) = *c {
+            if let Some(s) = placed_storage(u, d) {
+                restart.push(format!("the initializer of `{}` changed, and `{}` already holds the value the old one made (an initializer runs once) -- restart the app", def_name(&u.prog, d), def_name(&u.prog, s)));
+            }
+        }
+    }
     if !restart.is_empty() {
         out.rung = Rung::Restart;
         out.lines = restart;
@@ -3365,12 +3382,6 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         f.build_err = None;
         f.spec = None;
     }
-    for d in &static_defs {
-        out.lines.push(format!(
-            "note: static `{}` keeps its running value; its new initializer applies at the next start",
-            def_name(&u.prog, *d)
-        ));
-    }
     for d in &consts_hit {
         if !const_defs.contains(d) {
             out.lines.push(format!("note: const `{}` is evaluated again (it depends on a changed const)", def_name(&u.prog, *d)));
@@ -3385,7 +3396,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         let mut names: Vec<&str> = inlining_callers.iter().take(3).map(|&d| u.fns[d as usize].name.as_ref()).collect();
         if inlining_callers.len() > 3 { names.push("..."); }
         out.lines.push(format!(
-            "kept: {} fn(s) that inlined the edited code ({}) are rebuilt for their next call; a call of them already running (a loop that never returns) keeps the old code -- restart the app to apply it there",
+            "kept: {} fn(s) that inlined the edited code ({}) are rebuilt for their next call; a call of them already running finishes in the old code (one that keeps running it restarts the app: the landing check)",
             inlining_callers.len(), names.join(", ")
         ));
     }
@@ -3445,6 +3456,7 @@ pub(crate) fn domain_loaded(inputs: Option<Inputs>) {
     }
     *DOMAIN_RESTORED.lock().unwrap_or_else(|e| e.into_inner()) = restored;
     *DOMAIN_INPUTS.lock().unwrap_or_else(|e| e.into_inner()) = inputs;
+    PATCHED_FILES.lock().unwrap_or_else(|e| e.into_inner()).1.clear();
     DOMAIN_REVISION.fetch_add(1, std::sync::atomic::Ordering::Release);
     DOMAIN_LOADING.store(false, std::sync::atomic::Ordering::Release);
     watch_events::kick();
@@ -3479,6 +3491,36 @@ pub extern "C" fn __relax_on_patch(f: usize) {
 fn wake_program() {
     let wake = *PATCH_WAKER.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((scope, wake)) = wake { let _ = scope.call(|| wake()); }
+}
+
+/// The source files installed patches changed, each with the patch count when it last changed
+/// (and the count): what the program built from a file's text at run time (makepad's
+/// `script_mod!` designs, evaluated from their fns once) it builds again from the patched code
+/// (std::relax::patched_files). A loaded domain starts with none.
+static PATCHED_FILES: relax_session::sync::Mutex<(u64, Vec<(u64, String)>)> = relax_session::sync::Mutex::new((0, Vec::new()));
+
+/// A patch of `paths` is installed: noted for the program, which is woken.
+fn patch_landed(paths: impl Iterator<Item = String>) {
+    {
+        let mut p = PATCHED_FILES.lock().unwrap_or_else(|e| e.into_inner());
+        p.0 += 1;
+        let n = p.0;
+        for path in paths {
+            p.1.retain(|(_, q)| *q != path);
+            p.1.push((n, path));
+        }
+    }
+    wake_program();
+}
+
+/// The files patched after count `since`: "<count>\n" then one path per line.
+pub extern "C" fn __relax_patched_files(since: u64, buf: *mut u8, cap: usize) -> usize {
+    let p = PATCHED_FILES.lock().unwrap_or_else(|e| e.into_inner());
+    let mut s = format!("{}\n", p.0);
+    for (n, path) in &p.1 {
+        if *n > since { s.push_str(path); s.push('\n'); }
+    }
+    copy_out(&s, buf, cap)
 }
 
 pub extern "C" fn __relax_restart_supported() {
@@ -3538,29 +3580,8 @@ pub extern "C" fn __relax_restart_now(state: *const u8, len: usize) {
         // The queued HAL quit runs the app's normal cleanup after this event returns.
         return;
     }
-    let dir = std::env::temp_dir().join(format!("relax-restart-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join("state");
-    if let Err(e) = std::fs::write(&path, st) {
-        eprintln!("makepad live: restart: cannot write the state: {}", e);
-        return;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
-        let Some(exe) = std::env::current_exe().ok() else { return };
-        // the run's end as at exit: compiles stop and this run's code goes into the disk cache,
-        // so the restarted run links it instead of compiling it again (exec skips the exit handlers)
-        crate::run::summary("restart");
-        // a restart is a clean end of this process (its transcript is not kept)
-        crate::tui::exit_code(0);
-        crate::tui::finish(false);
-        eprintln!("makepad live: restarting with the program's state ({})", RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()));
-        let t0 = RESTART_SAVED_MS.load(std::sync::atomic::Ordering::Relaxed);
-        let e = std::process::Command::new(exe).args(&args[1..]).env("MAKEPAD_RUN_RESTORE", &path).env("MAKEPAD_RUN_RESTART_T0", t0.to_string()).exec();
-        eprintln!("makepad live: restart failed: {}", e);
-    }
+    RESTART_REQUESTED.store(false, std::sync::atomic::Ordering::SeqCst);
+    if let Err(e) = exec_restart(Some(st)) { eprintln!("makepad live: {e}"); }
 }
 
 /// makepad inspect: an edit that did not reach the running program is an agent's event (refused:
@@ -3694,14 +3715,106 @@ pub(crate) fn settle_verdicts(up: *mut Unit, pending: &mut Vec<PendingPatch>, un
     back
 }
 
-/// An edit that needs a restart: makepad restarts for real into a current binary (host::request;
-/// cargo's check is a no-op when makepad is up to date). Where this run cannot restart itself
-/// (no cargo-built loader, Windows) the edit waits for `session relaunch`.
-fn restart_for_edit(what: &str, lines: &[String], inputs: &Inputs) {
+/// An edit the patcher cannot absorb lands by restarting the program in place, at once
+/// (restart_in_place). Only where that is impossible does it wait for `session relaunch`.
+fn restart_for_edit(what: &str, lines: &[String]) {
     let why = format!("{}: {}", what, lines.first().cloned().unwrap_or_default());
-    if let Err(e) = host::request(format!("{why} (needs a restart)"), inputs.process_paths()) {
-        note_restart_pending(&why);
-        eprintln!("makepad live: {what}: restart to apply (reasons below); the app keeps running the previous code -- `makepad inspect <app> session relaunch` applies it ({e})");
+    match restart_in_place(why.clone()) {
+        Ok(how) => eprintln!("makepad live: {what}: restarting in place to apply it ({how}); reasons below"),
+        Err(e) => {
+            note_restart_pending(&why);
+            eprintln!("makepad live: {what}: restart to apply (reasons below); the app keeps running the previous code -- `makepad inspect <app> session relaunch` applies it ({e})");
+        }
+    }
+}
+
+/// How long a patch's old code may stay on a program thread's stack before the edit counts as
+/// not landed there (a call made before the patch that does not return: a loop).
+const LANDING: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The landing check of patch group `gen`: the fn with a frame on a program thread in code made
+/// before the patch, if any. A call that started before the patch finishes in its old code; one
+/// still there a while later never picks the edit up (a loop in it, or in a caller that inlined
+/// the edited code).
+fn running_old_code(u: &Unit, gen: u32) -> Option<String> {
+    let slots: std::collections::HashSet<u32> = u.patch_log.iter().filter(|(_, g)| *g == gen).map(|(id, _)| *id).collect();
+    if slots.is_empty() {
+        return None;
+    }
+    let caps = crate::inspect::capture_all(&crate::inspect::instrument::program_thread).ok()?;
+    let code = u.code.read().unwrap_or_else(|e| e.into_inner());
+    for c in caps {
+        for (k, &a) in c.frames.iter().enumerate() {
+            // pc, then return addresses (the call is the byte before)
+            let a = if k == 0 { a } else { a.wrapping_sub(1) };
+            let Some((start, _, slot)) = code.entry_at(a) else { continue };
+            if !slots.contains(&slot) || crate::stale::lookup(a).is_some() {
+                continue;
+            }
+            let f = &u.fns[slot as usize];
+            // the patch group that made this code (a replaced version keeps it in the history)
+            let made = if start == f.code { f.patch_gen } else { f.history().prev.iter().find(|p| p.0 == start).map_or(gen, |p| p.3) };
+            if made < gen {
+                return Some(f.name.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Restarts the program in place to apply `why`: a program that restarts with its state
+/// (std::relax::restart_supported) is asked to at its next safe point (a hosted app then
+/// relaunches its domain, window kept; a direct program starts its process again with the state),
+/// a hosted app that does not relaunches its domain, any other program's process starts again
+/// (same binary and command line). The program's sources are compiled by the new run; the loader
+/// itself is current (a change of its own inputs goes through host::request), so nothing is
+/// rebuilt. Returns how, or why it cannot.
+fn restart_in_place(why: String) -> Result<&'static str, String> {
+    *RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()) = why;
+    if RESTART_SUPPORTED.load(std::sync::atomic::Ordering::SeqCst) {
+        RESTART_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        wake_program();
+        return Ok("restart with the program's state");
+    }
+    if crate::run::app_domain().is_some() {
+        crate::run::relaunch()?;
+        return Ok("domain relaunch");
+    }
+    exec_restart(None).map(|_| "process restart")
+}
+
+/// The process starts again: the loader binary with the same command line, `state` handed to the
+/// new run (MAKEPAD_RUN_RESTORE). Returns only on failure.
+fn exec_restart(state: Option<&[u8]>) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let exe = host::loader().ok_or("the makepad binary's path is unknown")?;
+        let mut cmd = std::process::Command::new(exe);
+        cmd.args(std::env::args_os().skip(1));
+        match state {
+            Some(st) => {
+                let dir = std::env::temp_dir().join(format!("relax-restart-{}", std::process::id()));
+                let path = dir.join("state");
+                std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, st)).map_err(|e| format!("cannot write the state: {e}"))?;
+                cmd.env("MAKEPAD_RUN_RESTORE", &path);
+            }
+            None => { cmd.env_remove("MAKEPAD_RUN_RESTORE"); }
+        }
+        cmd.env("MAKEPAD_RUN_RESTART_T0", RESTART_SAVED_MS.load(std::sync::atomic::Ordering::Relaxed).to_string());
+        // the run's end as at exit: compiles stop and this run's code goes into the disk cache,
+        // so the restarted run links it instead of compiling it again (exec skips the exit handlers)
+        crate::run::summary("restart");
+        // a restart is a clean end of this process (its transcript is not kept)
+        crate::tui::exit_code(0);
+        crate::tui::finish(false);
+        eprintln!("makepad live: restarting ({})", RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()));
+        Err(format!("restart failed: {}", cmd.exec()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = state;
+        Err("this platform cannot start the process again in place".into())
     }
 }
 
@@ -3718,25 +3831,13 @@ fn note_restart_pending(why: &str) {
     }
 }
 
-/// The edits that wait for a relaunch, oldest first (cleared by a relaunch).
-/// `session relaunch`: applies the edits waiting for a restart. A hosted app relaunches its domain
-/// (window kept); a directly running program that restarts itself (std::relax::restart_supported)
-/// is asked to, at its next safe point, carrying its state over. Returns how.
+/// `session relaunch`: applies the edits waiting for a restart (restart_in_place). Returns how.
 pub fn relaunch_pending() -> Result<&'static str, String> {
-    if crate::run::app_domain().is_some() {
-        crate::run::relaunch()?;
-        return Ok("domain relaunch");
-    }
-    if !RESTART_SUPPORTED.load(std::sync::atomic::Ordering::SeqCst) {
-        return Err("no hosted app domain, and the program does not restart itself (std::relax::restart_supported): stop and start it".into());
-    }
     let why = RESTART_PENDING.lock().unwrap_or_else(|e| e.into_inner()).join("; ");
-    *RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()) = why;
-    RESTART_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
-    wake_program();
-    Ok("program restart with state")
+    restart_in_place(if why.is_empty() { "session relaunch".into() } else { why })
 }
 
+/// The edits that wait for a relaunch, oldest first (cleared by a relaunch).
 pub fn restart_pending() -> Vec<String> {
     RESTART_PENDING.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
@@ -3843,8 +3944,7 @@ fn log_edit(what: &str, o: &Outcome, saved: Option<std::time::SystemTime>, seen:
         Rung::Patch if o.lines.iter().any(|l| l.starts_with("incomplete:")) => "partial",
         Rung::Patch if o.changed == 0 => "unchanged",
         Rung::Patch => "patch",
-        Rung::Restart if crate::run::app_domain().is_some() || RESTART_SUPPORTED.load(std::sync::atomic::Ordering::SeqCst) => "restart",
-        Rung::Restart => "restart-unsupported",
+        Rung::Restart => "restart",
         Rung::Refuse => "refuse",
     };
     SESSION.lock().unwrap_or_else(|e| e.into_inner()).push((rung, total));
@@ -3899,7 +3999,7 @@ pub(crate) fn session_summary() -> Option<String> {
         n,
         count("patch") + count("unchanged") + count("partial"),
         100.0 * (count("patch") + count("unchanged") + count("partial")) as f64 / n as f64,
-        count("restart") + count("restart-unsupported"),
+        count("restart"),
         count("refuse"),
         pct(0.5),
         pct(0.95),
@@ -3921,6 +4021,7 @@ pub fn restart_symbol(name: &[u8]) -> Option<usize> {
     Some(match name {
         b"__relax_restart_supported" => __relax_restart_supported as *const () as usize,
         b"__relax_on_patch" => __relax_on_patch as *const () as usize,
+        b"__relax_patched_files" => __relax_patched_files as *const () as usize,
         b"__relax_live_edit_enabled" => __relax_live_edit_enabled as *const () as usize,
         b"__relax_restart_requested" => __relax_restart_requested as *const () as usize,
         b"__relax_restart_reason" => __relax_restart_reason as *const () as usize,
@@ -3968,10 +4069,11 @@ unsafe fn target_file(up: *mut Unit, target: &StreamTarget) -> Option<(u32, Stri
 }
 
 fn record_stream(target: &StreamTarget, o: &Outcome) {
-    if let StreamTarget::Module(h) = target {
-        if o.rung == Rung::Patch {
-            if let Some(&file) = o.files.first() { crate::modules::stream_applied(*h, file); }
-        }
+    if o.rung != Rung::Patch { return; }
+    match target {
+        StreamTarget::Module(h) => if let Some(&file) = o.files.first() { crate::modules::stream_applied(*h, file); },
+        // (a streamed edit of a program file: the program hears of it as of a save)
+        StreamTarget::Path(path) => if o.changed > 0 { patch_landed(std::iter::once(path.clone())); },
     }
 }
 
@@ -4224,6 +4326,8 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
     // first attempt's reasons -- the retry's type check finds the same errors already reported
     // and says only "type checking failed due to previous errors")
     let mut stalled: std::collections::HashMap<usize, (Instant, Vec<u8>, Vec<String>)> = std::collections::HashMap::new();
+    // installed patches whose landing is checked once LANDING has passed: (when, patch group, the edit)
+    let mut landing: Vec<(Instant, u32, String)> = Vec::new();
     let mut tick: u32 = 0;
     let mut startup_scan = true;
     let mut restart_required = false;
@@ -4236,7 +4340,8 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             && pending.is_empty() && !streams_busy(up);
         match events.as_mut() {
             Some(w) if quiet => {
-                let next = stalled.values().map(|(t, _, _)| std::time::Duration::from_secs(1).saturating_sub(t.elapsed())).min();
+                let next = stalled.values().map(|(t, _, _)| std::time::Duration::from_secs(1).saturating_sub(t.elapsed()))
+                    .chain(landing.iter().map(|l| l.0.saturating_duration_since(Instant::now()))).min();
                 w.wait(next.unwrap_or(LIVE_IDLE).min(LIVE_IDLE).max(std::time::Duration::from_millis(5)));
             }
             _ => std::thread::sleep(std::time::Duration::from_millis(5)),
@@ -4260,6 +4365,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             stalled.clear();
             undos.clear();
             restart_required = false;
+            landing.clear();
             startup_scan = true;
         }
         // Keep the original stamps and queued OS notifications intact until startup
@@ -4302,6 +4408,24 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
                 }
             }
         }
+        // The landing check: a patch whose old code is still running a while after the install
+        // has not reached that call (a loop that never returns): the edit restarts the app.
+        let now = Instant::now();
+        if landing.iter().any(|l| l.0 <= now) {
+            let due: Vec<(u32, String)> = landing.iter().filter(|l| l.0 <= now).map(|l| (l.1, l.2.clone())).collect();
+            landing.retain(|l| l.0 > now);
+            for (gen, what) in due {
+                if let Some(name) = crate::owner::call(crate::owner::Class::Program, || running_old_code(&*up, gen)) {
+                    let lines = vec![format!("`{name}` still runs the code from before the edit: a call made before the patch has not returned (a loop) -- restart the app")];
+                    log_edit(&what, &Outcome { kept: 0, pending: false, rung: Rung::Restart, files: Vec::new(), lines: lines.clone(), names: Vec::new(), changed: 0, group: gen, ms: [0.0; 4], undo: None, work: [0; 5] }, None, Instant::now());
+                    restart_for_edit(&what, &lines);
+                    for l in &lines { eprintln!("makepad live:   {}", l); }
+                    patch_refused_event(&what, false, &lines);
+                    landing.clear();
+                    break;
+                }
+            }
+        }
         // Re-check an unchanged failing prefix once, after one second of silence.
         let due: Vec<_> = stalled.iter().filter(|(_, (t, _, _))| t.elapsed().as_secs_f64() >= 1.0).map(|(&k, _)| k).collect();
         for k in due {
@@ -4319,7 +4443,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
                 log_edit(&f.0, &o, f.2.map(|s| s.0), seen);
                 match o.rung {
                     Rung::Refuse => eprintln!("makepad live: {}: NOT applied (errors below); the app runs the previous code", f.0),
-                    _ => restart_for_edit(&f.0, &o.lines, &inputs),
+                    _ => restart_for_edit(&f.0, &o.lines),
                 }
                 for l in &o.lines { eprintln!("makepad live:   {}", l); }
                 patch_refused_event(&f.0, o.rung == Rung::Refuse, &o.lines);
@@ -4330,7 +4454,8 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
                 log_edit(&what, &o, f.2.map(|s| s.0), seen);
                 eprintln!("makepad live: {}: patched ({} item(s) changed, {} fn(s) installed) in {:.1} ms", what, o.changed, o.names.len(), o.ms.iter().sum::<f64>());
                 crate::tui::flush();
-                wake_program();
+                patch_landed(std::iter::once(f.0.clone()));
+                if o.group != 0 { landing.push((Instant::now() + LANDING, o.group, what.clone())); }
                 for l in &o.lines { eprintln!("makepad live:   {}", l); }
                 if let Some(&file) = o.files.first() { f.1 = file; }
             }
@@ -4528,7 +4653,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             Rung::Refuse => eprintln!("makepad live: {}: NOT applied (errors below); the app runs the previous code", what),
             // an edit the patcher cannot absorb: makepad restarts for real (the app is asked at its
             // next safe point and keeps its state); it runs the previous code until then
-            Rung::Restart => restart_for_edit(&what, &o.lines, &inputs),
+            Rung::Restart => restart_for_edit(&what, &o.lines),
         }
         for l in &o.lines {
             eprintln!("makepad live:   {}", l);
@@ -4537,7 +4662,10 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             patch_refused_event(&what, o.rung == Rung::Refuse, &o.lines);
         }
         crate::tui::flush();
-        if o.rung == Rung::Patch { wake_program(); }
+        if o.rung == Rung::Patch {
+            patch_landed(which.iter().map(|&k| files[k].0.clone()));
+            if o.group != 0 { landing.push((Instant::now() + LANDING, o.group, what.clone())); }
+        }
         for (j, &k) in which.iter().enumerate() {
             files[k].1 = o.files[j];
         }

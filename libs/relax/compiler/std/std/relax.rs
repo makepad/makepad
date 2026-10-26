@@ -101,6 +101,7 @@ extern "C" {
     fn __relax_restart_supported();
     fn __relax_restart_requested() -> u32;
     fn __relax_restart_reason(buf: *mut u8, cap: usize) -> usize;
+    fn __relax_patched_files(since: u64, buf: *mut u8, cap: usize) -> usize;
     fn __relax_restored_state(buf: *mut u8, cap: usize) -> usize;
     fn __relax_restart_now(state: *const u8, len: usize);
     fn __relax_live_stream(path: *const u8, plen: usize, text: *const u8, len: usize) -> u32;
@@ -286,6 +287,29 @@ pub fn restart_reason() -> String {
         v.set_len(m.min(n));
         String::from_utf8_lossy(&v).into_owned()
     }
+}
+
+/// The source files live patches changed since `*seen` (start it at 0; the call advances it).
+/// The patched fns run the new code at their next call; what the program built from code at run
+/// time (makepad's `script_mod!` designs, evaluated once) it builds again for these files.
+pub fn patched_files(seen: &mut u64) -> crate::vec::Vec<String> {
+    let text = unsafe {
+        let mut v: crate::vec::Vec<u8> = crate::vec::Vec::new();
+        loop {
+            let n = __relax_patched_files(*seen, v.as_mut_ptr(), v.capacity());
+            if n <= v.capacity() {
+                v.set_len(n);
+                break;
+            }
+            v.reserve(n);
+        }
+        String::from_utf8_lossy(&v).into_owned()
+    };
+    let mut lines = text.lines();
+    if let Some(n) = lines.next().and_then(|n| n.parse().ok()) {
+        *seen = n;
+    }
+    lines.map(String::from).collect()
 }
 
 /// Restarts the program with `state`, which its fresh run reads with `restored_state`.

@@ -1259,23 +1259,30 @@ impl Cx {
     /// Wake and redraw after an installed compiler patch, including while idle.
     #[cfg(relax)]
     fn poll_live_patch(&mut self) {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
         static INSTALLED: AtomicBool = AtomicBool::new(false);
         static CHANGED: AtomicBool = AtomicBool::new(false);
+        // the patch count the designs were last re-run for (std::relax::patched_files)
+        static SEEN: AtomicU64 = AtomicU64::new(0);
         extern "C" fn wake() {
             CHANGED.store(true, Ordering::Release);
             crate::thread::SignalToUI::set_internal_signal();
         }
         if !INSTALLED.swap(true, Ordering::Relaxed) {
             std::relax::on_patch(wake);
-            // the first look at the design files' times
-            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-            self.queue_patched_script_mod_files();
+            // patches before this run's first look built nothing of this run: skip them
+            let mut seen = 0;
+            std::relax::patched_files(&mut seen);
+            SEEN.store(seen, Ordering::Relaxed);
         }
         if CHANGED.swap(false, Ordering::AcqRel) {
-            // a design (script_mod!) edit is not re-run by the patch itself
-            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-            self.queue_patched_script_mod_files();
+            // a design (script_mod!) is evaluated from its fn once: a patched file's designs
+            // run again, from the patched code
+            let mut seen = SEEN.load(Ordering::Relaxed);
+            for file in std::relax::patched_files(&mut seen) {
+                self.live_code_patched(&file);
+            }
+            SEEN.store(seen, Ordering::Relaxed);
             self.redraw_all();
             // the wake may be a restart request (std::relax::restart_requested)
             crate::restart::poll_requested();

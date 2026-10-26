@@ -314,7 +314,7 @@ impl Sync {
                         let at = tick.map_or(String::new(), |t| format!(" at session {session} tick {t}"));
                         let (sev, what) = match e.rung.as_str() {
                             "patch" | "partial" => (Sev::Info, format!("patched {} fns in {:.0} ms", e.fns, e.ms)),
-                            "restart" | "restart-unsupported" => (Sev::Warn, format!("needs a restart: {}", e.reasons)),
+                            "restart" => (Sev::Warn, format!("needs a restart: {}", e.reasons)),
                             "refuse" => (Sev::Warn, format!("refused the edit: {}", e.reasons)),
                             other => (Sev::Info, format!("{other} ({} files)", e.files)),
                         };

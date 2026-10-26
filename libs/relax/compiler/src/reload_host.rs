@@ -1,6 +1,7 @@
 //! Changes a running process cannot take in place: the provided crates built into makepad, std,
-//! makepad run's own sources, the Cargo graph, build scripts, and program edits the patcher cannot
-//! absorb (a Restart rung: a layout, a signature). The loader is rebuilt with cargo in
+//! makepad run's own sources, the Cargo graph and build scripts (a program edit the patcher
+//! cannot absorb restarts in place without a rebuild: reload.rs restart_in_place). The loader is
+//! rebuilt with cargo in
 //! the background (nice) while the app keeps running the code it has, then the process truly
 //! restarts: the rebuilt binary replaces it (exec) with the same command line, and an app that
 //! restarts with its state (std::relax::restart_supported) is asked first, at its next safe point
