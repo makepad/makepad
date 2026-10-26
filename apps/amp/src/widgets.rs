@@ -107,6 +107,8 @@ script_mod! {
         grid := MusicGrid{
             default_row_height: 36.0
             cols: 6
+            // A press that travels carries the song out of the window.
+            row_drag: true
         }
     }
 
@@ -913,32 +915,32 @@ impl TrackTable {
 
 impl TrackTableRef {
     pub fn activated(&self, actions: &Actions) -> Option<usize> {
-        match actions.find_widget_action(self.widget_uid())?.cast() {
+        actions.filter_widget_actions_cast::<TrackTableAction>(self.widget_uid()).find_map(|action| match action {
             TrackTableAction::Activated(row) => Some(row),
             _ => None,
-        }
+        })
     }
 
     pub fn menu(&self, actions: &Actions) -> Option<(usize, DVec2)> {
-        match actions.find_widget_action(self.widget_uid())?.cast() {
+        actions.filter_widget_actions_cast::<TrackTableAction>(self.widget_uid()).find_map(|action| match action {
             TrackTableAction::Menu(row, abs) => Some((row, abs)),
             _ => None,
-        }
+        })
     }
 
     pub fn radio(&self, actions: &Actions) -> Option<usize> {
-        match actions.find_widget_action(self.widget_uid())?.cast() {
+        actions.filter_widget_actions_cast::<TrackTableAction>(self.widget_uid()).find_map(|action| match action {
             TrackTableAction::Radio(row) => Some(row),
             _ => None,
-        }
+        })
     }
 
     /// Rows to drag out of the window, and the window.
     pub fn drag_out(&self, actions: &Actions) -> Option<(Vec<usize>, WindowId)> {
-        match actions.find_widget_action(self.widget_uid())?.cast() {
+        actions.filter_widget_actions_cast::<TrackTableAction>(self.widget_uid()).find_map(|action| match action {
             TrackTableAction::DragOut(rows, window) => Some((rows, window)),
             _ => None,
-        }
+        })
     }
 
     pub fn picked(&self) -> Option<usize> {

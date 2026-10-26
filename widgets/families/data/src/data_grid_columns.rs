@@ -154,6 +154,14 @@ impl<K: GridColumn> GridColumns<K> {
         self.sort
     }
 
+    /// Put a sort the host keeps elsewhere (one per list) in place; `None`
+    /// is the fallback. A column that cannot sort, or is neither chosen nor
+    /// leading, falls back too.
+    pub fn set_sort(&mut self, sort: Option<GridSort<K>>) {
+        let usable = |s: &GridSort<K>| s.column.sortable() && (self.chosen.contains(&s.column) || self.leading.contains(&s.column));
+        self.sort = sort.filter(usable).or(self.fallback);
+    }
+
     /// Every column the person cannot hide, in the list, before the rest if
     /// it was missing.
     fn complete(&self, mut columns: Vec<K>) -> Vec<K> {

@@ -13,7 +13,8 @@ use crate::source::{CatalogResults, Device, NowPlaying, Repeat, TrackDetail, Tra
 use crate::worker::Availability;
 use crate::Theme;
 use makepad_audio_route::AnalyzerHandle;
-use makepad_widgets::{log, GridColumns, GridSort};
+use makepad_widgets::{log, GridColumn, GridColumns, GridSort};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Tracks a search lists at most; the count says how many matched.
@@ -271,8 +272,10 @@ pub struct Requests {
     pub transport: Vec<Transport>,
     /// The query changed: search the catalog after a pause.
     pub catalog: bool,
-    /// The table's columns changed (chosen, moved, resized, sorted): save them.
+    /// The table's columns changed (chosen, moved, resized): save them.
     pub columns: bool,
+    /// A list's sort changed: save every list's sort.
+    pub sorts: bool,
     /// The play queue changed: hand its next tracks to the system.
     pub queue: bool,
     /// Fetch a radio: (seed uri, title).
@@ -319,8 +322,11 @@ pub struct Model {
     pub error: Option<String>,
     /// How long the last local search took, in ms.
     pub search_ms: f64,
-    /// The track table's columns and the sort a heading press chose.
+    /// The track table's columns, and the open list's sort.
     pub columns: GridColumns<Column>,
+    /// Each list's sort, by [`Model::list_key`]: a heading press sorts the
+    /// open list only, and it is sorted that way when it opens again.
+    pub sorts: HashMap<String, GridSort<Column>>,
     /// The equalizer as set, and where its route stands.
     pub eq: EqSettings,
     pub audio: AudioState,
@@ -386,6 +392,7 @@ impl Model {
             error: None,
             search_ms: 0.0,
             columns: columns::layout(),
+            sorts: HashMap::new(),
             eq: EqSettings::default(),
             audio: AudioState::Off,
             route_sound: None,
@@ -558,13 +565,55 @@ impl Model {
         }
     }
 
-    /// A press on a column's heading: rising, falling, then back to the
-    /// list's own order.
+    /// A press on a column's heading: the open list sorts by it rising, the
+    /// next press falling, and so on (# is the list's own order).
     pub fn press_heading(&mut self, column: Column) {
+        let Some(key) = self.list_key() else { return };
+        self.columns.set_sort(self.sorts.get(&key).copied());
         if self.columns.press_heading(column) {
-            self.requests.columns = true;
+            match self.columns.sort() {
+                Some(sort) => self.sorts.insert(key, sort),
+                None => self.sorts.remove(&key),
+            };
+            self.requests.sorts = true;
             self.rebuild();
         }
+    }
+
+    /// What the open list's sort is kept under: a playlist by its uri, an
+    /// artist or album by its name, the search page as one list.
+    pub fn list_key(&self) -> Option<String> {
+        match &self.page {
+            Page::Playlist(at) => self.index.entries.get(*at).map(|entry| format!("playlist {}", entry.uri)),
+            Page::Search => Some("search".into()),
+            Page::Artist(name) => Some(format!("artist {name}")),
+            Page::Album(name, artists, _) => Some(format!("album {name} · {artists}")),
+            Page::Equalizer | Page::Folders => None,
+        }
+    }
+
+    /// Every list's sort, one `up|down <column> <list key>` line each.
+    pub fn serialize_sorts(&self) -> String {
+        let mut lines: Vec<String> = self.sorts.iter().map(|(key, sort)| format!("{} {} {key}\n", if sort.descending { "down" } else { "up" }, sort.column.code())).collect();
+        lines.sort();
+        lines.concat()
+    }
+
+    /// Read back what [`Self::serialize_sorts`] wrote; unknown lines are skipped.
+    pub fn parse_sorts(&mut self, text: &str) {
+        for line in text.lines() {
+            let mut parts = line.splitn(3, ' ');
+            let (Some(way), Some(code), Some(key)) = (parts.next(), parts.next(), parts.next()) else { continue };
+            let descending = match way {
+                "down" => true,
+                "up" => false,
+                _ => continue,
+            };
+            if let Some(column) = columns::ALL.iter().copied().find(|c| c.code() == code) {
+                self.sorts.insert(key.to_string(), GridSort { column, descending });
+            }
+        }
+        self.rebuild();
     }
 
     /// The columns were chosen, moved or read back: rebuild in case the
@@ -1359,6 +1408,8 @@ impl Model {
         if self.filter == Filter::Local && self.page != Page::Folders {
             self.rows.retain(|row| !matches!(row, Row::Track { id, .. } if !index.has_local(*id)));
         }
+        let sort = self.list_key().and_then(|key| self.sorts.get(&key).copied());
+        self.columns.set_sort(sort);
         if let Some(sort) = self.columns.sort() {
             sort_tracks(&index, &mut self.rows, sort);
         }
@@ -1513,7 +1564,7 @@ pub fn long_duration(ms: u64) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn playing(uri: &str, on: bool) -> Option<NowPlaying> {
@@ -1600,8 +1651,9 @@ mod tests {
         }).collect()
     }
 
-    /// A heading sorts rising, falling, then back to the playlist's order;
-    /// text sorts folded (Ämber with the a's).
+    /// Each press on a heading turns the sort around (rising, falling,
+    /// rising...); text sorts folded (Ämber with the a's); # rising is the
+    /// playlist's own order.
     #[test]
     fn headings_sort_every_way() {
         let mut model = playlist_model();
@@ -1611,12 +1663,34 @@ mod tests {
         model.press_heading(Column::Title);
         assert_eq!(names(&model), ["Gamma", "Beta", "Ämber", "alpha"]);
         model.press_heading(Column::Title);
+        assert_eq!(names(&model), ["alpha", "Ämber", "Beta", "Gamma"]);
+        model.press_heading(Column::Number);
         assert_eq!(names(&model), ["Beta", "alpha", "Gamma", "Ämber"]);
         // # falling: the playlist backwards, newest additions first.
         model.press_heading(Column::Number);
-        model.press_heading(Column::Number);
         assert_eq!(names(&model), ["Ämber", "Gamma", "alpha", "Beta"]);
-        assert!(model.requests.columns, "a sort is saved with the layout");
+        assert!(model.requests.sorts, "a sort is saved");
+    }
+
+    /// A sort belongs to the list it was chosen on: another list opens in
+    /// its own order, and the first is sorted again when it reopens, also
+    /// after the sorts were saved and read back.
+    #[test]
+    fn each_list_keeps_its_own_sort() {
+        let mut model = playlist_model();
+        let page = model.page.clone();
+        model.press_heading(Column::Title);
+        model.press_heading(Column::Title);
+        assert_eq!(names(&model), ["Gamma", "Beta", "Ämber", "alpha"]);
+        model.open(Page::Search);
+        assert_eq!(model.columns.sort(), None);
+        model.open(page.clone());
+        assert_eq!(names(&model), ["Gamma", "Beta", "Ämber", "alpha"]);
+        let saved = model.serialize_sorts();
+        let mut fresh = playlist_model();
+        fresh.parse_sorts(&saved);
+        fresh.open(page);
+        assert_eq!(names(&fresh), ["Gamma", "Beta", "Ämber", "alpha"]);
     }
 
     /// Playing a row of a list sorted by # falling plays on in that order,
@@ -1755,7 +1829,7 @@ mod tests {
 
     /// A library of two system tracks, one with a local copy, and a local
     /// file of its own, laid side by side.
-    fn mixed_model() -> Model {
+    pub(crate) fn mixed_model() -> Model {
         use crate::source::{LibraryEntry, Playlist, PlaylistTrack, SourceId};
         let mut system = Index::new(SourceId::Spotify);
         system.set_library(vec![LibraryEntry { uri: "p:1".into(), name: "Mix".into(), is_folder: false, depth: 1 }]);
@@ -1773,11 +1847,11 @@ mod tests {
         model
     }
 
-    fn item(uri: &str, name: &str) -> QueueItem {
+    pub(crate) fn item(uri: &str, name: &str) -> QueueItem {
         QueueItem { uri: uri.into(), name: name.into(), artist: "A".into() }
     }
 
-    fn player_plays(model: &mut Model) -> Vec<String> {
+    pub(crate) fn player_plays(model: &mut Model) -> Vec<String> {
         std::mem::take(&mut model.requests.player).into_iter().map(|request| match request {
             PlayerRequest::Play { path, .. } => path,
             other => format!("{other:?}"),

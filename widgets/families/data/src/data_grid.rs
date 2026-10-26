@@ -634,6 +634,10 @@ enum Interact {
         travelled: bool,
         /// The press is carrying its row out (`row_drag`).
         carrying: bool,
+        /// A `row_drag` press on a row of a selection of several left the
+        /// selection as it was, so a drag carries all of it; a click
+        /// (no travel) selects the pressed row alone as it comes up.
+        select_on_click: bool,
         /// The scroll as the press went down, which a `drag_scrolling`
         /// press moves away from by the pointer's travel.
         scroll_at_press: DVec2,
@@ -980,6 +984,10 @@ pub struct DataGrid {
     row_drag_frame: Option<NextFrame>,
     #[rust]
     row_drag_frame_time: Option<f64>,
+    /// The pressing window's size as a cell press went down: a `row_drag`
+    /// press that drags out a selection and leaves it carries the rows.
+    #[rust]
+    press_window: Option<DVec2>,
 }
 
 pub type CopyProvider = Box<dyn FnMut(&GridSelection) -> String>;
@@ -2997,17 +3005,31 @@ impl DataGrid {
         // scroll, never rubber-bands: the press is held only to tell a
         // click from a drag.
         let selects = self.selection != GridSelectMode::Off;
-        if selects {
-            self.select_cell(cx, row, display_col, modifiers.shift);
+        // In a `row_drag` grid a plain press on a row of the selection keeps
+        // it, so the drag that may follow carries all of it (a click picks
+        // the row alone as it comes up); any other press picks as always.
+        let extend = modifiers.shift || modifiers.logo || modifiers.control;
+        let keep = selects && self.row_drag && !extend && row < self.rows
+            && self.selected.as_ref().is_some_and(|sel| {
+                let (first, last) = sel.row_range();
+                (first..=last).contains(&row) && first != last
+            });
+        if selects && !keep {
+            self.select_cell(cx, row, display_col, extend);
         }
+        // Dragging out a selection: in a `row_drag` grid only with a key
+        // held or from the empty space under the rows; a plain press there
+        // carries its row (and the selection it is part of).
+        let rubber_band = selects && !self.drag_scrolling && (!self.row_drag || extend || row >= self.rows);
         self.interact = Interact::CellPress {
             row,
             display_col,
             down_abs: abs,
             modifiers,
-            rubber_band: selects && !self.row_drag && !self.drag_scrolling,
+            rubber_band,
             travelled: false,
             carrying: false,
+            select_on_click: keep,
             scroll_at_press: self.scroll,
             at: abs,
         };
@@ -3057,6 +3079,7 @@ impl DataGrid {
             carrying,
             scroll_at_press,
             at,
+            ..
         } = &mut self.interact
         else {
             return;
@@ -3084,7 +3107,29 @@ impl DataGrid {
             }
             return;
         }
-        if row_drag {
+        if row_drag && *rubber_band {
+            // A selection dragged out past the window's edge goes on as a
+            // carry of the selected rows, out of the window.
+            let outside = self.press_window.is_some_and(|size| {
+                abs.x < 0.0 || abs.y < 0.0 || abs.x >= size.x || abs.y >= size.y
+            });
+            let head = self.selected.as_ref().map(|sel| sel.head).filter(|head| head.0 < self.rows);
+            if let (true, Some((head_row, head_col))) = (outside, head) {
+                *carrying = true;
+                let modifiers = *modifiers;
+                let col = self.display_to_data(head_col);
+                cx.widget_action(
+                    self.uid,
+                    DataGridAction::RowDragStarted {
+                        row: head_row,
+                        col,
+                        abs,
+                        modifiers,
+                    },
+                );
+                return;
+            }
+        } else if row_drag {
             if *travelled && *row < self.rows {
                 *carrying = true;
                 let (row, display_col, modifiers) = (*row, *display_col, *modifiers);
@@ -3144,6 +3189,7 @@ impl DataGrid {
             down_abs,
             travelled,
             carrying,
+            select_on_click,
             ..
         } = std::mem::take(&mut self.interact)
         else {
@@ -3156,6 +3202,9 @@ impl DataGrid {
         }
         if travelled || row >= self.rows || (abs - down_abs).length() > self.drag_threshold {
             return;
+        }
+        if select_on_click {
+            self.select_cell(cx, row, display_col, false);
         }
         let col = self.display_to_data(display_col);
         cx.widget_action(
@@ -3635,6 +3684,7 @@ impl Widget for DataGrid {
                         }
                     }
                     HitZone::Cell { row, display_col } => {
+                        self.press_window = cx.get_window_id_of(&self.area).map(|id| cx.windows[id].window_geom.inner_size);
                         self.press_cell(cx, row, display_col, fe.abs, fe.modifiers, fe.tap_count);
                         // Row picks and a grid whose columns fit move nothing sideways, so they leave a swipe back alone.
                         let drags_sideways = self.row_drag || if self.drag_scrolling {
@@ -4740,16 +4790,150 @@ mod tests {
         let at = middle(&grid, 2, 1);
         let (six, other_cell) = (at + dvec2(0.0, 6.0), middle(&grid, 5, 2));
         let out = raised(&mut cx, &mut grid, |cx, grid| {
-            grid.press_cell(cx, 2, 1, at, mods(false, true), 1);
+            grid.press_cell(cx, 2, 1, at, KeyModifiers::default(), 1);
             grid.move_cell_press(cx, six);
             grid.move_cell_press(cx, other_cell);
             grid.move_cell_press(cx, at + dvec2(400.0, 400.0));
             grid.release_cell_press(cx, at, KeyModifiers::default());
         });
-        assert_eq!(carried(&out), vec![(2, 1, six, mods(false, true))], "{out:?}");
+        assert_eq!(carried(&out), vec![(2, 1, six, KeyModifiers::default())], "{out:?}");
         assert!(released(&out).is_empty(), "{out:?}");
         assert_eq!(grid.selection(), Some(GridSelection::single(2, 1)));
         assert_eq!(grid.scroll, DVec2::default(), "the carry scrolled the grid");
+        });
+    }
+
+    /// A `row_drag` grid with rows 2..=4 picked: a plain press on row 3
+    /// keeps the pick and a drag carries it (no selection change on the
+    /// way); a click there picks row 3 alone as it comes up.
+    #[test]
+    fn a_press_on_the_picked_rows_carries_them_and_a_click_picks_one() {
+        crate::on_test_cx(|| {
+        for drag in [true, false] {
+            let mut cx = cx();
+            let mut grid = laid_out(&mut cx);
+            grid.row_drag = true;
+            grid.selected = Some(GridSelection { kind: GridSelectKind::Cells, anchor: (2, 0), head: (4, 0) });
+            let at = middle(&grid, 3, 1);
+            let end = if drag { middle(&grid, 6, 1) } else { at };
+            let out = raised(&mut cx, &mut grid, |cx, grid| {
+                grid.press_cell(cx, 3, 1, at, KeyModifiers::default(), 1);
+                assert_eq!(grid.selection().map(|s| s.row_range()), Some((2, 4)), "the press dropped the pick");
+                grid.move_cell_press(cx, end);
+                grid.release_cell_press(cx, end, KeyModifiers::default());
+            });
+            if drag {
+                assert_eq!(carried(&out).len(), 1, "{out:?}");
+                assert_eq!(carried(&out)[0].0, 3);
+                assert!(!selection_changed(&out), "{out:?}");
+                assert_eq!(grid.selection().map(|s| s.row_range()), Some((2, 4)));
+            } else {
+                assert!(carried(&out).is_empty(), "{out:?}");
+                assert_eq!(released(&out).len(), 1, "{out:?}");
+                assert_eq!(grid.selection().map(|s| s.row_range()), Some((3, 3)));
+            }
+        }
+        });
+    }
+
+    /// A plain press on a row outside the pick picks that row and a drag
+    /// carries it alone; with nothing picked the same.
+    #[test]
+    fn a_press_off_the_pick_carries_the_pressed_row() {
+        crate::on_test_cx(|| {
+        for picked in [true, false] {
+            let mut cx = cx();
+            let mut grid = laid_out(&mut cx);
+            grid.row_drag = true;
+            grid.selected = picked.then(|| GridSelection { kind: GridSelectKind::Cells, anchor: (2, 0), head: (4, 0) });
+            let at = middle(&grid, 5, 1);
+            let out = raised(&mut cx, &mut grid, |cx, grid| {
+                grid.press_cell(cx, 5, 1, at, KeyModifiers::default(), 1);
+                grid.move_cell_press(cx, at + dvec2(0.0, 30.0));
+            });
+            assert_eq!(carried(&out).iter().map(|c| c.0).collect::<Vec<_>>(), vec![5], "{out:?}");
+            assert_eq!(grid.selection().map(|s| s.row_range()), Some((5, 5)));
+        }
+        });
+    }
+
+    /// With Shift (or Cmd / Ctrl) held a `row_drag` press drags out a
+    /// selection instead of carrying; Shift-click still extends the pick.
+    #[test]
+    fn a_held_key_drags_out_a_selection_in_a_row_drag_grid() {
+        crate::on_test_cx(|| {
+        for held in [mods(true, false), mods(false, true), KeyModifiers { logo: true, ..Default::default() }] {
+            let mut cx = cx();
+            let mut grid = laid_out(&mut cx);
+            grid.row_drag = true;
+            grid.selected = Some(GridSelection::single(1, 1));
+            let at = middle(&grid, 2, 1);
+            let out = raised(&mut cx, &mut grid, |cx, grid| {
+                grid.press_cell(cx, 2, 1, at, held, 1);
+                grid.move_cell_press(cx, middle(grid, 4, 1));
+                grid.release_cell_press(cx, middle(grid, 4, 1), held);
+            });
+            assert!(carried(&out).is_empty(), "{held:?}: {out:?}");
+            assert!(selection_changed(&out), "{held:?}: {out:?}");
+            assert_eq!(grid.selection().map(|s| s.row_range()), Some((1, 4)), "{held:?}");
+        }
+        let mut cx = cx();
+        let mut grid = laid_out(&mut cx);
+        grid.row_drag = true;
+        grid.selected = Some(GridSelection::single(1, 1));
+        let at = middle(&grid, 3, 1);
+        grid.press_cell(&mut cx, 3, 1, at, mods(true, false), 1);
+        grid.release_cell_press(&mut cx, at, mods(true, false));
+        assert_eq!(grid.selection().map(|s| s.row_range()), Some((1, 3)), "Shift-click no longer extends");
+        });
+    }
+
+    /// A selection dragged out (Shift held) that leaves the window goes on
+    /// as a carry of the picked rows: the platform drag takes over.
+    #[test]
+    fn a_selection_dragged_out_of_the_window_becomes_a_carry() {
+        crate::on_test_cx(|| {
+        let mut cx = cx();
+        let mut grid = laid_out(&mut cx);
+        grid.row_drag = true;
+        grid.press_window = Some(dvec2(300.0, 200.0));
+        grid.selected = Some(GridSelection::single(1, 1));
+        let at = middle(&grid, 2, 1);
+        let inside = middle(&grid, 3, 1);
+        let outside = dvec2(320.0, inside.y);
+        let out = raised(&mut cx, &mut grid, |cx, grid| {
+            grid.press_cell(cx, 2, 1, at, mods(true, false), 1);
+            grid.move_cell_press(cx, inside);
+            assert!(matches!(grid.interact, Interact::CellPress { carrying: false, .. }));
+            grid.move_cell_press(cx, outside);
+            grid.move_cell_press(cx, outside + dvec2(40.0, 0.0));
+            grid.release_cell_press(cx, outside, KeyModifiers::default());
+        });
+        let carried = carried(&out);
+        assert_eq!(carried.len(), 1, "{out:?}");
+        assert_eq!(carried[0].0, 3, "{out:?}");
+        assert!(out.iter().any(|a| matches!(a, DataGridAction::RowDragEnded { .. })), "{out:?}");
+        assert_eq!(grid.selection().map(|s| s.row_range()), Some((1, 3)));
+        });
+    }
+
+    /// A press in the empty space under the rows drags out a selection.
+    #[test]
+    fn a_press_under_the_rows_drags_out_a_selection() {
+        crate::on_test_cx(|| {
+        let mut cx = cx();
+        let mut grid = laid_out(&mut cx);
+        grid.row_drag = true;
+        grid.rows = 4;
+        grid.compute_viewport();
+        let at = middle(&grid, 6, 1);
+        let out = raised(&mut cx, &mut grid, |cx, grid| {
+            grid.press_cell(cx, 6, 1, at, KeyModifiers::default(), 1);
+            grid.move_cell_press(cx, middle(grid, 1, 1));
+            grid.release_cell_press(cx, middle(grid, 1, 1), KeyModifiers::default());
+        });
+        assert!(carried(&out).is_empty(), "{out:?}");
+        assert!(selection_changed(&out), "{out:?}");
         });
     }
 

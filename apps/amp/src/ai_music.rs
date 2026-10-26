@@ -88,6 +88,11 @@ pub struct MusicModel {
     pub restriction: String,
 }
 
+/// What a model's weights allow, before the hub has said.
+pub fn restriction_of(model: &str) -> &'static str {
+    if model.starts_with("yue2") { "non-commercial" } else { "" }
+}
+
 impl MusicModel {
     /// The picker's line: the id and, when there is one, its restriction.
     pub fn label(&self) -> String {
@@ -962,12 +967,6 @@ pub struct Making {
 }
 
 impl Making {
-    /// Its step, in words: what happens and who does it.
-    pub fn step(&self) -> String {
-        let who = if self.at_work.is_empty() { String::new() } else { format!(" · {}", self.at_work) };
-        format!("{}{who}", self.step_word())
-    }
-
     /// Its step alone ("Writing", "Waiting for a GPU", "Singing").
     pub fn step_word(&self) -> String {
         match self.stage.as_str() {
@@ -984,14 +983,11 @@ impl Making {
         }
     }
 
-    /// The step with its percentage and elapsed time.
-    pub fn line(&self, now: f64) -> String {
-        format!("{}{} · {}", self.step(), self.percent(), clock(now - self.started_at))
-    }
-
-    /// The table's status cell: the step, its percentage and elapsed time.
+    /// The table's status cell: the step, its percentage, elapsed time and
+    /// who works on it.
     pub fn status(&self, now: f64) -> String {
-        format!("{}{} · {}", self.step_word(), self.percent(), clock(now - self.started_at))
+        let who = if self.at_work.is_empty() { String::new() } else { format!(" · {}", self.at_work) };
+        format!("{}{} · {}{who}", self.step_word(), self.percent(), clock(now - self.started_at))
     }
 
     fn percent(&self) -> String {
@@ -1090,43 +1086,9 @@ impl AiMode {
         self.songs.iter().filter(|s| !s.path.is_empty())
     }
 
-    /// The uri of the last song of the AI list.
-    pub fn last_uri(&self) -> Option<String> {
-        self.made().last().map(|s| uri_of(&s.path))
-    }
-
     /// Whether Auto has a song on its way already (made or being made).
     pub fn auto_pending(&self) -> bool {
         self.jobs.iter().any(|j| j.place == Place::End) || self.ready.iter().any(|(_, p)| *p == Place::End)
-    }
-
-    /// The page's one status line, under the controls: each song being made
-    /// with the node it got.
-    pub fn status(&self, now: f64) -> String {
-        if let Some(error) = &self.error {
-            return error.clone();
-        }
-        if !self.jobs.is_empty() {
-            let made = self.made().count();
-            return self.jobs.iter().enumerate().map(|(n, job)| format!("Song {}: {}", made + n + 1, job.line(now))).collect::<Vec<_>>().join("  ·  ");
-        }
-        if self.auto {
-            "Auto: when the last song starts, one more is made from the prompt and goes at the end".to_string()
-        } else {
-            "Generate now (⌘↩) makes a song from the prompt on your AI hub's GPUs; double-click a song to play the list from there".to_string()
-        }
-    }
-
-    /// The licence of the picked model, for the line under the picker.
-    pub fn licence(&self) -> String {
-        let restriction = self.models.iter().find(|m| m.id == self.model).map_or("", |m| m.restriction.as_str());
-        if self.model.starts_with("yue2") {
-            "YuE2-3B weights: CC BY-NC 4.0 · personal listening only".to_string()
-        } else if restriction.is_empty() || restriction == "none" {
-            format!("{}: permissive licence", self.model)
-        } else {
-            format!("{} weights: {restriction} licence · personal listening", self.model)
-        }
     }
 
     /// Whether `uri` is one of the AI songs.

@@ -183,7 +183,7 @@ impl App {
                         self.save_up_next(cx);
                     }
                 }
-                if self.ai.auto && uri == self.ai.last_uri() && !self.ai.auto_pending() {
+                if self.ai.auto && self.ai_last_in_play() && !self.ai.auto_pending() {
                     self.ai_generate(cx, Place::End);
                 }
             }
@@ -250,10 +250,10 @@ impl App {
         if let Some(auto) = self.ui.check_box(cx, ids!(ai_auto)).changed(actions) {
             self.ai.auto = auto;
             // Turned on while the last song plays: its follower starts now.
-            let playing = self.model.playback.uri().map(str::to_string);
-            if auto && playing.is_some() && playing == self.ai.last_uri() && !self.ai.auto_pending() {
+            if auto && self.ai_last_in_play() && !self.ai.auto_pending() {
                 self.ai_generate(cx, Place::End);
             }
+            self.ai_save(cx);
             self.model.requests.redraw = true;
         }
         let skip = self.ui.button(cx, ids!(ai_skip)).clicked(actions) || self.ui.button(cx, ids!(ai_skip_icon)).clicked(actions);
@@ -288,6 +288,24 @@ impl App {
         if let Some(at) = table.activated(actions) {
             self.ai_play_row(at);
         }
+        if let Some((rows, window)) = table.drag_out(actions) {
+            // AI songs are local Ogg files: they go as tagged MP3s with their
+            // lyrics. A song still being made has no file yet.
+            let of = self.ai_rows_of();
+            let paths: Vec<Option<String>> = rows
+                .into_iter()
+                .filter_map(|at| match of.get(at) {
+                    Some(RowOf::Made(index)) => Some(self.ai.songs.get(*index).map(|song| song.path.clone())),
+                    _ => None,
+                })
+                .collect();
+            if !paths.is_empty() {
+                self.drag_out(cx, window, paths);
+            }
+        }
+        if table.layout_changed(actions) {
+            self.ai_save(cx);
+        }
         if let Some(at) = table.picked(actions) {
             let picked = match self.ai_rows_of().into_iter().nth(at) {
                 Some(RowOf::Made(index)) => Some(index),
@@ -313,6 +331,36 @@ impl App {
         }
     }
 
+    /// Whether the playing song is an AI song and no AI song follows it in
+    /// the play queue: Auto makes the next one then. The play order, not the
+    /// table's sort, decides.
+    fn ai_last_in_play(&self) -> bool {
+        let Some(uri) = self.model.playback.uri() else { return false };
+        self.ai.is_ai(uri) && !self.model.queue.upcoming().any(|(_, item)| self.ai.is_ai(&item.uri))
+    }
+
+    /// Keep Auto and the table's columns and sort for the next run.
+    fn ai_save(&mut self, cx: &mut Cx) {
+        let layout = self.ui.ai_table(cx, ids!(ai_table)).layout_text();
+        self.save(crate::worker::Setting::AiMusic, format!("auto {}\n{layout}", self.ai.auto as u8));
+    }
+
+    /// Read back what [`Self::ai_save`] kept.
+    pub(crate) fn ai_restore(&mut self, cx: &mut Cx, text: &str) {
+        let mut layout = String::new();
+        for line in text.lines() {
+            match line.strip_prefix("auto ") {
+                Some(on) => self.ai.auto = on.trim() == "1",
+                None => {
+                    layout.push_str(line);
+                    layout.push('\n');
+                }
+            }
+        }
+        self.ui.ai_table(cx, ids!(ai_table)).restore_layout(cx, &layout);
+        self.model.requests.redraw = true;
+    }
+
     /// The rows in play order: the AI list (oldest first), then the songs
     /// being made, oldest first.
     fn ai_rows_of(&self) -> Vec<RowOf> {
@@ -331,10 +379,9 @@ impl App {
     /// their text changed.
     pub(crate) fn update_ai_page(&mut self, cx: &mut Cx) {
         let now = Self::now(cx);
-        let status = self.ai.status(now);
-        self.set_label(cx, live_id!(ai_status), ids!(ai_status), &status);
-        let licence = self.ai.licence();
-        self.set_label(cx, live_id!(ai_licence), ids!(ai_licence), &licence);
+        let error = self.ai.error.clone().unwrap_or_default();
+        self.set_visible(cx, ids!(ai_status), !error.is_empty());
+        self.set_label(cx, live_id!(ai_status), ids!(ai_status), &error);
         let busy = self.ai.busy();
         self.set_visible(cx, ids!(ai_cancel_cap), busy);
         let auto = self.ui.check_box(cx, ids!(ai_auto));
@@ -345,7 +392,7 @@ impl App {
             self.ai_models_shown = true;
             let mut labels: Vec<String> = self.ai.models.iter().map(|m| m.label()).collect();
             if labels.is_empty() {
-                labels.push(self.ai.model.clone());
+                labels.push(crate::ai_music::MusicModel { id: self.ai.model.clone(), restriction: crate::ai_music::restriction_of(&self.ai.model).into() }.label());
             }
             let picker = self.ui.drop_down(cx, ids!(ai_model));
             picker.set_labels(cx, labels);
@@ -378,6 +425,8 @@ impl App {
                         style: song.prompt.clone(),
                         model: song.model.clone(),
                         created: created_secs(&song.path).map(created_text),
+                        created_secs: created_secs(&song.path),
+                        length: song.length,
                         time: (song.length > 0.0).then(|| clock(song.length)),
                         status: String::new(),
                         progress: None,
@@ -397,6 +446,8 @@ impl App {
                         style,
                         model,
                         created: None,
+                        created_secs: None,
+                        length: 0.0,
                         time: None,
                         status: job.status(now),
                         progress: Some(job.permille as f64 / 1000.0),
@@ -519,10 +570,10 @@ impl App {
             (ids!(side_queue_cap), "Next in queue: what plays after this song"),
             (ids!(ai_show_lyrics_cap), "The lyrics in time with the music, with their translation; click a line to play from there"),
             (ids!(ai_language), "The language the writer translates the lyrics into, from the next song on"),
-            (ids!(ai_now_cap), "Make one song from the prompt now; it plays next (⌘↩ in the prompt does the same)"),
+            (ids!(ai_now_cap), "Generate now (⌘↩): make one song from the prompt on your AI hub's GPUs; it plays next"),
             (ids!(ai_auto), "Auto: when the last song of the list starts playing, one more is made from the prompt and goes at the end"),
             (ids!(ai_cancel_cap), "Stop making the songs being made (made ones stay in the list)"),
-            (ids!(ai_model), "The music model for the next song"),
+            (ids!(ai_model), "The music model for the next song. YuE2-3B's weights are CC BY-NC 4.0: personal listening only"),
             (ids!(ai_skip_cap), "Skip to the next song"),
             (ids!(ai_length), "How long the next song is (the writer sizes its lyrics to it)"),
             (ids!(ai_prompt), "What to hear. Edits apply from the next song made; the playing song is never interrupted"),

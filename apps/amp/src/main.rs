@@ -815,26 +815,24 @@ script_mod! {
                                         flow: Down
                                         spacing: 6
                                         padding: Inset{left: 3 right: 3 top: 10 bottom: 3}
+                                        // The prompt (two lines; a longer one scrolls in
+                                        // the field) and its controls in one row.
                                         View{
                                             width: Fill
                                             height: Fit
                                             flow: Right
                                             spacing: 10
+                                            align: Align{y: 0.5}
                                             padding: Inset{left: 9 right: 9}
-                                            ai_prompt := mod.widgets.HwTextInput{width: Fill height: 66 is_multiline: true text: "EDM christmas music" empty_text: "What do you want to hear? (⌘↩ makes a song now)"}
+                                            ai_prompt := mod.widgets.HwTextInput{width: Fill height: 44 is_multiline: true padding: Inset{left: 8 right: 8 top: 4 bottom: 4} text: "EDM christmas music" empty_text: "What do you want to hear?"}
                                             View{
                                                 width: Fit
                                                 height: Fit
-                                                flow: Down
+                                                flow: Right
                                                 spacing: 6
-                                                View{
-                                                    width: Fit
-                                                    height: Fit
-                                                    flow: Right
-                                                    spacing: 6
-                                                    ai_length := mod.widgets.HwDropDown{width: 76 height: 28 labels: ["1 min", "2 min", "3 min", "5 min"]}
-                                                    ai_model := mod.widgets.HwDropDown{width: 186 height: 28 labels: ["yue2-3b · non-commercial"]}
-                                                }
+                                                align: Align{y: 0.5}
+                                                ai_length := mod.widgets.HwDropDown{width: 76 height: 28 labels: ["1 min", "2 min", "3 min", "5 min"]}
+                                                ai_model := mod.widgets.HwDropDown{width: 186 height: 28 labels: ["yue2-3b · non-commercial"]}
                                                 View{
                                                     width: Fit
                                                     height: Fit
@@ -856,16 +854,8 @@ script_mod! {
                                                 }
                                             }
                                         }
-                                        View{
-                                            width: Fill
-                                            height: Fit
-                                            flow: Right
-                                            spacing: 12
-                                            padding: Inset{left: 9 right: 9}
-                                            align: Align{y: 0.5}
-                                            ai_status := mod.widgets.HwPanelText{width: Fill max_lines: 1 text_overflow: TextOverflow.Ellipsis text: ""}
-                                            ai_licence := mod.widgets.HwPanelText{width: Fit max_lines: 1 text: "" draw_text +: {text_style: theme.font_regular{font_size: 8.0}}}
-                                        }
+                                        // Only when something went wrong.
+                                        ai_status := mod.widgets.HwPanelText{visible: false width: Fill padding: Inset{left: 12 right: 9} max_lines: 1 text_overflow: TextOverflow.Ellipsis text: ""}
                                         ai_empty := mod.widgets.HwPanelText{width: Fill padding: Inset{left: 12 top: 8} text: "No songs yet. Type what you want to hear and press Generate now: a song takes about a minute."}
                                         // Every AI song in play order, then the ones being made (ai_table.rs).
                                         ai_table := mod.widgets.AiTable{}
@@ -2193,6 +2183,9 @@ impl App {
         if requests.columns {
             self.save(Setting::Columns, self.model.columns.serialize());
         }
+        if requests.sorts {
+            self.save(Setting::Sorts, self.model.serialize_sorts());
+        }
         if requests.catalog && self.model.system_ready() {
             if !self.catalog_timer.is_empty() {
                 cx.stop_timer(self.catalog_timer);
@@ -2445,6 +2438,8 @@ impl App {
                     }
                 }
                 Message::Saved { setting: Setting::UpNext, text } => self.restore_up_next(cx, &text),
+                Message::Saved { setting: Setting::Sorts, text } => self.model.parse_sorts(&text),
+                Message::Saved { setting: Setting::AiMusic, text } => self.ai_restore(cx, &text),
                 Message::Saved { setting: Setting::Visualizer, text } => self.restore_milk(cx, &text),
                 // The last run's queue, parked: shown, steering nothing,
                 // unless something was played before it was read.

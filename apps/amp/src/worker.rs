@@ -152,10 +152,14 @@ pub enum Setting {
     /// The equalizer page's picture: spectrum or MilkDrop, and MilkDrop's
     /// own choices (`MilkSettings::serialize`).
     Visualizer,
+    /// Each track list's sort (`Model::serialize_sorts`).
+    Sorts,
+    /// The AI music page: Auto, and its table's columns and sort.
+    AiMusic,
 }
 
 impl Setting {
-    const ALL: [Setting; 5] = [Setting::Columns, Setting::UpNext, Setting::Equalizer, Setting::Queue, Setting::Visualizer];
+    const ALL: [Setting; 7] = [Setting::Columns, Setting::UpNext, Setting::Equalizer, Setting::Queue, Setting::Visualizer, Setting::Sorts, Setting::AiMusic];
 
     fn file(self) -> &'static str {
         match self {
@@ -164,6 +168,8 @@ impl Setting {
             Setting::Equalizer => "eq.txt",
             Setting::Queue => "queue.txt",
             Setting::Visualizer => "visualizer.txt",
+            Setting::Sorts => "sorts.txt",
+            Setting::AiMusic => "ai_music.txt",
         }
     }
 
