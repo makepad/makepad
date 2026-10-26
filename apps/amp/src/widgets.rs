@@ -93,6 +93,23 @@ script_mod! {
         }
     }
 
+    // The AI music page's songs (ai_table.rs): the track table's grid and
+    // type, its own columns.
+    mod.widgets.AiTableBase = #(crate::ai_table::AiTable::register_widget(vm))
+    mod.widgets.AiTable = set_type_default() do mod.widgets.AiTableBase{
+        width: Fill
+        height: Fill
+        flow: Down
+        draw_title +: {text_style: theme.font_regular{font_size: 11.5}}
+        draw_small +: {text_style: theme.font_regular{font_size: 10.0}}
+        draw_icon +: {text_style: theme.font_icons{font_size: 10.0}}
+        draw_round: mod.widgets.DrawMusicRound{}
+        grid := MusicGrid{
+            default_row_height: 36.0
+            cols: 6
+        }
+    }
+
     mod.widgets.UpNextBase = #(UpNext::register_widget(vm))
     mod.widgets.UpNext = set_type_default() do mod.widgets.UpNextBase{
         width: Fill
@@ -155,7 +172,7 @@ pub const ICON_RADIO: &str = "\u{f519}";
 pub const ICON_QUEUE: &str = "\u{f0cb}";
 const ICON_FOLDER: &str = "\u{f07b}";
 const ICON_LIST: &str = "\u{f03a}";
-const ICON_SPEAKER: &str = "\u{f027}";
+pub(crate) const ICON_SPEAKER: &str = "\u{f027}";
 /// A track there is a local file of: a drive.
 const ICON_LOCAL: &str = "\u{f0a0}";
 const ICON_CACHED: &str = "\u{f058}";
@@ -163,7 +180,7 @@ const CACHED_INK: Vec4f = Vec4f { x: 0.24, y: 0.80, z: 0.43, w: 1.0 };
 
 /// The row under the pointer in a list's grid (for its hover tint);
 /// `true` when it changed (the grid is redrawn).
-fn track_hover(cx: &mut Cx, grid: &DataGridRef, event: &Event, row: &mut Option<usize>) -> bool {
+pub(crate) fn track_hover(cx: &mut Cx, grid: &DataGridRef, event: &Event, row: &mut Option<usize>) -> bool {
     let abs = match event {
         Event::MouseMove(e) => Some(e.abs),
         Event::MouseLeave(_) => None,
@@ -184,7 +201,7 @@ fn track_hover_at(cx: &mut Cx, grid: &DataGridRef, abs: Option<DVec2>, row: &mut
 }
 
 /// A row's hover tint: faint, under the selection's stronger one.
-fn hover_tint(theme: &Theme) -> Vec4f {
+pub(crate) fn hover_tint(theme: &Theme) -> Vec4f {
     with_alpha(theme.accent, crate::hw::row_tint_alphas(theme.background, theme.foreground, theme.accent).1)
 }
 
@@ -239,13 +256,13 @@ pub(crate) fn text_fit(draw: &mut DrawText, cx: &mut Cx2d, x: f64, mid: f64, max
 }
 
 /// Text ending at `right`, centred vertically on `mid`.
-fn text_right(draw: &mut DrawText, cx: &mut Cx2d, right: f64, mid: f64, text: &str) {
+pub(crate) fn text_right(draw: &mut DrawText, cx: &mut Cx2d, right: f64, mid: f64, text: &str) {
     let width = text_width(draw, cx, text);
     let y = mid - text_height(draw, cx, text) * 0.5;
     draw.draw_abs(cx, dvec2(right - width, y), text);
 }
 
-fn round(draw: &mut DrawMusicRound, cx: &mut Cx2d, rect: Rect, color: Vec4f, radius: f32) {
+pub(crate) fn round(draw: &mut DrawMusicRound, cx: &mut Cx2d, rect: Rect, color: Vec4f, radius: f32) {
     draw.color = color;
     draw.radius = radius;
     draw.draw_abs(cx, rect);

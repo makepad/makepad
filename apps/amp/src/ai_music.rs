@@ -1,9 +1,10 @@
-//! AI music: an endless run of songs made on the fleet's AI hub, for
+//! AI music: songs made on the fleet's AI hub from the person's prompt, for
 //! personal listening.
 //!
-//! One song ahead: when an AI song starts playing, the UI asks for the next
-//! one ([`AiCommand::Next`]) with whatever the person's prompt field says
-//! now. The **ai-music** worker then
+//! A song is asked for ([`AiCommand::Next`]) with whatever the prompt field
+//! says then: by "Generate now" (it plays next), or by Auto when the last
+//! song of the AI list starts playing (it goes at the end, so the list never
+//! runs dry; `ai_page.rs`). The **ai-music** worker then
 //!
 //! 1. asks the song writer, a chat model on the hardened `claude-cli` hub
 //!    (Claude Code, sandboxed, reached by pin; see `libs/ai/hub/src/claude_cli.rs`),
@@ -26,7 +27,7 @@
 //!    normal local folder of the library, and says it is ready
 //!    ([`AiEvent::Ready`]).
 //!
-//! Cancel and Restart bump the epoch the UI shares with the worker: the
+//! Cancel bumps the epoch the UI shares with the worker: the
 //! running writer turn or hub job sees it at its next poll and is cancelled
 //! on its node (the hub raises the job's cancel flag; the GPU is freed).
 //!
@@ -145,15 +146,11 @@ impl SongPrompt {
 pub struct ReadySong {
     pub path: String,
     pub song: SongPrompt,
-    pub seconds: f64,
-    /// How long it took to make.
-    pub render_seconds: f64,
 }
 
 pub enum AiCommand {
-    /// Write and render the next song. `epoch` is the shared epoch when the
-    /// command was sent: a later Cancel or Restart cancels it.
-    /// Write and render one song per id, written in ONE writer turn and then
+    /// `epoch` is the shared epoch when the command was sent: a later
+    /// Cancel cancels it. Write and render one song per id, written in ONE writer turn and then
     /// rendered in parallel. Each `id` names its song's events; `language`:
     /// the one to translate the lyrics into ([`LANGUAGES`]).
     Next { ids: Vec<u64>, request: String, model: String, minutes: u32, language: String, epoch: u64 },
@@ -182,7 +179,7 @@ pub enum AiEvent {
     Where { epoch: u64, id: u64, text: String },
     /// The songs of the conversation, oldest first (made ones have a path).
     Songs(Vec<SongPrompt>),
-    /// The writer conversation as text, for the expand view.
+    /// The writer conversation as text, for the side panel's Writer chat.
     Conversation(String),
 }
 
@@ -327,10 +324,6 @@ fn song_from(value: &json::Value, model: &str) -> Result<SongPrompt, String> {
     Ok(song)
 }
 
-/// Songs kept made ahead of the playing one: two, so a skip never waits
-/// (a song renders about four times faster than it plays).
-pub const AHEAD: usize = 2;
-
 /// The song lengths the page offers, in minutes; the first is the default.
 pub const LENGTHS: [u32; 4] = [1, 2, 3, 5];
 
@@ -442,7 +435,7 @@ impl Session {
         out
     }
 
-    /// The conversation as text, newest last, for the expand view.
+    /// The conversation as text, newest last, for the side panel's Writer chat.
     pub fn render(&self) -> String {
         let mut out = String::new();
         if !self.summary.is_empty() {
@@ -763,7 +756,7 @@ fn render_song(song: SongPrompt, minutes: u32, job: &Job, cancelled: &dyn Fn() -
     song.path = path.to_string_lossy().into_owned();
     song.length = seconds;
     song.made_on = format!("{} on {}", output.model, node_label(&output.node));
-    Ok(ReadySong { path: song.path.clone(), song, seconds, render_seconds })
+    Ok(ReadySong { path: song.path.clone(), song })
 }
 
 /// Time the lyrics by the song-timing artifact (the model's own score),
@@ -930,9 +923,12 @@ fn write_song(folder: &Path, song: &SongPrompt, model: &str, audio: &makepad_aud
 
 // ---- the UI thread's side -------------------------------------------------
 
-/// What the page's right side shows.
+/// What the app's side panel shows (the AI pages only while an AI song plays
+/// or the AI page is open; else the queue).
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Inspect {
+pub enum Side {
+    /// "Next in queue": the play queue.
+    Queue,
     /// The song's lyrics in time with the music.
     Lyrics,
     /// Its style, length, what made it, its file.
@@ -941,10 +937,20 @@ pub enum Inspect {
     Chat,
 }
 
+/// Where a song goes in the play order once it is made.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Place {
+    /// "Generate now": it plays next (at once when nothing plays).
+    Next,
+    /// Auto: at the end of the AI list.
+    End,
+}
+
 /// A song being made: its id, what it is at, who works on it.
 #[derive(Clone, Debug)]
 pub struct Making {
     pub id: u64,
+    pub place: Place,
     /// When it was asked for (app seconds), for the elapsed time.
     pub started_at: f64,
     pub stage: String,
@@ -959,31 +965,45 @@ impl Making {
     /// Its step, in words: what happens and who does it.
     pub fn step(&self) -> String {
         let who = if self.at_work.is_empty() { String::new() } else { format!(" · {}", self.at_work) };
+        format!("{}{who}", self.step_word())
+    }
+
+    /// Its step alone ("Writing", "Waiting for a GPU", "Singing").
+    pub fn step_word(&self) -> String {
         match self.stage.as_str() {
-            "" | "writing" => format!("Writing the song{who}"),
-            "queued" => format!("Waiting for a GPU{who}"),
-            "saving" => "Saving to the AI music playlist".to_string(),
+            "" | "writing" => "Writing".to_string(),
+            "queued" => "Waiting for a GPU".to_string(),
+            "saving" => "Saving".to_string(),
             stage => {
                 let mut stage = stage.to_string();
                 if let Some(first) = stage.get(..1) {
                     stage = first.to_uppercase() + &stage[1..];
                 }
-                format!("{stage}{who}")
+                stage
             }
         }
     }
 
     /// The step with its percentage and elapsed time.
     pub fn line(&self, now: f64) -> String {
-        let pct = if self.permille > 0 { format!(" · {}%", self.permille / 10) } else { String::new() };
-        format!("{}{pct} · {}", self.step(), clock(now - self.started_at))
+        format!("{}{} · {}", self.step(), self.percent(), clock(now - self.started_at))
+    }
+
+    /// The table's status cell: the step, its percentage and elapsed time.
+    pub fn status(&self, now: f64) -> String {
+        format!("{}{} · {}", self.step_word(), self.percent(), clock(now - self.started_at))
+    }
+
+    fn percent(&self) -> String {
+        if self.permille > 0 { format!(" {}%", self.permille / 10) } else { String::new() }
     }
 }
 
 /// The AI music page's state, on the UI thread.
 pub struct AiMode {
-    /// Songs keep coming (Start pressed, Stop not).
-    pub on: bool,
+    /// Auto: when the last song of the AI list starts playing, one more is
+    /// made from the prompt and goes at the end.
+    pub auto: bool,
     pub model: String,
     pub models: Vec<MusicModel>,
     /// The song length asked for, in minutes (one of [`LENGTHS`]).
@@ -991,51 +1011,42 @@ pub struct AiMode {
     /// The songs being made, oldest first (each on the GPU the fleet gave it).
     pub jobs: Vec<Making>,
     pub next_id: u64,
-    /// The next song, made, waiting for the library to list its file.
-    pub ready: Vec<ReadySong>,
-    /// The next song, in the queue.
-    pub queued: Vec<ReadySong>,
+    /// Made songs waiting for the library to list their file, and where
+    /// each goes in the play order.
+    pub ready: Vec<(ReadySong, Place)>,
     /// The songs of the conversation, oldest first.
     pub songs: Vec<SongPrompt>,
     /// The row picked for its lyrics and prompt (an index into `songs`);
     /// none: the playing AI song (else the newest).
     pub selected: Option<usize>,
-    pub inspect: Inspect,
-    /// The right side fills the page (the song list hidden).
-    pub big: bool,
+    pub side: Side,
     /// The language the writer translates the lyrics into ([`LANGUAGES`]).
     pub language: String,
-    /// Skip was pressed with no song ready: the next one starts when made.
-    pub skip_waiting: bool,
-    /// A song just made: its row is highlighted until then (app seconds).
-    pub fresh: Option<(String, f64)>,
     pub error: Option<String>,
     pub conversation: String,
-    /// The uri last seen playing.
+    /// The uri last seen playing, and whether it was an AI song.
     pub last_uri: Option<String>,
+    pub last_was_ai: bool,
 }
 
 impl Default for AiMode {
     fn default() -> Self {
         Self {
-            on: false,
+            auto: false,
             model: DEFAULT_MODEL.to_string(),
             models: Vec::new(),
             minutes: LENGTHS[0],
             jobs: Vec::new(),
             next_id: 1,
             ready: Vec::new(),
-            queued: Vec::new(),
             songs: Vec::new(),
             selected: None,
-            inspect: Inspect::Lyrics,
-            big: false,
+            side: Side::Lyrics,
             language: LANGUAGES[0].to_string(),
-            skip_waiting: false,
-            fresh: None,
             error: None,
             conversation: String::new(),
             last_uri: None,
+            last_was_ai: false,
         }
     }
 }
@@ -1044,6 +1055,25 @@ impl Default for AiMode {
 pub fn clock(seconds: f64) -> String {
     let s = seconds.max(0.0).round() as u64;
     format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// When a song file was made: `write_song` names it "<title> - <epoch
+/// seconds>.ogg".
+pub fn created_secs(path: &str) -> Option<i64> {
+    let stem = Path::new(path).file_stem()?.to_str()?;
+    let (_, secs) = stem.rsplit_once(" - ")?;
+    secs.parse().ok().filter(|s| *s > 0)
+}
+
+/// `26 Oct 14:05` on the local wall clock; `26 Oct 2025` in another year.
+pub fn created_text(secs: i64) -> String {
+    let at = makepad_civil_time::local_or_utc(secs);
+    let month = makepad_civil_time::MONTH_ABBR[(at.month.clamp(1, 12) - 1) as usize];
+    if at.year == makepad_civil_time::local_now().year {
+        format!("{} {month} {}", at.day, at.hm())
+    } else {
+        format!("{} {month} {}", at.day, at.year)
+    }
 }
 
 impl AiMode {
@@ -1055,31 +1085,35 @@ impl AiMode {
         self.jobs.iter_mut().find(|j| j.id == id)
     }
 
+    /// The made songs, oldest first: the AI list, in play order.
+    pub fn made(&self) -> impl Iterator<Item = &SongPrompt> {
+        self.songs.iter().filter(|s| !s.path.is_empty())
+    }
+
+    /// The uri of the last song of the AI list.
+    pub fn last_uri(&self) -> Option<String> {
+        self.made().last().map(|s| uri_of(&s.path))
+    }
+
+    /// Whether Auto has a song on its way already (made or being made).
+    pub fn auto_pending(&self) -> bool {
+        self.jobs.iter().any(|j| j.place == Place::End) || self.ready.iter().any(|(_, p)| *p == Place::End)
+    }
+
     /// The page's one status line, under the controls: each song being made
     /// with the node it got.
     pub fn status(&self, now: f64) -> String {
         if let Some(error) = &self.error {
             return error.clone();
         }
-        if self.skip_waiting {
-            if let Some(job) = self.jobs.first() {
-                let pct = if job.permille > 0 { format!(" {}%", job.permille / 10) } else { String::new() };
-                return format!("Skipping: the next song is generating{pct}; it starts as soon as it is ready");
-            }
-        }
         if !self.jobs.is_empty() {
-            let made = self.songs.iter().filter(|s| !s.path.is_empty()).count();
+            let made = self.made().count();
             return self.jobs.iter().enumerate().map(|(n, job)| format!("Song {}: {}", made + n + 1, job.line(now))).collect::<Vec<_>>().join("  ·  ");
         }
-        if let Some(next) = self.queued.first().or(self.ready.first()) {
-            let more = self.queued.len() + self.ready.len();
-            let more = if more > 1 { format!(" (+{} more)", more - 1) } else { String::new() };
-            return format!("Next song ready: “{}” ({}){more}, made by {} in {:.0} s", next.song.title, clock(next.seconds), next.song.made_on, next.render_seconds);
-        }
-        if self.on {
-            "On: the next song starts being made when this one starts playing".to_string()
+        if self.auto {
+            "Auto: when the last song starts, one more is made from the prompt and goes at the end".to_string()
         } else {
-            "Type what you want to hear, pick a model and press Start. Songs are made on your AI hub's GPUs and go to the “AI music” playlist.".to_string()
+            "Generate now (⌘↩) makes a song from the prompt on your AI hub's GPUs; double-click a song to play the list from there".to_string()
         }
     }
 
@@ -1097,7 +1131,7 @@ impl AiMode {
 
     /// Whether `uri` is one of the AI songs.
     pub fn is_ai(&self, uri: &str) -> bool {
-        self.songs.iter().any(|s| !s.path.is_empty() && uri_of(&s.path) == uri)
+        self.made().any(|s| uri_of(&s.path) == uri)
     }
 }
 
@@ -1240,12 +1274,10 @@ mod tests {
             assert!(song.song.synced.is_some() && song.song.timing.is_some());
             let decoded = makepad_audio_decode::decode_any(&bytes).unwrap();
             println!(
-                "LIVE song {n}: \"{}\" {:.1} s audio, rendered on {} in {:.1} s (x{:.2} real time), file {}",
+                "LIVE song {n}: \"{}\" {:.1} s audio, rendered on {}, file {}",
                 song.song.title,
                 decoded.frames() as f64 / decoded.rate as f64,
                 song.song.made_on,
-                song.render_seconds,
-                song.seconds / song.render_seconds,
                 song.path
             );
             println!("LIVE style {n}: {}", song.song.prompt);
@@ -1267,5 +1299,12 @@ mod tests {
     fn file_stems_are_plain() {
         assert_eq!(file_stem("Neon / Snow: Fall!"), "Neon Snow Fall");
         assert_eq!(file_stem("???"), "Untitled");
+    }
+
+    #[test]
+    fn created_comes_from_the_file_name() {
+        assert_eq!(created_secs("/m/AI music/Minuit - Sur la Seine - 1761480000.ogg"), Some(1761480000));
+        assert_eq!(created_secs("/m/AI music/Untitled.ogg"), None);
+        assert_eq!(created_secs(""), None);
     }
 }

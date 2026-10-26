@@ -104,6 +104,10 @@ impl App {
         // drawer) opens it.
         let host_shown = self.ui.hw_stage(cx, ids!(stage)).shown("tracks_host").is_some() || self.ui.hw_stage(cx, ids!(stage)).shown("tracks").is_some();
         let seen = std::mem::replace(&mut state(cx).seen, page.clone());
+        // The side panel offers the AI pages while the AI page is open.
+        if seen != page && (seen == "ai" || page == "ai") {
+            self.update_ai_page(cx);
+        }
         if seen != page && page != "tracks" && !host_shown && !self.up_next_open {
             self.up_next_open = true;
             self.apply_up_next(cx);

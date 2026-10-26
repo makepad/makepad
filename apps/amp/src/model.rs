@@ -344,9 +344,10 @@ pub struct Model {
     /// The local file played out with nothing of ours after it: Play
     /// starts it again.
     pub local_done: bool,
-    /// AI music is on and an AI song plays (`ai_music.rs`): when it plays
-    /// out with nothing after it, its last [`crate::ai_music::LOOP_TAIL_MS`]
-    /// play again until the next song is ready, rather than silence.
+    /// An AI song plays while one is being made (`ai_page.rs`): when it
+    /// plays out with nothing after it, its last
+    /// [`crate::ai_music::LOOP_TAIL_MS`] play again until the new song is
+    /// ready, rather than silence.
     pub ai_hold: bool,
     /// Set when that happened; the next AI song then starts at once.
     pub ai_waiting: bool,
@@ -909,15 +910,35 @@ impl Model {
         }
     }
 
-    /// A finished AI song (a local file the index knows): next in the queue,
-    /// or playing now when `now` (nothing of the AI plays, or the last one
-    /// is replaying its end while it waited).
-    /// `at`: its place among the hand-queued tracks (after the AI songs
-    /// queued before it, so they play in the order made).
-    pub fn ai_enqueue(&mut self, item: QueueItem, at: usize, now: bool) {
-        let at = if now { 0 } else { at.min(self.queue.user.len()) };
-        self.queue.user.insert(at, item);
-        if now {
+    /// Play the AI list (`items`, oldest first) from `start` on: songs
+    /// made later for its end join this list (`ai_append`).
+    pub fn ai_play(&mut self, items: Vec<QueueItem>, start: usize) {
+        self.ai_waiting = false;
+        let first = self.queue.play_list(items, start, crate::ai_music::FOLDER_NAME);
+        self.start(first);
+    }
+
+    /// A song made by "Generate now": it plays next (at once when the
+    /// playing AI song was replaying its end while it waited).
+    pub fn ai_play_next(&mut self, item: QueueItem) {
+        if self.ai_waiting {
+            self.ai_waiting = false;
+            self.queue.user.insert(0, item);
+            let next = self.queue.advance();
+            self.start(next);
+        } else {
+            self.run(Activate::PlayNext(item));
+        }
+    }
+
+    /// A song Auto made for the end of the AI list: it joins the list
+    /// playing, when that is the AI list.
+    pub fn ai_append(&mut self, item: QueueItem) {
+        if !self.queue.driving || self.queue.source != crate::ai_music::FOLDER_NAME {
+            return;
+        }
+        self.queue.list.push(item);
+        if self.ai_waiting {
             self.ai_waiting = false;
             let next = self.queue.advance();
             self.start(next);
@@ -1967,6 +1988,40 @@ mod tests {
         model.transport(Transport::Resume);
         assert_eq!(player_plays(&mut model), ["/m/mine.ogg"]);
         assert!(!model.local_done);
+    }
+
+    /// AI music: the AI list plays from the song picked; a song Auto made
+    /// joins its end, one made by Generate now plays next; a song made
+    /// while the last one replayed its end (waiting) starts at once; a list
+    /// that is not the AI list is left alone.
+    #[test]
+    fn ai_songs_go_where_they_were_made_for() {
+        let mut model = mixed_model();
+        let (mine, kept) = (item("file:///m/mine.ogg", "Mine"), item("file:///m/kept.ogg", "Kept"));
+        model.ai_play(vec![mine.clone()], 0);
+        assert_eq!(player_plays(&mut model), ["/m/mine.ogg"]);
+        model.ai_append(kept.clone());
+        assert_eq!(upcoming(&model), ["Kept"], "Auto's song joins the end");
+        model.ai_play_next(item("file:///m/mine.ogg", "Mine again"));
+        assert_eq!(upcoming(&model), ["Mine again", "Kept"], "Generate now's song plays next");
+        assert!(player_plays(&mut model).is_empty(), "nothing is interrupted");
+
+        model.edit_queue(|queue| queue.clear());
+        model.ai_play(vec![kept.clone()], 0);
+        player_plays(&mut model);
+        model.ai_hold = true;
+        model.local_ended(model.local_generation);
+        assert!(model.ai_waiting, "the last song replays its end while one is made");
+        player_plays(&mut model);
+        model.ai_append(mine.clone());
+        assert_eq!(player_plays(&mut model), ["/m/mine.ogg"], "the made song starts at once");
+        assert!(!model.ai_waiting);
+
+        model.ai_hold = false;
+        model.run(Activate::PlayOne(kept));
+        player_plays(&mut model);
+        model.ai_append(mine);
+        assert!(upcoming(&model).is_empty(), "not the AI list: nothing joins it");
     }
 
     /// A file that cannot be read or decoded moves on even under repeat

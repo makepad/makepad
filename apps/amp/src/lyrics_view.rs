@@ -100,12 +100,10 @@ pub struct HwLyrics {
     #[rust]
     live: bool,
     #[rust]
-    big: bool,
-    #[rust]
     rows: Vec<Row>,
-    /// The width and size the rows were laid out for.
+    /// The width the rows were laid out for.
     #[rust]
-    laid: Option<(f64, bool)>,
+    laid: Option<f64>,
     /// Each line's top and bottom in the content.
     #[rust]
     line_spans: Vec<(f64, f64)>,
@@ -138,30 +136,25 @@ impl HwLyrics {
     }
 
     fn layout(&mut self, cx: &mut Cx2d, width: f64) {
-        let scale = if self.big { 1.45 } else { 1.0 };
-        for draw in [&mut self.draw_line, &mut self.draw_now, &mut self.draw_trans, &mut self.draw_section] {
-            draw.font_scale = scale as f32;
-        }
         self.rows.clear();
         self.line_spans.clear();
         let Some(lyrics) = self.lyrics.clone() else {
             self.content_h = 0.0;
             return;
         };
-        let pad = 10.0 * scale;
-        let line_h = 19.0 * scale;
-        let trans_h = 15.0 * scale;
-        // Text is measured unscaled; `font_scale` applies when drawn.
-        let space = (text_width(&self.draw_now, cx, " ") * scale).max(3.0);
+        let pad = 10.0;
+        let line_h = 19.0;
+        let trans_h = 15.0;
+        let space = text_width(&self.draw_now, cx, " ").max(3.0);
         let mut y = 4.0;
         let mut n = 0;
         for section in &lyrics.sections {
             if !section.name.is_empty() {
                 if y > 4.0 {
-                    y += 8.0 * scale;
+                    y += 8.0;
                 }
-                self.rows.push(Row { kind: Kind::Section, y, h: 16.0 * scale, text: section.name.to_uppercase(), words: Vec::new() });
-                y += 18.0 * scale;
+                self.rows.push(Row { kind: Kind::Section, y, h: 16.0, text: section.name.to_uppercase(), words: Vec::new() });
+                y += 18.0;
             }
             for line in &section.lines {
                 let top = y;
@@ -169,7 +162,7 @@ impl HwLyrics {
                 let mut row: Vec<(usize, f64)> = Vec::new();
                 let mut x = 0.0;
                 for (w, word) in line.words.iter().enumerate() {
-                    let ww = text_width(&self.draw_now, cx, &word.text) * scale;
+                    let ww = text_width(&self.draw_now, cx, &word.text);
                     if x > 0.0 && x + ww > width - pad {
                         self.rows.push(Row { kind: Kind::Words(n), y, h: line_h, text: String::new(), words: std::mem::take(&mut row) });
                         y += line_h;
@@ -181,11 +174,11 @@ impl HwLyrics {
                 self.rows.push(Row { kind: Kind::Words(n), y, h: line_h, text: String::new(), words: row });
                 y += line_h;
                 if !line.translation.is_empty() {
-                    let space = (text_width(&self.draw_trans, cx, " ") * scale).max(2.0);
+                    let space = text_width(&self.draw_trans, cx, " ").max(2.0);
                     let mut text = String::new();
                     let mut x = 0.0;
                     for (word, gap) in tokens(&line.translation) {
-                        let ww = text_width(&self.draw_trans, cx, &word) * scale;
+                        let ww = text_width(&self.draw_trans, cx, &word);
                         if x > 0.0 && x + ww > width - pad {
                             self.rows.push(Row { kind: Kind::Translation, y, h: trans_h, text: std::mem::take(&mut text), words: Vec::new() });
                             y += trans_h;
@@ -201,8 +194,8 @@ impl HwLyrics {
                     self.rows.push(Row { kind: Kind::Translation, y, h: trans_h, text, words: Vec::new() });
                     y += trans_h;
                 }
-                y += 5.0 * scale;
-                self.line_spans.push((top, y - 5.0 * scale));
+                y += 5.0;
+                self.line_spans.push((top, y - 5.0));
                 n += 1;
             }
         }
@@ -238,8 +231,8 @@ impl Widget for HwLyrics {
         cx.begin_turtle(walk, Layout { clip_x: true, clip_y: true, ..Layout::default() });
         let rect = cx.turtle().rect();
         let now = cx.seconds_since_app_start();
-        if self.laid != Some((rect.size.x, self.big)) {
-            self.laid = Some((rect.size.x, self.big));
+        if self.laid != Some(rect.size.x) {
+            self.laid = Some(rect.size.x);
             self.layout(cx, rect.size.x);
         }
         let (fg, muted, accent) = (self.ink, self.muted, self.accent);
@@ -352,15 +345,6 @@ impl HwLyricsRef {
             inner.live = live;
             inner.playing = playing;
             inner.anchor = (position, now);
-            inner.draw_line.redraw(cx);
-        }
-    }
-
-    pub fn set_big(&self, cx: &mut Cx, big: bool) {
-        let Some(mut inner) = self.borrow_mut() else { return };
-        if inner.big != big {
-            inner.big = big;
-            inner.laid = None;
             inner.draw_line.redraw(cx);
         }
     }

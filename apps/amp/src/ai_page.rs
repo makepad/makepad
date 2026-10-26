@@ -1,50 +1,41 @@
 //! The AI music page: a tab of the list area beside Tracks and Equalizer
-//! (`ai_music.rs` has the mode itself). Its flow, top to bottom:
+//! (`ai_music.rs` has the mode itself), and the AI pages of the side panel.
 //!
-//! 1. **Go**: what to hear, the model, Start (Stop while on);
-//! 2. **running**: the song being made is the first row, from the moment
-//!    Start is pressed: its step in words (writing on Claude Code / generating
-//!    on which node and GPU), a progress bar, the elapsed time, Cancel and
-//!    Restart;
-//! 3. **output**: a made song becomes a playable row (highlighted for a
-//!    moment), plays at once or next, and is listed in the sidebar's
-//!    "AI music" playlist;
-//! 4. **inspect** (the right side): the playing AI song's lyrics in time
-//!    with the music, each line with its translation (`lyrics_view.rs`); a
-//!    click on a row shows that song instead. "Song" shows its style and what
-//!    made it, "Writer chat" the writer conversation; the expand key gives
-//!    the right side the whole page.
+//! 1. **The prompt** across the top, many lines; beside it the length, the
+//!    model, **Generate now** (also ⌘↩ in the prompt), **Auto** and Skip.
+//!    Generate now makes one song from the prompt right away; it plays next
+//!    (at once when nothing plays). Auto: every time the last song of the
+//!    AI list starts playing, one more is made from the prompt and goes at
+//!    the end, so the list never runs dry; off, nothing is made on its own.
+//!    Skip is the player's Next.
+//! 2. **The list**: the AI songs in the playlist's table (`ai_table.rs`), in
+//!    play order, then the songs being made with their step and progress.
+//!    Double-click or Return plays the list from that song; songs Auto makes
+//!    join the playing list at its end.
+//! 3. **The side panel** (beside the list area, where "Next in queue" is):
+//!    while an AI song plays or this page is open it has the pages Queue,
+//!    Lyrics (the playing song's lyrics in time with the music, each line
+//!    with its translation, `lyrics_view.rs`; a picked row shows that song),
+//!    Song (its style and what made it) and Writer chat. An AI song that
+//!    starts opens the panel on its lyrics.
 
-use crate::ai_songs::{AiRowView, AiSongsWidgetRefExt};
-use crate::ai_music::{clock, uri_of, AiCommand, AiEvent, Inspect, Making, ReadySong, SongPrompt, AHEAD, DEFAULT_REQUEST, LANGUAGES, LENGTHS};
+use crate::ai_music::{clock, created_secs, created_text, uri_of, AiCommand, AiEvent, Making, Place, ReadySong, Side, SongPrompt, DEFAULT_REQUEST, LANGUAGES, LENGTHS};
+use crate::ai_table::{AiTableRow, AiTableWidgetRefExt};
 use crate::layout::HwStageWidgetRefExt;
-use crate::lyrics_view::HwLyricsWidgetRefExt;
-use crate::source::Transport;
 use crate::local::LocalCommand;
+use crate::lyrics_view::HwLyricsWidgetRefExt;
 use crate::model::Engine;
 use crate::queue::QueueItem;
+use crate::source::Transport;
 use crate::App;
 use makepad_widgets::*;
 use std::sync::atomic::Ordering;
 
-/// How long a just-made song's row stays highlighted (s).
-const FRESH_S: f64 = 4.0;
-
-/// One row as shown.
-struct Row {
-    /// Index into `AiMode::songs` (None: the song being written).
-    song: Option<usize>,
-    /// The job making it (a running row).
-    job: Option<u64>,
-    /// Stable across updates (the file, or "making:<job>").
-    key: String,
-    num: String,
-    title: String,
-    style: String,
-    length: String,
-    status: String,
-    running: bool,
-    playable: bool,
+/// One row of the list: a made song (an index into `AiMode::songs`) or a
+/// song being made (its job; its written song once there is one).
+enum RowOf {
+    Made(usize),
+    Making(u64),
 }
 
 impl App {
@@ -58,34 +49,32 @@ impl App {
             workers.ai_epoch.fetch_add(1, Ordering::SeqCst);
         }
         self.ai.jobs.clear();
+        self.model.requests.redraw = true;
     }
 
-    /// Keep [`AHEAD`] songs made or being made after the playing one, with
-    /// what the field says now: each is a job of its own, so two songs
-    /// render on two GPUs at once.
-    fn ai_next(&mut self, cx: &mut Cx) {
-        // All songs missing are written in one writer turn, then render in
-        // parallel: no song waits for the writer.
-        let missing = AHEAD.saturating_sub(self.ai.jobs.len() + self.ai.ready.len() + self.ai.queued.len());
-        if missing > 0 {
-            let mut request = self.ui.text_input(cx, ids!(ai_prompt)).text();
-            if request.trim().is_empty() {
-                request = DEFAULT_REQUEST.to_string();
+    /// Make one song from what the prompt says now; `place`: where it goes
+    /// in the play order once made.
+    fn ai_generate(&mut self, cx: &mut Cx, place: Place) {
+        let mut request = self.ui.text_input(cx, ids!(ai_prompt)).text();
+        if request.trim().is_empty() {
+            request = DEFAULT_REQUEST.to_string();
+        }
+        if self.ai.models.is_empty() {
+            if let Some(workers) = &self.workers {
+                workers.ai_music(AiCommand::Models);
             }
-            let epoch = self.ai_epoch();
-            let ids: Vec<u64> = (0..missing as u64).map(|n| self.ai.next_id + n).collect();
-            let Some(workers) = &self.workers else { return };
-            if workers.ai_music(AiCommand::Next { ids: ids.clone(), request, model: self.ai.model.clone(), minutes: self.ai.minutes, language: self.ai.language.clone(), epoch }) {
-                self.ai.next_id += missing as u64;
-                self.ai.error = None;
-                let now = Self::now(cx);
-                for id in ids {
-                    self.ai.jobs.push(Making { id, started_at: now, stage: "writing".to_string(), permille: 0, at_work: String::new(), song: None });
-                }
-                self.ai_animate(cx);
-            } else {
-                self.ai.error = Some("The AI music worker is busy; press Restart".into());
-            }
+        }
+        let epoch = self.ai_epoch();
+        let id = self.ai.next_id;
+        let Some(workers) = &self.workers else { return };
+        if workers.ai_music(AiCommand::Next { ids: vec![id], request, model: self.ai.model.clone(), minutes: self.ai.minutes, language: self.ai.language.clone(), epoch }) {
+            self.ai.next_id += 1;
+            self.ai.error = None;
+            let now = Self::now(cx);
+            self.ai.jobs.push(Making { id, place, started_at: now, stage: "writing".to_string(), permille: 0, at_work: String::new(), song: None });
+            self.ai_animate(cx);
+        } else {
+            self.ai.error = Some("The AI music worker is busy; try again in a moment".into());
         }
         self.model.requests.redraw = true;
     }
@@ -132,25 +121,19 @@ impl App {
                 }
             }
             AiEvent::Ready { epoch: at, id, song } if at == epoch => {
+                let place = self.ai.jobs.iter().find(|j| j.id == id).map_or(Place::End, |j| j.place);
                 self.ai.jobs.retain(|j| j.id != id);
-                self.ai.fresh = Some((uri_of(&song.path), Self::now(cx)));
                 self.ai_file_ready(&song);
-                self.ai.ready.push(song);
-                // Two ahead: the next one starts right away.
-                if self.ai.on {
-                    self.ai_next(cx);
-                }
+                self.ai.ready.push((song, place));
             }
             AiEvent::Failed { epoch: at, id, error } if at == epoch => {
                 self.ai.jobs.retain(|j| j.id != id);
                 // "unavailable: no GPU hub ..." reads as a sentence.
-                let error = error.strip_prefix("unavailable: ").unwrap_or(&error).to_string();
-                let mut error = error;
+                let mut error = error.strip_prefix("unavailable: ").unwrap_or(&error).to_string();
                 if let Some(first) = error.get(..1) {
                     error = first.to_uppercase() + &error[1..];
                 }
                 self.ai.error = Some(error);
-                self.ai.on = false;
             }
             AiEvent::Cancelled { epoch: at, id } if at == epoch => self.ai.jobs.retain(|j| j.id != id),
             // A Next cancelled since: its file (if any) stays in the library.
@@ -171,93 +154,115 @@ impl App {
         }
     }
 
-    /// After every event: an AI song that started asks for the next one; a
-    /// made song the library lists goes into the queue (playing at once
-    /// when nothing of the AI plays); the model knows whether to hold.
+    /// The AI list as queue items, oldest first: the made songs the library
+    /// lists (a file it has not read yet cannot play).
+    fn ai_items(&self) -> Vec<QueueItem> {
+        self.ai.made().map(ai_item).filter(|item| self.model.index.track(&item.uri).is_some()).collect()
+    }
+
+    /// After every event: an AI song that starts opens the side panel on its
+    /// lyrics and, being the last of the list with Auto on, asks for the
+    /// next one; a made song the library lists goes where it was made for;
+    /// the model knows whether to hold the end of the playing song.
     pub(crate) fn ai_tick(&mut self, cx: &mut Cx) {
         let uri = self.model.playback.uri().map(str::to_string);
         let playing_ai = uri.as_deref().is_some_and(|u| self.ai.is_ai(u));
-        if uri != self.ai.last_uri {
+        // A song that starts, or one that turns out to be an AI song once
+        // the worker's song list names its file (a just-made song can start
+        // before that).
+        if uri != self.ai.last_uri || playing_ai != self.ai.last_was_ai {
             self.ai.last_uri = uri.clone();
             if playing_ai {
-                // The right side follows the song that starts.
+                // The side panel follows the song that starts.
                 self.ai.selected = None;
-                self.ai.queued.retain(|q| Some(uri_of(&q.path)) != uri);
-                self.ai.skip_waiting = false;
-                if self.ai.on {
-                    self.ai_next(cx);
-                }
-                self.model.requests.redraw = true;
-            }
-        }
-        self.model.ai_hold = self.ai.on && playing_ai && self.model.engine == Engine::Local;
-        if !self.ai.on {
-            return;
-        }
-        // The transport's Next with nothing made after the playing song.
-        if self.model.ai_waiting && playing_ai {
-            self.ai.skip_waiting = true;
-        }
-        // Keep two made ahead (a failed one waits for Start or Restart).
-        if self.ai.error.is_none() {
-            self.ai_next(cx);
-        }
-        // Made songs the library lists go into the queue, in the order made
-        // (after the ones queued before).
-        while let Some(first) = self.ai.ready.first() {
-            let uri = uri_of(&first.path);
-            if self.model.index.track(&uri).is_none() {
-                break;
-            }
-            let ready = self.ai.ready.remove(0);
-            let now = !playing_ai || self.model.ai_waiting;
-            let item = QueueItem { uri, name: ready.song.title.clone(), artist: format!("AI · {}", ready.song.model) };
-            let at = self.ai.queued.len();
-            self.ai.queued.push(ready);
-            self.model.ai_enqueue(item, at, now);
-        }
-    }
-
-    /// Play song `at` of the list now.
-    fn ai_play(&mut self, at: usize) {
-        let Some(song) = self.ai.songs.get(at) else { return };
-        let uri = uri_of(&song.path);
-        if song.path.is_empty() {
-            return;
-        }
-        if self.model.index.track(&uri).is_none() {
-            if let Some(workers) = &self.workers {
-                workers.local(LocalCommand::FileAdded);
-            }
-            self.ai.error = Some(format!("“{}” is not in the library yet; try again in a moment", song.title));
-            return;
-        }
-        let item = QueueItem { uri, name: song.title.clone(), artist: format!("AI · {}", song.model) };
-        self.model.ai_enqueue(item, 0, true);
-    }
-
-    /// The page's controls.
-    pub(crate) fn ai_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        let go = self.ui.button(cx, ids!(ai_go)).clicked(actions) || self.ui.button(cx, ids!(ai_go_icon)).clicked(actions);
-        if go {
-            self.ai.on = !self.ai.on;
-            if self.ai.on {
-                if self.ai.models.is_empty() {
-                    if let Some(workers) = &self.workers {
-                        workers.ai_music(AiCommand::Models);
+                if !self.ai.last_was_ai {
+                    self.ai.side = Side::Lyrics;
+                    if !self.up_next_open {
+                        self.up_next_open = true;
+                        self.apply_up_next(cx);
+                        self.save_up_next(cx);
                     }
                 }
-                self.ai.error = None;
-                self.ai_next(cx);
-            } else if self.ai.busy() {
-                // Stop: the song being made is cancelled; what is made stays.
-                self.ai_cancel_running();
+                if self.ai.auto && uri == self.ai.last_uri() && !self.ai.auto_pending() {
+                    self.ai_generate(cx, Place::End);
+                }
+            }
+            self.ai.last_was_ai = playing_ai;
+            self.model.requests.redraw = true;
+        }
+        // While a song is made, the playing AI song's end plays again rather
+        // than silence when nothing follows it.
+        self.model.ai_hold = playing_ai && self.ai.busy() && self.model.engine == Engine::Local;
+        // Made songs the library lists go where they were made for, in the
+        // order made.
+        while let Some((first, _)) = self.ai.ready.first() {
+            let item = QueueItem { uri: uri_of(&first.path), name: first.song.title.clone(), artist: format!("AI · {}", first.song.model) };
+            if self.model.index.track(&item.uri).is_none() {
+                break;
+            }
+            let (_, place) = self.ai.ready.remove(0);
+            // Nothing plays (or it played out): the AI list plays from it.
+            if self.model.playback.uri().is_none() || self.model.local_done {
+                let mut items = self.ai_items();
+                let start = match items.iter().position(|i| i.uri == item.uri) {
+                    Some(start) => start,
+                    None => {
+                        items.push(item);
+                        items.len() - 1
+                    }
+                };
+                self.model.ai_play(items, start);
+                continue;
+            }
+            match place {
+                Place::Next => self.model.ai_play_next(item),
+                Place::End => self.model.ai_append(item),
+            }
+        }
+    }
+
+    /// Play the AI list from row `at` of the table.
+    fn ai_play_row(&mut self, at: usize) {
+        let Some(RowOf::Made(index)) = self.ai_rows_of().into_iter().nth(at) else { return };
+        let Some(song) = self.ai.songs.get(index) else { return };
+        let uri = uri_of(&song.path);
+        let items = self.ai_items();
+        match items.iter().position(|i| i.uri == uri) {
+            Some(start) => self.model.ai_play(items, start),
+            None => {
+                if let Some(workers) = &self.workers {
+                    workers.local(LocalCommand::FileAdded);
+                }
+                self.ai.error = Some(format!("“{}” is not in the library yet; try again in a moment", song.title));
+            }
+        }
+        self.model.requests.redraw = true;
+    }
+
+    /// The page's and the side panel's controls.
+    pub(crate) fn ai_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        let now = self.ui.button(cx, ids!(ai_now)).clicked(actions) || self.ui.button(cx, ids!(ai_now_icon)).clicked(actions);
+        // ⌘↩ in the prompt (a plain ↩ is a new line).
+        let returned = self.ui.text_input(cx, ids!(ai_prompt)).returned(actions).is_some();
+        if now || returned {
+            self.ai_generate(cx, Place::Next);
+        }
+        if let Some(auto) = self.ui.check_box(cx, ids!(ai_auto)).changed(actions) {
+            self.ai.auto = auto;
+            // Turned on while the last song plays: its follower starts now.
+            let playing = self.model.playback.uri().map(str::to_string);
+            if auto && playing.is_some() && playing == self.ai.last_uri() && !self.ai.auto_pending() {
+                self.ai_generate(cx, Place::End);
             }
             self.model.requests.redraw = true;
         }
         let skip = self.ui.button(cx, ids!(ai_skip)).clicked(actions) || self.ui.button(cx, ids!(ai_skip_icon)).clicked(actions);
         if skip {
-            self.ai_skip(cx);
+            self.model.next();
+            self.model.requests.redraw = true;
+        }
+        if self.ui.button(cx, ids!(ai_cancel)).clicked(actions) {
+            self.ai_cancel_running();
         }
         if let Some(at) = self.ui.drop_down(cx, ids!(ai_length)).selected(actions) {
             // From the next song on.
@@ -279,42 +284,27 @@ impl App {
             self.model.transport(Transport::Seek((at * 1000.0) as u32));
             self.model.requests.redraw = true;
         }
-        let rows = self.ai_rows();
-        let list = self.ui.portal_list(cx, &[live_id!(ai_rows), live_id!(list)]);
-        for (n, item) in list.items_with_actions(actions) {
-            let Some(row) = rows.get(n) else { continue };
-            if item.button(cx, ids!(cancel)).clicked(actions) {
-                self.ai_cancel_running();
-                self.ai.on = false;
-                self.ai.error = Some("Cancelled. Press Start to make a song again.".into());
-                self.model.requests.redraw = true;
-            }
-            if item.button(cx, ids!(restart)).clicked(actions) {
-                self.ai_restart(cx);
-            }
-            let play = item.button(cx, ids!(play)).clicked(actions) || item.button(cx, ids!(play_icon)).clicked(actions);
-            if play {
-                if let Some(at) = row.song {
-                    self.ai_play(at);
-                }
-            }
-            if item.as_view().finger_up(actions).is_some_and(|e| e.is_over) {
-                self.ai.selected = row.song;
-                if self.ai.inspect == Inspect::Chat {
-                    self.ai.inspect = Inspect::Lyrics;
-                }
-                self.model.requests.redraw = true;
-            }
+        let table = self.ui.ai_table(cx, ids!(ai_table));
+        if let Some(at) = table.activated(actions) {
+            self.ai_play_row(at);
         }
-        for (key, view) in [(ids!(ai_show_lyrics), Inspect::Lyrics), (ids!(ai_show_song), Inspect::Song), (ids!(ai_show_chat), Inspect::Chat)] {
-            if self.ui.button(cx, key).clicked(actions) {
-                self.ai.inspect = view;
-                self.model.requests.redraw = true;
+        if let Some(at) = table.picked(actions) {
+            let picked = match self.ai_rows_of().into_iter().nth(at) {
+                Some(RowOf::Made(index)) => Some(index),
+                Some(RowOf::Making(id)) => self.ai.jobs.iter().find(|j| j.id == id).and_then(|j| j.song.as_ref().map(|(index, _)| *index)),
+                None => None,
+            };
+            self.ai.selected = picked;
+            if self.ai.side == Side::Chat || self.ai.side == Side::Queue {
+                self.ai.side = Side::Lyrics;
             }
-        }
-        if self.ui.button(cx, ids!(ai_big)).clicked(actions) {
-            self.ai.big = !self.ai.big;
             self.model.requests.redraw = true;
+        }
+        for (key, side) in [(ids!(side_queue), Side::Queue), (ids!(ai_show_lyrics), Side::Lyrics), (ids!(ai_show_song), Side::Song), (ids!(ai_show_chat), Side::Chat)] {
+            if self.ui.button(cx, key).clicked(actions) {
+                self.ai.side = side;
+                self.model.requests.redraw = true;
+            }
         }
         if self.ui.button(cx, ids!(ai_new)).clicked(actions) {
             if let Some(workers) = &self.workers {
@@ -323,97 +313,34 @@ impl App {
         }
     }
 
-    /// Skip: the next made song now; none made yet, it starts the moment it
-    /// is (the playing one goes on meanwhile). Each skip keeps two ahead.
-    fn ai_skip(&mut self, cx: &mut Cx) {
-        if !self.ai.on {
-            self.ai.on = true;
-        }
-        if self.ai.queued.is_empty() {
-            self.ai.skip_waiting = true;
-            self.model.ai_waiting = true;
-        } else {
-            self.model.next();
-        }
-        self.ai_next(cx);
-        self.model.requests.redraw = true;
+    /// The rows in play order: the AI list (oldest first), then the songs
+    /// being made, oldest first.
+    fn ai_rows_of(&self) -> Vec<RowOf> {
+        let made = self.ai.songs.iter().enumerate().filter(|(_, s)| !s.path.is_empty()).map(|(at, _)| RowOf::Made(at));
+        made.chain(self.ai.jobs.iter().map(|j| RowOf::Making(j.id))).collect()
     }
 
-    /// Restart: the song being made (or waiting as next) makes way for one
-    /// written from the prompt as it is now. Made files stay in the library.
-    fn ai_restart(&mut self, cx: &mut Cx) {
-        self.ai_cancel_running();
-        let dropped: Vec<String> = self.ai.queued.drain(..).map(|q| uri_of(&q.path)).collect();
-        self.model.edit_queue(|queue| queue.user.retain(|item| !dropped.contains(&item.uri)));
-        self.ai.ready.clear();
-        self.ai.on = true;
-        self.ai_next(cx);
+    /// Whether the side panel offers its AI pages: an AI song plays, or the
+    /// AI page is open.
+    fn ai_side_offered(&mut self, cx: &mut Cx) -> bool {
+        let playing_ai = self.model.playback.uri().is_some_and(|u| self.ai.is_ai(u));
+        playing_ai || self.ui.hw_stage(cx, ids!(stage)).panels().1 == "ai"
     }
 
-    /// The rows, newest first: the songs being made (each on its GPU), then
-    /// the made ones.
-    fn ai_rows(&self) -> Vec<Row> {
-        let mut rows = Vec::new();
-        let made = self.ai.songs.iter().filter(|s| !s.path.is_empty()).count();
-        let playing = self.model.playback.uri().map(str::to_string);
-        let next_uris: Vec<String> = self.ai.queued.iter().chain(self.ai.ready.iter()).map(|r| uri_of(&r.path)).collect();
-        for (n, job) in self.ai.jobs.iter().enumerate().rev() {
-            let (song, title, style) = match &job.song {
-                Some((index, song)) => (Some(*index), song.title.clone(), song.prompt.clone()),
-                None => (None, "New song".to_string(), "being written from your prompt".to_string()),
-            };
-            rows.push(Row {
-                song,
-                job: Some(job.id),
-                key: format!("making:{}", job.id),
-                num: format!("{}", made + n + 1),
-                title,
-                style,
-                length: String::new(),
-                status: String::new(),
-                running: true,
-                playable: false,
-            });
-        }
-        for (at, song) in self.ai.songs.iter().enumerate().rev() {
-            if song.path.is_empty() {
-                continue;
-            }
-            let uri = uri_of(&song.path);
-            let status = if playing.as_deref() == Some(uri.as_str()) {
-                if self.model.playback.is_playing() { "Playing".into() } else { "Paused".into() }
-            } else if let Some(at) = next_uris.iter().position(|u| *u == uri) {
-                if at == 0 { "Next up".into() } else { format!("Up next ({})", at + 1) }
-            } else {
-                String::new()
-            };
-            let number = self.ai.songs[..=at].iter().filter(|s| !s.path.is_empty()).count();
-            rows.push(Row {
-                song: Some(at),
-                job: None,
-                key: song.path.clone(),
-                num: number.to_string(),
-                title: song.title.clone(),
-                style: song.prompt.clone(),
-                length: if song.length > 0.0 { clock(song.length) } else { String::new() },
-                status,
-                running: false,
-                playable: true,
-            });
-        }
-        rows
-    }
-
-    /// The page, from the mode. Labels are only set when their text changed.
+    /// The page and the side panel, from the mode. Labels are only set when
+    /// their text changed.
     pub(crate) fn update_ai_page(&mut self, cx: &mut Cx) {
         let now = Self::now(cx);
         let status = self.ai.status(now);
         self.set_label(cx, live_id!(ai_status), ids!(ai_status), &status);
         let licence = self.ai.licence();
         self.set_label(cx, live_id!(ai_licence), ids!(ai_licence), &licence);
-        self.set_label(cx, live_id!(ai_go), ids!(ai_go), if self.ai.on { "Stop" } else { "Start" });
-        self.set_label(cx, live_id!(ai_go_icon), ids!(ai_go_icon), if self.ai.on { "\u{f04d}" } else { "\u{f04b}" });
-        self.ui.relief_view(cx, ids!(ai_go_cap)).set_latched(cx, if self.ai.on { 1.0 } else { 0.0 });
+        let busy = self.ai.busy();
+        self.set_visible(cx, ids!(ai_cancel_cap), busy);
+        let auto = self.ui.check_box(cx, ids!(ai_auto));
+        if auto.active(cx) != self.ai.auto {
+            auto.set_active(cx, self.ai.auto, Animate::No);
+        }
         if !self.ai_models_shown {
             self.ai_models_shown = true;
             let mut labels: Vec<String> = self.ai.models.iter().map(|m| m.label()).collect();
@@ -436,74 +363,76 @@ impl App {
             }
         }
 
-        // The rows.
-        let rows = self.ai_rows();
-        self.set_visible(cx, ids!(ai_empty), rows.is_empty());
-        let theme = self.model.theme;
-        let fresh = self.ai.fresh.clone().filter(|(_, at)| now - at < FRESH_S);
-        let views: Vec<AiRowView> = rows
-            .iter()
-            .map(|row| {
-                let job = row.job.and_then(|id| self.ai.jobs.iter().find(|j| j.id == id));
-                // A song being made: its step, node and time under its title,
-                // "Making" and the percentage as its status.
-                let (style, status) = match job {
-                    Some(job) => (job.line(now), if job.permille > 0 { format!("Making {}%", job.permille / 10) } else { "Making".to_string() }),
-                    None => (row.style.clone(), row.status.clone()),
-                };
-                // Picked, just made, being made: shades of the accent.
-                let uri = row.song.and_then(|at| self.ai.songs.get(at)).map(|s| uri_of(&s.path));
-                let selected = row.song.is_some() && row.song == self.ai.selected;
-                let just_made = fresh.as_ref().is_some_and(|(u, _)| Some(u) == uri.as_ref());
-                let alpha = if just_made { 0.32 } else if selected { 0.18 } else if row.running { 0.08 } else { 0.0 };
-                AiRowView {
-                    key: row.key.clone(),
-                    num: row.num.clone(),
-                    title: row.title.clone(),
-                    style,
-                    length: row.length.clone(),
-                    status,
-                    running: row.running,
-                    playable: row.playable,
-                    tint: vec4(theme.accent.x, theme.accent.y, theme.accent.z, alpha as f32),
-                    bar: job.map(|job| (job.permille as f64 / 1000.0, (now * 0.6).fract(), theme.accent, vec4(theme.muted.x, theme.muted.y, theme.muted.z, 0.25))),
+        // The list.
+        let playing = self.model.playback.uri().map(str::to_string);
+        let rows: Vec<AiTableRow> = self
+            .ai_rows_of()
+            .into_iter()
+            .enumerate()
+            .filter_map(|(n, row)| match row {
+                RowOf::Made(index) => {
+                    let song = self.ai.songs.get(index)?;
+                    Some(AiTableRow {
+                        num: (n + 1).to_string(),
+                        title: song.title.clone(),
+                        style: song.prompt.clone(),
+                        model: song.model.clone(),
+                        created: created_secs(&song.path).map(created_text),
+                        time: (song.length > 0.0).then(|| clock(song.length)),
+                        status: String::new(),
+                        progress: None,
+                        current: playing.as_deref() == Some(uri_of(&song.path).as_str()),
+                        running: false,
+                    })
+                }
+                RowOf::Making(id) => {
+                    let job = self.ai.jobs.iter().find(|j| j.id == id)?;
+                    let (title, style, model) = match &job.song {
+                        Some((_, song)) => (song.title.clone(), song.prompt.clone(), song.model.clone()),
+                        None => ("New song".to_string(), "being written from your prompt".to_string(), self.ai.model.clone()),
+                    };
+                    Some(AiTableRow {
+                        num: (n + 1).to_string(),
+                        title,
+                        style,
+                        model,
+                        created: None,
+                        time: None,
+                        status: job.status(now),
+                        progress: Some(job.permille as f64 / 1000.0),
+                        current: false,
+                        running: true,
+                    })
                 }
             })
             .collect();
-        self.ui.ai_songs(cx, ids!(ai_rows)).set_rows(cx, views);
+        self.set_visible(cx, ids!(ai_empty), rows.is_empty());
+        self.ui.ai_table(cx, ids!(ai_table)).set_rows(cx, rows);
 
-        // The inspector: the picked song, else the playing AI song, else the
-        // one being made, else the newest.
-        let inspect = self.ai.inspect;
-        for (cap, view) in [(ids!(ai_show_lyrics_cap), Inspect::Lyrics), (ids!(ai_show_song_cap), Inspect::Song), (ids!(ai_show_chat_cap), Inspect::Chat)] {
-            self.ui.relief_view(cx, cap).set_lit(cx, if inspect == view { 1.0 } else { 0.0 });
+        // The side panel: the queue, or (while an AI song plays or this page
+        // is open) the page picked.
+        let offered = self.ai_side_offered(cx);
+        let side = if offered { self.ai.side } else { Side::Queue };
+        self.set_visible(cx, ids!(side_tabs), offered);
+        for (cap, page) in [(ids!(side_queue_cap), Side::Queue), (ids!(ai_show_lyrics_cap), Side::Lyrics), (ids!(ai_show_song_cap), Side::Song), (ids!(ai_show_chat_cap), Side::Chat)] {
+            self.ui.relief_view(cx, cap).set_lit(cx, if side == page { 1.0 } else { 0.0 });
         }
-        self.set_visible(cx, ids!(ai_new_cap), inspect == Inspect::Chat);
-        self.set_visible(cx, ids!(ai_lyrics_pane), inspect == Inspect::Lyrics);
-        self.set_visible(cx, ids!(ai_detail), inspect != Inspect::Lyrics);
-        if self.ai_big_shown != Some(self.ai.big) {
-            self.ai_big_shown = Some(self.ai.big);
-            self.set_visible(cx, ids!(ai_list), !self.ai.big);
-            let mut side = self.ui.widget(cx, ids!(ai_inspect));
-            if self.ai.big {
-                script_apply_eval!(cx, side, {width: mod.prelude.widgets_internal.Fill});
-            } else {
-                script_apply_eval!(cx, side, {width: 280});
-            }
-            self.set_label(cx, live_id!(ai_big), ids!(ai_big), if self.ai.big { "\u{f066}" } else { "\u{f065}" });
-            self.ui.relief_view(cx, ids!(ai_big_cap)).set_latched(cx, if self.ai.big { 1.0 } else { 0.0 });
-        }
-        let playing_uri = self.model.playback.uri().map(str::to_string);
+        self.set_visible(cx, ids!(up_next), side == Side::Queue);
+        self.set_visible(cx, ids!(ai_lyrics_pane), side == Side::Lyrics);
+        self.set_visible(cx, ids!(ai_detail), side == Side::Song || side == Side::Chat);
+        self.set_visible(cx, ids!(ai_new_cap), side == Side::Chat);
+        // The picked song, else the playing AI song, else the one being
+        // made, else the newest.
         let shown = self
             .ai
             .selected
             .and_then(|at| self.ai.songs.get(at))
-            .or_else(|| self.ai.songs.iter().find(|s| !s.path.is_empty() && playing_uri.as_deref() == Some(uri_of(&s.path).as_str())))
+            .or_else(|| self.ai.made().find(|s| playing.as_deref() == Some(uri_of(&s.path).as_str())))
             .or_else(|| self.ai.jobs.first().and_then(|j| j.song.as_ref().map(|(_, s)| s)))
-            .or_else(|| self.ai.songs.iter().rev().find(|s| !s.path.is_empty()))
+            .or_else(|| self.ai.made().last())
             .cloned();
-        self.update_lyrics(cx, shown.as_ref(), playing_uri.as_deref());
-        let (title, meta, body) = if inspect == Inspect::Chat {
+        self.update_lyrics(cx, shown.as_ref(), playing.as_deref());
+        let (title, meta, body) = if side == Side::Chat {
             (
                 "The writer conversation".to_string(),
                 "One conversation for all songs (kept between runs), so the writer remembers what it already wrote.".to_string(),
@@ -525,7 +454,6 @@ impl App {
     fn update_lyrics(&mut self, cx: &mut Cx, song: Option<&SongPrompt>, playing_uri: Option<&str>) {
         let now = Self::now(cx);
         let view = self.ui.hw_lyrics(cx, ids!(ai_lyrics));
-        view.set_big(cx, self.ai.big);
         let Some(song) = song else {
             view.set_lyrics(cx, "", None);
             self.set_label(cx, live_id!(ai_lyrics_title), ids!(ai_lyrics_title), "Lyrics");
@@ -540,7 +468,7 @@ impl App {
         } else if live {
             if self.model.playback.is_playing() { "Playing".to_string() } else { "Paused".to_string() }
         } else {
-            "Not playing (press its Play)".to_string()
+            "Not playing (double-click it in the list)".to_string()
         };
         let mut info = vec![state];
         match (song.lyrics.trim().is_empty(), song.timing.as_deref()) {
@@ -562,15 +490,15 @@ impl App {
         view.set_clock(cx, live, position, live && self.model.playback.is_playing());
     }
 
-    /// While a song is made and the page is open, its bar's sheen and the
-    /// elapsed time move: a frame every 1/15 s for the page alone.
+    /// While a song is made and the page is open, its progress and elapsed
+    /// time move: a frame every 1/15 s for the page alone.
     fn ai_animate(&mut self, cx: &mut Cx) {
         if self.ai.busy() {
             self.ai_frame = cx.new_next_frame();
         }
     }
 
-    /// The bar's frames and the keys' tooltips.
+    /// The progress frames and the keys' tooltips.
     pub(crate) fn ai_page_event(&mut self, cx: &mut Cx, event: &Event) {
         if let Some(frame) = self.ai_frame.is_event(event) {
             if self.ai.busy() {
@@ -587,13 +515,15 @@ impl App {
         if self.ui.window(cx, ids!(main_window)).window_id() != Some(e.window_id) {
             return;
         }
-        let tips: [(&[LiveId], &str); 11] = [
+        let tips: [(&[LiveId], &str); 13] = [
+            (ids!(side_queue_cap), "Next in queue: what plays after this song"),
             (ids!(ai_show_lyrics_cap), "The lyrics in time with the music, with their translation; click a line to play from there"),
             (ids!(ai_language), "The language the writer translates the lyrics into, from the next song on"),
-            (ids!(ai_big_cap), if self.ai.big { "Show the song list again" } else { "Give the lyrics the whole page" }),
-            (ids!(ai_go_cap), if self.ai.on { "Stop AI music: no new songs are made (made ones stay in the AI music playlist)" } else { "Start AI music: songs are written from your prompt and made on your AI hub, one ahead of what plays" }),
+            (ids!(ai_now_cap), "Make one song from the prompt now; it plays next (⌘↩ in the prompt does the same)"),
+            (ids!(ai_auto), "Auto: when the last song of the list starts playing, one more is made from the prompt and goes at the end"),
+            (ids!(ai_cancel_cap), "Stop making the songs being made (made ones stay in the list)"),
             (ids!(ai_model), "The music model for the next song"),
-            (ids!(ai_skip_cap), "Skip to the next AI song (two are kept made ahead; if none is ready yet, it starts the moment it is)"),
+            (ids!(ai_skip_cap), "Skip to the next song"),
             (ids!(ai_length), "How long the next song is (the writer sizes its lyrics to it)"),
             (ids!(ai_prompt), "What to hear. Edits apply from the next song made; the playing song is never interrupted"),
             (ids!(ai_show_song_cap), "The song's style tags, length, what made it and its file"),
@@ -619,6 +549,11 @@ impl App {
             None => tip.hide(cx),
         }
     }
+}
+
+/// A made song as the queue holds it.
+fn ai_item(song: &SongPrompt) -> QueueItem {
+    QueueItem { uri: uri_of(&song.path), name: song.title.clone(), artist: format!("AI · {}", song.model) }
 }
 
 /// A song for the inspector: title, what it is and what made it, the lyrics.

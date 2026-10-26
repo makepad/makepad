@@ -1128,6 +1128,11 @@ script_mod! {
     mod.widgets.HwBrowserCheck = CheckBox{
         draw_text +: {color: #xc8ccd2}
     }
+    // A check box on a panel (the AI page's Auto): the panel's ink, a box
+    // of the display's floor, the accent's mark (set with the palette).
+    mod.widgets.HwPanelCheck = CheckBox{
+        draw_text +: {color: #x2b2e33 text_style: theme.font_bold{font_size: 10.5}}
+    }
     mod.widgets.HwBrowser = MilkdropBrowser{
         filters +: {
             search := mod.widgets.HwBrowserSearch{}
@@ -1662,6 +1667,19 @@ fn palette_defaults(vm: &mut ScriptVm) -> String {
     set("HwClockFace.emissive", format!("vec4({:.4}, {:.4}, {:.4}, 0.45)", clock_ink.x, clock_ink.y, clock_ink.z));
     set("HwMarquee.draw_text.color", hex(screen_text));
     set("HwBrowserCheck.draw_text.color", hex(screen_muted));
+    for state in ["color", "color_hover", "color_down", "color_focus", "color_active"] {
+        set(&format!("HwPanelCheck.draw_text.{state}"), hex(panel_text));
+    }
+    // Its box: the display's floor in a rim of the panel's secondary ink.
+    for state in ["color", "color_hover", "color_down", "color_active", "color_focus"] {
+        set(&format!("HwPanelCheck.draw_bg.{state}"), hex(screen_bg));
+    }
+    for state in ["border_color", "border_color_down", "border_color_active", "border_color_focus"] {
+        set(&format!("HwPanelCheck.draw_bg.{state}"), hex(with_a(panel_muted, 0.8)));
+    }
+    set("HwPanelCheck.draw_bg.border_color_hover", hex(accent));
+    set("HwPanelCheck.draw_bg.mark_color_active", hex(accent));
+    set("HwPanelCheck.draw_bg.mark_color_active_hover", hex(accent));
     // The audio connection's sheet and faint hints (connection.rs).
     set("HwConnText.draw_text.color", hex(screen_text));
     set("HwConnMuted.draw_text.color", hex(screen_muted));

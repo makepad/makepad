@@ -40,6 +40,8 @@ makepad-strict-json = { path = "../../libs/strict_json" }
 # AI music (src/ai_music.rs): the hub's job API for the song writer and the
 # music models, and the encoder that files each song as tagged Ogg Vorbis.
 makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false }
+# The AI list's Created column on the local wall clock.
+makepad-civil-time = { path = "../../libs/civil_time" }
 makepad-audio-encode = { path = "../../libs/audio_encode" }
 
 [dev-dependencies]

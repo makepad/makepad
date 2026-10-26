@@ -55,7 +55,7 @@ mod worker;
 mod ai;
 mod ai_music;
 mod ai_page;
-mod ai_songs;
+mod ai_table;
 mod lyrics;
 mod lyrics_view;
 use crate::ai_music::AiMode;
@@ -85,76 +85,6 @@ const CATALOG_DELAY: f64 = 0.3;
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
-
-    // A thin progress bar (ai_page.rs sets `progress` 0..1, `phase` for its
-    // moving sheen while a song is made, and its inks from the theme).
-    let AiBar = View{
-        width: Fill
-        height: 5
-        show_bg: true
-        draw_bg +: {
-            progress: instance(0.0)
-            phase: instance(0.0)
-            fill: instance(vec4(0.22, 0.78, 1.0, 1.0))
-            track: instance(vec4(0.5, 0.5, 0.5, 0.22))
-            pixel: fn() {
-                let p = self.pos * self.rect_size
-                let sdf = Sdf2d.viewport(p)
-                let h = self.rect_size.y
-                sdf.box(0.0, 0.0, self.rect_size.x, h, h * 0.5)
-                sdf.fill(self.track)
-                let w = max(self.rect_size.x * clamp(self.progress, 0.0, 1.0), h)
-                sdf.box(0.0, 0.0, w, h, h * 0.5)
-                let x = p.x / max(self.rect_size.x, 1.0)
-                let sheen = 0.35 * max(0.0, 1.0 - abs(fract(x * 1.5 - self.phase) - 0.5) * 5.0)
-                sdf.fill(vec4(mix(self.fill.xyz, vec3(1.0, 1.0, 1.0), sheen), self.fill.w))
-                return sdf.result
-            }
-        }
-    }
-
-    // One song of the AI music page (ai_page.rs): number, title, style,
-    // length and what is happening to it; a click shows its lyrics.
-    let AiRow = View{
-        visible: false
-        width: Fill
-        height: Fit
-        flow: Down
-        spacing: 4
-        padding: Inset{left: 8 right: 8 top: 6 bottom: 6}
-        cursor: MouseCursor.Hand
-        show_bg: true
-        draw_bg +: {color: #x00000000}
-        View{
-            width: Fill
-            height: Fit
-            flow: Right
-            spacing: 10
-            align: Align{y: 0.5}
-            num := mod.widgets.HwPanelText{width: 30 text: ""}
-            View{
-                width: Fill
-                height: Fit
-                flow: Down
-                spacing: 2
-                title := mod.widgets.HwPanelTitle{width: Fill max_lines: 1 text_overflow: TextOverflow.Ellipsis text: "" draw_text +: {text_style: theme.font_bold{font_size: 11.0}}}
-                style := mod.widgets.HwPanelText{width: Fill max_lines: 1 text_overflow: TextOverflow.Ellipsis text: "" draw_text +: {text_style: theme.font_regular{font_size: 8.5}}}
-            }
-            length := mod.widgets.HwPanelText{width: 38 text: ""}
-            status := mod.widgets.HwPanelText{width: 96 max_lines: 2 text_overflow: TextOverflow.Ellipsis text: ""}
-            play_cap := mod.widgets.HwKey{width: Fit height: 26 inset: 3 flow: Right spacing: 6 align: Align{x: 0.5 y: 0.5} padding: Inset{left: 10 right: 10}
-                play_icon := mod.widgets.HwKeyButton{text: "\u{f04b}" width: Fit draw_text +: {text_style: theme.font_icons{font_size: 9.0}}}
-                play := mod.widgets.HwKeyText{text: "Play" width: Fit}
-            }
-            restart_cap := mod.widgets.HwKey{visible: false width: Fit height: 26 inset: 3 padding: Inset{left: 10 right: 10}
-                restart := mod.widgets.HwKeyText{text: "Restart" width: Fit}
-            }
-            cancel_cap := mod.widgets.HwKey{visible: false width: Fit height: 26 inset: 3 padding: Inset{left: 10 right: 10}
-                cancel := mod.widgets.HwKeyText{text: "Cancel" width: Fit}
-            }
-        }
-        bar := AiBar{visible: false}
-    }
 
     // A key with its indicator dash under it.
     let LitKey = View{
@@ -656,7 +586,65 @@ script_mod! {
                                         flow: Down
                                         spacing: 6
                                         padding: Inset{left: 6 right: 8 top: 14 bottom: 8}
+                                        // While an AI song plays (or the AI page is open), the
+                                        // panel's pages (ai_page.rs): the queue, the song's lyrics
+                                        // in time with the music, what made it, the writer chat.
+                                        side_tabs := View{
+                                            visible: false
+                                            width: Fill
+                                            height: Fit
+                                            flow: Right
+                                            spacing: 5
+                                            align: Align{y: 0.5}
+                                            padding: Inset{left: 6}
+                                            side_queue_cap := mod.widgets.HwKey{width: Fit height: 28 inset: 3 padding: Inset{left: 15 right: 8} draw_bg +: {has_led: 1.0 role: 46.0}
+                                                side_queue := mod.widgets.HwKeyText{text: "Queue" width: Fit}
+                                            }
+                                            ai_show_lyrics_cap := mod.widgets.HwKey{width: Fit height: 28 inset: 3 padding: Inset{left: 15 right: 8} draw_bg +: {has_led: 1.0 role: 46.0}
+                                                ai_show_lyrics := mod.widgets.HwKeyText{text: "Lyrics" width: Fit}
+                                            }
+                                            ai_show_song_cap := mod.widgets.HwKey{width: Fit height: 28 inset: 3 padding: Inset{left: 15 right: 8} draw_bg +: {has_led: 1.0 role: 46.0}
+                                                ai_show_song := mod.widgets.HwKeyText{text: "Song" width: Fit}
+                                            }
+                                            ai_show_chat_cap := mod.widgets.HwKey{width: Fit height: 28 inset: 3 padding: Inset{left: 15 right: 8} draw_bg +: {has_led: 1.0 role: 46.0}
+                                                ai_show_chat := mod.widgets.HwKeyText{text: "Writer chat" width: Fit}
+                                            }
+                                        }
                                         up_next := UpNext{}
+                                        ai_lyrics_pane := View{
+                                            visible: false
+                                            width: Fill
+                                            height: Fill
+                                            flow: Down
+                                            spacing: 6
+                                            padding: Inset{left: 8 top: 4}
+                                            ai_lyrics_title := mod.widgets.HwPanelTitle{width: Fill text: ""}
+                                            ai_lyrics_info := mod.widgets.HwPanelText{width: Fill text: ""}
+                                            View{
+                                                width: Fill
+                                                height: Fit
+                                                flow: Right
+                                                spacing: 8
+                                                align: Align{y: 0.5}
+                                                mod.widgets.HwPanelText{width: Fill text: "Translate new songs to"}
+                                                ai_language := mod.widgets.HwDropDown{width: 128 height: 28 labels: ["English", "Dutch", "German", "French", "Spanish", "Italian", "Portuguese", "Japanese", "Chinese", "Korean", "No translation"]}
+                                            }
+                                            ai_lyrics := mod.widgets.HwLyrics{}
+                                        }
+                                        ai_detail := ScrollYView{
+                                            visible: false
+                                            width: Fill
+                                            height: Fill
+                                            flow: Down
+                                            spacing: 6
+                                            padding: Inset{left: 8 top: 4}
+                                            ai_detail_title := mod.widgets.HwPanelTitle{width: Fill text: ""}
+                                            ai_detail_meta := mod.widgets.HwPanelText{width: Fill text: ""}
+                                            ai_detail_body := mod.widgets.HwPanelText{width: Fill text: "" draw_text +: {text_style: theme.font_regular{font_size: 10.0}}}
+                                        }
+                                        ai_new_cap := mod.widgets.HwKey{visible: false width: Fit height: 28 inset: 3 padding: Inset{left: 10 right: 10} margin: Inset{left: 8}
+                                            ai_new := mod.widgets.HwKeyText{text: "New conversation" width: Fit}
+                                        }
                                     }}
                                 // The graphic EQ (`eq.rs`): in a layout's `eq` slot, or a
                                 // drawer over the main list the EQ key opens.
@@ -813,9 +801,10 @@ script_mod! {
                                         tab_ai := mod.widgets.HwKeyText{text: "AI music" width: Fit draw_text +: {text_style: theme.font_bold{font_size: 11.5}}}
                                     }
                                 }
-                                // The AI music page (ai_page.rs): what to hear, the model and
-                                // Start on top; the songs as a list (the one being made first,
-                                // with its progress); the picked song's lyrics and prompt.
+                                // The AI music page (ai_page.rs): the prompt across the top with
+                                // the length, the model, Generate now, Auto and Skip beside it; the
+                                // AI songs below in the playlist's table. The playing song's lyrics
+                                // are in the side panel.
                                 c_ai := View{
                                     width: Fill
                                     height: Fill
@@ -824,125 +813,62 @@ script_mod! {
                                         width: Fill
                                         height: Fill
                                         flow: Down
-                                        spacing: 8
-                                        padding: Inset{left: 12 right: 12 top: 12 bottom: 10}
+                                        spacing: 6
+                                        padding: Inset{left: 3 right: 3 top: 10 bottom: 3}
                                         View{
                                             width: Fill
                                             height: Fit
                                             flow: Right
-                                            spacing: 8
-                                            align: Align{y: 0.5}
-                                            ai_prompt := mod.widgets.HwTextInput{width: Fill height: 32 text: "EDM christmas music" empty_text: "What do you want to hear?"}
-                                            ai_length := mod.widgets.HwDropDown{width: 84 height: 30 labels: ["1 min", "2 min", "3 min", "5 min"]}
-                                            ai_model := mod.widgets.HwDropDown{width: 220 height: 30 labels: ["yue2-3b · non-commercial"]}
-                                            ai_skip_cap := mod.widgets.HwKey{width: Fit height: 32 inset: 3 flow: Right spacing: 7 align: Align{x: 0.5 y: 0.5} padding: Inset{left: 12 right: 12}
-                                                ai_skip_icon := mod.widgets.HwKeyButton{text: "\u{f051}" width: Fit draw_text +: {text_style: theme.font_icons{font_size: 10.5}}}
-                                                ai_skip := mod.widgets.HwKeyText{text: "Skip" width: Fit draw_text +: {text_style: theme.font_bold{font_size: 11.5}}}
-                                            }
-                                            ai_go_cap := mod.widgets.HwKey{width: 104 height: 32 inset: 3 flow: Right spacing: 7 align: Align{x: 0.5 y: 0.5} draw_bg +: {role: 43.0}
-                                                ai_go_icon := mod.widgets.HwKeyButton{text: "\u{f04b}" width: Fit draw_text +: {text_style: theme.font_icons{font_size: 10.5}}}
-                                                ai_go := mod.widgets.HwKeyText{text: "Start" width: Fit draw_text +: {text_style: theme.font_bold{font_size: 11.5}}}
-                                            }
-                                        }
-                                        View{
-                                            width: Fill
-                                            height: Fit
-                                            flow: Right
-                                            spacing: 12
-                                            ai_status := mod.widgets.HwPanelText{width: Fill max_lines: 2 text_overflow: TextOverflow.Ellipsis text: ""}
-                                            ai_licence := mod.widgets.HwPanelText{width: Fit max_lines: 1 text: "" draw_text +: {text_style: theme.font_regular{font_size: 8.5}}}
-                                        }
-                                        View{
-                                            width: Fill
-                                            height: Fill
-                                            flow: Right
-                                            spacing: 12
-                                            ai_list := View{
-                                                width: Fill
-                                                height: Fill
+                                            spacing: 10
+                                            padding: Inset{left: 9 right: 9}
+                                            ai_prompt := mod.widgets.HwTextInput{width: Fill height: 66 is_multiline: true text: "EDM christmas music" empty_text: "What do you want to hear? (⌘↩ makes a song now)"}
+                                            View{
+                                                width: Fit
+                                                height: Fit
                                                 flow: Down
-                                                spacing: 2
+                                                spacing: 6
                                                 View{
-                                                    width: Fill
+                                                    width: Fit
                                                     height: Fit
                                                     flow: Right
-                                                    spacing: 10
-                                                    padding: Inset{left: 8 right: 8 bottom: 2}
-                                                    mod.widgets.HwPanelText{width: 30 text: "#"}
-                                                    mod.widgets.HwPanelText{width: Fill text: "Song"}
-                                                    mod.widgets.HwPanelText{width: 38 text: "Time"}
-                                                    mod.widgets.HwPanelText{width: 96 text: "Status"}
-                                                    View{width: 68 height: 1}
+                                                    spacing: 6
+                                                    ai_length := mod.widgets.HwDropDown{width: 76 height: 28 labels: ["1 min", "2 min", "3 min", "5 min"]}
+                                                    ai_model := mod.widgets.HwDropDown{width: 186 height: 28 labels: ["yue2-3b · non-commercial"]}
                                                 }
-                                                ai_empty := mod.widgets.HwPanelText{width: Fill padding: Inset{left: 8 top: 8} text: "No songs yet. Press Start: the first song takes about a minute, then each next one is made while the last plays."}
-                                                // Every song, newest first, virtualised (ai_songs.rs).
-                                                ai_rows := mod.widgets.AiSongs{
-                                                    list := PortalList{
-                                                        width: Fill
-                                                        height: Fill
-                                                        AiRow := AiRow{visible: true}
-                                                    }
-                                                }
-                                            }
-                                            // The picked (else the playing) song: its lyrics in time
-                                            // with the music, what made it, or the writer chat.
-                                            ai_inspect := View{
-                                                width: 280
-                                                height: Fill
-                                                flow: Down
-                                                spacing: 8
                                                 View{
-                                                    width: Fill
+                                                    width: Fit
                                                     height: Fit
                                                     flow: Right
                                                     spacing: 6
                                                     align: Align{y: 0.5}
-                                                    ai_show_lyrics_cap := mod.widgets.HwKey{width: Fit height: 28 inset: 3 padding: Inset{left: 10 right: 10} draw_bg +: {has_led: 1.0 role: 46.0}
-                                                        ai_show_lyrics := mod.widgets.HwKeyText{text: "Lyrics" width: Fit}
+                                                    ai_now_cap := mod.widgets.HwKey{width: Fit height: 30 inset: 3 flow: Right spacing: 6 align: Align{x: 0.5 y: 0.5} padding: Inset{left: 10 right: 10} draw_bg +: {role: 43.0}
+                                                        ai_now_icon := mod.widgets.HwKeyButton{text: "\u{f0d0}" width: Fit draw_text +: {text_style: theme.font_icons{font_size: 10.0}}}
+                                                        ai_now := mod.widgets.HwKeyText{text: "Generate now" width: Fit draw_text +: {text_style: theme.font_bold{font_size: 10.5}}}
                                                     }
-                                                    ai_show_song_cap := mod.widgets.HwKey{width: Fit height: 28 inset: 3 padding: Inset{left: 10 right: 10} draw_bg +: {has_led: 1.0 role: 46.0}
-                                                        ai_show_song := mod.widgets.HwKeyText{text: "Song" width: Fit}
+                                                    ai_auto := mod.widgets.HwPanelCheck{text: "Auto"}
+                                                    ai_skip_cap := mod.widgets.HwKey{width: Fit height: 30 inset: 3 flow: Right spacing: 6 align: Align{x: 0.5 y: 0.5} padding: Inset{left: 10 right: 10}
+                                                        ai_skip_icon := mod.widgets.HwKeyButton{text: "\u{f051}" width: Fit draw_text +: {text_style: theme.font_icons{font_size: 10.0}}}
+                                                        ai_skip := mod.widgets.HwKeyText{text: "Skip" width: Fit draw_text +: {text_style: theme.font_bold{font_size: 10.5}}}
                                                     }
-                                                    ai_show_chat_cap := mod.widgets.HwKey{width: Fit height: 28 inset: 3 padding: Inset{left: 10 right: 10} draw_bg +: {has_led: 1.0 role: 46.0}
-                                                        ai_show_chat := mod.widgets.HwKeyText{text: "Writer chat" width: Fit}
+                                                    ai_cancel_cap := mod.widgets.HwKey{visible: false width: Fit height: 30 inset: 3 align: Align{x: 0.5 y: 0.5} padding: Inset{left: 10 right: 10}
+                                                        ai_cancel := mod.widgets.HwKeyText{text: "Cancel" width: Fit draw_text +: {text_style: theme.font_bold{font_size: 10.5}}}
                                                     }
-                                                    View{width: Fill height: 1}
-                                                    ai_big_cap := mod.widgets.HwKey{width: 34 height: 28 inset: 3 align: Align{x: 0.5 y: 0.5}
-                                                        ai_big := mod.widgets.HwKeyButton{text: "\u{f065}" width: Fit draw_text +: {text_style: theme.font_icons{font_size: 10.0}}}
-                                                    }
-                                                }
-                                                ai_lyrics_pane := View{
-                                                    width: Fill
-                                                    height: Fill
-                                                    flow: Down
-                                                    spacing: 6
-                                                    ai_lyrics_title := mod.widgets.HwPanelTitle{width: Fill text: ""}
-                                                    ai_lyrics_info := mod.widgets.HwPanelText{width: Fill text: ""}
-                                                    View{
-                                                        width: Fill
-                                                        height: Fit
-                                                        flow: Right
-                                                        spacing: 8
-                                                        align: Align{y: 0.5}
-                                                        mod.widgets.HwPanelText{width: Fill text: "Translate new songs to"}
-                                                        ai_language := mod.widgets.HwDropDown{width: 128 height: 28 labels: ["English", "Dutch", "German", "French", "Spanish", "Italian", "Portuguese", "Japanese", "Chinese", "Korean", "No translation"]}
-                                                    }
-                                                    ai_lyrics := mod.widgets.HwLyrics{}
-                                                }
-                                                ai_detail := ScrollYView{
-                                                    width: Fill
-                                                    height: Fill
-                                                    flow: Down
-                                                    spacing: 6
-                                                    ai_detail_title := mod.widgets.HwPanelTitle{width: Fill text: ""}
-                                                    ai_detail_meta := mod.widgets.HwPanelText{width: Fill text: ""}
-                                                    ai_detail_body := mod.widgets.HwPanelText{width: Fill text: "" draw_text +: {text_style: theme.font_regular{font_size: 10.0}}}
-                                                }
-                                                ai_new_cap := mod.widgets.HwKey{visible: false width: Fit height: 28 inset: 3 padding: Inset{left: 10 right: 10}
-                                                    ai_new := mod.widgets.HwKeyText{text: "New conversation" width: Fit}
                                                 }
                                             }
                                         }
+                                        View{
+                                            width: Fill
+                                            height: Fit
+                                            flow: Right
+                                            spacing: 12
+                                            padding: Inset{left: 9 right: 9}
+                                            align: Align{y: 0.5}
+                                            ai_status := mod.widgets.HwPanelText{width: Fill max_lines: 1 text_overflow: TextOverflow.Ellipsis text: ""}
+                                            ai_licence := mod.widgets.HwPanelText{width: Fit max_lines: 1 text: "" draw_text +: {text_style: theme.font_regular{font_size: 8.0}}}
+                                        }
+                                        ai_empty := mod.widgets.HwPanelText{width: Fill padding: Inset{left: 12 top: 8} text: "No songs yet. Type what you want to hear and press Generate now: a song takes about a minute."}
+                                        // Every AI song in play order, then the ones being made (ai_table.rs).
+                                        ai_table := mod.widgets.AiTable{}
                                     }
                                 }
                                 // The AI stylist's chat (theme_manager.rs).
@@ -1218,9 +1144,6 @@ pub struct App {
     /// The model picker shows `ai.models`.
     #[rust]
     ai_models_shown: bool,
-    /// The page-filling lyrics as last applied.
-    #[rust]
-    ai_big_shown: Option<bool>,
     /// The AI page's frames while a song is made (its bar, the elapsed time).
     #[rust]
     ai_frame: NextFrame,
@@ -3275,7 +3198,6 @@ impl AppMain for App {
         crate::eq::script_mod(vm);
         crate::micro::script_mod(vm);
         crate::lyrics_view::script_mod(vm);
-        crate::ai_songs::script_mod(vm);
         crate::connection::script_mod(vm);
         makepad_app_aichat::script_mod(vm);
         makepad_widgets_feedback::script_mod(vm);
