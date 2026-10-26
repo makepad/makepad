@@ -55,7 +55,7 @@ Fixed-size fields are little-endian. `str` and `bytes` are `u32 LE length` + byt
 | 4 | SelectScreen | `index u32` (into `Welcome.screens`) |
 | 5 | RequestKeyframe | — (sent by the viewer after a decode error) |
 | 7 | Refresh | `hz u16`: the viewer's display refresh, measured from its vsync (0 = not known). Sent after Hello and on every change. |
-| 8 | Window | `width u32, height u32, scale u16`: the viewer's picture area in device pixels and its scale (hundredths, 200 = 2.00x). Sent once it has held still for 250 ms, after the Welcome and after every resize. A desktop whose size follows its viewer (a virtual display set to follow) takes this size and scale from the active viewer (the watching viewer that sent input last), so the picture is shown 1:1. |
+| 8 | Window | `width u32, height u32, scale u16`: the viewer's picture area in device pixels and its scale (hundredths, 200 = 2.00x). Sent once it has held still for 250 ms, after the Welcome and after every resize. A desktop whose size follows its viewer (a virtual display set to follow) takes this size and scale from the viewer that connected last ("last connection wins", see Sessions), so its picture is shown 1:1; the others see it scaled. |
 | 10 | Key | `down bool, keycode u32 (makepad KeyCode index), mods u8 (1 shift, 2 control, 4 alt, 8 logo)` |
 | 11 | Pointer | `x u16, y u16`: position over the stream picture, 0..=65535 on each axis |
 | 12 | Button | `down bool, button u8 (0 left, 1 right, 2 middle, 3 back, 4 forward)` |
@@ -65,7 +65,7 @@ Fixed-size fields are little-endian. `str` and `bytes` are `u32 LE length` + byt
 | 20 | Ping | `client_ns u64` (the viewer's clock) |
 | 21 | Stats | `frame u32, decode_us u32, present_us u32`: about once a second; `frame` the last picture shown and `present_us` its decode-end to on screen; `decode_us` a picture's decode (its slowest stream's), the mean over the pictures since the last `Stats` (version 7 viewers before this rule sent the last picture's) |
 | 22 | Clipboard | `text str` (the desktop's clipboard takes it) |
-| 24 | Encoding | `chroma u8, codec u8, preset u8, mbps u16, fps u16`: how this viewer wants the stream encoded, 0 = auto each. `chroma` 1 4:4:4, 2 4:2:0; `codec` 1 H.264, 2 H.265; `preset` 1 sharp (the encoder's best pictures per bit), 2 fast (its fastest encode); `mbps` the most the stream may take (all tiles; 0 = no cap of its own: the desktop streams at most the lowest cap of its watching viewers); `fps` pictures a second (0 = its display's refresh). Sent after the Hello and on every change. The active viewer's choices decide the stream (the watching viewer that sent input last, view-only viewers last); the decoders of every watching viewer (`Hello.caps`) and the desktop's settings bound them. |
+| 24 | Encoding | `chroma u8, codec u8, preset u8, mbps u16, fps u16`: how this viewer wants the stream encoded, 0 = auto each. `chroma` 1 4:4:4, 2 4:2:0; `codec` 1 H.264, 2 H.265; `preset` 1 sharp (the encoder's best pictures per bit), 2 fast (its fastest encode); `mbps` the most the stream may take (all tiles; 0 = no cap of its own: the desktop streams at most the lowest cap of its watching viewers); `fps` pictures a second (0 = its display's refresh). Sent after the Hello and on every change. The choices of the watching viewer that connected last decide the stream (view-only viewers last); the decoders of every watching viewer (`Hello.caps`) and the desktop's settings bound them. |
 
 Gamepad buttons: bit 0 A, 1 B, 2 X, 3 Y, 4 left shoulder, 5 right shoulder, 6 select, 7 start, 8 home,
 9 left thumb, 10 right thumb, 11-14 d-pad up/down/left/right. Sticks run −32767..32767, up positive
@@ -128,9 +128,13 @@ example, no `/dev/uinput` access); `input_note` says why.
   viewer decodes the bands at once), and the rate stays: that second's backlog is the decoder's.
   A step that does not cut the decode time by a fifth goes back and is the last. The bands stay
   until a viewer leaves. `Rate` tells the viewers each change.
-- **Backpressure.** The desktop never drops an encoded picture: the next one references it. While
-  a watching viewer has more than 2 pictures unsent, it makes none. The newest picture goes out
-  once the viewer has caught up.
+- **Backpressure.** The desktop never drops an encoded picture of a stream a viewer follows: the
+  next one references it. While a watching viewer has more than 2 pictures unsent and no other
+  watching viewer keeps up, it makes none; the newest picture goes out once the viewer has caught
+  up. A viewer behind while another keeps up is let go of the stream instead: it gets no pictures
+  until it has caught up, then starts again at a key frame (asked at most every 2 s per viewer),
+  so each viewer gets pictures at the pace of its own link and a slow one never holds the others
+  back (`server::Feed`). The adaptive rate follows the viewers that keep up.
 
 ## Streams (tiles and interleaving)
 
@@ -238,10 +242,15 @@ The viewer shows these in its overlay and sends `Stats` once a second.
 
 ## Sessions
 
-A viewer keeps every desktop in its list connected. Those it does not show are paused: no
-pictures, and a ping each second keeps their latency current. Showing another desktop is
-`Pause` to the old one and `Resume` to the new one, which answers with a key frame: one round
-trip plus one encode. It needs no new TLS handshake.
+A viewer keeps every desktop in its list connected, one connection each whatever number of its
+windows show it. Those no window shows are paused: no pictures, and a ping each second keeps
+their latency current. Every shown desktop streams at once; a connection is never paused or
+closed because another one is shown. Showing a desktop no window showed is `Resume`, answered
+with a key frame: one round trip plus one encode, no new TLS handshake.
 
-The desktop serves any number of sessions. They watch the same screen, and the stream follows
-the last `SelectScreen`.
+The desktop serves several sessions at once (8, at most 4 from one address); a new viewer never
+ends an existing one. They watch the same screen from one capture and one encode, and the stream
+follows the last `SelectScreen`. **Last connection wins**: a desktop that follows its viewer
+takes the `Window` of the viewer that connected last (not view-only, its window said); the
+earlier ones see that size scaled. When it leaves, the one that connected before it decides
+again (`server::size_owner`).

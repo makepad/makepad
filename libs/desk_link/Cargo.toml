@@ -22,6 +22,11 @@ name = "server_admin"
 path = "tests/server_admin.rs"
 required-features = ["server"]
 
+[[bin]]
+name = "desk-link-testhost"
+path = "src/bin/desk_link_testhost.rs"
+required-features = ["server"]
+
 [[test]]
 name = "server_input"
 path = "tests/server_input.rs"

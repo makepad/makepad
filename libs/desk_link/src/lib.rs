@@ -169,7 +169,7 @@ pub enum ClientMsg {
     /// How this viewer wants the stream encoded ([`pref`]; 0 = auto each): `chroma`, `codec`,
     /// `preset`, the most it may take (`mbps`, all tiles; 0 = no cap of its own: the desktop
     /// streams at most the lowest of its watching viewers' caps) and pictures a second (`fps`;
-    /// 0 = its display's refresh). Sent after the Hello and on every change; the active viewer's
+    /// 0 = its display's refresh). Sent after the Hello and on every change; the last connected viewer's
     /// choices decide the stream, the decoders of every watching viewer bound them.
     Encoding { chroma: u8, codec: u8, preset: u8, mbps: u16, fps: u16 },
 }

@@ -13,17 +13,18 @@
 
 use makepad_desk_link as proto;
 use makepad_widgets::makepad_platform::video_file::{GpuReady, StreamTile, StreamTuning, StreamVideoCodec, VideoStreamEncoder, VideoStreamEncoderOptions};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use makepad_desk_link::server::Out;
+use makepad_desk_link::server::{Feed, Out};
 pub use super::capture::{InFlight, TilePlan};
 pub use super::settings::Split;
 
-/// The viewers a picture goes to: their queue, its backlog, whether they pause.
-pub type Subscribers = Arc<Mutex<Vec<(Sender<Out>, Arc<AtomicUsize>, Arc<AtomicBool>)>>>;
+/// The viewers a picture goes to: their queue and their feed (backlog, pause, whether the
+/// picture goes to them: `Feed::admit`).
+pub type Subscribers = Arc<Mutex<Vec<(Sender<Out>, Arc<Feed>)>>>;
 
 /// The release fence of the frame that rendered a picture (Linux), or nothing to wait for.
 pub enum Fence {
@@ -233,12 +234,14 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
             last_failure = Some((text, Instant::now()));
         }
     };
-    let send = |bytes: Vec<u8>| {
-        for (out, backlog, paused) in subscribers.lock().unwrap().iter() {
-            if paused.load(Ordering::Acquire) {
+    // a picture goes to every viewer that follows the stream (one behind while others keep up
+    // skips pictures until it starts again at a key frame)
+    let send = |frame: u32, key: bool, bytes: Vec<u8>| {
+        for (out, feed) in subscribers.lock().unwrap().iter() {
+            if !feed.admit(frame, key) {
                 continue;
             }
-            backlog.fetch_add(1, Ordering::AcqRel);
+            feed.backlog.fetch_add(1, Ordering::AcqRel);
             let _ = out.send(Out::Video(bytes.clone()));
         }
     };
@@ -272,7 +275,7 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
                     }
                 };
                 if parts == 1 {
-                    send(msg);
+                    send(frame, key, msg);
                     complete(&stats, took_us);
                 } else {
                     // each engine encodes in order: the oldest picture completes first
@@ -282,7 +285,7 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
                     if gathering.front().is_some_and(|(_, parts, _)| parts.iter().all(Option::is_some)) {
                         let (_, parts, slowest) = gathering.pop_front().unwrap();
                         let all: Vec<u8> = parts.into_iter().flat_map(Option::unwrap).collect();
-                        send(all);
+                        send(frame, key, all);
                         complete(&stats, slowest);
                     }
                 }

@@ -49,7 +49,7 @@ pub fn limit_name(limit: u8) -> &'static str {
     }
 }
 
-/// The active viewer's picture area (device pixels), its display refresh (mHz) and scale
+/// The deciding viewer's (the last connection's) picture area (device pixels), its display refresh (mHz) and scale
 /// (hundredths): what a desktop that follows its viewer (a virtual display) takes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ViewerWindow {
@@ -84,22 +84,19 @@ impl DeskLink {
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use super::capture::{CaptureState, Want};
-    use makepad_desk_link::server::{Control, Geometry, Input, Out, Server, ServerConfig, ToUi};
+    use makepad_desk_link::server::{self, Control, Feed, Geometry, Input, Out, Server, ServerConfig, ToUi};
     use super::settings::DeskLinkSettings;
     use makepad_desk_link::{self as proto, ScreenInfo, ServerMsg};
     use super::encode::{EncodeStats, Encoder, Fence, Job, Subscribers, TilePlan};
     use makepad_widgets::makepad_platform::video_file::{StreamVideoCodec, VideoStreamEncoder};
     use super::rate::effort;
     use makepad_widgets::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
-    /// More pictures than this queued for a viewer: no picture is made until it catches up
-    /// (none is ever dropped once encoded: the next one references it).
     /// How long the desktop holds still before its picture is sent again near lossless (s).
     const REFINE_AFTER: f64 = 0.12;
 
-    const BACKLOG: usize = 2;
 
     struct Viewer {
         session: u32,
@@ -112,17 +109,13 @@ mod native {
         refresh_hz: u16,
         since: std::time::Instant,
         out: std::sync::mpsc::Sender<Out>,
-        backlog: Arc<AtomicUsize>,
-        paused: Arc<AtomicBool>,
+        /// Its pictures: backlog, pause, whether it follows the stream (`server::Feed`).
+        feed: Arc<Feed>,
         /// From its last `Stats`: pictures it was behind the last one sent, its decode and
         /// present time (µs).
         shown: Option<(u32, u32, u32)>,
         /// Its picture area: device pixels and scale (hundredths), from its `Window`.
         window: Option<(u32, u32, u16)>,
-        /// When it last became the active viewer (it sent input, or it opened).
-        active_at: std::time::Instant,
-        /// It sent input (a viewer someone uses outranks one that only opened later).
-        input: bool,
         /// `caps::VIEW_ONLY`: its window never decides the desktop's size.
         view_only: bool,
         /// Its decoder takes H.265.
@@ -193,7 +186,7 @@ mod native {
         tl_idle: bool,
         tl_congested_at: Option<f64>,
         tl_congested_s: f64,
-        /// The active viewer's window as last handed out (`take_viewer_window`).
+        /// The deciding viewer's window as last handed out (`take_viewer_window`).
         viewer_window: Option<super::ViewerWindow>,
         /// Stream sizes whose 4:4:4 encode lost the GPU device: they stream 4:2:0 from then on
         /// (the same configuration again would only lose the new device too).
@@ -214,7 +207,7 @@ mod native {
             self.viewers
                 .iter()
                 .filter(|v| v.session != 0)
-                .map(|v| super::DeskLinkViewer { session: v.session, name: v.name.clone(), peer: v.peer.clone(), paused: v.paused.load(Ordering::Acquire), secs: v.since.elapsed().as_secs(), stream: stream.clone() })
+                .map(|v| super::DeskLinkViewer { session: v.session, name: v.name.clone(), peer: v.peer.clone(), paused: v.feed.paused.load(Ordering::Acquire), secs: v.since.elapsed().as_secs(), stream: stream.clone() })
                 .collect()
         }
 
@@ -225,11 +218,13 @@ mod native {
 
         /// Ends a viewer's session from this desktop (the bar's panel): it is told why and
         /// closed; it leaves the list when the server reports it gone.
-        /// The active viewer's window when it changed since the last call: of the watching
-        /// viewers that said their window size and are not view-only, the one that sent input
-        /// last, else the last to come.
+        /// The window the desktop follows when it changed since the last call: the last
+        /// connection wins (`server::size_owner`): of the viewers that said their window size
+        /// and are not view-only, the one that connected last; the others see the desktop
+        /// scaled. When it leaves, the one before it decides again.
         pub fn take_viewer_window(&mut self) -> Option<super::ViewerWindow> {
-            let v = self.viewers.iter().filter(|v| !v.paused.load(Ordering::Acquire) && !v.view_only && v.window.is_some()).max_by_key(|v| (v.input, v.active_at))?;
+            let owner = server::size_owner(self.viewers.iter().map(|v| (v.session, !v.view_only && v.window.is_some())))?;
+            let v = self.viewers.iter().find(|v| v.session == owner)?;
             let (width, height, scale) = v.window?;
             let refresh_mhz = if v.refresh_hz == 0 { 0 } else { v.refresh_hz as u32 * 1000 };
             let window = super::ViewerWindow { width, height, refresh_mhz, scale: scale as u32 };
@@ -300,8 +295,8 @@ mod native {
                 None => (spec.to_string(), 600),
             };
             let (tx, rx) = std::sync::mpsc::channel::<Out>();
-            let backlog = Arc::new(AtomicUsize::new(0));
-            let (backlog2, signal) = (backlog.clone(), self.signal.clone());
+            let feed = Arc::new(Feed::new(false));
+            let (feed2, signal) = (feed.clone(), self.signal.clone());
             let gone = Arc::new(AtomicBool::new(false));
             let gone2 = gone.clone();
             let spawned = std::thread::Builder::new().name("desk-link-dump".into()).spawn(move || {
@@ -335,7 +330,7 @@ mod native {
                             }
                             super::note(&format!("desk link dump: picture {frame} stream {stream}{} {} bytes, encode {:.2} ms", if key { " (key)" } else { "" }, data.len(), (encoded_ns.saturating_sub(built_ns)) as f64 / 1e6));
                         }
-                        backlog2.fetch_sub(1, Ordering::AcqRel);
+                        feed2.backlog.fetch_sub(1, Ordering::AcqRel);
                         if written >= count {
                             break;
                         }
@@ -347,7 +342,7 @@ mod native {
             });
             if spawned.is_ok() {
                 self.dump_gone = Some(gone);
-                self.viewers.push(Viewer { session: 0, name: "dump".into(), peer: String::new(), full_chroma: true, refresh_hz: 0, since: std::time::Instant::now(), out: tx, backlog, paused: Arc::new(AtomicBool::new(false)), shown: None, window: None, active_at: std::time::Instant::now(), input: false, view_only: false, hevc: true, prefs: Prefs::default() });
+                self.viewers.push(Viewer { session: 0, name: "dump".into(), peer: String::new(), full_chroma: true, refresh_hz: 0, since: std::time::Instant::now(), out: tx, feed, shown: None, window: None, view_only: false, hevc: true, prefs: Prefs::default() });
                 self.sync_subscribers();
             }
         }
@@ -395,10 +390,10 @@ mod native {
             }
             #[cfg(not(target_os = "linux"))]
             let _ = screens;
-            for v in self.viewers.iter().filter(|v| v.refresh_hz > 0 && !v.paused.load(Ordering::Acquire)) {
+            for v in self.viewers.iter().filter(|v| v.refresh_hz > 0 && !v.feed.paused.load(Ordering::Acquire)) {
                 fps = fps.min(v.refresh_hz as u32);
             }
-            // the active viewer's own cap (0: its display)
+            // the deciding viewer's own cap (0: its display)
             let wanted = self.prefs().fps;
             if wanted > 0 {
                 fps = fps.min(wanted as u32);
@@ -422,18 +417,18 @@ mod native {
         }
 
         fn watching(&self) -> bool {
-            self.viewers.iter().any(|v| !v.paused.load(Ordering::Acquire))
+            self.viewers.iter().any(|v| !v.feed.paused.load(Ordering::Acquire))
         }
 
         /// The choices of the viewer whose `Encoding` decides the stream: of the watching viewers,
-        /// one someone uses (not view-only, input last) first.
+        /// the last connection (view-only ones last), as for the size.
         fn prefs(&self) -> Prefs {
-            self.viewers.iter().filter(|v| !v.paused.load(Ordering::Acquire)).max_by_key(|v| (!v.view_only, v.input, v.active_at)).map_or(Prefs::default(), |v| v.prefs)
+            self.viewers.iter().filter(|v| !v.feed.paused.load(Ordering::Acquire)).max_by_key(|v| (!v.view_only, v.session)).map_or(Prefs::default(), |v| v.prefs)
         }
 
         /// Whether a `size` stream may be 4:4:4 for these choices, and why not.
         fn can_444(&self, size: [u32; 2], p: &Prefs) -> (bool, &'static str) {
-            let watching = || self.viewers.iter().filter(|v| !v.paused.load(Ordering::Acquire));
+            let watching = || self.viewers.iter().filter(|v| !v.feed.paused.load(Ordering::Acquire));
             if p.chroma == proto::pref::HALF {
                 (false, "4:2:0: the viewer asks for it")
             } else if !self.settings.as_ref().is_some_and(|s| s.full_chroma) {
@@ -454,13 +449,13 @@ mod native {
             if !self.can_444(size, &p).0 || p.chroma == proto::pref::FULL { effort::FAST } else { effort::HALF }
         }
 
-        /// How a `size` stream is encoded now: the active viewer's choices within what every
+        /// How a `size` stream is encoded now: the last connection's choices within what every
         /// watching viewer decodes, the GPU encodes and the settings allow, and the step the
         /// encoder's throughput asked for (`rate::effort`).
         fn choice(&self, size: [u32; 2]) -> Choice {
             use proto::pref;
             let p = self.prefs();
-            let watching = || self.viewers.iter().filter(|v| !v.paused.load(Ordering::Acquire));
+            let watching = || self.viewers.iter().filter(|v| !v.feed.paused.load(Ordering::Acquire));
             let (can_444, no_444) = self.can_444(size, &p);
             let mut why: Vec<String> = Vec::new();
             let hevc = if p.codec == pref::H264 {
@@ -512,7 +507,7 @@ mod native {
         /// viewers' own caps (none by default: the adaptive rate alone decides).
         fn rate_ceiling(&self, _size: [u32; 2], _full_chroma: bool) -> u32 {
             let base = self.settings.as_ref().map_or(u32::MAX, |s| s.ceiling_kbps());
-            self.viewers.iter().filter(|v| !v.paused.load(Ordering::Acquire) && v.prefs.mbps > 0).map(|v| v.prefs.mbps as u32 * 1000).fold(base, u32::min).max(1)
+            self.viewers.iter().filter(|v| !v.feed.paused.load(Ordering::Acquire) && v.prefs.mbps > 0).map(|v| v.prefs.mbps as u32 * 1000).fold(base, u32::min).max(1)
         }
 
         /// The whole stream's rate now (kbit/s, the encoder splits it over the tiles): the
@@ -591,9 +586,9 @@ mod native {
                 Some(s) => (s.sent.pictures.swap(0, Ordering::Relaxed), s.sent.bytes.swap(0, Ordering::Relaxed), s.sent.write_us_max.swap(0, Ordering::Relaxed)),
                 None => (0, 0, 0),
             };
-            let backlog = self.viewers.iter().map(|v| v.backlog.load(Ordering::Acquire)).max().unwrap_or(0);
+            let backlog = self.viewers.iter().map(|v| v.feed.backlog.load(Ordering::Acquire)).max().unwrap_or(0);
             // the viewer furthest behind (pictures sent that it has not shown yet, from its Stats)
-            let shown: Vec<(u32, u32, u32)> = self.viewers.iter_mut().filter(|v| !v.paused.load(Ordering::Acquire)).filter_map(|v| v.shown.take()).collect();
+            let shown: Vec<(u32, u32, u32)> = self.viewers.iter_mut().filter(|v| !v.feed.paused.load(Ordering::Acquire)).filter_map(|v| v.shown.take()).collect();
             let viewer = shown.iter().max_by_key(|s| s.0).map_or(String::new(), |(behind, decode, present)| format!(" · viewer behind {behind} (decode {:.1} ms, present {:.1} ms)", *decode as f64 / 1000.0, *present as f64 / 1000.0));
             // the slowest decoder of the watching viewers (its slowest stream's, per picture)
             let decode_ms = shown.iter().map(|s| s.1).max().unwrap_or(0) as f64 / 1000.0;
@@ -845,7 +840,7 @@ mod native {
         }
 
         fn sync_subscribers(&self) {
-            *self.subscribers.lock().unwrap() = self.viewers.iter().map(|v| (v.out.clone(), v.backlog.clone(), v.paused.clone())).collect();
+            *self.subscribers.lock().unwrap() = self.viewers.iter().map(|v| (v.out.clone(), v.feed.clone())).collect();
         }
 
         fn keyframe(&self) {
@@ -862,7 +857,7 @@ mod native {
                 self.update_capture(cx);
             }
             let Some(server) = &self.server else {
-                let congested = self.viewers.iter().any(|v| !v.paused.load(Ordering::Acquire) && v.backlog.load(Ordering::Acquire) > BACKLOG);
+                let congested = server::hold(self.viewers.iter().map(|v| &*v.feed));
                 if congested != self.congested {
                     self.set_congested(cx, congested);
                     self.update_capture(cx);
@@ -873,7 +868,7 @@ mod native {
             let note = server.input_note.lock().unwrap().clone();
             for m in messages {
                 match m {
-                    ToUi::Opened { session, peer, client, name, screen, paused, caps, out, backlog } => {
+                    ToUi::Opened { session, peer, client, name, screen, paused, caps, out, feed } => {
                         let (screens, default) = self.screens(cx);
                         if self.viewers.is_empty() {
                             self.screen = if screen >= 0 && (screen as usize) < screens.len() { screen as usize } else { default };
@@ -899,7 +894,7 @@ mod native {
                         };
                         let _ = out.send(Out::Msg(welcome.encode()));
                         let _ = out.send(Out::Msg(self.rate_msg(cx).encode()));
-                        self.viewers.push(Viewer { session, name, peer: ip, full_chroma: caps & proto::caps::FULL_CHROMA != 0, refresh_hz: 0, since: std::time::Instant::now(), out, backlog, paused: Arc::new(AtomicBool::new(paused)), shown: None, window: None, active_at: std::time::Instant::now(), input: false, view_only: caps & proto::caps::VIEW_ONLY != 0, hevc: caps & proto::caps::HEVC != 0, prefs: Prefs::default() });
+                        self.viewers.push(Viewer { session, name, peer: ip, full_chroma: caps & proto::caps::FULL_CHROMA != 0, refresh_hz: 0, since: std::time::Instant::now(), out, feed, shown: None, window: None, view_only: caps & proto::caps::VIEW_ONLY != 0, hevc: caps & proto::caps::HEVC != 0, prefs: Prefs::default() });
                         self.generation = self.generation.wrapping_add(1);
                         self.sync_subscribers();
                         self.cursor = None;
@@ -910,14 +905,14 @@ mod native {
                         let Some(i) = self.viewers.iter().position(|v| v.session == session) else { continue };
                         match control {
                             Control::Pause => {
-                                self.viewers[i].paused.store(true, Ordering::Release);
+                                self.viewers[i].feed.paused.store(true, Ordering::Release);
                                 self.generation = self.generation.wrapping_add(1);
                             }
                             Control::Resume => {
                                 if !self.watching() {
                                     self.rate.begin(&format!("{}@{}", self.viewers[i].name, self.viewers[i].peer));
                                 }
-                                self.viewers[i].paused.store(false, Ordering::Release);
+                                self.viewers[i].feed.paused.store(false, Ordering::Release);
                                 self.generation = self.generation.wrapping_add(1);
                                 self.cursor = None;
                                 self.keyframe();
@@ -938,18 +933,7 @@ mod native {
                             }
                             Control::Window { width, height, scale } => {
                                 super::note(&format!("desk link: {} window {width}x{height} at {:.2}x", self.viewers[i].name, scale as f64 / 100.0));
-                                // a resize after the first size (maximise, fullscreen, a drag) is
-                                // someone using that viewer: the desktop follows it at once, not
-                                // only after its next input
-                                if self.viewers[i].window.is_some_and(|w| w != (width, height, scale)) {
-                                    self.viewers[i].active_at = std::time::Instant::now();
-                                    self.viewers[i].input = true;
-                                }
                                 self.viewers[i].window = Some((width, height, scale));
-                            }
-                            Control::Active => {
-                                self.viewers[i].active_at = std::time::Instant::now();
-                                self.viewers[i].input = true;
                             }
                             Control::Clipboard(text) => cx.copy_to_clipboard(&text),
                             Control::Encoding { chroma, codec, preset, mbps, fps } => {
@@ -975,7 +959,7 @@ mod native {
                     ToUi::Closed { session, reason } => {
                         if let Some(i) = self.viewers.iter().position(|v| v.session == session) {
                             let v = self.viewers.remove(i);
-                            if !v.paused.load(Ordering::Acquire) {
+                            if !v.feed.paused.load(Ordering::Acquire) {
                                 self.rate.remember(&format!("{}@{}", v.name, v.peer));
                             }
                             super::note(&format!("desk link: {} left ({reason})", v.name));
@@ -988,8 +972,13 @@ mod native {
                     }
                 }
             }
-            // a viewer behind on pictures stops the capture until it caught up
-            let congested = self.viewers.iter().any(|v| !v.paused.load(Ordering::Acquire) && v.backlog.load(Ordering::Acquire) > BACKLOG);
+            // a viewer let go of the stream that caught up starts again at a key frame
+            if server::resync_due(self.viewers.iter().map(|v| &*v.feed)) {
+                self.keyframe();
+            }
+            // a viewer behind on pictures stops the capture until it caught up (one behind while
+            // another keeps up is let go of the stream instead: `server::hold`)
+            let congested = server::hold(self.viewers.iter().map(|v| &*v.feed));
             if congested != self.congested {
                 self.set_congested(cx, congested);
                 self.update_capture(cx);

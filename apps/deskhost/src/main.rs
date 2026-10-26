@@ -30,7 +30,7 @@ mod macos;
 mod windows;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use makepad_desk_link::server::{Control, Geometry, Out, Server, ServerConfig, ToUi};
+use makepad_desk_link::server::{self, Control, Feed, Geometry, Out, Server, ServerConfig, ToUi};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use makepad_desk_link::{self as proto, ServerMsg};
 use makepad_desk_link::ScreenInfo;
@@ -38,7 +38,7 @@ use makepad_desk_link::ScreenInfo;
 use makepad_video::{GpuReady, StreamVideoCodec, VideoStreamEncoder, VideoStreamEncoderOptions};
 use settings::Settings;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::Sender;
@@ -47,10 +47,6 @@ use std::sync::Arc;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::time::Duration;
 use std::time::Instant;
-
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-/// More pictures than this queued for a viewer: no picture is encoded until it catches up.
-const BACKLOG: usize = 2;
 
 pub fn log(text: &str) {
     use std::io::Write;
@@ -192,8 +188,8 @@ struct Viewer {
     session: u32,
     name: String,
     out: Sender<Out>,
-    backlog: Arc<AtomicUsize>,
-    paused: Arc<AtomicBool>,
+    /// Its pictures: backlog, pause, whether it follows the stream (`server::Feed`).
+    feed: Arc<Feed>,
     /// The viewer's display refresh (Hz, 0 = not known) and whether it was told the stream's rate.
     refresh: u16,
     told_rate: bool,
@@ -366,7 +362,7 @@ fn stream_fps(cap: u32, screen_hz: u32, stream: [u32; 2], viewers: &[Viewer]) ->
     if screen_hz > 0 {
         fps = fps.min(screen_hz);
     }
-    for v in viewers.iter().filter(|v| v.refresh > 0 && !v.paused.load(Ordering::Acquire)) {
+    for v in viewers.iter().filter(|v| v.refresh > 0 && !v.feed.paused.load(Ordering::Acquire)) {
         fps = fps.min(v.refresh as u32);
     }
     fps
@@ -460,7 +456,7 @@ fn run(desktop: &mut dyn Desktop, status: &mut Status, ctl: &HostControl, settin
         // whatever arrived from the sessions
         for m in server.rx.try_iter() {
             match m {
-                ToUi::Opened { session, peer, client, name, screen: wanted, paused, out, backlog, .. } => {
+                ToUi::Opened { session, peer, client, name, screen: wanted, paused, out, feed, .. } => {
                     screens = desktop.screens();
                     if viewers.is_empty() && wanted >= 0 && (wanted as usize) < screens.len() {
                         screen = wanted as usize;
@@ -479,7 +475,7 @@ fn run(desktop: &mut dyn Desktop, status: &mut Status, ctl: &HostControl, settin
                         server: settings::host_name(),
                     };
                     let _ = out.send(Out::Msg(welcome.encode()));
-                    viewers.push(Viewer { session, name, out, backlog, paused: Arc::new(AtomicBool::new(paused)), refresh: 0, told_rate: false, synced: false, peer, since: Instant::now(), sent: (0, 0), sent_rate: (0, 0) });
+                    viewers.push(Viewer { session, name, out, feed, refresh: 0, told_rate: false, synced: false, peer, since: Instant::now(), sent: (0, 0), sent_rate: (0, 0) });
                     report_viewers(ctl, &viewers, fps);
                     key_wanted = true;
                     cursor = None;
@@ -487,9 +483,9 @@ fn run(desktop: &mut dyn Desktop, status: &mut Status, ctl: &HostControl, settin
                 ToUi::Control { session, control } => {
                     let Some(v) = viewers.iter_mut().find(|v| v.session == session) else { continue };
                     match control {
-                        Control::Pause => v.paused.store(true, Ordering::Release),
+                        Control::Pause => v.feed.paused.store(true, Ordering::Release),
                         Control::Resume => {
-                            v.paused.store(false, Ordering::Release);
+                            v.feed.paused.store(false, Ordering::Release);
                             v.synced = false;
                             key_wanted = true;
                             cursor = None;
@@ -516,7 +512,7 @@ fn run(desktop: &mut dyn Desktop, status: &mut Status, ctl: &HostControl, settin
                         }
                         // a physical screen streams its real size: the viewer's window size (v5,
                         // for desktops that follow their viewer) and who drives last change nothing
-                        Control::Window { .. } | Control::Active => {}
+                        Control::Window { .. } => {}
                         Control::Clipboard(_) | Control::Stats { .. } | Control::Encoding { .. } => {}
                     }
                 }
@@ -563,7 +559,7 @@ fn run(desktop: &mut dyn Desktop, status: &mut Status, ctl: &HostControl, settin
             let _ = v.out.send(Out::Msg(ServerMsg::Rate { fps: fps as u16, kbps: settings.kbps, limit, full_chroma: false, codec: proto::pref::H264, preset: proto::pref::FAST, streams: 1, why: String::new() }.encode()));
         }
         // the capture follows the viewers: on while one watches, on the screen they watch, at the stream's rate
-        watching = viewers.iter().any(|v| !v.paused.load(Ordering::Acquire));
+        watching = viewers.iter().any(|v| !v.feed.paused.load(Ordering::Acquire));
         match (watching, capturing) {
             (true, c) if c != Some((screen, fps)) => {
                 pending = None;
@@ -614,8 +610,13 @@ fn run(desktop: &mut dyn Desktop, status: &mut Status, ctl: &HostControl, settin
         while let Ok(newer) = frame_rx.try_recv() {
             pending = Some(newer);
         }
-        // a viewer behind: the frame waits (no teardown, no key frame) and goes when it caught up
-        let congested = viewers.iter().any(|v| !v.paused.load(Ordering::Acquire) && v.backlog.load(Ordering::Acquire) > BACKLOG);
+        // a viewer let go of the stream that caught up starts again at a key frame
+        if server::resync_due(viewers.iter().map(|v| &*v.feed)) {
+            key_wanted = true;
+        }
+        // a viewer behind: the frame waits (no teardown, no key frame) and goes when it caught up;
+        // one behind while another keeps up is let go of the stream instead (`server::hold`)
+        let congested = server::hold(viewers.iter().map(|v| &*v.feed));
         if congested {
             continue;
         }
@@ -647,7 +648,7 @@ fn run(desktop: &mut dyn Desktop, status: &mut Status, ctl: &HostControl, settin
         }
         let (enc, _, _) = encoder.as_mut().unwrap();
         // a key frame: asked for, a viewer not in step, or the scheduled one
-        let unsynced = viewers.iter().any(|v| !v.synced && !v.paused.load(Ordering::Acquire));
+        let unsynced = viewers.iter().any(|v| !v.synced && !v.feed.paused.load(Ordering::Acquire));
         if settings.key_every > 0 && last_key.elapsed() >= Duration::from_secs(settings.key_every as u64) {
             key_wanted = true;
         }
@@ -684,7 +685,7 @@ fn run(desktop: &mut dyn Desktop, status: &mut Status, ctl: &HostControl, settin
                     }
                     let bytes = proto::encode_video(frame_no, p.is_key, frame.captured_ns, encoded_ns, 0, (0, 1, 0, 0), proto::pref::H264, &p.data);
                     for v in viewers.iter_mut() {
-                        if v.paused.load(Ordering::Acquire) {
+                        if !v.feed.admit(frame_no, p.is_key) {
                             continue;
                         }
                         // a viewer starts at a key frame
@@ -692,7 +693,7 @@ fn run(desktop: &mut dyn Desktop, status: &mut Status, ctl: &HostControl, settin
                         if !v.synced {
                             continue;
                         }
-                        v.backlog.fetch_add(1, Ordering::AcqRel);
+                        v.feed.backlog.fetch_add(1, Ordering::AcqRel);
                         v.sent.0 += 1;
                         v.sent.1 += bytes.len() as u64;
                         if v.out.send(Out::Video(bytes.clone())).is_err() {
@@ -727,7 +728,7 @@ fn report_viewers(ctl: &HostControl, viewers: &[Viewer], fps: u32) {
             let (pics, bytes) = v.sent_rate;
             let base = makepad_desk_link_panel::stream_line(false, false, fps, 0, 1);
             let stream = if pics > 0 { format!("{base} \u{b7} {:.1} Mbit/s \u{b7} {pics} sent/s", bytes as f64 * 8.0 / 1e6) } else { format!("{base} \u{b7} idle (the screen is still)") };
-            makepad_desk_link_panel::ViewerRow { session: v.session, name: v.name.clone(), peer: v.peer.clone(), paused: v.paused.load(Ordering::Acquire), secs: v.since.elapsed().as_secs(), stream }
+            makepad_desk_link_panel::ViewerRow { session: v.session, name: v.name.clone(), peer: v.peer.clone(), paused: v.feed.paused.load(Ordering::Acquire), secs: v.since.elapsed().as_secs(), stream }
         })
         .collect();
     ctl.update(|r| r.viewers = rows);

@@ -1,24 +1,25 @@
 //! Desk Link — the viewer of the window manager's remote desktop.
 //!
 //! A window is the picture alone under its caption. The caption carries, left to right: the
-//! stream's stats (pictures a second, the rate, codec and chroma) next to the window buttons,
-//! the machines open in the window as tabs (a live / connecting / offline dot and the short
-//! name; "+" opens a desktop that is not open), and the history toggle. Several windows each
-//! show their own machines (a tab dragged out of the strip, or "Open in new window" in its
-//! menu, makes a new one: two machines side by side); each window's size drives the display of
-//! the desktop it shows; Cmd+N (File → New Window, the Dock icon's menu) opens one more. The
-//! viewer has no tray or menu-bar item: choosing a machine is the caption's. The desktops it
-//! knows (saved hosts in `~/.makepad/desklink/hosts`, `--connect host[:port]`; never this
-//! machine itself) are each kept open and paused while not shown; "+" lists the ones open in
-//! no window. Closing the first window keeps the app (macOS: in the Dock; elsewhere while other
-//! windows show) with its desktops paused; the Dock icon shows it again. The picture is the
-//! remote screen at its own resolution, scaled to the window at a whole-pixel scale where it
-//! fits (aspect-locked, letterboxed); input is mapped back through the same placement.
-//! Keyboard input goes to the desktop once the picture was clicked. The stream is the
-//! desktop's choice (codec and rate auto).
+//! machines as tabs (a live / connecting / offline dot and the short name), the stream's stats,
+//! and the history toggle. The machines are the app's, not a window's: every window lists every
+//! machine the app knows (saved hosts in `~/.makepad/desklink/hosts`, `--connect host[:port]`;
+//! never this machine itself) and differs only in which one it shows. Each window streams its
+//! machine live at once with the others (no connection pauses or closes for another); windows
+//! on the same machine share its connection and pictures; the window that showed it or had the
+//! focus last sizes a desktop that follows its viewer. A machine no window shows stays connected
+//! and paused. Keys go to the focused window's machine only, and what a window holds down goes
+//! up when it loses the focus. Cmd+N (File → New Window, the Dock icon's menu) or a tab's "Open
+//! in new window" opens one more window; Cmd+W closes one (the first one of the installed Dock
+//! app hides into the Dock; the Dock icon shows it again). The windows and the machine each
+//! showed are restored at launch (`restore`). The picture is the remote screen at its own
+//! resolution, scaled to the window at a whole-pixel scale where it fits (aspect-locked,
+//! letterboxed); input is mapped back through the same placement. Keyboard input goes to the
+//! desktop once the picture was clicked. The stream is the desktop's choice (codec and rate
+//! auto).
 //!
 //! Shortcuts (Cmd on macOS, Ctrl+Shift elsewhere; never sent to the desktop): Cmd+N a new
-//! window (File → New Window, also in the Dock icon's menu), Cmd+1..9 shows tab N, Cmd+R
+//! window (File → New Window, also in the Dock icon's menu), Cmd+W closes the window, Cmd+1..9 shows tab N, Cmd+R
 //! reconnects, Cmd+Shift+S the desktop's next screen, Cmd+Shift+L latency details,
 //! Cmd+Shift+H the history scrubber.
 //!
@@ -42,8 +43,8 @@
 //! `--scrub-check SECS`: after SECS of pictures, pause, scrub the history (steps back and
 //! forward, a far jump, a saved clip), print the timings on stderr and exit (`--check-hold`:
 //! stay paused). `--check-scrubber`: open the scrubber once pictures arrive and hover the
-//! middle of its timeline (a thumbnail), `--check-split`: open the second tab in a window of
-//! its own (selftest lines say where things are drawn).
+//! middle of its timeline (a thumbnail), `--check-split`: the second machine in a new window
+//! (selftest lines say where things are drawn). `--no-restore`: not the last run's windows.
 
 mod caption;
 mod clip;
@@ -51,6 +52,7 @@ mod conn;
 mod held;
 mod history;
 mod installed;
+mod restore;
 mod scrub;
 mod scrubber;
 mod view;
@@ -107,9 +109,9 @@ script_mod! {
             main := MenuItem.Main{items:[@app_menu, @file_menu, @window_menu]}
             app_menu := MenuItem.Sub{name:"Desk Link" items:[@quit]}
             quit := MenuItem.Item{name:"Quit Desk Link" key: KeyCode.KeyQ enabled: true}
-            file_menu := MenuItem.Sub{name:"File" items:[@new_window, @close_tab]}
+            file_menu := MenuItem.Sub{name:"File" items:[@new_window, @close_window]}
             new_window := MenuItem.Item{name:"New Window" key: KeyCode.KeyN enabled: true dock: true}
-            close_tab := MenuItem.Item{name:"Close Tab" key: KeyCode.KeyW enabled: true}
+            close_window := MenuItem.Item{name:"Close Window" key: KeyCode.KeyW enabled: true}
         }
         body +: {
             padding: 0 spacing: 0
@@ -137,6 +139,12 @@ pub struct App {
     ui: WidgetRef,
     #[rust]
     conns: Vec<Connection>,
+    /// Each connection's newest picture, imported once for every window that shows it.
+    #[rust]
+    pictures: std::collections::HashMap<usize, viewer::ConnPicture>,
+    /// The windows changed since they were last saved (`restore`).
+    #[rust]
+    restore_dirty: bool,
     /// The viewer windows (the first is `main_window`; the others made at run time).
     #[rust]
     viewers: Vec<Viewer>,
@@ -207,7 +215,7 @@ impl Check {
     const FIRST: i64 = 0;
 }
 
-fn port_of(spec: &str) -> (String, u16) {
+pub(crate) fn port_of(spec: &str) -> (String, u16) {
     match spec.rsplit_once(':') {
         Some((h, p)) if !h.is_empty() && p.parse::<u16>().is_ok() && !h.contains(']') || h.ends_with(']') && p.parse::<u16>().is_ok() => {
             (h.trim_start_matches('[').trim_end_matches(']').to_string(), p.parse().unwrap())
@@ -365,7 +373,7 @@ fn pad_of(s: &makepad_widgets::makepad_platform::event::game_input::GamepadState
 }
 
 /// The viewer's own shortcuts (never sent to the desktop): Cmd (macOS) / Ctrl+Shift (elsewhere)
-/// with 1..9 (tab N), R (reconnect), W (close the tab; the last one its window); with Shift on
+/// with 1..9 (tab N), R (reconnect), W (close the window); with Shift on
 /// macOS: S (the desktop's next screen), L (latency details), H (history); Ctrl+Shift+N a new
 /// window (macOS: Cmd+N, the menu's); Ctrl+Tab / Ctrl+Shift+Tab the next / previous tab;
 /// fullscreen on and off: Cmd+Ctrl+F (macOS), F11 elsewhere. All of them work in fullscreen,
@@ -375,8 +383,8 @@ pub enum Shortcut {
     Desktop(usize),
     /// A new window (Cmd+N; Ctrl+Shift+N elsewhere).
     NewWindow,
-    /// Closes the shown tab; the last tab closes the window (Cmd+W; Ctrl+Shift+W elsewhere).
-    CloseTab,
+    /// Closes the window (Cmd+W; Ctrl+Shift+W elsewhere).
+    CloseWindow,
     /// The next (+1) or previous (-1) tab, round (Ctrl+Tab, Ctrl+Shift+Tab).
     NextTab(i32),
     /// Fullscreen on / off (Cmd+Ctrl+F on macOS, F11 elsewhere).
@@ -414,13 +422,13 @@ pub(crate) fn shortcut(e: &KeyEvent) -> Option<Shortcut> {
             return Some(Shortcut::NewWindow);
         }
         if e.key_code == KeyCode::KeyW && cfg!(target_vendor = "apple") {
-            return Some(Shortcut::CloseTab);
+            return Some(Shortcut::CloseWindow);
         }
     }
     if shifted {
         return match e.key_code {
             KeyCode::KeyN if !cfg!(target_vendor = "apple") => Some(Shortcut::NewWindow),
-            KeyCode::KeyW if !cfg!(target_vendor = "apple") => Some(Shortcut::CloseTab),
+            KeyCode::KeyW if !cfg!(target_vendor = "apple") => Some(Shortcut::CloseWindow),
             KeyCode::KeyS => Some(Shortcut::NextScreen),
             KeyCode::KeyL => Some(Shortcut::Details),
             KeyCode::KeyH => Some(Shortcut::History),
@@ -803,14 +811,9 @@ impl MatchEvent for App {
             let paused = !self.conns.is_empty();
             self.conns.push(Connection::open(name, host, port, paused, self.signal.clone()));
         }
-        // the first window opens every desktop known at the start, the first one shown
-        for i in 0..self.conns.len() {
-            self.viewers[0].tabs.push(i);
-        }
-        let first = args.windows(2).find(|w| w[0] == "--select").and_then(|w| w[1].parse::<usize>().ok()).filter(|n| *n < self.conns.len()).unwrap_or(0);
-        if !self.conns.is_empty() {
-            self.select(cx, 0, first);
-        }
+        // the last run's windows, each on its machine (`--select N`: the first window's)
+        let first = args.windows(2).find(|w| w[0] == "--select").and_then(|w| w[1].parse::<usize>().ok()).filter(|n| *n < self.conns.len());
+        self.restore_windows(cx, first);
         self.refresh(cx);
         self.tick = cx.start_interval(1.0);
     }
@@ -866,6 +869,7 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if let Event::Shutdown = event {
             installed::clear_pid();
+            self.save_windows(cx);
             // every connection's threads (and the scrub decoders) end and are joined before the app goes
             // nothing stays pressed on a desktop: the ups go out before the connections close
             for vi in 0..self.viewers.len() {
@@ -903,18 +907,20 @@ impl AppMain for App {
             }
             // the menu bar's File → New Window (Cmd-N) and the Dock icon's New Window
             Event::MacosMenuCommand(id) if *id == live_id!(new_window) => {
-                self.new_empty_window(cx);
+                self.new_window(cx, None, None);
                 return;
             }
-            // File → Close Tab (Cmd-W): the focused window's shown tab
-            Event::MacosMenuCommand(id) if *id == live_id!(close_tab) => {
+            // File → Close Window (Cmd-W): the focused window
+            Event::MacosMenuCommand(id) if *id == live_id!(close_window) => {
                 let vi = self.focused.min(self.viewers.len() - 1);
-                self.do_shortcut(cx, vi, Shortcut::CloseTab);
+                self.do_shortcut(cx, vi, Shortcut::CloseWindow);
                 return;
             }
+            // the focused window drives its machine (its keys) and sizes a desktop that follows
             Event::WindowGotFocus(id) => {
                 if let Some(vi) = self.viewer_of_window(*id) {
                     self.focused = vi;
+                    self.claim_size(cx, vi);
                 }
             }
             // focus gone (Cmd-Tab, another window, a sheet): what this window holds down on its
@@ -967,6 +973,7 @@ impl AppMain for App {
                 let v = &mut self.viewers[vi];
                 v.window_px = [(g.inner_size.x * g.dpi_factor).round() as u32, (g.inner_size.y * g.dpi_factor).round() as u32];
                 let changed = v.fullscreen != g.is_fullscreen;
+                self.restore_dirty = true;
                 v.fullscreen = g.is_fullscreen;
                 if changed {
                     viewer::selftest(&format!("window {vi} fullscreen {}", g.is_fullscreen));
@@ -988,6 +995,9 @@ impl AppMain for App {
             }
             self.refresh(cx);
             self.check_ui_tick(cx);
+            if self.restore_dirty {
+                self.save_windows(cx);
+            }
             if self.stats_log {
                 for v in &self.viewers {
                     let Some(c) = v.selected.and_then(|i| self.conns.get(i)) else { continue };

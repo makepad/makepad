@@ -153,7 +153,7 @@ pub struct ServerConfig {
 
 /// What the sessions tell the UI thread.
 pub enum ToUi {
-    Opened { session: u32, peer: String, client: String, name: String, screen: i32, paused: bool, caps: u32, out: Sender<Out>, backlog: Arc<AtomicUsize> },
+    Opened { session: u32, peer: String, client: String, name: String, screen: i32, paused: bool, caps: u32, out: Sender<Out>, feed: Arc<Feed> },
     Control { session: u32, control: Control },
     Closed { session: u32, reason: String },
 }
@@ -167,9 +167,6 @@ pub enum Control {
     Refresh(u16),
     /// The viewer's picture area: device pixels and scale (hundredths).
     Window { width: u32, height: u32, scale: u16 },
-    /// This viewer sent input while another one was the last to: it is the active viewer now
-    /// (a desktop that follows its viewer's size follows this one).
-    Active,
     Clipboard(String),
     Stats { frame: u32, decode_us: u32, present_us: u32 },
     /// The viewer's encoding choices (`pref::*`, cap Mbit/s, pictures a second; 0 = auto each).
@@ -212,6 +209,124 @@ pub struct SendStats {
     pub pictures: AtomicU64,
     pub bytes: AtomicU64,
     pub write_us_max: AtomicU64,
+}
+
+/// More pictures than this queued for a watching viewer and not written: it is behind.
+pub const BACKLOG: usize = 2;
+/// A viewer that fell behind starts again at a key frame no sooner than this after its last one
+/// (a slow link costs the others a key frame at most this often).
+const RESYNC_EVERY: Duration = Duration::from_secs(2);
+
+/// One viewer's pictures (shared by its owner, which queues them, and its session, which writes
+/// them): every viewer of a desktop gets the same capture and encode, at the pace its own link
+/// takes. A viewer behind while another keeps up is let go of the stream (it skips pictures) and
+/// starts again at a key frame once it has caught up, so one slow link never holds the others
+/// back; a viewer behind with nobody keeping up holds the capture (`hold`) as before.
+#[derive(Default)]
+pub struct Feed {
+    /// Pictures queued and not written yet.
+    pub backlog: AtomicUsize,
+    /// It asked for no pictures (`Pause`).
+    pub paused: AtomicBool,
+    state: Mutex<FeedState>,
+}
+
+#[derive(Default)]
+struct FeedState {
+    /// Let go of the stream: no pictures until a key frame after it caught up.
+    skipping: bool,
+    /// The picture last decided and whether it goes here (its parts all go, or none).
+    decided: Option<(u32, bool)>,
+    /// When its last resync key frame was asked for.
+    resync_at: Option<Instant>,
+}
+
+impl Feed {
+    pub fn new(paused: bool) -> Feed {
+        Feed { paused: AtomicBool::new(paused), ..Default::default() }
+    }
+
+    pub fn watching(&self) -> bool {
+        !self.paused.load(Ordering::Acquire)
+    }
+
+    pub fn behind(&self) -> bool {
+        self.backlog.load(Ordering::Acquire) > BACKLOG
+    }
+
+    /// Let go of the stream (skipping pictures until it starts again at a key frame).
+    pub fn skipping(&self) -> bool {
+        self.state.lock().unwrap().skipping
+    }
+
+    /// Whether picture `frame` (a key frame or not) goes to this viewer; every part of one
+    /// picture gets the same answer. A paused viewer gets none; a skipping one only a key
+    /// frame, once its queue is empty (then it follows the stream again).
+    pub fn admit(&self, frame: u32, key: bool) -> bool {
+        if !self.watching() {
+            return false;
+        }
+        let mut s = self.state.lock().unwrap();
+        if let Some((f, yes)) = s.decided {
+            if f == frame {
+                return yes;
+            }
+        }
+        if s.skipping && key && self.backlog.load(Ordering::Acquire) == 0 {
+            s.skipping = false;
+        }
+        let yes = !s.skipping;
+        s.decided = Some((frame, yes));
+        yes
+    }
+}
+
+/// Whether the capture holds its next picture: a watching viewer that follows the stream is
+/// behind and nobody else keeps up. A viewer behind while another watching one keeps up is let
+/// go of the stream instead (`Feed::admit` skips its pictures), and the capture goes on.
+pub fn hold<'a>(feeds: impl IntoIterator<Item = &'a Feed> + Clone) -> bool {
+    let keeps_up = feeds.clone().into_iter().any(|f| f.watching() && !f.behind() && !f.skipping());
+    let mut hold = false;
+    for f in feeds {
+        if !f.watching() || !f.behind() {
+            continue;
+        }
+        let mut s = f.state.lock().unwrap();
+        if s.skipping {
+            continue;
+        }
+        if keeps_up {
+            s.skipping = true;
+        } else {
+            hold = true;
+        }
+    }
+    hold
+}
+
+/// Whether a key frame is due for a viewer that was let go of the stream and has caught up
+/// (at most every `RESYNC_EVERY` per viewer). Asking marks it asked.
+pub fn resync_due<'a>(feeds: impl IntoIterator<Item = &'a Feed>) -> bool {
+    let mut due = false;
+    for f in feeds {
+        if !f.watching() || f.backlog.load(Ordering::Acquire) != 0 {
+            continue;
+        }
+        let mut s = f.state.lock().unwrap();
+        if s.skipping && s.resync_at.is_none_or(|t| t.elapsed() >= RESYNC_EVERY) {
+            s.resync_at = Some(Instant::now());
+            due = true;
+        }
+    }
+    due
+}
+
+/// The viewer whose window decides the size of a desktop that follows its viewer: the last
+/// connection wins. Of the viewers that said their window and may decide (not view-only), the
+/// one that connected last (sessions count up); when it leaves, the one before it decides
+/// again. `viewers`: (session, may decide).
+pub fn size_owner(viewers: impl IntoIterator<Item = (u32, bool)>) -> Option<u32> {
+    viewers.into_iter().filter(|v| v.1).map(|v| v.0).max()
 }
 
 pub struct Server {
@@ -374,7 +489,6 @@ impl Server {
             .name("desk-link-listen".into())
             .spawn(move || {
                 let next_session = Arc::new(AtomicU32::new(1));
-                let active = Arc::new(AtomicU32::new(0));
                 while !stop2.load(Ordering::Acquire) {
                     match listener.accept() {
                         Ok((tcp, peer)) => {
@@ -407,7 +521,6 @@ impl Server {
                                 clock,
                                 input: input.clone(),
                                 guard: guard.clone(),
-                                active: active.clone(),
                                 _slot: slot,
                             };
                             let spawned = std::thread::Builder::new().name(format!("desk-link-{session}")).spawn(move || ctx.run(tcp));
@@ -449,8 +562,6 @@ struct SessionCtx {
     clock: fn() -> u64,
     input: InputFactory,
     guard: Arc<Guard>,
-    /// The session that sent input last (0: none yet), shared by all sessions.
-    active: Arc<AtomicU32>,
     _slot: SessionSlot,
 }
 
@@ -540,7 +651,7 @@ impl SessionCtx {
             }
         };
         let (out_tx, out_rx) = channel::<Out>();
-        let backlog = Arc::new(AtomicUsize::new(0));
+        let feed = Arc::new(Feed::new(paused));
         self.send_ui(ToUi::Opened {
             session: self.session,
             peer: self.peer.to_string(),
@@ -550,7 +661,7 @@ impl SessionCtx {
             caps,
             paused,
             out: out_tx,
-            backlog: backlog.clone(),
+            feed: feed.clone(),
         });
         // steady state: short reads, writes in between. Set on the TLS stream's own socket: on
         // Windows a duplicated handle's SO_RCVTIMEO does not reach the stream's reads, which then
@@ -585,7 +696,7 @@ impl SessionCtx {
                         self.sent.write_us_max.fetch_max(started.elapsed().as_micros() as u64, Ordering::Relaxed);
                         // caught up: the UI may make pictures again (it holds them back while
                         // a viewer is behind)
-                        if backlog.fetch_sub(1, Ordering::AcqRel) == 1 {
+                        if feed.backlog.fetch_sub(1, Ordering::AcqRel) == 1 {
                             (self.wake)();
                         }
                         result.map_err(|e| format!("write: {e}"))?;
@@ -619,9 +730,6 @@ impl SessionCtx {
                     ClientMsg::Encoding { chroma, codec, preset, mbps, fps } => Some(Control::Encoding { chroma, codec, preset, mbps, fps }),
                     ClientMsg::Hello { .. } => return Err("a second hello".into()),
                     input => {
-                        if self.active.swap(self.session, Ordering::AcqRel) != self.session {
-                            self.send_ui(ToUi::Control { session: self.session, control: Control::Active });
-                        }
                         if let Some(inj) = injector.as_mut() {
                             let geometry = *self.geometry.lock().unwrap();
                             match input {
@@ -645,5 +753,68 @@ impl SessionCtx {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod feed_tests {
+    use super::*;
+
+    fn queued(f: &Feed, n: usize) {
+        f.backlog.store(n, Ordering::Release);
+    }
+
+    #[test]
+    fn one_slow_viewer_alone_holds_the_capture() {
+        let a = Feed::new(false);
+        queued(&a, BACKLOG + 1);
+        assert!(hold([&a]));
+        assert!(!a.skipping());
+    }
+
+    #[test]
+    fn a_slow_viewer_is_let_go_while_another_keeps_up_and_comes_back_at_a_key_frame() {
+        let (fast, slow) = (Feed::new(false), Feed::new(false));
+        queued(&slow, BACKLOG + 1);
+        assert!(!hold([&fast, &slow]), "the fast viewer keeps the capture going");
+        assert!(slow.skipping());
+        assert!(fast.admit(1, false) && !slow.admit(1, false));
+        // a key frame while the slow one still has pictures queued: not yet
+        assert!(!slow.admit(2, true));
+        assert!(!resync_due([&fast, &slow]));
+        queued(&slow, 0);
+        assert!(resync_due([&fast, &slow]));
+        assert!(!resync_due([&fast, &slow]), "asked once per RESYNC_EVERY");
+        assert!(!slow.admit(3, false));
+        assert!(slow.admit(4, true) && !slow.skipping());
+        assert!(slow.admit(5, false));
+    }
+
+    #[test]
+    fn every_part_of_a_picture_gets_the_same_answer() {
+        let (fast, slow) = (Feed::new(false), Feed::new(false));
+        assert!(slow.admit(7, false));
+        queued(&slow, BACKLOG + 1);
+        hold([&fast, &slow]);
+        assert!(slow.admit(7, false), "the rest of picture 7 still goes");
+        assert!(!slow.admit(8, false));
+    }
+
+    #[test]
+    fn a_paused_viewer_gets_nothing_and_holds_nothing() {
+        let (a, b) = (Feed::new(true), Feed::new(false));
+        queued(&a, BACKLOG + 5);
+        assert!(!a.admit(1, true));
+        assert!(!hold([&a, &b]));
+    }
+
+    #[test]
+    fn the_last_connection_decides_the_size_and_the_one_before_takes_over() {
+        assert_eq!(size_owner([(3, true), (5, true), (4, true)]), Some(5));
+        // view-only (a probe) or no window said yet: never
+        assert_eq!(size_owner([(3, true), (5, false)]), Some(3));
+        assert_eq!(size_owner([(5, false)]), None);
+        // the newest left: the one before it again
+        assert_eq!(size_owner([(3, true), (4, true)]), Some(4));
     }
 }

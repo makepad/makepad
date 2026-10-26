@@ -31,7 +31,6 @@ script_mod! {
     mod.widgets.DeskTabs = set_type_default() do mod.widgets.DeskTabsBase {
         width: Fit height: Fill
         draw_text +: { text_style: theme.font_regular{} }
-        icon_plus +: { svg: crate_resource("self:resources/icons/plus.svg") }
         color_text: theme.color_label_outer
         color_dim: theme.color_label_outer_off
         color_tab: theme.color_bg_highlight
@@ -140,25 +139,16 @@ pub enum TabsAction {
     Select(usize),
     /// A right click: the tab's menu under `Rect` (window coordinates).
     Menu(usize, Rect),
-    /// The "+": the desktops to open, under `Rect`.
-    Plus(Rect),
-    /// The tab was dragged out of the strip and let go at this point (window coordinates).
-    DragOut(usize, Vec2d),
     #[default]
     None,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum TabHit {
-    Tab(usize),
-    Plus,
-}
+/// A tab, by its place in the strip.
+type TabHit = usize;
 
 const TAB_H: f64 = 24.0;
 const TAB_PAD: f64 = 10.0;
 const DOT: f64 = 7.0;
-/// A tab let go this far below the strip (or outside the window) leaves it.
-const DRAG_OUT: f64 = 36.0;
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct DeskTabs {
@@ -171,8 +161,6 @@ pub struct DeskTabs {
     draw_bg: DrawRound,
     #[live]
     draw_text: DrawText,
-    #[live]
-    icon_plus: DrawSvg,
     #[live]
     color_text: Vec4f,
     #[live]
@@ -195,15 +183,6 @@ pub struct DeskTabs {
     strip: Rect,
     #[rust]
     hot: Option<TabHit>,
-    /// A press on a tab: (its index, where).
-    #[rust]
-    press: Option<(usize, Vec2d)>,
-    /// The pressed tab follows the pointer (a drag).
-    #[rust]
-    drag: Option<Vec2d>,
-    /// The tab shown before the press (a tab dragged out gives the window back to it).
-    #[rust]
-    shown_before: Option<usize>,
     #[rust]
     window: Option<WindowId>,
     /// Where each tab is (`label@(x,y)`), for a selftest that clicks one.
@@ -243,21 +222,17 @@ impl Widget for DeskTabs {
         // a tab is the live dot and the short name, nothing else (no close glyph: Cmd+W or the
         // tab's menu closes it)
         let tab_w = |w: f64| TAB_PAD + DOT + 6.0 + w + TAB_PAD;
-        let total: f64 = widths.iter().map(|w| tab_w(*w) + 2.0).sum::<f64>() + TAB_H + 4.0;
+        let total: f64 = widths.iter().map(|w| tab_w(*w) + 2.0).sum::<f64>();
         let area = cx.walk_turtle(Walk { width: Size::Fixed(total), ..walk });
         self.strip = area;
         self.hits.clear();
         let y = area.pos.y + ((area.size.y - TAB_H) * 0.5).floor();
         let mut x = area.pos.x;
-        let dragging = self.drag.zip(self.press).map(|(at, (i, from))| (i, at.x - from.x));
         let mut notes = Vec::new();
         for (i, (t, w)) in self.tabs.iter().zip(widths.iter()).enumerate() {
             let tw = tab_w(*w);
-            let mut r = Rect { pos: dvec2(x, y), size: dvec2(tw, TAB_H) };
-            if let Some((_, dx)) = dragging.filter(|(d, _)| *d == i) {
-                r.pos.x += dx;
-            }
-            let hot = self.hot == Some(TabHit::Tab(i));
+            let r = Rect { pos: dvec2(x, y), size: dvec2(tw, TAB_H) };
+            let hot = self.hot == Some(i);
             let bg = if t.selected { self.color_tab } else if hot { self.color_hover } else { vec4(0.0, 0.0, 0.0, 0.0) };
             self.draw_bg.fill(cx, r, bg, 7.0);
             let dot = Rect { pos: dvec2(r.pos.x + TAB_PAD, r.pos.y + (TAB_H - DOT) * 0.5), size: dvec2(DOT, DOT) };
@@ -266,18 +241,10 @@ impl Widget for DeskTabs {
             let label = Rect { pos: dvec2(dot.pos.x + DOT + 6.0, r.pos.y), size: dvec2(*w, TAB_H) };
             let fg = if t.selected || hot { self.color_text } else { self.color_dim };
             text_in(&mut self.draw_text, cx, label, &t.name, fg, 0.0);
-            self.hits.push((r, TabHit::Tab(i)));
+            self.hits.push((r, i));
             notes.push(format!("{}@({:.0},{:.0})", t.name, r.pos.x + r.size.x * 0.5, r.pos.y + r.size.y * 0.5));
             x += tw + 2.0;
         }
-        let plus = Rect { pos: dvec2(x + 2.0, y), size: dvec2(TAB_H, TAB_H) };
-        if self.hot == Some(TabHit::Plus) {
-            self.draw_bg.fill(cx, plus, self.color_hover, 7.0);
-        }
-        self.icon_plus.color = if self.hot == Some(TabHit::Plus) { self.color_text } else { self.color_dim };
-        self.icon_plus.draw_abs(cx, Rect { pos: plus.pos + dvec2(6.0, 6.0), size: dvec2(TAB_H - 12.0, TAB_H - 12.0) });
-        self.hits.push((plus, TabHit::Plus));
-        notes.push(format!("+@({:.0},{:.0})", plus.pos.x + TAB_H * 0.5, plus.pos.y + TAB_H * 0.5));
         let note = notes.join(" ");
         if note != self.noted {
             crate::viewer::selftest(&format!("tabs {note}"));
@@ -291,51 +258,21 @@ impl Widget for DeskTabs {
         let mine = |w: WindowId| Some(w) == self.window;
         match event {
             Event::MouseMove(e) if mine(e.window_id) => {
-                if let Some((_, from)) = self.press {
-                    if self.drag.is_some() || (e.abs - from).length() > 5.0 {
-                        self.drag = Some(e.abs);
-                        self.draw_bg.redraw(cx);
-                    }
-                    return;
-                }
                 let hot = self.hit(e.abs);
                 if hot != self.hot {
                     self.hot = hot;
                     self.draw_bg.redraw(cx);
                 }
             }
+            // a tab shows its machine in this window; its menu opens it in a new one (nothing
+            // moves: every window lists every machine)
             Event::MouseDown(e) if mine(e.window_id) => {
-                let Some(h) = self.hit(e.abs) else { return };
+                let Some(i) = self.hit(e.abs).filter(|i| *i < self.tabs.len()) else { return };
                 if e.button.is_secondary() {
-                    if let TabHit::Tab(i) = h {
-                        cx.widget_action(uid, TabsAction::Menu(self.tabs[i].conn, self.rect_of(TabHit::Tab(i))));
-                    }
-                    return;
+                    cx.widget_action(uid, TabsAction::Menu(self.tabs[i].conn, self.rect_of(i)));
+                } else {
+                    cx.widget_action(uid, TabsAction::Select(self.tabs[i].conn));
                 }
-                match h {
-                    TabHit::Tab(i) => {
-                        self.press = Some((i, e.abs));
-                        self.shown_before = self.tabs.iter().find(|t| t.selected).map(|t| t.conn);
-                        cx.widget_action(uid, TabsAction::Select(self.tabs[i].conn));
-                    }
-                    TabHit::Plus => cx.widget_action(uid, TabsAction::Plus(self.rect_of(TabHit::Plus))),
-                }
-            }
-            Event::MouseUp(e) if mine(e.window_id) => {
-                if let (Some((i, _)), Some(_)) = (self.press, self.drag) {
-                    let s = self.strip;
-                    let away = e.abs.y > s.pos.y + s.size.y + DRAG_OUT || e.abs.y < s.pos.y - DRAG_OUT || e.abs.x < 0.0;
-                    if away && i < self.tabs.len() {
-                        cx.widget_action(uid, TabsAction::DragOut(self.tabs[i].conn, e.abs));
-                        // the press showed the dragged tab: the window goes back to what it showed
-                        if let Some(before) = self.shown_before.filter(|c| *c != self.tabs[i].conn) {
-                            cx.widget_action(uid, TabsAction::Select(before));
-                        }
-                    }
-                }
-                self.press = None;
-                self.drag = None;
-                self.draw_bg.redraw(cx);
             }
             _ => {}
         }

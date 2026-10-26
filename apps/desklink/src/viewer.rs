@@ -1,6 +1,6 @@
-//! A viewer window: its tabs (the machines open in it), the one it shows, its input, its stats,
-//! and its history scrubber. The app keeps one `Viewer` per window; every connection is open in
-//! at most one of them.
+//! A viewer window: the machine it shows (its tabs are every machine the app knows, the same
+//! in every window), its input, its stats, and its history scrubber. The app keeps one `Viewer`
+//! per window; any number of windows may show one machine (they share its connection).
 
 use crate::caption::{CaptionToggle, DeskTabs, MenuItem, PopMenu, TabInfo, TabReach};
 use crate::conn::{Latency, State};
@@ -32,6 +32,22 @@ fn make_window(cx: &mut Cx) -> WidgetRef {
     })
 }
 
+/// A connection's newest picture as the windows show it: imported once, `seq` counting up.
+#[derive(Clone)]
+pub struct ConnPicture {
+    pub seq: u64,
+    pub parts: Arc<Vec<crate::view::ShownPart>>,
+    pub width: u32,
+    pub height: u32,
+    pub frame: u32,
+    pub built_ns: u64,
+    pub encoded_ns: u64,
+    pub sent_ns: u64,
+    pub received_ns: u64,
+    pub decoded_ns: u64,
+    pub decode_ns: u64,
+}
+
 pub struct Viewer {
     /// Its `Window` widget.
     pub window: WidgetRef,
@@ -42,9 +58,10 @@ pub struct Viewer {
     pub drawn: bool,
     /// The window shows (the first one may be closed into the menu bar).
     pub visible: bool,
-    /// The connections open in it, in tab order, and the one it shows.
-    pub tabs: Vec<usize>,
+    /// The connection it shows (its selected tab).
     pub selected: Option<usize>,
+    /// The connection's picture last shown (`App::pictures`, 0: none yet).
+    pub pic_seq: u64,
     /// Keyboard to the desktop (the picture was clicked last).
     pub keyboard: bool,
     /// Keys and buttons held down on the desktop it drives (a drag keeps driving the picture
@@ -94,8 +111,6 @@ pub struct Viewer {
 pub enum MenuFor {
     #[default]
     None,
-    /// "+": the desktops not open anywhere.
-    Plus,
     /// A tab's menu.
     Tab(usize),
     /// The scrubber's Save menu.
@@ -104,7 +119,6 @@ pub enum MenuFor {
 
 const OPEN_NEW_WINDOW: u64 = 1;
 const RECONNECT: u64 = 2;
-const CLOSE_TAB: u64 = 3;
 const SAVE_CLIP: u64 = 1;
 const SAVE_FRAME: u64 = 2;
 
@@ -115,8 +129,8 @@ impl Viewer {
             extra,
             drawn: false,
             visible: true,
-            tabs: Vec::new(),
             selected: None,
+            pic_seq: 0,
             keyboard: false,
             input: Held::default(),
             last_pointer: None,
@@ -158,21 +172,39 @@ impl App {
         self.viewers.iter().position(|v| v.window_id() == Some(id))
     }
 
-    pub fn viewer_of_conn(&self, conn: usize) -> Option<usize> {
-        self.viewers.iter().position(|v| v.tabs.contains(&conn))
-    }
-
-    /// Pauses every connection that no visible window shows and resumes the shown ones.
+    /// Pauses every connection that no visible window shows and resumes the shown ones (each
+    /// window streams its machine live, whatever the others show).
     pub fn sync_shown(&self) {
         for (i, c) in self.conns.iter().enumerate() {
             c.show(self.viewers.iter().any(|v| v.visible && v.selected == Some(i)));
         }
     }
 
-    /// Shows connection `conn` (a tab of viewer `vi`) in that window.
+    /// Window `vi` decides the size of the desktop it shows (a desktop that follows its viewer
+    /// takes it): the window that showed it or had the focus last, of the windows showing it.
+    pub fn claim_size(&mut self, cx: &mut Cx, vi: usize) {
+        let Some(conn) = self.viewers.get(vi).and_then(|v| v.selected) else { return };
+        let sink = self.conns.get(conn).map(|c| c.view.clone());
+        for (k, v) in self.viewers.iter().enumerate() {
+            if v.selected != Some(conn) {
+                continue;
+            }
+            if let Some(mut r) = v.window.widget(cx, ids!(remote)).borrow_mut::<RemoteView>() {
+                r.sink = if k == vi { sink.clone() } else { None };
+                r.redraw(cx);
+            }
+        }
+    }
+
+    /// Shows connection `conn` in window `vi` (any other window may show it too: they share its
+    /// connection and its pictures).
     pub fn select(&mut self, cx: &mut Cx, vi: usize, conn: usize) {
-        if self.viewers[vi].selected == Some(conn) {
+        if conn >= self.conns.len() || self.viewers[vi].selected == Some(conn) {
             return;
+        }
+        // a desktop that does not answer is tried again now (no waiting out its backoff)
+        if matches!(self.conns[conn].state(), State::Offline(_)) {
+            self.conns[conn].reconnect();
         }
         if self.viewers[vi].scrub_open {
             // the history is the shown connection's
@@ -182,68 +214,21 @@ impl App {
         let v = &mut self.viewers[vi];
         v.selected = Some(conn);
         v.last_pointer = None;
-        let sink = self.conns.get(conn).map(|c| c.view.clone());
+        v.keyboard = false;
+        v.pic_seq = 0;
         if let Some(mut r) = self.viewers[vi].widget(cx, ids!(remote)).borrow_mut::<RemoteView>() {
             r.clear(cx);
-            r.sink = sink;
+            r.sink = None;
         }
+        self.claim_size(cx, vi);
         self.sync_shown();
+        self.restore_dirty = true;
         self.refresh_viewer(cx, vi);
+        selftest(&format!("window {vi} shows {}", self.conns[conn].name));
     }
 
-    /// Opens connection `conn` as a tab of viewer `vi` (taken from the window that had it) and
-    /// shows it.
-    pub fn add_tab(&mut self, cx: &mut Cx, vi: usize, conn: usize) {
-        if let Some(from) = self.viewer_of_conn(conn) {
-            if from == vi {
-                self.select(cx, vi, conn);
-                return;
-            }
-            self.close_tab(cx, from, conn);
-        }
-        self.viewers[vi].tabs.push(conn);
-        self.select(cx, vi, conn);
-    }
-
-    /// Closes a tab: its connection stays open (paused; "+" or the menu bar shows it again).
-    /// A window made at run time closes with its last tab.
-    pub fn close_tab(&mut self, cx: &mut Cx, vi: usize, conn: usize) {
-        let v = &mut self.viewers[vi];
-        let Some(k) = v.tabs.iter().position(|c| *c == conn) else { return };
-        v.tabs.remove(k);
-        if v.selected == Some(conn) {
-            if v.scrub_open {
-                self.close_scrubber(cx, vi);
-            }
-            self.release_held(vi, "tab closed");
-            let v = &mut self.viewers[vi];
-            v.selected = None;
-            let next = v.tabs.get(k.min(v.tabs.len().saturating_sub(1))).copied();
-            if let Some(mut r) = self.viewers[vi].widget(cx, ids!(remote)).borrow_mut::<RemoteView>() {
-                r.clear(cx);
-                r.sink = None;
-            }
-            if let Some(n) = next {
-                self.select(cx, vi, n);
-            }
-        }
-        if self.viewers[vi].tabs.is_empty() && self.viewers[vi].extra {
-            self.viewers[vi].window.as_window().close(cx);
-        }
-        self.sync_shown();
-        self.refresh_viewer(cx, vi);
-    }
-
-    /// The user closes a tab (Cmd+W, the tab's "Close Tab"): the last one closes its window too.
-    pub fn close_tab_closing_window(&mut self, cx: &mut Cx, vi: usize, conn: usize) {
-        self.close_tab(cx, vi, conn);
-        if self.viewers[vi].tabs.is_empty() && !self.viewers[vi].extra {
-            self.close_window(cx, vi);
-        }
-    }
-
-    /// Closes window `vi` as its caption's close button does: the first window hides when
-    /// `keep_on_close` says so, else it closes.
+    /// Closes window `vi` as its caption's close button does (Cmd+W): the first window hides
+    /// when `keep_on_close` says so, else it closes.
     pub fn close_window(&mut self, cx: &mut Cx, vi: usize) {
         if self.keep_on_close(vi) {
             self.hide_main(cx);
@@ -252,34 +237,47 @@ impl App {
         }
     }
 
-    /// A new window showing connection `conn` (taken from the window that had it), at `at`
-    /// (screen points; else beside the window it came from).
-    pub fn new_window(&mut self, cx: &mut Cx, conn: usize, at: Option<Vec2d>) -> usize {
+    /// A new window showing connection `conn` (None: the first machine no window shows, else
+    /// the focused window's), at `at`/`size` (screen points; else beside the focused window,
+    /// half its width: two machines side by side). Nothing moves: every window lists every
+    /// machine.
+    pub fn new_window(&mut self, cx: &mut Cx, conn: Option<usize>, at: Option<(Vec2d, Vec2d)>) -> usize {
         let window = make_window(cx);
-        let from = self.viewer_of_conn(conn);
-        self.place_new_window(cx, &window, from.map(|f| (f, at)));
+        self.place_new_window(cx, &window, at);
         self.viewers.push(Viewer::new(window, true));
         let vi = self.viewers.len() - 1;
-        self.add_tab(cx, vi, conn);
+        let shown: Vec<usize> = self.viewers.iter().filter(|v| v.visible).filter_map(|v| v.selected).collect();
+        let focused = self.viewers.get(self.focused).and_then(|v| v.selected);
+        let conn = conn.or_else(|| (0..self.conns.len()).find(|i| !shown.contains(i))).or(focused).or((!self.conns.is_empty()).then_some(0));
+        if let Some(conn) = conn {
+            self.select(cx, vi, conn);
+        }
         self.focused = vi;
-        selftest(&format!("window {vi} made for {}", self.conns.get(conn).map_or("?", |c| c.name.as_str())));
+        self.restore_dirty = true;
+        self.refresh_viewer(cx, vi);
+        selftest(&format!("window {vi} made for {}", conn.and_then(|c| self.conns.get(c)).map_or("nothing", |c| c.name.as_str())));
         cx.redraw_all();
         vi
     }
 
-    /// Where a new window goes, before the platform makes it: beside the window `from` (at `at`,
-    /// screen points, when a tab was dropped there), half its width: two machines side by side.
-    fn place_new_window(&self, cx: &mut Cx, window: &WidgetRef, from: Option<(usize, Option<Vec2d>)>) {
-        let src = from.map(|f| f.0).unwrap_or(self.focused.min(self.viewers.len().saturating_sub(1)));
-        let (pos, size) = match self.viewers.get(src) {
-            Some(v) => {
-                let w = v.window.as_window();
-                (w.get_position(cx), w.get_inner_size(cx))
+    /// Where a new window goes, before the platform makes it: `at` (position, inner size; a
+    /// restored window), else beside the focused window at half its width.
+    fn place_new_window(&self, cx: &mut Cx, window: &WidgetRef, at: Option<(Vec2d, Vec2d)>) {
+        let (pos, size) = match at {
+            Some(at) => at,
+            None => {
+                let src = self.focused.min(self.viewers.len().saturating_sub(1));
+                let (pos, size) = match self.viewers.get(src) {
+                    Some(v) => {
+                        let w = v.window.as_window();
+                        (w.get_position(cx), w.get_inner_size(cx))
+                    }
+                    None => (dvec2(80.0, 80.0), dvec2(1400.0, 860.0)),
+                };
+                let size = dvec2((size.x * 0.5).max(640.0), size.y.max(400.0));
+                (pos + dvec2(size.x.min(700.0), 0.0), size)
             }
-            None => (dvec2(80.0, 80.0), dvec2(1400.0, 860.0)),
         };
-        let size = dvec2((size.x * 0.5).max(640.0), size.y.max(400.0));
-        let pos = from.and_then(|f| f.1).unwrap_or(pos + dvec2(size.x.min(700.0), 0.0));
         if let Some(id) = window.as_window().window_id() {
             if cx.windows.is_valid(id) {
                 let w = &mut cx.windows[id];
@@ -289,10 +287,15 @@ impl App {
         }
     }
 
-    /// A window made at run time closed: its tabs close with it.
+    /// A window made at run time closed: what it held goes up; its machines stay (every window
+    /// lists them all), paused when no window shows them.
     pub fn window_closed(&mut self, cx: &mut Cx, vi: usize) {
         self.release_held(vi, "window closed");
         let v = self.viewers.remove(vi);
+        // another window on the same machine sizes it now
+        if let Some(other) = v.selected.and_then(|c| self.viewers.iter().position(|o| o.visible && o.selected == Some(c))) {
+            self.claim_size(cx, other);
+        }
         drop(v);
         if self.focused >= self.viewers.len() || self.focused == vi {
             self.focused = 0;
@@ -300,41 +303,15 @@ impl App {
             self.focused -= 1;
         }
         self.sync_shown();
+        self.restore_dirty = true;
         // no window left on screen: the app ends (the installed Dock app stays in the Dock)
         if !crate::installed::is_dock_app() && self.viewers.iter().all(|v| !v.visible) {
+            self.save_windows(cx);
             cx.quit();
         }
     }
 
-    /// The window that has connection `conn` shows it (made visible and raised), or a new
-    /// window does.
-    pub fn open_desktop(&mut self, cx: &mut Cx, conn: usize) {
-        if conn >= self.conns.len() {
-            return;
-        }
-        // a desktop that does not answer is tried again now (no waiting out its backoff)
-        if matches!(self.conns[conn].state(), State::Offline(_)) {
-            self.conns[conn].reconnect();
-        }
-        let vi = match self.viewer_of_conn(conn) {
-            Some(vi) => vi,
-            // the first window, closed into the menu bar with nothing open, takes it
-            None if !self.viewers[0].visible && self.viewers[0].tabs.is_empty() => {
-                self.add_tab(cx, 0, conn);
-                0
-            }
-            None => self.new_window(cx, conn, None),
-        };
-        self.viewers[vi].visible = true;
-        self.viewers[vi].keyboard = false;
-        self.select(cx, vi, conn);
-        self.viewers[vi].window.as_window().show(cx);
-        self.focused = vi;
-        self.sync_shown();
-        selftest(&format!("showing desktop {conn} ({}) in window {vi}", self.conns[conn].name));
-    }
-
-    /// Whether closing window `vi` keeps it (hidden, its tabs kept): the first window of the
+    /// Whether closing window `vi` keeps it (hidden, its machine kept): the first window of the
     /// installed Dock app (it stays in the Dock) or while another window shows.
     pub fn keep_on_close(&self, vi: usize) -> bool {
         vi == 0 && (crate::installed::is_dock_app() || self.viewers.iter().skip(1).any(|v| v.visible))
@@ -345,35 +322,17 @@ impl App {
         if self.viewers.iter().any(|v| v.visible) {
             return;
         }
-        match self.viewers[0].selected.or_else(|| self.viewers[0].tabs.first().copied()) {
-            Some(conn) => self.open_desktop(cx, conn),
-            None => {
-                self.viewers[0].visible = true;
-                self.viewers[0].window.as_window().show(cx);
-                self.sync_shown();
-            }
-        }
+        self.viewers[0].visible = true;
+        self.viewers[0].keyboard = false;
+        self.viewers[0].window.as_window().show(cx);
+        self.focused = 0;
+        self.claim_size(cx, 0);
+        self.sync_shown();
+        self.restore_dirty = true;
         selftest("opened again: window shown");
     }
 
-    /// File → New Window / Cmd+N: a window with the first desktop open in no window, else empty
-    /// (its "+" opens one).
-    pub fn new_empty_window(&mut self, cx: &mut Cx) {
-        if let Some(conn) = (0..self.conns.len()).find(|i| self.viewer_of_conn(*i).is_none()) {
-            self.new_window(cx, conn, None);
-            return;
-        }
-        let window = make_window(cx);
-        self.place_new_window(cx, &window, None);
-        self.viewers.push(Viewer::new(window, true));
-        let vi = self.viewers.len() - 1;
-        self.focused = vi;
-        self.refresh_viewer(cx, vi);
-        selftest(&format!("window {vi} made empty"));
-        cx.redraw_all();
-    }
-
-    /// The first window closed: hidden with its tabs (their desktops pause).
+    /// The first window closed: hidden (its machine pauses unless another window shows it).
     pub fn hide_main(&mut self, cx: &mut Cx) {
         self.release_held(0, "window closed");
         self.viewers[0].visible = false;
@@ -381,8 +340,13 @@ impl App {
             self.close_scrubber(cx, 0);
         }
         self.viewers[0].window.as_window().set_visible(cx, false);
+        // another window on the same machine sizes it now
+        if let Some(other) = (1..self.viewers.len()).find(|k| self.viewers[*k].visible && self.viewers[*k].selected.is_some() && self.viewers[*k].selected == self.viewers[0].selected) {
+            self.claim_size(cx, other);
+        }
         self.sync_shown();
-        selftest("first window closed: hidden, its tabs kept");
+        self.restore_dirty = true;
+        selftest("first window closed: hidden");
     }
 
     /// Drops connection `i`'s session and opens it again now (a tab's "Reconnect", Cmd+R).
@@ -390,9 +354,8 @@ impl App {
         if let Some(c) = self.conns.get(i) {
             c.reconnect();
         }
-        if let Some(vi) = self.viewer_of_conn(i) {
-            let v = &mut self.viewers[vi];
-            if v.selected == Some(i) {
+        for v in &mut self.viewers {
+            if v.input.on.is_some_and(|(c, _)| c == i) {
                 // the session ends: the desktop lets go of what it held
                 v.input.release();
                 v.last_pointer = None;
@@ -414,8 +377,8 @@ impl App {
     pub fn do_shortcut(&mut self, cx: &mut Cx, vi: usize, s: Shortcut) {
         match s {
             Shortcut::Desktop(k) => {
-                if let Some(conn) = self.viewers[vi].tabs.get(k).copied() {
-                    self.open_desktop(cx, conn);
+                if k < self.conns.len() {
+                    self.select(cx, vi, k);
                 }
             }
             Shortcut::Reconnect => {
@@ -423,14 +386,14 @@ impl App {
                     self.reconnect(cx, i);
                 }
             }
-            Shortcut::NewWindow => self.new_empty_window(cx),
+            Shortcut::NewWindow => {
+                self.new_window(cx, None, None);
+            }
             Shortcut::NextTab(d) => {
-                let v = &self.viewers[vi];
-                let n = v.tabs.len() as i32;
+                let n = self.conns.len() as i32;
                 if n > 0 {
-                    let at = v.selected.and_then(|c| v.tabs.iter().position(|t| *t == c)).map_or(0, |k| k as i32 + d);
-                    let conn = v.tabs[at.rem_euclid(n) as usize];
-                    self.open_desktop(cx, conn);
+                    let at = self.viewers[vi].selected.map_or(0, |k| k as i32 + d);
+                    self.select(cx, vi, at.rem_euclid(n) as usize);
                 }
             }
             Shortcut::Fullscreen => {
@@ -441,10 +404,7 @@ impl App {
                     w.maximize(cx);
                 }
             }
-            Shortcut::CloseTab => match self.viewers[vi].selected.or_else(|| self.viewers[vi].tabs.last().copied()) {
-                Some(conn) => self.close_tab_closing_window(cx, vi, conn),
-                None => self.close_window(cx, vi),
-            },
+            Shortcut::CloseWindow => self.close_window(cx, vi),
             Shortcut::NextScreen => self.next_screen(vi),
             Shortcut::Details => {
                 self.details = !self.details;
@@ -462,11 +422,12 @@ impl App {
     }
 
     fn tab_infos(&self, vi: usize) -> Vec<TabInfo> {
+        // every machine the app knows, in every window; only the selection differs
         let v = &self.viewers[vi];
-        v.tabs
+        self.conns
             .iter()
-            .filter_map(|&i| {
-                let c = self.conns.get(i)?;
+            .enumerate()
+            .filter_map(|(i, c)| {
                 let reach = match c.state() {
                     State::Connected => TabReach::Live,
                     State::Connecting | State::Reconnecting => TabReach::Connecting,
@@ -500,9 +461,11 @@ impl App {
             return;
         };
         let paused = self.viewers[vi].scrub.is_some();
+        self.take_picture(cx, ci);
+        // paused: live pictures go on arriving (and recording) but are not shown; a picture is
+        // shown once in each window on this machine
+        let picture = self.pictures.get(&ci).filter(|p| !paused && p.seq != self.viewers[vi].pic_seq).cloned();
         let c = &self.conns[ci];
-        // paused: live pictures go on arriving (and recording) but are not shown
-        let picture = c.latest.lock().unwrap().take().filter(|_| !paused);
         let history_line = {
             let h = c.history.lock().unwrap();
             format!("history {:.1} s · {} packets · {:.0} MB", h.span_ns() as f64 / 1e9, h.len(), h.bytes() as f64 / (1 << 20) as f64)
@@ -535,7 +498,8 @@ impl App {
             l.decode = p.decode_ns as f64 / 1e6;
             v.decode_sum.0 += l.decode;
             v.decode_sum.1 += 1;
-            view.set_picture(cx, p.width, p.height, p.parts, p.frame, p.decoded_ns);
+            v.pic_seq = p.seq;
+            view.set_shared(cx, p.width, p.height, p.parts, p.frame, p.decoded_ns);
         }
         if let Some(w) = welcome.as_ref().filter(|_| state == State::Connected && !paused) {
             // the picture area is known before the first picture: input maps from the start
@@ -619,6 +583,16 @@ impl App {
         if self.viewers[vi].scrub.is_some() && (got_history || cx.seconds_since_app_start() - self.clip_at < 10.0) {
             self.update_scrubber(cx, vi);
         }
+    }
+
+    /// Connection `ci`'s newest decoded picture, imported once (its textures shared by every
+    /// window showing it).
+    fn take_picture(&mut self, cx: &mut Cx, ci: usize) {
+        let Some(p) = self.conns[ci].latest.lock().unwrap().take() else { return };
+        let seq = self.pictures.get(&ci).map_or(1, |o| o.seq + 1);
+        let parts = Arc::new(crate::view::import_parts(cx, p.parts, &mut Vec::new()));
+        let shown = ConnPicture { seq, parts, width: p.width, height: p.height, frame: p.frame, built_ns: p.built_ns, encoded_ns: p.encoded_ns, sent_ns: p.sent_ns, received_ns: p.received_ns, decoded_ns: p.decoded_ns, decode_ns: p.decode_ns };
+        self.pictures.insert(ci, shown);
     }
 
     fn set_caption(&mut self, cx: &mut Cx, vi: usize, title: String, stats: String) {
@@ -1146,56 +1120,25 @@ impl App {
         }
     }
 
-    /// The "+": the desktops open in no window.
-    pub fn plus_menu(&mut self, cx: &mut Cx, vi: usize, anchor: Rect) {
-        let mut items: Vec<MenuItem> = self
-            .conns
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| self.viewer_of_conn(*i).is_none())
-            .map(|(i, c)| {
-                let hint = match c.state() {
-                    State::Connected => c.shared.lock().unwrap().rtt_ms.map_or("live".to_string(), |r| format!("live \u{b7} {r:.0} ms")),
-                    State::Connecting | State::Reconnecting => "connecting".to_string(),
-                    State::Offline(_) => "offline".to_string(),
-                };
-                MenuItem::new(format!("{}  {}", c.name, c.host), i as u64).hint(hint)
-            })
-            .collect();
-        if items.is_empty() {
-            items.push(MenuItem::new("Every desktop is open", u64::MAX).hint("~/.makepad/desklink/hosts").disabled());
-        }
-        self.open_menu(cx, vi, MenuFor::Plus, anchor, false, items);
-    }
-
-    /// A tab's menu (a right click): open it in a window of its own, reconnect (only when it
-    /// does not answer), close it.
+    /// A tab's menu (a right click): the machine in a new window (this one keeps what it
+    /// shows), reconnect (only when it does not answer).
     pub fn tab_menu(&mut self, cx: &mut Cx, vi: usize, conn: usize, anchor: Rect) {
         let key = if cfg!(target_vendor = "apple") { "\u{2318}R" } else { "Ctrl+Shift+R" };
-        let mut items = vec![];
-        let mut open = MenuItem::new("Open in new window", OPEN_NEW_WINDOW).hint("or drag the tab out");
-        if self.viewers[vi].tabs.len() < 2 {
-            open = open.disabled();
-        }
-        items.push(open);
+        let mut items = vec![MenuItem::new("Open in new window", OPEN_NEW_WINDOW)];
         if self.conns.get(conn).is_some_and(|c| c.state() != State::Connected) {
             items.push(MenuItem::new("Reconnect", RECONNECT).hint(key));
         }
-        let key = if cfg!(target_vendor = "apple") { "\u{2318}W" } else { "Ctrl+Shift+W" };
-        items.push(MenuItem::new("Close Tab", CLOSE_TAB).hint(key));
         self.open_menu(cx, vi, MenuFor::Tab(conn), anchor, false, items);
     }
 
     pub fn menu_chose(&mut self, cx: &mut Cx, vi: usize, id: u64) {
         let what = std::mem::take(&mut self.viewers[vi].menu_for);
         match what {
-            MenuFor::Plus if (id as usize) < self.conns.len() => self.add_tab(cx, vi, id as usize),
             MenuFor::Tab(conn) => match id {
                 OPEN_NEW_WINDOW => {
-                    self.new_window(cx, conn, None);
+                    self.new_window(cx, Some(conn), None);
                 }
                 RECONNECT => self.reconnect(cx, conn),
-                CLOSE_TAB => self.close_tab_closing_window(cx, vi, conn),
                 _ => {}
             },
             MenuFor::Save => self.save(cx, vi, id == SAVE_FRAME),
@@ -1208,18 +1151,8 @@ impl App {
         use crate::caption::TabsAction;
         self.focused = vi;
         match action {
-            TabsAction::Select(conn) => {
-                self.viewers[vi].keyboard = false;
-                self.select(cx, vi, conn);
-            }
+            TabsAction::Select(conn) => self.select(cx, vi, conn),
             TabsAction::Menu(conn, r) => self.tab_menu(cx, vi, conn, r),
-            TabsAction::Plus(r) => self.plus_menu(cx, vi, r),
-            TabsAction::DragOut(conn, abs) => {
-                if self.viewers[vi].tabs.len() > 1 {
-                    let origin = self.viewers[vi].window.as_window().get_position(cx);
-                    self.new_window(cx, conn, Some(origin + abs - dvec2(120.0, 14.0)));
-                }
-            }
             TabsAction::None => {}
         }
     }
@@ -1259,8 +1192,8 @@ impl App {
                     selftest(&format!("scrubber hovering picture {i} (10 s back)"));
                 }
                 "split" => {
-                    if let Some(&conn) = self.viewers[0].tabs.get(1) {
-                        self.new_window(cx, conn, None);
+                    if self.conns.len() > 1 {
+                        self.new_window(cx, Some(1), None);
                     }
                 }
                 _ => {}

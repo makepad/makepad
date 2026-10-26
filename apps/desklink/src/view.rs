@@ -88,10 +88,10 @@ pub struct RemoteView {
     note_color: Vec4f,
     /// The newest picture's parts (its tiles, or all of it), as textures.
     #[rust]
-    parts: Vec<ShownPart>,
+    parts: Arc<Vec<ShownPart>>,
     /// GPU parts drawn before them, held until no frame in flight can still sample them.
     #[rust]
-    retired: VecDeque<ShownPart>,
+    retired: VecDeque<Arc<Vec<ShownPart>>>,
     /// The whole picture's size.
     #[rust]
     size: [u32; 2],
@@ -198,15 +198,29 @@ impl RemoteView {
     /// sampled where the decoder put them (nothing is copied), CPU parts uploaded.
     pub fn set_picture(&mut self, cx: &mut Cx, width: u32, height: u32, parts: Vec<Part>, frame: u32, decoded_ns: u64) {
         let mut old = std::mem::take(&mut self.parts);
-        self.parts = import_parts(cx, parts, &mut old);
+        let parts = match Arc::get_mut(&mut old) {
+            Some(old) => import_parts(cx, parts, old),
+            None => import_parts(cx, parts, &mut Vec::new()),
+        };
+        self.show_parts(cx, width, height, Arc::new(parts), frame, decoded_ns, old);
+    }
+
+    /// A picture already imported (one decoded picture shown in every window on its desktop:
+    /// the same textures, nothing copied).
+    pub fn set_shared(&mut self, cx: &mut Cx, width: u32, height: u32, parts: Arc<Vec<ShownPart>>, frame: u32, decoded_ns: u64) {
+        let old = std::mem::replace(&mut self.parts, Arc::new(Vec::new()));
+        self.show_parts(cx, width, height, parts, frame, decoded_ns, old);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn show_parts(&mut self, cx: &mut Cx, width: u32, height: u32, parts: Arc<Vec<ShownPart>>, frame: u32, decoded_ns: u64, old: Arc<Vec<ShownPart>>) {
+        self.parts = parts;
         // a frame in flight may still sample the last few GPU pictures: the GPU is at most a
         // couple behind
-        for o in old.drain(..) {
-            if matches!(o.tex, PartTex::Gpu { .. }) {
-                self.retired.push_back(o);
-            }
+        if old.iter().any(|o| matches!(o.tex, PartTex::Gpu { .. })) {
+            self.retired.push_back(old);
         }
-        while self.retired.len() > RETIRED_PICTURES * self.parts.len().max(1) {
+        while self.retired.len() > RETIRED_PICTURES {
             self.retired.pop_front();
         }
         self.size = [width, height];
@@ -223,7 +237,7 @@ impl RemoteView {
     }
 
     pub fn clear(&mut self, cx: &mut Cx) {
-        self.parts.clear();
+        self.parts = Arc::new(Vec::new());
         self.retired.clear();
         self.size = [0, 0];
         self.draw_bg.redraw(cx);
