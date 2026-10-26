@@ -296,6 +296,9 @@ pub mod menu_kind {
     /// the item shows a check mark state (`CHECKED` says which)
     pub const CHECKABLE: u32 = 1 << 11;
     pub const CHECKED: u32 = 1 << 12;
+    /// the application's About item: the system's About panel (name, version, icon from the
+    /// bundle), not a command
+    pub const ABOUT: u32 = 1 << 13;
 }
 
 /// `FileDialog::kind`: the dialog in the low byte, bit 8: choose several.

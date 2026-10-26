@@ -380,6 +380,9 @@ pub enum Cmd {
     Platform(Box<dyn std::any::Any + Send>),
     Close {
         window: Option<usize>,
+        /// `ask=1`: the user's close (title-bar button, Cmd+W): the app is asked first
+        /// (`WindowCloseRequested`) and may keep the window, e.g. hide it instead
+        ask: bool,
         tx: Sender<Reply>,
     },
     /// Give a window a new inner size, in layout points, the way a
@@ -745,7 +748,7 @@ pub const COMMANDS: &[Command] = &[
     Command { words: "cap pause", args: "", answers: "stop writing without stopping the clock", service: "ui", risk: CmdRisk::Act, params: "", required: &[], positional: &[] },
     Command { words: "cap resume", args: "", answers: "restart writing", service: "ui", risk: CmdRisk::Act, params: "", required: &[], positional: &[] },
     Command { words: "cursor", args: "[show=1|0] [style=arrow|hand|text|crosshair|app] [x= y=] [w=ID]", answers: "a pointer drawn into the frame, moved by injected mouse input", service: "ui", risk: CmdRisk::Act, params: "\"show\":{\"type\":\"boolean\"},\"style\":{\"type\":\"string\",\"enum\":[\"arrow\",\"hand\",\"text\",\"crosshair\",\"app\"]},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"}", required: &[], positional: &[] },
-    Command { words: "close", args: "[w=ID]", answers: "close one window the normal way", service: "ui", risk: CmdRisk::Destructive, params: "\"w\":{\"type\":\"integer\"}", required: &[], positional: &[] },
+    Command { words: "close", args: "[w=ID] [ask=1]", answers: "close one window the normal way; ask=1 asks the app first like the window's close button (it may keep or hide the window)", service: "ui", risk: CmdRisk::Destructive, params: "\"w\":{\"type\":\"integer\"},\"ask\":{\"type\":\"integer\"}", required: &[], positional: &[] },
     Command { words: "resize", args: "w= h= [window=ID]", answers: "give the window a new inner size in layout points; answers after the frame that shows it", service: "ui", risk: CmdRisk::Act, params: "\"w\":{\"type\":\"number\"},\"h\":{\"type\":\"number\"},\"window\":{\"type\":\"integer\"}", required: &["w", "h"], positional: &[] },
     Command { words: "handsoff", args: "[on=1|0]", answers: "the red hands-off frame round the window", service: "ui", risk: CmdRisk::Act, params: "\"on\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
     Command { words: "ai", args: "[on=1|0] | say=TEXT", answers: "the AI chat overlay: toggle or type a line", service: "ui", risk: CmdRisk::Act, params: "\"on\":{\"type\":\"boolean\"},\"say\":{\"type\":\"string\"}", required: &[], positional: &[] },

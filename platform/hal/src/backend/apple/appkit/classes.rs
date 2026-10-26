@@ -116,6 +116,16 @@ fn define_app_delegate() -> *const Class {
         }
     }
 
+    // The user opened the running app again (its Dock icon, Finder, `open`): with no window on
+    // screen the app is asked to show itself, as an `AppOpen` without items (a later launch of a
+    // single-instance app). AppKit itself still unminiaturizes a minimized window.
+    extern "C" fn application_should_handle_reopen(_: &Object, _: Sel, _: ObjcId, has_visible_windows: BOOL) -> BOOL {
+        if has_visible_windows == NO {
+            app().send_app_open(&[]);
+        }
+        YES
+    }
+
     /// A file URL as its path, anything else as the URL string.
     unsafe fn open_item(url: ObjcId) -> Option<(u32, String)> {
         if url == nil {
@@ -136,6 +146,7 @@ fn define_app_delegate() -> *const Class {
     unsafe {
         decl.add_method(sel!(applicationShouldTerminate:), application_should_terminate as extern "C" fn(&Object, Sel, ObjcId) -> isize);
         decl.add_method(sel!(application:openURLs:), application_open_urls as extern "C" fn(&Object, Sel, ObjcId, ObjcId));
+        decl.add_method(sel!(applicationShouldHandleReopen:hasVisibleWindows:), application_should_handle_reopen as extern "C" fn(&Object, Sel, ObjcId, BOOL) -> BOOL);
     }
     decl.register()
 }

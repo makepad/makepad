@@ -358,9 +358,9 @@ unsafe fn init() {
     a.pasteboard.set(msg_send![class!(NSPasteboard), generalPasteboard]);
     let _ = a.classes.set(classes);
     let () = msg_send![ns_app, finishLaunching];
-    // a minimal app menu (Quit, Cmd+Q) for unbundled `cargo run` apps; an app's own menu
+    // a minimal app menu (About, Quit with Cmd+Q) named after the bundle; an app's own menu
     // (`MenuSet`) replaces it
-    install_quit_menu();
+    install_app_menu();
     begin_test_instance_activity();
     // the system appearance, now and whenever it changes
     read_appearance();
@@ -1407,7 +1407,7 @@ pub(super) fn activation_policy_name() -> &'static str {
     }
 }
 
-fn install_quit_menu() {
+fn install_app_menu() {
     // the running app's CFBundleName is what macOS shows as the application menu title; none
     // for a binary that is not bundled at all
     let name = unsafe {
@@ -1421,13 +1421,16 @@ fn install_quit_menu() {
         }
     };
     let sub = MenuItem { parent: 0, kind: menu_kind::SUB, ..Default::default() };
+    let about = MenuItem { parent: 1, kind: menu_kind::ITEM | menu_kind::ABOUT, cmd: 0, key: makepad_key_code::KeyCode::Escape.to_index(), str: 0 };
+    let line = MenuItem { parent: 1, kind: menu_kind::LINE, ..Default::default() };
     let quit = MenuItem { parent: 1, kind: menu_kind::ITEM | menu_kind::QUIT, cmd: 0, key: makepad_key_code::KeyCode::KeyQ.to_index(), str: 0 };
-    update_menu(&[(sub, name.clone()), (quit, format!("Quit {name}"))]);
+    update_menu(&[(sub, name.clone()), (about, format!("About {name}")), (line, String::new()), (quit, format!("Quit {name}"))]);
 }
 
 /// Builds the main menu from the flat list: node `i` (1-based) is `items[i - 1]`, `parent` 0 is
 /// the root. A `QUIT` item goes to `terminate:` (which routes through `applicationShouldTerminate:`
-/// outside any in-flight handler); the others to the menu target that re-emits their command.
+/// outside any in-flight handler), an `ABOUT` item to the application's standard About panel; the
+/// others to the menu target that re-emits their command.
 fn update_menu(items: &[(MenuItem, String)]) {
     unsafe {
         let a = app();
@@ -1452,7 +1455,14 @@ fn update_menu(items: &[(MenuItem, String)]) {
                 menu_kind::ITEM => {
                     menus.push(nil);
                     let quit = item.kind & menu_kind::QUIT != 0;
-                    let action = if quit { sel!(terminate:) } else { sel!(menuAction:) };
+                    let about = item.kind & menu_kind::ABOUT != 0;
+                    let action = if quit {
+                        sel!(terminate:)
+                    } else if about {
+                        sel!(orderFrontStandardAboutPanel:)
+                    } else {
+                        sel!(menuAction:)
+                    };
                     let shift = item.kind & menu_kind::SHIFT != 0;
                     let key = makepad_key_code::KeyCode::from_index(item.key);
                     let sub_item: ObjcId = msg_send![
@@ -1463,7 +1473,7 @@ fn update_menu(items: &[(MenuItem, String)]) {
                     ];
                     let enabled = item.kind & menu_kind::DISABLED == 0;
                     let () = msg_send![sub_item, setEnabled: if enabled { YES } else { NO }];
-                    if !quit {
+                    if !quit && !about {
                         let target: ObjcId = msg_send![a.classes().menu_target, new];
                         let () = msg_send![sub_item, setTarget: target];
                         (*target).set_ivar("command_u64", item.cmd as usize);

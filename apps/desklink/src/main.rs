@@ -37,6 +37,7 @@
 mod clip;
 mod conn;
 mod history;
+mod installed;
 mod menu;
 mod scrub;
 mod view;
@@ -1018,6 +1019,19 @@ impl App {
         }
     }
 
+    /// The window with the selected desktop, or empty when none is known yet (the Dock app's launch
+    /// and reopen).
+    fn show_window(&mut self, cx: &mut Cx) {
+        if self.conns.is_empty() {
+            self.window_shown = true;
+            self.ui.window(cx, ids!(main_window)).show(cx);
+            self.refresh_tray(cx);
+        } else {
+            let i = self.selected;
+            self.open_desktop(cx, i);
+        }
+    }
+
     /// The window closed into the menu bar: the shown desktop pauses, no Dock icon.
     fn hide_window(&mut self, cx: &mut Cx) {
         self.window_shown = false;
@@ -1028,7 +1042,12 @@ impl App {
             c.show(false);
         }
         self.ui.window(cx, ids!(main_window)).set_visible(cx, false);
-        cx.show_in_dock(false);
+        // the installed Desk Link.app is a Dock app: its Dock icon stays while it runs
+        if !installed::is_dock_app() {
+            cx.show_in_dock(false);
+        } else {
+            log!("desklink: window closed: hidden, the app stays in the Dock");
+        }
         menu::selftest("window closed: hidden, Desk Link stays in the menu bar");
         self.refresh_tray(cx);
     }
@@ -1217,6 +1236,7 @@ fn decode_bench(dir: &str) -> ! {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
+        installed::write_pid();
         let args: Vec<String> = std::env::args().collect();
         if let Some(i) = args.iter().position(|a| a == "--decode-bench") {
             decode_bench(args.get(i + 1).map(String::as_str).unwrap_or(""));
@@ -1250,6 +1270,10 @@ impl MatchEvent for App {
             self.select(cx, n);
         }
         self.tick = cx.start_interval(1.0);
+        // the installed Dock app opens with its window, like any app started from the Dock
+        if installed::is_dock_app() {
+            self.show_window(cx);
+        }
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
@@ -1284,6 +1308,7 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if let Event::Shutdown = event {
+            installed::clear_pid();
             // every connection's threads (and the scrub decoder) end and are joined before the app goes
             self.scrub = None;
             self.conns.clear();
@@ -1313,6 +1338,13 @@ impl AppMain for App {
                     }
                     _ => {}
                 }
+                return;
+            }
+            // opened again (macOS: its Dock icon, Finder, `open` while no window is on screen; a later
+            // launch elsewhere): the window, like a tray click
+            Event::AppOpen(e) if e.items.is_empty() => {
+                self.show_window(cx);
+                log!("desklink: opened again: window shown");
                 return;
             }
             // a desktop whose tray click is no dropdown's: the window

@@ -9,7 +9,10 @@ use std::path::{Path, PathBuf};
 /// - [`AppOpenSource::SecondInstance`]: a later launch of a single-instance
 ///   app (see `AppMain::single_instance`) handed its arguments to this
 ///   process and exited. `items` can be empty: the user started the app
-///   again. The platform raises the app's windows first.
+///   again. The platform raises the app's windows first. On macOS the
+///   system's reopen (the Dock icon, Finder or `open` of the running app
+///   while none of its windows is on screen) arrives the same way, with no
+///   items: an app that hid its window on close shows it again here.
 /// - [`AppOpenSource::System`]: the OS routed an open request to the running
 ///   app: macOS `application:openURLs:` (Finder, `open`, URL schemes), iOS
 ///   `application:openURL:options:`, Android `ACTION_VIEW` / `ACTION_SEND`

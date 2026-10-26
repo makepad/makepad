@@ -733,9 +733,10 @@ impl Cx {
                         _ => AppOpenItem::Url(value),
                     })
                     .collect();
-                if !items.is_empty() {
-                    crate::app_open::post(items, AppOpenSource::System);
-                }
+                // none: the user opened the running app again with no window on screen (macOS
+                // reopen, its Dock icon): like a later launch of a single-instance app
+                let source = if items.is_empty() { AppOpenSource::SecondInstance } else { AppOpenSource::System };
+                crate::app_open::post(items, source);
             }
 
             // ---- child windows and domains (this app is a parent)

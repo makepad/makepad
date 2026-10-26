@@ -192,7 +192,8 @@ mod imp {
             "cap resume" => reply_to_answer(ask(|tx| Cmd::CapPause(false, tx), 4)),
             "close" => {
                 let window = p.window();
-                reply_to_answer(ask(move |tx| Cmd::Close { window, tx }, 4))
+                let ask_app = p.flag(&["ask"]);
+                reply_to_answer(ask(move |tx| Cmd::Close { window, ask: ask_app, tx }, 4))
             }
             // A responsive layout is checked by resizing, so the bridge can:
             // `resize w= h= [window=]` in layout points, answered after the
@@ -2581,7 +2582,7 @@ mod imp {
                 out.push_str("]}");
                 let _ = tx.send(Reply::Text(out));
             }
-            Cmd::Close { window, tx } => {
+            Cmd::Close { window, ask, tx } => {
                 let window_id = match resolve_window(cx, window) {
                     Ok(window_id) => window_id,
                     Err(err) => {
@@ -2589,12 +2590,24 @@ mod imp {
                         return;
                     }
                 };
-                let line = format!("[makepad-remote] remote closed window {}", window_id.id());
+                // ask=1: the window's own close button's path (HalEvent::CloseRequested): the app
+                // may keep the window by clearing accept_close
+                let accept_close = std::rc::Rc::new(std::cell::Cell::new(true));
+                if ask {
+                    cx.call_event_handler(&crate::event::Event::WindowCloseRequested(crate::event::WindowCloseRequestedEvent { window_id, accept_close: accept_close.clone() }));
+                }
+                let line = if accept_close.get() {
+                    format!("[makepad-remote] remote closed window {}", window_id.id())
+                } else {
+                    format!("[makepad-remote] remote close of window {} declined by the app", window_id.id())
+                };
                 println!("{line}");
                 let _ = std::io::stdout().flush();
                 push_log_line(line);
                 let _ = tx.send(Reply::Ok);
-                cx.push_unique_platform_op(crate::cx_api::CxOsOp::CloseWindow(window_id));
+                if accept_close.get() {
+                    cx.push_unique_platform_op(crate::cx_api::CxOsOp::CloseWindow(window_id));
+                }
             }
             Cmd::Resize { window, size, tx } => {
                 let window_id = match resolve_window(cx, window) {
