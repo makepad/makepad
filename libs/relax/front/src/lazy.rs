@@ -1376,10 +1376,13 @@ fn global_items(src: &[u8], tokens: &[Tok]) -> bool {
 // inferred from its spelling.
 fn builtin_derive_list(src: &[u8], tokens: &[Tok]) -> Option<Vec<&'static str>> {
     let mut traits = Vec::new();
-    for token in tokens {
+    for (i, token) in tokens.iter().enumerate() {
         match token.kind {
-            T::OpenParen | T::CloseParen | T::Comma => {}
+            T::OpenParen | T::CloseParen | T::Comma | T::PathSep | T::KwCrate | T::KwSelfValue | T::KwSuper => {}
             T::Ident => {
+                if tokens.get(i + 1).is_some_and(|next| next.kind == T::PathSep) {
+                    continue;
+                }
                 let name = std::str::from_utf8(&src[token.lo as usize..token.hi as usize]).ok()?;
                 if crate::macro_reg::has_derive(name) {
                     if crate::macro_reg::outline_native(name, crate::macro_reg::Kind::Derive) { continue; }
@@ -1402,8 +1405,12 @@ fn index_builtin_derives(file: &mut FileIndex, index: &crate::rs_index::NameInde
         for attr in crate::cfg::attrs_before(view, keyword, cfg) {
             let lo = attr.toks.lo as usize;
             let hi = attr.toks.hi as usize;
-            if lo >= hi || crate::cfg::tok_str(view, lo) != b"derive" { continue; }
-            if let Some(traits) = builtin_derive_list(src, &tokens[lo + 1..hi]) {
+            let mut p = lo;
+            while p < hi && matches!(tokens[p].kind, T::Ident | T::RawIdent | T::KwCrate | T::KwSelfValue | T::KwSuper | T::PathSep) {
+                p += 1;
+            }
+            if p == lo || crate::cfg::tok_str(view, p - 1) != b"derive" { continue; }
+            if let Some(traits) = builtin_derive_list(src, &tokens[p..hi]) {
                 for tr in traits {
                     file.impls.push((Some(format!("core::{tr}")), format!("{module}::{}", item.name)));
                     crate::why::event("rs-derive-index", &file.path, 0, &item.name, None);
@@ -1451,9 +1458,14 @@ fn rust_eager_reason(src: &[u8], tokens: &[Tok], names: &Names, ci: usize, modul
             let end = demand::close(tokens, open);
             let Some(name) = tokens.get(open + 1).filter(|_| open + 1 < end) else { i = end + 1; continue; };
             let name = std::str::from_utf8(&src[name.lo as usize..name.hi as usize]).unwrap_or("");
+            let mut p = open + 1;
+            while p < end && matches!(tokens[p].kind, T::Ident | T::RawIdent | T::KwCrate | T::KwSelfValue | T::KwSuper | T::PathSep) {
+                p += 1;
+            }
+            let is_derive = p > open + 1 && std::str::from_utf8(&src[tokens[p - 1].lo as usize..tokens[p - 1].hi as usize]).unwrap_or("") == "derive";
             match name {
                 "lang" | "no_mangle" | "export_name" | "link" | "link_name" | "link_section" | "used" | "global_allocator" | "alloc_error_handler" | "panic_handler" => file = Some(("language or linkage attribute", false)),
-                "derive" if builtin_derive_list(src, &tokens[open + 2..end]).is_some() => {
+                _ if is_derive && builtin_derive_list(src, &tokens[p..end]).is_some() => {
                     file = Some(("indexed compiler derive output", false));
                 }
                 "default" if !crate::macro_reg::has_attr(name) => {}

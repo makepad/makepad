@@ -208,8 +208,8 @@ impl<T> BinaryHeap<T> {
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
-    pub fn iter(&self) -> crate::slice::Iter<'_, T> {
-        crate::slice::Iter::new(self.data.as_slice())
+    pub fn iter(&self) -> Iter<'_, T> {
+        Iter { iter: crate::slice::Iter::new(self.data.as_slice()) }
     }
     pub fn drain(&mut self) -> crate::vec::Drain<'_, T> {
         self.data.drain(..)
@@ -301,7 +301,61 @@ impl<T: Ord> Extend<T> for BinaryHeap<T> {
     }
 }
 
-pub type Iter<'a, T> = crate::slice::Iter<'a, T>;
+#[derive(Debug)]
+pub struct Iter<'a, T> {
+    iter: crate::slice::Iter<'a, T>,
+}
+
+impl<'a, T> Iter<'a, T> {
+    pub fn as_slice(&self) -> &'a [T] {
+        self.iter.as_slice()
+    }
+}
+
+impl<'a, T> Clone for Iter<'a, T> {
+    fn clone(&self) -> Iter<'a, T> {
+        Iter { iter: self.iter.clone() }
+    }
+}
+
+impl<'a, T> Default for Iter<'a, T> {
+    fn default() -> Iter<'a, T> {
+        Iter { iter: crate::slice::Iter::default() }
+    }
+}
+
+impl<'a, T> Iterator for Iter<'a, T> {
+    type Item = &'a T;
+    fn next(&mut self) -> Option<&'a T> {
+        self.iter.next()
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.iter.size_hint()
+    }
+    fn count(self) -> usize {
+        self.iter.count()
+    }
+    fn nth(&mut self, n: usize) -> Option<&'a T> {
+        self.iter.nth(n)
+    }
+    fn last(self) -> Option<&'a T> {
+        self.iter.last()
+    }
+}
+
+impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
+    fn next_back(&mut self) -> Option<&'a T> {
+        self.iter.next_back()
+    }
+    fn nth_back(&mut self, n: usize) -> Option<&'a T> {
+        self.iter.nth_back(n)
+    }
+}
+
+impl<'a, T> ExactSizeIterator for Iter<'a, T> {}
+unsafe impl<'a, T> crate::iter::TrustedLen for Iter<'a, T> {}
+impl<'a, T> FusedIterator for Iter<'a, T> {}
+
 pub type Drain<'a, T> = crate::vec::Drain<'a, T>;
 
 pub struct IntoIter<T> {
@@ -337,9 +391,9 @@ impl<T> IntoIterator for BinaryHeap<T> {
 
 impl<'a, T> IntoIterator for &'a BinaryHeap<T> {
     type Item = &'a T;
-    type IntoIter = crate::slice::Iter<'a, T>;
-    fn into_iter(self) -> crate::slice::Iter<'a, T> {
-        crate::slice::Iter::new(self.data.as_slice())
+    type IntoIter = Iter<'a, T>;
+    fn into_iter(self) -> Iter<'a, T> {
+        self.iter()
     }
 }
 

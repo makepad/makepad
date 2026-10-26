@@ -1637,11 +1637,12 @@ impl<'a> Parser<'a> {
             Some(d) => Some(crate::builtins::override_rules(&self.session.options, d)),
             None => bdef.or_else(|| {
                 // a macro this crate imported under another name (`use std::{eprintln as log_error}`)
-                let own = matches!(qual.as_deref(), None | Some("crate") | Some("self") | Some("super"));
+                let own = matches!(qual.as_deref(), None | Some("crate") | Some("self") | Some("super")) || qual.as_deref() == Some(self.krate.as_str());
                 let (q, target) = if own { m.table.alias(&self.krate, &name)?.clone() } else { return None };
                 let q2 = match q.as_str() {
                     "std" | "core" | "alloc" | "" => None,
                     "crate" | "self" | "super" => Some("crate"),
+                    other if other == self.krate => Some("crate"),
                     other => Some(other),
                 };
                 // the dep's own re-export under that name (`pub use crate::{__trace as trace}`)
@@ -1676,7 +1677,11 @@ impl<'a> Parser<'a> {
                             Some(d) => Some(d),
                             // a std macro Relax handles by its name (format family, assert, ..):
                             // the alias forwards its tokens to it, as `alias!(..)` => `target!(..)`
-                            None => m.forwarding_def(&name, &self.krate, &target),
+                            None if !STD_PRELUDE_MACROS.contains(&name.as_str())
+                                && matches!(q.as_str(), "std" | "core" | "alloc")
+                                && (STD_PRELUDE_MACROS.contains(&target.as_str())
+                                    || matches!(target.as_str(), "asm" | "global_asm" | "naked_asm" | "assert_matches" | "debug_assert_matches" | "const_format_args")) => m.forwarding_def(&name, &self.krate, &target),
+                            None => None,
                         }
                     }
                 }
@@ -5384,9 +5389,9 @@ impl Parser<'_> {
             while token < expansion.toks.len() && expansion.toks[token].hi <= origin.lo { token += 1; }
             let mut source = origin.source;
             if !self.token_input && source.file == 0 {
-                // Preserve Rust's identifier hygiene independently of the diagnostic arena.
+                // Preserve Rust's identifier and format-literal hygiene independently of the diagnostic arena.
                 if source.hi > source.lo {
-                    if let Some(t) = expansion.toks.get(token).filter(|t| matches!(t.kind, T::Ident | T::RawIdent) || (T::KwAs as u8..=T::KwTry as u8).contains(&(t.kind as u8))) {
+                    if let Some(t) = expansion.toks.get(token).filter(|t| matches!(t.kind, T::Ident | T::RawIdent | T::Str | T::RawStr) || (T::KwAs as u8..=T::KwTry as u8).contains(&(t.kind as u8))) {
                         let name_lo = t.lo + if t.kind == T::RawIdent { 2 } else { 0 };
                         self.tok_origin.push((base + name_lo, source.lo, t.hi - name_lo));
                     }

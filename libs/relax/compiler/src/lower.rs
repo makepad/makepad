@@ -3534,18 +3534,17 @@ impl<'a> Lcx<'a> {
             let leaves = self.to_leaves(iv.clone(), it);
             self.disjoint_index(span.0, span.1, leaves[0]);
         }
-        let addr = self.place_addr(&pl, pt);
         // an array indexed through its slice's impl: `&[T; N]` unsizes to `&[T]`
         let (self_v, self_t) = match (self.kind(pt), self.kind(args[0])) {
             (TyKind::Array(_, n), TyKind::Slice(_)) => {
+                let addr = self.place_addr(&pl, pt);
                 let n = n.try_to_target_usize(&self.u.tcx.tys).expect("normalized array length");
                 let l = self.iconst(n as i64);
                 (Val::L(vec![addr, l]), self.u.tcx.tys.intern(TyKind::Ref(mutbl, args[0], crate::types::RegionId::ERASED)))
             }
             // rustc_codegen_ssa/src/mir/rvalue.rs: a reference to an unsized
             // place carries the place's metadata as well as its data address.
-            _ if self.unsized_ty(pt) => (match &pl { Place::Regs(regs) => Val::L(regs.clone()), _ => panic!("unsized index receiver without metadata") }, self.u.tcx.tys.intern(TyKind::Ref(mutbl, pt, crate::types::RegionId::ERASED))),
-            _ => (Val::L(vec![addr]), self.u.tcx.tys.intern(TyKind::Ref(mutbl, pt, crate::types::RegionId::ERASED))),
+            _ => (Val::L(self.ref_to_place(&pl, pt)), self.u.tcx.tys.intern(TyKind::Ref(mutbl, pt, crate::types::RegionId::ERASED))),
         };
         let ret_t = self.u.tcx.tys.intern(TyKind::Ref(mutbl, t, crate::types::RegionId::ERASED));
         let r = self.emit_instance(instance, vec![(self_v, self_t), (iv, it)], ret_t);
@@ -6484,7 +6483,12 @@ impl<'a> Lcx<'a> {
                         // char arguments are not target-usize array lengths).
                         let value = v.try_to_value(&self.u.tcx.tys).expect("normalized const argument");
                         let scalar = value.valtree.try_to_leaf().expect("scalar const argument");
-                        Val::L(vec![self.iconst(scalar.to_bits(scalar.size()) as i64)])
+                        let bits = scalar.to_bits(scalar.size());
+                        if self.is_wide(value.ty) {
+                            Val::L(vec![self.iconst(bits as u64 as i64), self.iconst((bits >> 64) as u64 as i64)])
+                        } else {
+                            Val::L(vec![self.iconst(extend_const(bits as i64, self.int_ty(value.ty)))])
+                        }
                     }
                     _ => {
                         self.err(self.pos, "internal: const generic param without a value in this instance".to_string());
@@ -11962,6 +11966,20 @@ impl<'a> Lcx<'a> {
                                     let ct = self.u.tcx.const_ty(&self.u.prog, d).unwrap_or(self.u.tcx.tys.error);
                                     (self.const_val(d, Vec::new(), ct), ct)
                                 }
+                                Some(Res::ConstParam(i)) => match self.b.args.get(i as usize).map(|a| self.kind(*a)) {
+                                    Some(TyKind::Const(v)) => {
+                                        let value = v.try_to_value(&self.u.tcx.tys).expect("normalized const argument");
+                                        let scalar = value.valtree.try_to_leaf().expect("scalar const argument");
+                                        let bits = scalar.to_bits(scalar.size());
+                                        let val = if self.is_wide(value.ty) {
+                                            Val::L(vec![self.iconst(bits as u64 as i64), self.iconst((bits >> 64) as u64 as i64)])
+                                        } else {
+                                            Val::L(vec![self.iconst(extend_const(bits as i64, self.int_ty(value.ty)))])
+                                        };
+                                        (val, value.ty)
+                                    }
+                                    _ => continue,
+                                },
                                 _ => continue,
                             }
                         }

@@ -552,6 +552,12 @@ impl<'c, 'a> Unit<'c, 'a> {
 
     /// A call that never returns (its result is `!`, or a type without values) ends the flow.
     fn after_call(&mut self, e: ExprId) {
+        if self.closure.is_some() {
+            if let Some(c) = self.cur {
+                let ex = self.exit;
+                self.link(c, ex);
+            }
+        }
         if self.is_never(e) || self.uninhabited(e) { self.cur = None; }
     }
 
@@ -720,14 +726,16 @@ impl<'c, 'a> Unit<'c, 'a> {
             },
             ExprKind::Field(x, _) | ExprKind::TupleField(x, _) => {
                 let (r, _, ind) = self.place(x);
-                let deref = matches!(self.ty_kind_of(x), Some(TyKind::Ref(..) | TyKind::Ptr(..))) || self.is_box(x);
+                let deref = self.cx.body.field_idx.get(&e.0).is_some_and(|&(d, _)| d > 0)
+                    || matches!(self.ty_kind_of(x), Some(TyKind::Ref(..) | TyKind::Ptr(..)))
+                    || self.is_box(x);
                 (r, false, ind || deref)
             }
             ExprKind::Index(a, i) => {
                 let (r, _, ind) = self.place(a);
                 self.expr(i);
-                let overloaded = self.cx.body.ov_index.get(&e.0).is_some();
-                let deref = matches!(self.ty_kind_of(a), Some(TyKind::Ref(..) | TyKind::Ptr(..) | TyKind::Slice(_))) || overloaded;
+                let overloaded = self.cx.body.ov_index.get(&e.0).is_some() || self.cx.body.index_derefs(e.0) > 0;
+                let deref = matches!(self.ty_kind_of(a), Some(TyKind::Ref(..) | TyKind::Ptr(..) | TyKind::Slice(_))) || self.is_box(a) || overloaded;
                 (r, false, ind || deref)
             }
             ExprKind::Unary(UnOp::Deref, x) => {
@@ -919,6 +927,11 @@ impl<'c, 'a> Unit<'c, 'a> {
                     let s = s as usize;
                     if !reach[s] { continue; }
                     for k in 0..w { out[k] |= live_in[s * w + k]; }
+                }
+                if n == exit as usize {
+                    for (v, var) in self.vars.iter().enumerate() {
+                        if var.own { out[v / 64] &= !(1u64 << (v % 64)); }
+                    }
                 }
                 let d = self.nodes[n].def;
                 if d != NONE { out[(d / 64) as usize] &= !(1u64 << (d % 64)); }
