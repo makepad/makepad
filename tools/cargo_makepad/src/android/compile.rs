@@ -1207,6 +1207,7 @@ fn compile_java(
         makepad_java_classes_dir.join("VideoPlayerRunnable.java"),
         makepad_java_classes_dir.join("OesDecodeSurface.java"),
         makepad_java_classes_dir.join("H264Encoder.java"),
+        makepad_java_classes_dir.join("MakepadFileProvider.java"),
         build_paths.java_file.clone(),
         build_paths.xr_file.clone(),
     ];
