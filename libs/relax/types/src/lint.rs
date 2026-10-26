@@ -593,7 +593,7 @@ pub fn is_automatically_derived(prog: &Program, d: DefId) -> bool {
     let ast = &prog.files[def.file as usize].ast;
     let item = ast.item(def.item);
     has_attr(prog, def.file, ast.list(item.attrs), "automatically_derived")
-        || prog.files[def.file as usize].expansion_kind(item.lo) == crate::parser::ExpnKind::Builtin
+        || derived(prog, d)
 }
 
 /// The attributes of the parameters, statements and arms around the binding written at `pos` in

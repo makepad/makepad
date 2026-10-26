@@ -1401,6 +1401,9 @@ impl<'a> Checker<'a> {
     /// Whether `pos` lies in the expansion of a macro defined in another file (lints from
     /// external macros are not reported).
     fn in_external_macro(&self, pos: u32) -> bool {
+        if crate::lint::generated(self.cx.prog, self.cx.body.def) || crate::lint::external(self.cx.prog, self.cx.body.file, pos) {
+            return true;
+        }
         let pf = &self.cx.prog.files[self.cx.body.file as usize];
         if pos < pf.src_len {
             return false;

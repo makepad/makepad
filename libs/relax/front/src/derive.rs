@@ -187,10 +187,14 @@ impl<'a> Parser<'a> {
         let mut wanted: Vec<&'static str> = Vec::new();
         for a in self.ast.list(it.attrs) {
             let (lo, hi) = (a.toks.lo as usize, a.toks.hi as usize);
-            if hi <= lo || self.tok_text(self.toks.at(lo)) != b"derive" {
+            let mut p = lo;
+            while p < hi && matches!(self.toks.at(p).kind, T::Ident | T::RawIdent | T::KwCrate | T::KwSelfValue | T::KwSuper | T::PathSep) {
+                p += 1;
+            }
+            if p == lo || self.tok_text(self.toks.at(p - 1)) != b"derive" {
                 continue;
             }
-            for i in lo + 1..hi {
+            for i in p..hi {
                 let t = self.toks.at(i);
                 if t.kind != T::Ident {
                     continue;

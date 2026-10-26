@@ -5673,7 +5673,8 @@ impl<'a> Fcx<'a> {
                 let mut cur = self.shallow(ta);
                 let mut derefs = 0usize;
                 let tis = self.shallow(ti);
-                let idx_is_range = matches!(self.tcx.tys.kind(tis), TyKind::Adt(..));
+                use crate::lang_items::LangItem;
+                let idx_is_range = matches!(self.tcx.tys.kind(tis), TyKind::Adt(d, _, _) if matches!(self.tcx.lang_items.by_def.get(d), Some(LangItem::Range | LangItem::RangeFrom | LangItem::RangeTo | LangItem::RangeFull | LangItem::RangeInclusiveStruct | LangItem::RangeToInclusive)));
                 // an integer literal index stays open until the indexing is known: `f[1]` with
                 // `impl Index<isize> for Foo` is isize (rustc: the literal is typed by the
                 // selected Index impl); builtin array/slice indexing makes it usize
@@ -5698,7 +5699,7 @@ impl<'a> Fcx<'a> {
                             // goes through std's `impl<T, I: SliceIndex<[T]>> Index<I> for [T]`:
                             // the result is `<I as SliceIndex<[T]>>::Output`)
                             let std_range = match self.tcx.tys.kind(tis) {
-                                TyKind::Adt(d, _, _) => matches!(self.prog.name(*d), "Range" | "RangeFrom" | "RangeTo" | "RangeFull" | "RangeInclusive" | "RangeToInclusive"),
+                                TyKind::Adt(..) => idx_is_range,
                                 TyKind::Param(_) | TyKind::Alias(_, AliasTy { kind: AliasTyKind::Projection { .. }, .. }) => false,
                                 _ => true,
                             };
@@ -5744,7 +5745,7 @@ impl<'a> Fcx<'a> {
                             self.set_operand_deref(e.0, derefs, None, cur);
                             derefs += 1;
                         }
-                        TyKind::Adt(..) | TyKind::Param(_) | TyKind::Alias(..) | TyKind::Dyn(..) => {
+                        TyKind::Adt(..) | TyKind::Param(_) | TyKind::Alias(..) | TyKind::Dyn(..) | TyKind::Str => {
                             // `Index<Idx>` impl on the type, else autoderef through Deref
                             if let Some(td) = self.lang_item(&["ops", "Index"]) {
                                 let dc = self.infcx.deeply_resolve_ignoring_regions(cur);
@@ -7770,11 +7771,15 @@ impl<'a> Fcx<'a> {
                             Some(li) => {
                                 self.b.fmt_named.insert((e.0, sy), Res::Local(li));
                             }
-                            None => match self.prog.lookup_in_scope(self.module, sy, false) {
-                                Some(d) => {
-                                    self.b.fmt_named.insert((e.0, sy), Res::Def(d));
+                            None => if let Some(&(i, _, _)) = self.env.consts.iter().find(|c| self.env.names.get(c.0 as usize) == Some(&sy)) {
+                                self.b.fmt_named.insert((e.0, sy), Res::ConstParam(i));
+                            } else {
+                                match self.prog.lookup_in_scope(self.module, sy, false) {
+                                    Some(d) => {
+                                        self.b.fmt_named.insert((e.0, sy), Res::Def(d));
+                                    }
+                                    None => self.err(fe.lo, format!("cannot find `{}` for format string", n)),
                                 }
-                                None => self.err(fe.lo, format!("cannot find `{}` for format string", n)),
                             },
                         }
                     } else {

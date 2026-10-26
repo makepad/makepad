@@ -112,11 +112,11 @@ impl<T, E> Result<T, E> {
         }
         self
     }
-    pub const fn iter(&self) -> crate::option::Iter<'_, T> {
-        crate::option::Iter::from_option(self.as_ref().ok())
+    pub const fn iter(&self) -> Iter<'_, T> {
+        Iter { inner: crate::option::Iter::from_option(self.as_ref().ok()) }
     }
-    pub const fn iter_mut(&mut self) -> crate::option::IterMut<'_, T> {
-        crate::option::IterMut { inner: self.as_mut().ok() }
+    pub const fn iter_mut(&mut self) -> IterMut<'_, T> {
+        IterMut { inner: crate::option::IterMut { inner: self.as_mut().ok() } }
     }
     #[track_caller]
     pub fn expect(self, msg: &str) -> T
@@ -247,8 +247,59 @@ fn unwrap_failed(msg: &str, error: &dyn fmt::Debug) -> ! {
     crate::panicking::panic_fmt(format_args!("{msg}: {error:?}"))
 }
 
-pub type Iter<'a, T> = crate::option::Iter<'a, T>;
-pub type IterMut<'a, T> = crate::option::IterMut<'a, T>;
+#[derive(Debug)]
+pub struct Iter<'a, T> {
+    inner: crate::option::Iter<'a, T>,
+}
+
+impl<'a, T> Iterator for Iter<'a, T> {
+    type Item = &'a T;
+    fn next(&mut self) -> Option<&'a T> {
+        self.inner.next()
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
+    fn next_back(&mut self) -> Option<&'a T> {
+        self.inner.next_back()
+    }
+}
+
+impl<'a, T> Clone for Iter<'a, T> {
+    fn clone(&self) -> Iter<'a, T> {
+        Iter { inner: self.inner.clone() }
+    }
+}
+
+impl<'a, T> ExactSizeIterator for Iter<'a, T> {}
+impl<'a, T> crate::iter::FusedIterator for Iter<'a, T> {}
+
+#[derive(Debug)]
+pub struct IterMut<'a, T> {
+    inner: crate::option::IterMut<'a, T>,
+}
+
+impl<'a, T> Iterator for IterMut<'a, T> {
+    type Item = &'a mut T;
+    fn next(&mut self) -> Option<&'a mut T> {
+        self.inner.next()
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl<'a, T> DoubleEndedIterator for IterMut<'a, T> {
+    fn next_back(&mut self) -> Option<&'a mut T> {
+        self.inner.next_back()
+    }
+}
+
+impl<'a, T> ExactSizeIterator for IterMut<'a, T> {}
+impl<'a, T> crate::iter::FusedIterator for IterMut<'a, T> {}
 
 #[derive(Clone, Debug)]
 pub struct IntoIter<T> {
@@ -285,16 +336,16 @@ impl<T, E> IntoIterator for Result<T, E> {
 
 impl<'a, T, E> IntoIterator for &'a Result<T, E> {
     type Item = &'a T;
-    type IntoIter = crate::option::Iter<'a, T>;
-    fn into_iter(self) -> crate::option::Iter<'a, T> {
+    type IntoIter = Iter<'a, T>;
+    fn into_iter(self) -> Iter<'a, T> {
         self.iter()
     }
 }
 
 impl<'a, T, E> IntoIterator for &'a mut Result<T, E> {
     type Item = &'a mut T;
-    type IntoIter = crate::option::IterMut<'a, T>;
-    fn into_iter(self) -> crate::option::IterMut<'a, T> {
+    type IntoIter = IterMut<'a, T>;
+    fn into_iter(self) -> IterMut<'a, T> {
         self.iter_mut()
     }
 }

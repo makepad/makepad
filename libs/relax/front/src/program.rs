@@ -3973,18 +3973,23 @@ impl Program {
             } else {
                 tdef = self.lookup_in_container(parent, last, true);
                 vdef = if self.imports[i].bound & BOUND_SELF_ONLY != 0 { None } else { self.lookup_in_container(parent, last, false) };
-                // rustc ignores a namespace whose binding this module cannot see when the other
+                let mdef = self.imports[i].bound & BOUND_SELF_ONLY == 0 && self.lookup_macro_in_container(parent, last);
+                // rustc ignores a namespace whose binding this module cannot see when another
                 // namespace is accessible (`use validate::validate;` where `validate` also holds
-                // a private glob-imported module of that name); with neither accessible the
+                // a private glob-imported module of that name, or `use zerovec::zerovec;` where
+                // `zerovec` holds a private submodule and a public macro); with none accessible the
                 // privacy error is reported
-                if self.def(parent).kind == DefKind::Mod && tdef.is_some() && vdef.is_some() {
+                if self.def(parent).kind == DefKind::Mod && (tdef.is_some() as u8 + vdef.is_some() as u8 + mdef as u8) >= 2 {
                     let sub = self.def(parent).sub;
                     let seen = |p: &Program, ns: bool| {
                         let mut q = GlobQuery { precise: true, ..Default::default() };
                         p.lookup_in_module_vis(sub, last, ns, &mut q).map_or(true, |(_, v)| p.vis_visible(v, module))
                     };
-                    let (tv, vv) = (seen(self, true), seen(self, false));
-                    if tv && !vv { vdef = None; } else if vv && !tv { tdef = None; }
+                    let (tv, vv) = (tdef.is_some() && seen(self, true), vdef.is_some() && seen(self, false));
+                    if tv || vv || mdef {
+                        if !tv { tdef = None; }
+                        if !vv { vdef = None; }
+                    }
                 }
             }
             if tdef.is_none() && vdef.is_none() {
