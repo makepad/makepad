@@ -8926,6 +8926,275 @@ fn drain_slow_base() {
     });
 }
 
+/// SETTLE-TIER (GAPX7): the settled state of lukewarm code. Code that runs every frame but under
+/// the O3 threshold stayed in baseline code behind its count stub forever: the settled x64 race ran
+/// ~7% of its UI cycles in baseline code and ~5% in count stubs (~20% of its front-end stalls;
+/// GAPX6). Once tiering is quiet (no O3 push or install for SETTLE_QUIET_NS, no queued O3 / O2
+/// build, no open counted window; a game's trickle of first compiles does not count), the first O3
+/// worker opens a SETTLE_WINDOW_NS counting window (settle_checkpoint) and at its end sweeps the
+/// counting slots: every slot whose cost rate in the window shows it running regularly (at least
+/// the O3 threshold's rate / settle_div()) gets its O2 build when it runs baseline code (stored like
+/// every O2 build: record_o2), and once at its final code its tier decision is final (T_FINAL): the
+/// count stub goes out of the slot, its calls go straight to the code and pay no counting. Rounds
+/// repeat until one has nothing to build ("final": time to final performance, `--verbose`). No
+/// timer runs afterwards; the first O3 worker's idle poll only reads counters. Phase changes:
+/// SETTLE_NEW_CODE first compiles since the settle or a live patch re-arm every final slot (a new
+/// window, then a sweep), and so does SETTLE_REARM_NS of program time; a final slot's own loop that
+/// reaches the O3 threshold's rate re-arms that slot at once (rt_loop_hot). Nothing here is stored:
+/// a warm start links the O2 entries and settles again, without builds.
+/// MAKEPAD_RUN_SETTLE_TIER=0: off (A/B); MAKEPAD_RUN_SETTLE_DIV=<n>: the running bar (default 256).
+const T_FINAL: u64 = 4;
+const SETTLE_QUIET_NS: u64 = 3_000_000_000;
+/// a re-armed counting window's length before the sweep reads its costs (two half-lives)
+const SETTLE_WINDOW_NS: u64 = 4_000_000_000;
+const SETTLE_REARM_NS: u64 = 64_000_000_000;
+/// first compiles (new code reached) since the settle that re-arm the final slots
+const SETTLE_NEW_CODE: u64 = 64;
+/// sweep rounds per epoch (each O2 round normally needs one more round to make its slots final)
+const SETTLE_ROUNDS: u32 = 4;
+
+fn settle_tier_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_SETTLE_TIER").map_or(true, |v| v != "0"))
+}
+
+fn settle_div() -> u64 {
+    static D: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *D.get_or_init(|| std::env::var("MAKEPAD_RUN_SETTLE_DIV").ok().and_then(|v| v.parse().ok()).filter(|&n: &u64| n > 0).unwrap_or(256))
+}
+
+fn settle_trace() -> bool {
+    static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *T.get_or_init(|| std::env::var_os("MAKEPAD_RUN_SETTLE_TRACE").is_some()) || crate::run::VERBOSE.load(Ordering::Relaxed)
+}
+
+/// O2 builds that waited for a borrow-check verdict (o2_begin: dropped, re-queued by the verdict)
+static O2_VERDICT_WAITS: AtomicU64 = AtomicU64::new(0);
+/// slots whose tier decision is final (T_FINAL) now
+static FINAL_SLOTS: AtomicU64 = AtomicU64::new(0);
+/// (trace) the settle's O2 builds by the slot's stored entry: no key, no entry, baseline, O1, O2, O3
+static SETTLE_ENTRY_RANKS: [AtomicU64; 6] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+
+struct SettleTier {
+    seen: [u64; 2],
+    /// first compiles and the patch epoch when the epoch went final
+    at_final: [u64; 2],
+    quiet_since: u64,
+    /// the open counting window's start (settle_checkpoint), 0: none open
+    window_at: u64,
+    /// final since (tier_clock), 0 while counting
+    final_at: u64,
+    rounds: u32,
+    epoch: u32,
+}
+static SETTLE_TIER: relax_session::sync::Mutex<SettleTier> = relax_session::sync::Mutex::new(SettleTier { seen: [u64::MAX; 2], at_final: [0; 2], quiet_since: 0, window_at: 0, final_at: 0, rounds: 0, epoch: 0 });
+
+/// What a settle waits out: O3 queue pushes and installs (O2 builds are the settle's own work).
+fn settle_activity() -> [u64; 2] {
+    [TIER_PUSHES.load(Ordering::Relaxed), TIER1_INSTALLS.load(Ordering::Relaxed)]
+}
+
+/// The first O3 worker's poll (no lock held): the settle state machine (SETTLE-TIER above).
+fn settle_tier_tick() {
+    if !settle_tier_on() || TIER_STOP.load(Ordering::SeqCst) {
+        return;
+    }
+    let up = TIER_UNIT.load(Ordering::Acquire);
+    if up.is_null() || T1PROF.lock().unwrap().as_ref().is_some_and(|p| p.replay) || !BASE.lock().unwrap_or_else(|e| e.into_inner()).released {
+        return;
+    }
+    let now = tier_clock();
+    let mut st = SETTLE_TIER.lock().unwrap_or_else(|e| e.into_inner());
+    let act = settle_activity();
+    let moved = act != st.seen;
+    if moved {
+        st.seen = act;
+        st.quiet_since = now;
+    }
+    if st.final_at != 0 {
+        // a phase change (much new code reached, a patch) or the periodic look: the final slots
+        // count again
+        let (code, patch) = (demand_compiled(), PATCH_EPOCH.load(Ordering::Relaxed));
+        let why = if patch != st.at_final[1] {
+            Some("patch")
+        } else if code >= st.at_final[0] + SETTLE_NEW_CODE {
+            Some("new code")
+        } else if now.saturating_sub(st.final_at) >= SETTLE_REARM_NS {
+            Some("periodic")
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            st.final_at = 0;
+            st.rounds = 0;
+            st.window_at = 0;
+            st.epoch += 1;
+            drop(st);
+            if FINAL_SLOTS.load(Ordering::Relaxed) != 0 {
+                let n = owner::publish(|| unsafe { settle_rearm_all(up) });
+                if settle_trace() {
+                    eprintln!("makepad-run settle-tier: re-armed {} final slots ({}) at t={:.1} s", n, why, wall_ns() as f64 / 1e9);
+                }
+            }
+        }
+        return;
+    }
+    // quiet, and the queues drained: no O3 / O2 build pending or running, no counted window open
+    let (o2q, o2run, _) = o2_counts();
+    if now.saturating_sub(st.quiet_since) < SETTLE_QUIET_NS || o2q != 0 || o2run || !TIER_INBOX.is_empty() || pgo_counting()
+        || !tier_queue().unwrap_or_else(|e| e.into_inner()).is_empty() || !TIER_ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+    {
+        st.window_at = 0;
+        return;
+    }
+    // the rates are measured over a window of this quiet program: every counting slot's cost is
+    // checked in at its start (a startup burst long ago is no rate now)
+    if st.window_at == 0 {
+        st.window_at = now.max(1);
+        drop(st);
+        owner::publish(|| unsafe { settle_checkpoint(up) });
+        return;
+    }
+    if now.saturating_sub(st.window_at) < SETTLE_WINDOW_NS {
+        return;
+    }
+    st.window_at = 0;
+    st.rounds += 1;
+    let (round, epoch) = (st.rounds, st.epoch);
+    drop(st);
+    let (running, queued, finalized) = owner::publish(|| unsafe { settle_sweep(up) });
+    let mut st = SETTLE_TIER.lock().unwrap_or_else(|e| e.into_inner());
+    if queued == 0 || st.rounds >= SETTLE_ROUNDS {
+        st.final_at = tier_clock().max(1);
+        st.at_final = [demand_compiled(), PATCH_EPOCH.load(Ordering::Relaxed)];
+    }
+    if settle_trace() {
+        eprintln!("makepad-run settle-tier: epoch {} round {} at t={:.1} s: {} running slots, {} O2 builds queued, {} made final ({} final in all){}", epoch, round, wall_ns() as f64 / 1e9, running, queued, finalized, FINAL_SLOTS.load(Ordering::Relaxed), if st.final_at != 0 { " -- final" } else { "" });
+        let r: Vec<u64> = SETTLE_ENTRY_RANKS.iter().map(|x| x.load(Ordering::Relaxed)).collect();
+        eprintln!("makepad-run settle-tier: O2 builds so far by stored entry (no key/none/baseline/O1/O2/O3): {:?}; O2 worker: {} installed, {} dropped ({} waiting for a verdict)", r, O2_STATS[0].load(Ordering::Relaxed), O2_STATS[2].load(Ordering::Relaxed), O2_VERDICT_WAITS.load(Ordering::Relaxed));
+    }
+}
+
+/// A settle window opens (owner, unit lock): every counting slot's cost so far is checked in (its
+/// decayed cost and the time recorded, the budget refilled, as a cost check under the threshold
+/// does), so what it spends next is its rate in the window. A slot over the threshold is left to
+/// its next call (rt_hot queues it).
+unsafe fn settle_checkpoint(up: *mut Unit) {
+    let u = &*up;
+    let Some(threshold) = u.tier1.as_ref().map(|t| t.threshold) else { return };
+    let now = tier_clock();
+    for id in 0..u.fns.len() as u32 {
+        let rec = tier_rec(&u.slots, id);
+        if (*rec.add(3)).load(Ordering::Acquire) == T_COUNTING {
+            let _ = tier_check(rec, threshold, now);
+        }
+    }
+}
+
+/// One settle round at the end of its window (owner, unit lock): (running slots, O2 builds
+/// queued, slots made final). Running: a cost rate since the window's checkpoint (or the slot's
+/// last cost check in it) of at least the O3 threshold's rate / settle_div().
+unsafe fn settle_sweep(up: *mut Unit) -> (u64, u64, u64) {
+    let u = &*up;
+    let Some(threshold) = u.tier1.as_ref().map(|t| t.threshold) else { return (0, 0, 0) };
+    let bar = (threshold / settle_div()).max(1);
+    // units per second at the bar (a steady rate r converges on r x half-life / ln 2)
+    let bar_rate = bar as f64 * std::f64::consts::LN_2 / (COST_HALF_LIFE_NS / 1e9);
+    let now = tier_clock();
+    let running_now = |rec: *const AtomicU64| -> bool {
+        let (cost, spent) = tier_cost_now(rec, threshold, now);
+        let dt = now.saturating_sub((*rec.add(4)).load(Ordering::Relaxed));
+        // (a check in the window's first second refilled the budget: too short a span for a rate)
+        if dt >= 1_000_000_000 { spent as f64 * 1e9 / dt as f64 >= bar_rate } else { cost >= bar }
+    };
+    let (mut running, mut queued, mut finalized) = (0, 0, 0);
+    for id in 0..u.fns.len() as u32 {
+        let rec = tier_rec(&u.slots, id);
+        if (*rec.add(3)).load(Ordering::Acquire) != T_COUNTING || u.frequency_profiles.contains_key(&id) {
+            continue;
+        }
+        if !running_now(rec) {
+            continue;
+        }
+        running += 1;
+        // baseline code that keeps running: its O2 build first (its install re-arms the count
+        // stub for the O2 code: rearm_counter); the next round makes it final
+        if u.fns[id as usize].base_code.swap(false, Ordering::Relaxed) && o2_base(up, id) {
+            queued += 1;
+            // (trace: the stored entry of a slot that ran baseline code -- an O2 entry here means
+            // an earlier session's O2 build was stored but not linked)
+            if settle_trace() {
+                if let Some(mut c) = (&mut *up).cache.take() {
+                    let r = c.slot_entry_rank(&*up, id);
+                    (&mut *up).cache = Some(c);
+                    let k = match r { None => 0, Some(None) => 1, Some(Some(t)) => 2 + t.min(3) as usize };
+                    SETTLE_ENTRY_RANKS[k].fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            continue;
+        }
+        if settle_final(u, id) {
+            finalized += 1;
+        }
+    }
+    (running, queued, finalized)
+}
+
+/// Slot `id` (counting) gets final: its count stub out of the slot (calls go to its code).
+unsafe fn settle_final(u: &Unit, id: u32) -> bool {
+    let rec = tier_rec(&u.slots, id);
+    if (*rec.add(3)).compare_exchange(T_COUNTING, T_FINAL, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        return false;
+    }
+    // (word 4 is the time of the last loop chunk while final: rt_loop_hot)
+    (*rec.add(4)).store(tier_clock(), Ordering::Relaxed);
+    let code = (*rec.add(1)).load(Ordering::Relaxed);
+    let stub = (*rec.add(2)).load(Ordering::Relaxed);
+    let _ = SlotWord::of(&u.slots, id).compare_exchange(stub, code, Ordering::SeqCst, Ordering::SeqCst);
+    FINAL_SLOTS.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+/// A final slot counts again from nothing (no lock: atomics only, rt_loop_hot too). False: it was
+/// not final. A slot whose word is not its counted code (other code installed while final) is
+/// left to settle_rearm_all, which makes it a stub.
+unsafe fn settle_unfinal(u: &Unit, id: u32, threshold: u64) -> bool {
+    let rec = tier_rec(&u.slots, id);
+    if (*rec.add(3)).compare_exchange(T_FINAL, T_COUNTING, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        return false;
+    }
+    tier_count_fresh(rec, threshold, tier_clock());
+    FINAL_SLOTS.fetch_sub(1, Ordering::Relaxed);
+    let code = (*rec.add(1)).load(Ordering::Relaxed);
+    let stub = (*rec.add(2)).load(Ordering::Relaxed);
+    let _ = SlotWord::of(&u.slots, id).compare_exchange(code, stub, Ordering::SeqCst, Ordering::SeqCst);
+    true
+}
+
+/// Every final slot counts again (owner, unit lock): the number re-armed.
+unsafe fn settle_rearm_all(up: *mut Unit) -> u64 {
+    let u = &mut *up;
+    let Some(threshold) = u.tier1.as_ref().map(|t| t.threshold) else { return 0 };
+    let mut n = 0;
+    for id in 0..u.fns.len() as u32 {
+        let rec = tier_rec(&u.slots, id);
+        if (*rec.add(3)).load(Ordering::Acquire) != T_FINAL {
+            continue;
+        }
+        if !settle_unfinal(u, id, threshold) {
+            continue;
+        }
+        n += 1;
+        // other code went into the slot while it was final (a patch, an O2 / O1v install): a count
+        // stub for that code
+        let word = SlotWord::of(&u.slots, id).load(Ordering::SeqCst);
+        if word != (*rec.add(2)).load(Ordering::Relaxed) && u.fns[id as usize].compiled {
+            u.rearm_counter(id, word);
+        }
+    }
+    n
+}
+
 /// The startup released its workers (after the first present): the baseline slots sampled so far
 /// get their O2 builds. Unit lock held.
 unsafe fn release_base(up: *mut Unit) {
@@ -8942,15 +9211,16 @@ unsafe fn release_base(up: *mut Unit) {
 }
 
 /// Queues baseline slot `id` for its O2 build (once; not glue or sandbox twins, as o2_hot).
-unsafe fn o2_base(up: *mut Unit, id: u32) {
+/// True: queued now.
+unsafe fn o2_base(up: *mut Unit, id: u32) -> bool {
     let u = &*up;
     if (id as usize) >= u.fns.len() || matches!(u.fns[id as usize].key, FnKey::Glue(..) | FnKey::Sandbox(_) | FnKey::Plain(_)) || u.cache.is_none() || !o2_on() {
-        return;
+        return false;
     }
     {
         let mut seen = O2_SEEN.lock().unwrap_or_else(|e| e.into_inner());
         if !seen.get_or_insert_with(Default::default).insert((up as usize, id)) {
-            return;
+            return false;
         }
     }
     u.fns[id as usize].hot_hint.store(true, Ordering::Relaxed);
@@ -8962,6 +9232,7 @@ unsafe fn o2_base(up: *mut Unit, id: u32) {
         O2_WAKE.notify_one();
     }
     o2_start(up);
+    true
 }
 
 /// Verified O1 rebuilds (o1v): slots whose cache entry is to become verified O1 code, served by
@@ -9211,6 +9482,7 @@ unsafe fn o2_begin(up: *mut Unit, id: u32) -> Option<O2Work> {
     if !(&*up).refresh_verified(id) {
         await_verdict(id, Await::O2);
         O2_STATS[2].fetch_add(1, Ordering::Relaxed);
+        O2_VERDICT_WAITS.fetch_add(1, Ordering::Relaxed);
         return None;
     }
     let f = &(&*up).fns[id as usize];
@@ -13726,7 +13998,18 @@ fn rt_loop_hot(counter: u64, fp: u64) {
         let rec = tier_rec(&u.slots, id);
         let chunk = (threshold / LOOP_CHUNK_DIV).max(1);
         (*rec.add(8)).store(chunk, Ordering::Relaxed);
-        if (*rec.add(3)).load(Ordering::Relaxed) != T_COUNTING {
+        let st = (*rec.add(3)).load(Ordering::Relaxed);
+        if st == T_FINAL {
+            // a final slot's loop (SETTLE-TIER): word 4 is its last chunk's time. Two chunks closer
+            // than a chunk takes at the O3 threshold's rate: the loop turned hot, the slot counts
+            // again (this chunk charged below); slower, it stays final
+            let now = tier_clock();
+            let last = (*rec.add(4)).swap(now, Ordering::Relaxed);
+            let at_threshold = (COST_HALF_LIFE_NS / std::f64::consts::LN_2 / LOOP_CHUNK_DIV as f64) as u64;
+            if now.saturating_sub(last) >= at_threshold || !settle_unfinal(u, id, threshold) {
+                return;
+            }
+        } else if st != T_COUNTING {
             return;
         }
         tier_charge(rec, chunk);
@@ -15044,7 +15327,7 @@ pub(crate) fn tier_explain(u: &Unit, id: u32) -> (String, Vec<(String, String)>)
         "not in the slot (other code was installed over it)".to_string()
     };
     rows.push(("count stub".into(), format!("{}; weight {} per call ({} code bytes); re-arms {}{}", stub_state, weight, w5 & CODE_BYTES, n(tl::ev::ARM), last_s(tl::ev::ARM).map_or(String::new(), |t| format!(" (last {t})")))));
-    let st = match state { 0 => "not armed", T_COUNTING => "counting", T_QUEUED => "queued / tiered (calls not counted)", T_REPLAY => "replay", _ => "?" };
+    let st = match state { 0 => "not armed", T_COUNTING => "counting", T_QUEUED => "queued / tiered (calls not counted)", T_REPLAY => "replay", T_FINAL => "final (settled lukewarm code: count stub out, calls not counted)", _ => "?" };
     let half_s = COST_HALF_LIFE_NS / 1e9;
     rows.push(("tier record".into(), format!("{}; decayed cost {} of {} ({} spent since the last check {} ago in program time (wall less foreground compiles); half-life {:.1} s: O3 needs a steady ~{:.0} units/s = ~{:.0} calls/s at this weight); rearmed once {}; hot loop charged {}", st, cost, threshold, spent, ms(tier_clock().saturating_sub(last_check)), half_s, threshold as f64 * std::f64::consts::LN_2 / half_s, threshold as f64 * std::f64::consts::LN_2 / half_s / weight.max(1) as f64, w5 & REARMED != 0, w5 & LOOP_CHARGED != 0)));
     if loop_left != 0 {
@@ -15120,6 +15403,8 @@ pub(crate) fn tier_explain(u: &Unit, id: u32) -> (String, Vec<(String, String)>)
         "never armed: no count stub was put in front of its code (a kind that is not counted -- glue, shim, foreign fn -- or code installed without one), so its calls cannot queue O3; only `tier <fn> o3` builds it".into()
     } else if state == T_COUNTING && !stub_in {
         "NOT COUNTED: its count stub is out of the slot (other code was installed over it) -- its calls are not counted, so it is never queued for O3".to_string()
+    } else if state == T_FINAL {
+        "final: settled lukewarm code (SETTLE-TIER) -- its count stub is out of the slot; it counts again when the program reaches new code, after the periodic re-arm, or when one of its loops turns hot".to_string()
     } else if state == T_COUNTING {
         format!("counting: decayed cost {} of {} ({:.0}%; weight {} per call, half-life {:.1} s): O3 is queued at the first call that finds it over the threshold", cost, threshold, cost as f64 * 100.0 / threshold.max(1) as f64, weight, COST_HALF_LIFE_NS / 1e9)
     } else if state == T_QUEUED {
@@ -16209,6 +16494,8 @@ fn tier1_thread(runtime: &crate::options::RuntimeOptions, k: usize, normal: usiz
                     pgo_poll();
                     // baseline code that keeps running under the O3 threshold: its O2 builds
                     drain_slow_base();
+                    // the settled state: lukewarm code optimised, its count stubs out (SETTLE-TIER)
+                    settle_tier_tick();
                 }
                 q = tier_queue().unwrap_or_else(|e| e.into_inner());
             }
