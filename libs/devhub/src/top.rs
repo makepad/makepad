@@ -4,7 +4,6 @@
 //! `nvidia-smi`; macOS `ps`), nothing is asked of the processes.
 
 use makepad_remote::json_str;
-use std::time::Duration;
 
 /// One GPU's live numbers (`nvidia-smi`).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -106,7 +105,7 @@ fn sample() -> (f64, Vec<ProcRow>) {
     let read = || std::fs::read_to_string("/proc/stat").ok().and_then(|t| parse_proc_stat(&t));
     let (s0, p0) = (read(), procs());
     let t0 = std::time::Instant::now();
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(std::time::Duration::from_millis(500));
     let (s1, p1) = (read(), procs());
     let secs = t0.elapsed().as_secs_f64().max(0.001);
     let tck = {
