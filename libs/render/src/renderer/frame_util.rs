@@ -251,13 +251,48 @@ pub(super) fn chunk_cell(x: f32, z: f32) -> (i32, i32) {
 /// plane, so anything straddling or spanning the frustum always draws.
 #[derive(Clone, Copy, Debug)]
 pub struct Frustum {
-    pub(super) planes: [Vec4f; 6],
+    first: Planes,
+    /// A stereo view's second eye: what either eye sees draws (`from_clip_matrices`).
+    second: Option<Planes>,
 }
 
 impl Frustum {
     /// `clip` maps world space to clip space, column-vector convention as
     /// `Mat4f` stores it — row `i` is `v[i], v[i+4], v[i+8], v[i+12]`.
     pub fn from_clip_matrix(clip: &Mat4f) -> Self {
+        Self { first: Planes::from_clip_matrix(clip), second: None }
+    }
+
+    /// The union of two views (the eyes of a stereo frame): a test rejects only what
+    /// both views reject.
+    pub fn from_clip_matrices(a: &Mat4f, b: &Mat4f) -> Self {
+        Self { first: Planes::from_clip_matrix(a), second: Some(Planes::from_clip_matrix(b)) }
+    }
+
+    /// Sphere-vs-frustum; false only when the sphere is fully beyond a plane.
+    pub fn intersects_sphere(&self, center: Vec3f, radius: f32) -> bool {
+        self.first.intersects_sphere(center, radius) || self.second.is_some_and(|p| p.intersects_sphere(center, radius))
+    }
+
+    /// World-axis-aligned box vs the frustum (`Planes::intersects_aabb`).
+    pub fn intersects_aabb(&self, min: Vec3f, max: Vec3f) -> bool {
+        self.first.intersects_aabb(min, max) || self.second.is_some_and(|p| p.intersects_aabb(min, max))
+    }
+
+    /// Model-space AABB under `transform` vs the frustum (`Planes::intersects_obb`).
+    pub fn intersects_obb(&self, min: Vec3f, max: Vec3f, transform: &Mat4f) -> bool {
+        self.first.intersects_obb(min, max, transform) || self.second.is_some_and(|p| p.intersects_obb(min, max, transform))
+    }
+}
+
+/// One view's six inward planes.
+#[derive(Clone, Copy, Debug)]
+struct Planes {
+    planes: [Vec4f; 6],
+}
+
+impl Planes {
+    fn from_clip_matrix(clip: &Mat4f) -> Self {
         let row = |i: usize| vec4(clip.v[i], clip.v[i + 4], clip.v[i + 8], clip.v[i + 12]);
         let (r0, r1, r2, r3) = (row(0), row(1), row(2), row(3));
         // Near uses the GL convention (-w <= z). A backend that clips at
@@ -274,12 +309,12 @@ impl Frustum {
         Self { planes }
     }
 
-    pub(super) fn distance(p: Vec4f, v: Vec3f) -> f32 {
+    fn distance(p: Vec4f, v: Vec3f) -> f32 {
         p.x * v.x + p.y * v.y + p.z * v.z + p.w
     }
 
     /// Sphere-vs-frustum; false only when the sphere is fully beyond a plane.
-    pub fn intersects_sphere(&self, center: Vec3f, radius: f32) -> bool {
+    fn intersects_sphere(&self, center: Vec3f, radius: f32) -> bool {
         self.planes
             .iter()
             .all(|p| Self::distance(*p, center) >= -(radius + CULL_MARGIN))
@@ -288,7 +323,7 @@ impl Frustum {
     /// World-axis-aligned box vs the frustum, via the positive-vertex trick:
     /// per plane, only the corner most inside can decide "fully outside".
     /// Same conservatism as the corner tests — straddlers always pass.
-    pub fn intersects_aabb(&self, min: Vec3f, max: Vec3f) -> bool {
+    fn intersects_aabb(&self, min: Vec3f, max: Vec3f) -> bool {
         self.planes.iter().all(|p| {
             let v = vec3f(
                 if p.x >= 0.0 { max.x } else { min.x },
@@ -304,7 +339,7 @@ impl Frustum {
     /// exact for "entirely outside plane P" and never false-culls, because a
     /// box with any part inside keeps at least one corner inside every plane's
     /// reject test.
-    pub fn intersects_obb(&self, min: Vec3f, max: Vec3f, transform: &Mat4f) -> bool {
+    fn intersects_obb(&self, min: Vec3f, max: Vec3f, transform: &Mat4f) -> bool {
         let t = &transform.v;
         // The bounding sphere of the transformed box decides first: beyond
         // a plane by more than its radius puts every corner beyond it (the

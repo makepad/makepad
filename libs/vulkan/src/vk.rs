@@ -4942,7 +4942,9 @@ impl DescriptorType {
     pub const SAMPLED_IMAGE: Self = Self(2 as i32);
     pub const SAMPLER: Self = Self(0 as i32);
     pub const STORAGE_BUFFER: Self = Self(7 as i32);
+    pub const STORAGE_BUFFER_DYNAMIC: Self = Self(9 as i32);
     pub const UNIFORM_BUFFER: Self = Self(6 as i32);
+    pub const UNIFORM_BUFFER_DYNAMIC: Self = Self(8 as i32);
 }
 impl core::fmt::Debug for DescriptorType { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
 match self.0 {

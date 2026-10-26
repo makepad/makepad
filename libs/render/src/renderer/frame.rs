@@ -104,18 +104,22 @@ impl Renderer {
         // CPU frustum for per-frame instance culling AND the Realtime
         // bake's visible-region scheduling, in the same world units the
         // instance transforms use (the stage rides inside the clip matrix).
-        // Flat stage only: in XR the runtime overwrites the pass camera
-        // with its own eye matrices every frame (see stage.rs), so
-        // scene_state is not what renders there and culling from it could
-        // drop visible geometry. Only per-frame packing points consult
-        // this — cached static slabs are never culled, because they outlive
-        // the camera that built them.
-        let frustum_val = (self.stage.mode == StageMode::Flat).then(|| {
-            Frustum::from_clip_matrix(&Mat4f::mul(
+        // In XR the runtime draws with its own eye matrices (see stage.rs),
+        // not scene_state's camera: the frustum is then the union of the
+        // eyes the next XR frame draws with (what either eye sees draws).
+        // Only per-frame packing points consult this — cached static slabs
+        // are never culled, because they outlive the camera that built them.
+        let frustum_val = if self.stage.mode == StageMode::Flat {
+            Some(Frustum::from_clip_matrix(&Mat4f::mul(
                 &scene_state.projection,
                 &Mat4f::mul(&scene_state.view, &stage_matrix),
+            )))
+        } else {
+            cx.cx.xr_eye_matrices().map(|[(view_l, projection_l), (view_r, projection_r)]| Frustum::from_clip_matrices(
+                &Mat4f::mul(&projection_l, &Mat4f::mul(&view_l, &stage_matrix)),
+                &Mat4f::mul(&projection_r, &Mat4f::mul(&view_r, &stage_matrix)),
             ))
-        });
+        };
         let frustum = frustum_val.as_ref();
         // Which tier serves the DYNAMIC casters this frame — the ONE
         // decision point (gpu_lightmap::dynamic_shadow_tiers) both the

@@ -72,6 +72,10 @@ pub(super) struct Program {
     pub layout: vk::PipelineLayout,
     pub descriptors: vk::DescriptorSetLayout,
     pub descriptor_types: Vec<(u32, vk::DescriptorType)>,
+    /// The bindings fed from the batch's upload arena (the uniform blocks, the pick block and
+    /// the instance storage), by binding number: dynamic, so one written set serves every draw
+    /// with the same buffers and textures and a draw binds it with its own offsets.
+    pub dynamic: Vec<u32>,
     pub samplers: Vec<vk::Sampler>,
     vertex: vk::ShaderModule,
     fragment: vk::ShaderModule,
@@ -87,12 +91,14 @@ impl Program {
             return Err("SPIR-V pipeline binding/layout mismatch".into());
         }
         let mut out = Self { dev, desc, code, bindings, vertex_stride, layout: vk::PipelineLayout::null(),
-            descriptors: vk::DescriptorSetLayout::null(), descriptor_types: Vec::new(), samplers: Vec::new(),
+            descriptors: vk::DescriptorSetLayout::null(), descriptor_types: Vec::new(), dynamic: Vec::new(), samplers: Vec::new(),
             vertex: vk::ShaderModule::null(), fragment: vk::ShaderModule::null(),
             xr_vertex: vk::ShaderModule::null(), xr_fragment: vk::ShaderModule::null() };
         for (i, slot) in out.bindings.iter().enumerate() {
             if i != pipeline_binding::TEXTURES && *slot != pipeline_binding::NONE {
-                out.descriptor_types.push((*slot, vk::DescriptorType::UNIFORM_BUFFER));
+                // the fixed blocks come from the arena; custom uniform buffers are bound whole
+                let ty = if i < pipeline_binding::BUFFERS { vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC } else { vk::DescriptorType::UNIFORM_BUFFER };
+                out.descriptor_types.push((*slot, ty));
             }
         }
         for i in 0..out.code.textures.len() as u32 {
@@ -105,18 +111,23 @@ impl Program {
             out.descriptor_types.push((out.code.sampler_base.checked_add(i).ok_or("sampler binding overflow")?, vk::DescriptorType::SAMPLER));
         }
         if out.code.depth_binding != ABSENT { out.descriptor_types.push((out.code.depth_binding, vk::DescriptorType::SAMPLED_IMAGE)); }
-        if out.code.instance_binding != ABSENT { out.descriptor_types.push((out.code.instance_binding, vk::DescriptorType::STORAGE_BUFFER)); }
-        if out.code.pick_binding != ABSENT { out.descriptor_types.push((out.code.pick_binding, vk::DescriptorType::UNIFORM_BUFFER)); }
+        if out.code.instance_binding != ABSENT { out.descriptor_types.push((out.code.instance_binding, vk::DescriptorType::STORAGE_BUFFER_DYNAMIC)); }
+        if out.code.pick_binding != ABSENT { out.descriptor_types.push((out.code.pick_binding, vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC)); }
         out.descriptor_types.sort_by_key(|b| b.0);
+        out.dynamic = out.descriptor_types.iter().filter(|(_, ty)| matches!(*ty, vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC | vk::DescriptorType::STORAGE_BUFFER_DYNAMIC))
+            .map(|(slot, _)| *slot).collect();
         if out.descriptor_types.windows(2).any(|p| p[0].0 == p[1].0) { return Err("overlapping Vulkan descriptor bindings".into()); }
         // every binding is visible to both stages: the per-stage limits apply to the whole set (a
         // driver that is not told refuses the pipeline with an unexplained error: PowerVR, ERROR_UNKNOWN)
         let limits = &out.dev.properties.limits;
-        let count = |t: vk::DescriptorType| out.descriptor_types.iter().filter(|(_, ty)| *ty == t).count() as u32;
-        for (t, max, what) in [(vk::DescriptorType::SAMPLED_IMAGE, limits.max_per_stage_descriptor_sampled_images, "sampled images"),
-            (vk::DescriptorType::SAMPLER, limits.max_per_stage_descriptor_samplers, "samplers"),
-            (vk::DescriptorType::UNIFORM_BUFFER, limits.max_per_stage_descriptor_uniform_buffers, "uniform buffers"),
-            (vk::DescriptorType::STORAGE_BUFFER, limits.max_per_stage_descriptor_storage_buffers, "storage buffers")] {
+        let count = |t: &[vk::DescriptorType]| out.descriptor_types.iter().filter(|(_, ty)| t.contains(ty)).count() as u32;
+        let (uniform, storage) = ([vk::DescriptorType::UNIFORM_BUFFER, vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC], [vk::DescriptorType::STORAGE_BUFFER, vk::DescriptorType::STORAGE_BUFFER_DYNAMIC]);
+        for (t, max, what) in [(&[vk::DescriptorType::SAMPLED_IMAGE][..], limits.max_per_stage_descriptor_sampled_images, "sampled images"),
+            (&[vk::DescriptorType::SAMPLER][..], limits.max_per_stage_descriptor_samplers, "samplers"),
+            (&uniform[..], limits.max_per_stage_descriptor_uniform_buffers, "uniform buffers"),
+            (&storage[..], limits.max_per_stage_descriptor_storage_buffers, "storage buffers"),
+            (&uniform[1..], limits.max_descriptor_set_uniform_buffers_dynamic, "dynamic uniform buffers"),
+            (&storage[1..], limits.max_descriptor_set_storage_buffers_dynamic, "dynamic storage buffers")] {
             let n = count(t);
             if n > max { return Err(format!("the shader binds {n} {what} per stage, the device allows {max}")); }
         }

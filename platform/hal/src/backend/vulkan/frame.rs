@@ -40,7 +40,19 @@ struct Prepared {
     vertex: Arc<Buffer>,
     index: Arc<Buffer>,
     descriptors: vk::DescriptorSet,
+    /// the dynamic offsets of the set's arena bindings, in binding order (`Program::dynamic`)
+    offsets: [u32; MAX_DYNAMIC],
     first_instance: u32,
+}
+
+/// The arena-fed bindings a program can have: five uniform blocks, the pick block, the instances.
+const MAX_DYNAMIC: usize = 8;
+
+/// Record an arena binding's offset at its place among the program's dynamic bindings.
+fn dynamic_offset(p: &super::pipeline::Program, offsets: &mut [u32; MAX_DYNAMIC], slot: u32, offset: u64) -> Result<(), String> {
+    let i = p.dynamic.iter().position(|b| *b == slot).filter(|i| *i < MAX_DYNAMIC).ok_or("arena binding missing from the dynamic set")?;
+    offsets[i] = u32::try_from(offset).map_err(|_| "arena offset exceeds 32 bits")?;
+    Ok(())
 }
 
 /// A pass's view count: 2 for a multiview pass (`Pass::views`), else 1.
@@ -541,6 +553,7 @@ impl Vulkan {
         let prof_key = batch.prof.as_ref().map(|p| p.key);
         // an ablation frame of the GPU profiler leaves out one shader's draws
         let ablate = prof_key.filter(|k| k.ablate && !pick).and_then(|_| gpu_prof::ablate_target());
+        batch.forget_blocks();
         for d in draws {
             s.stats.draws += 1;
             if d.index[1] == 0 || d.inst.count == 0 { continue; }
@@ -676,7 +689,8 @@ impl Vulkan {
                     bound.index = (p.index.buffer, index_type);
                     batch.buffers.push(p.index.clone());
                 }
-                self.dev.raw.cmd_bind_descriptor_sets(batch.cb, vk::PipelineBindPoint::GRAPHICS, p.pipeline.program.layout, 0, &[p.descriptors], &[]);
+                let dynamic = p.pipeline.program.dynamic.len();
+                self.dev.raw.cmd_bind_descriptor_sets(batch.cb, vk::PipelineBindPoint::GRAPHICS, p.pipeline.program.layout, 0, &[p.descriptors], &p.offsets[..dynamic]);
                 if d.inst_ranges.len != 0 && read_pairs(view.arena, d.inst_ranges).count() != d.inst_ranges.len as usize { s.bad(); continue; }
                 let whole = (d.inst_ranges.len == 0).then_some([0, d.inst.count]);
                 for [start, count] in whole.into_iter().chain(read_pairs(view.arena, d.inst_ranges)) {
@@ -746,21 +760,29 @@ impl Vulkan {
         let width = if d.flags & Draw::INDEX_U32 != 0 { 4 } else { 2 };
         if (d.index[0] as u64 + d.index[1] as u64) * width > index.size { return Err("index range exceeds buffer".into()); }
         let mut first_instance = 0;
+        let mut offsets = [0u32; MAX_DYNAMIC];
         if p.code.instance_binding != ABSENT {
             let stride = p.desc.instance_stride as u64 * 4;
-            let (instance, offset, length) = if d.inst.kind == Inst::BUFFER {
+            let max_range = self.dev.properties.limits.max_storage_buffer_range as u64;
+            let (instance, offset, range) = if d.inst.kind == Inst::BUFFER {
                 let buffer = buffer(d.inst.id).ok_or("missing instance buffer")?;
                 let end = (d.inst.off as u64 + d.inst.count as u64).checked_mul(stride).ok_or("instance range overflow")?;
                 if stride == 0 || end > buffer.size { return Err("instance range exceeds storage".into()); }
+                if buffer.size > max_range { return Err("instance storage exceeds device range".into()); }
                 first_instance = d.inst.off;
                 let length = buffer.size; (buffer, 0, length)
             } else if d.inst.kind == Inst::INLINE {
                 let data = unsafe { d.inst.data.as_bytes() };
                 if stride == 0 || d.inst.count as u64 * stride > data.len() as u64 { return Err("inline instance range exceeds data".into()); }
-                let (buffer, at) = batch.put(data)?; (buffer, at, data.len() as u64)
+                if data.len() as u64 > max_range { return Err("instance storage exceeds device range".into()); }
+                let (buffer, at) = batch.put(data)?;
+                // the rest of the arena from the draw's offset: one set serves every inline draw
+                // of the arena, whatever its instance count
+                let range = if buffer.size <= max_range { vk::WHOLE_SIZE } else { data.len() as u64 };
+                (buffer, at, range)
             } else { return Err("unknown instance source".into()); };
-            if length > self.dev.properties.limits.max_storage_buffer_range as u64 { return Err("instance storage exceeds device range".into()); }
-            bins.push((p.code.instance_binding, vk::DescriptorType::STORAGE_BUFFER, vk::DescriptorBufferInfo::default().buffer(instance.buffer).offset(offset).range(length)));
+            dynamic_offset(p, &mut offsets, p.code.instance_binding, offset)?;
+            bins.push((p.code.instance_binding, vk::DescriptorType::STORAGE_BUFFER_DYNAMIC, vk::DescriptorBufferInfo::default().buffer(instance.buffer).range(range)));
             batch.buffers.push(instance);
         }
         for (which, source) in [(pipeline_binding::DRAW_CALL, d.uniforms[0]), (pipeline_binding::PASS, pass.uniforms),
@@ -768,8 +790,11 @@ impl Vulkan {
             let slot = p.bindings[which]; if slot == ABSENT { continue; }
             let bytes = unsafe { source.as_bytes() };
             if bytes.is_empty() || bytes.len() as u64 > self.dev.properties.limits.max_uniform_buffer_range as u64 { return Err("invalid uniform block size".into()); }
-            let (buffer, offset) = batch.put(bytes)?;
-            bins.push((slot, vk::DescriptorType::UNIFORM_BUFFER, vk::DescriptorBufferInfo::default().buffer(buffer.buffer).offset(offset).range(bytes.len() as u64)));
+            // a block the previous draws already uploaded (the pass's, a draw list's) is not
+            // copied again
+            let (buffer, offset) = batch.put_block(which, bytes)?;
+            dynamic_offset(p, &mut offsets, slot, offset)?;
+            bins.push((slot, vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC, vk::DescriptorBufferInfo::default().buffer(buffer).range(bytes.len() as u64)));
         }
         for (i, slot) in p.bindings[pipeline_binding::BUFFERS..].iter().enumerate() {
             if *slot == ABSENT { continue; }
@@ -819,9 +844,19 @@ impl Vulkan {
             bytes[..4].copy_from_slice(&d.pick.to_le_bytes());
             bytes[4..8].copy_from_slice(&pick_mask.to_le_bytes());
             let (buffer, offset) = batch.put(&bytes)?;
-            bins.push((p.code.pick_binding, vk::DescriptorType::UNIFORM_BUFFER, vk::DescriptorBufferInfo::default().buffer(buffer.buffer).offset(offset).range(16)));
+            dynamic_offset(p, &mut offsets, p.code.pick_binding, offset)?;
+            bins.push((p.code.pick_binding, vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC, vk::DescriptorBufferInfo::default().buffer(buffer.buffer).range(16)));
         }
-        let set = batch.descriptors(p, Arc::as_ptr(&state) as usize)?;
+        // A set written earlier in this batch with the same buffers, images and samplers serves
+        // this draw too (the arena bindings differ only in their dynamic offsets).
+        let (set, fresh) = batch.descriptor_set(p, Arc::as_ptr(&state) as usize, bins, images)?;
+        if fresh { self.write_set(set, bins, images); }
+        s.ledger.touch(Kind::Pipeline, d.pipeline.index, d.pipeline.gen, s.frame, now);
+        for id in [d.vb, d.ib, d.inst.id].into_iter().chain(d.ubufs).filter(|i| !i.is_none()) { s.ledger.touch(Kind::Buffer, id.index, id.gen, s.frame, now); }
+        Ok(Some(Prepared { pipeline, vertex, index, descriptors: set, offsets, first_instance }))
+    }
+
+    fn write_set(&self, set: vk::DescriptorSet, bins: &[(u32, vk::DescriptorType, vk::DescriptorBufferInfo)], images: &[(u32, vk::DescriptorType, vk::DescriptorImageInfo)]) {
         // written from a stack chunk: one call for a usual draw, no allocation
         let writes = bins.iter().map(|(slot, ty, info)| vk::WriteDescriptorSet::default().dst_set(set).dst_binding(*slot)
             .descriptor_type(*ty).buffer_info(std::slice::from_ref(info)))
@@ -834,9 +869,6 @@ impl Vulkan {
             if n == chunk.len() { unsafe { self.dev.raw.update_descriptor_sets(&chunk, &[]); } n = 0; }
         }
         if n > 0 { unsafe { self.dev.raw.update_descriptor_sets(&chunk[..n], &[]); } }
-        s.ledger.touch(Kind::Pipeline, d.pipeline.index, d.pipeline.gen, s.frame, now);
-        for id in [d.vb, d.ib, d.inst.id].into_iter().chain(d.ubufs).filter(|i| !i.is_none()) { s.ledger.touch(Kind::Buffer, id.index, id.gen, s.frame, now); }
-        Ok(Some(Prepared { pipeline, vertex, index, descriptors: set, first_instance }))
     }
 
     fn bind_image(&self, s: &mut Session, id: Id, image: Arc<Image>, shape: u32, slot: u32, attachments: &[Arc<Image>], batch: &mut Batch, now: u64,

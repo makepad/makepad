@@ -306,7 +306,9 @@ value VkDescriptorType COMBINED_IMAGE_SAMPLER
 value VkDescriptorType SAMPLED_IMAGE
 value VkDescriptorType SAMPLER
 value VkDescriptorType STORAGE_BUFFER
+value VkDescriptorType STORAGE_BUFFER_DYNAMIC
 value VkDescriptorType UNIFORM_BUFFER
+value VkDescriptorType UNIFORM_BUFFER_DYNAMIC
 value VkDisplayPlaneAlphaFlagsKHR GLOBAL
 value VkDisplayPlaneAlphaFlagsKHR OPAQUE
 value VkDisplayPlaneAlphaFlagsKHR PER_PIXEL

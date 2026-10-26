@@ -215,6 +215,12 @@ pub(super) struct Batch {
     /// arenas this batch had to allocate (none in steady frames): the frame stats' `arena_allocs`
     pub allocs: u64,
     pub draw_counts: FastMap<usize, u32>,
+    /// The sets this batch wrote, by what they hold (`descriptor_set`): a draw with the same
+    /// buffers, images and samplers binds one again with its own dynamic offsets.
+    sets: FastMap<u64, (vk::DescriptorSet, Vec<u64>)>,
+    set_key: Vec<u64>,
+    /// The uniform blocks this pass already uploaded, per binding role (`put_block`).
+    blocks: [(usize, usize, vk::Buffer, u64); 8],
     /// When `finish` handed the batch to the submit worker, while the frame profile records (0:
     /// not recording): its submit queue wait, vkQueueSubmit and submit->rendered times.
     finished_ns: u64,
@@ -280,7 +286,8 @@ impl Batch {
         let mut b = Self { dev, spares: spares.clone(), reusable: false, pool: vk::CommandPool::null(), cb: vk::CommandBuffer::null(), fence: vk::Fence::null(),
             query: (vk::QueryPool::null(), 0), idle_query: (vk::QueryPool::null(), 0), prof: None, prof_key: None,
             images: Vec::new(), buffers: Vec::new(), pipelines: Vec::new(), passes: Vec::new(), framebuffers: Vec::new(),
-            descriptors: FastMap::default(), tickets: Vec::new(), scanout: None, present: None, tap: None, arena: None, arenas: Vec::new(), reserve, allocs: 0, draw_counts: FastMap::default(), finished_ns: 0,
+            descriptors: FastMap::default(), tickets: Vec::new(), scanout: None, present: None, tap: None, arena: None, arenas: Vec::new(), reserve, allocs: 0, draw_counts: FastMap::default(),
+            sets: FastMap::default(), set_key: Vec::new(), blocks: [(0, 0, vk::Buffer::null(), 0); 8], finished_ns: 0,
             #[cfg(target_os = "linux")] external_waits: Vec::new(),
             #[cfg(target_os = "linux")] external_signals: Vec::new(),
             #[cfg(target_os = "linux")] release_fence: None,
@@ -392,7 +399,45 @@ impl Batch {
         Ok((buffer, at))
     }
 
-    pub fn descriptors(&mut self, p: &Program, state: usize) -> Result<vk::DescriptorSet, String> {
+    /// Upload a uniform block for the binding role `which`, unless this pass's previous upload
+    /// for the role was the same bytes (the pass block, a draw list's block): those are shared.
+    pub fn put_block(&mut self, which: usize, bytes: &[u8]) -> Result<(vk::Buffer, u64), String> {
+        let memo = (bytes.as_ptr() as usize, bytes.len());
+        if let Some((ptr, len, buffer, at)) = self.blocks.get(which).copied() {
+            if (ptr, len) == memo && buffer != vk::Buffer::null() { return Ok((buffer, at)); }
+        }
+        let (buffer, at) = self.put(bytes)?;
+        if let Some(slot) = self.blocks.get_mut(which) { *slot = (memo.0, memo.1, buffer.buffer, at); }
+        Ok((buffer.buffer, at))
+    }
+
+    /// A new pass's command data: no uploaded block is known to match it.
+    pub fn forget_blocks(&mut self) { self.blocks = [(0, 0, vk::Buffer::null(), 0); 8]; }
+
+    /// The set for a draw's bindings: one this batch already wrote with the same buffers,
+    /// images and samplers (`false`: nothing to write), or a new one to write (`true`).
+    pub fn descriptor_set(&mut self, p: &Program, state: usize, bins: &[(u32, vk::DescriptorType, vk::DescriptorBufferInfo)],
+        images: &[(u32, vk::DescriptorType, vk::DescriptorImageInfo)]) -> Result<(vk::DescriptorSet, bool), String> {
+        let mut key = std::mem::take(&mut self.set_key);
+        key.clear();
+        key.push(p.descriptors.0);
+        for (slot, ty, info) in bins { key.extend([*slot as u64 | (ty.0 as u64) << 32, info.buffer.0, info.offset, info.range]); }
+        for (slot, ty, info) in images { key.extend([*slot as u64 | (ty.0 as u64) << 32, info.sampler.0, info.image_view.0, info.image_layout.0 as u64]); }
+        let hash = key.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, v| (h ^ *v).wrapping_mul(0x0100_0000_01b3).rotate_left(23));
+        let found = self.sets.get(&hash).filter(|(_, k)| *k == key).map(|(set, _)| *set);
+        let out = match found {
+            Some(set) => Ok((set, false)),
+            None => self.descriptors(p, state).map(|set| {
+                // a hash two different keys share keeps its first set; the second is not reused
+                if !self.sets.contains_key(&hash) { self.sets.insert(hash, (set, key.clone())); }
+                (set, true)
+            }),
+        };
+        self.set_key = key;
+        out
+    }
+
+    fn descriptors(&mut self, p: &Program, state: usize) -> Result<vk::DescriptorSet, String> {
         // a reused pool that holds fewer sets than this batch draws with the layout is replaced
         if let Some((pool, sets, sized)) = self.descriptors.get_mut(&p.descriptors).filter(|(_, _, sized)| !*sized) {
             let draws = *self.draw_counts.get(&state).ok_or("pipeline missing from frame descriptor counts")?;

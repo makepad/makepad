@@ -123,3 +123,22 @@ fn aabb_test_matches_the_corner_test() {
     assert!(fr.intersects_aabb(vec3f(-100.0, -1.0, -1.0), vec3f(0.0, 1.0, 1.0)));
     assert!(!fr.intersects_aabb(vec3f(-101.0, -1.0, -1.0), vec3f(-99.0, 1.0, 1.0)));
 }
+
+/// A stereo frame's frustum is the union of its eyes: a box only the right
+/// eye sees still draws, a box neither sees is culled.
+#[test]
+fn stereo_frustum_keeps_what_either_eye_sees() {
+    let eye = |x: f32| {
+        let view = Mat4f::look_at(vec3f(x, 0.0, 10.0), vec3f(x, 0.0, 0.0), vec3f(0.0, 1.0, 0.0));
+        Mat4f::mul(&Mat4f::perspective(30.0, 1.0, 1.0, 500.0), &view)
+    };
+    let (left, right) = (eye(-20.0), eye(20.0));
+    let stereo = Frustum::from_clip_matrices(&left, &right);
+    let only_right = unit_box_at(vec3f(20.0, 0.0, -10.0));
+    assert!(!Frustum::from_clip_matrix(&left).intersects_obb(only_right.0, only_right.1, &only_right.2));
+    assert!(stereo.intersects_obb(only_right.0, only_right.1, &only_right.2));
+    assert!(stereo.intersects_aabb(vec3f(-21.0, -1.0, -11.0), vec3f(-19.0, 1.0, -9.0)));
+    let neither = unit_box_at(vec3f(0.0, 80.0, -10.0));
+    assert!(!stereo.intersects_obb(neither.0, neither.1, &neither.2));
+    assert!(!stereo.intersects_sphere(vec3f(0.0, 80.0, -10.0), 1.0));
+}

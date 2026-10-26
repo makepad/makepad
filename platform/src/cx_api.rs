@@ -229,6 +229,12 @@ pub trait CxOsApi {
         None
     }
 
+    /// The view and projection of each eye the next XR frame draws with, in tracking space:
+    /// what a renderer culls and picks levels of detail by under XR.
+    fn xr_eye_matrices(&self) -> Option<[(crate::makepad_math::Mat4f, crate::makepad_math::Mat4f); 2]> {
+        None
+    }
+
     /*
     fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket;
     fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);*/
@@ -912,6 +918,11 @@ impl Cx {
 
     pub fn xr_effective_frame_rate_hz(&self) -> Option<f64> {
         <Self as CxOsApi>::xr_effective_frame_rate_hz(self)
+    }
+
+    /// The eyes of the next XR frame (`CxOsApi::xr_eye_matrices`): `[(view, projection); 2]`.
+    pub fn xr_eye_matrices(&self) -> Option<[(crate::makepad_math::Mat4f, crate::makepad_math::Mat4f); 2]> {
+        <Self as CxOsApi>::xr_eye_matrices(self)
     }
 
     pub fn geometry_pool_slot_count(&self) -> usize {

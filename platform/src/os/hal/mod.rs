@@ -439,6 +439,11 @@ mod android_socket;
 pub(crate) mod android_fleet;
 
 impl crate::cx_api::CxOsApi for Cx {
+    fn xr_eye_matrices(&self) -> Option<[(crate::makepad_math::Mat4f, crate::makepad_math::Mat4f); 2]> {
+        let frame = self.hal.xr.as_ref()?.frame?;
+        Some([xr::eye_matrices(&frame, 0), xr::eye_matrices(&frame, 1)])
+    }
+
     fn init_cx_os(&mut self) {
         self.hal.start_ns = makepad_hal::clock_ns();
         // an Android APK and an iOS / tvOS device have no build tree: the resources are in the
